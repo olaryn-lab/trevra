@@ -1,54 +1,61 @@
 /* ===========================================================================
  * TREVRA TOKEN LAYER
  *
- * MIRROR: this :root block is duplicated verbatim in src/client/styles.css --
- * same names, same values, same order. Two stylesheets ship on two surfaces;
- * this block is the one place they agree. Change it here, change it there.
+ * MIRROR: this block is duplicated verbatim in src/client/styles.css -- same names, same
+ * values, same order. Change it here, change it there.
  *
- * TYPEFACE -- A DECISION, NOT A FALLBACK.
- * No webfont ships with this product and none is going to: no @font-face, no
- * font link, no font package, nothing here downloads. The stacks below name
- * only faces already installed on the machine doing the reading, so the first
- * name that exists is the one that renders -- there is no waiting, no swap,
- * and no invisible text.
+ * SOURCE: the values are the shared Leanchain design system's, not Trevra's
+ * own. /design-system.css (vendored by scripts/sync-design-system.ts, linked
+ * before this sheet on every page) defines the shared roles -- --background,
+ * --foreground, --primary, --radius-panel, --text-sm and the rest -- for light
+ * and dark. Every --t-* name below points at one of them, so Trevra shares one
+ * look with Beseam and LemonCrow and differs only in its accent: forest green.
+ * The roles switch mode on their own under both [data-theme] and
+ * prefers-color-scheme, so the dark blocks at the end carry only Trevra's
+ * extensions: the green ramp and the night console. Do not add a literal here
+ * for something the design system already names; change it there and re-run
+ * the sync.
  *
- * Earlier revisions led with "Avenir Next", which resolves on macOS and
- * nowhere else, and the marketing sheet asked for Inter without ever shipping
- * it. Every tracking and weight value in both files was therefore tuned
- * against a face most visitors never received. Those names are gone. What
- * renders now is a grotesque -- SF Pro, Segoe UI Variable, or Roboto -- and
- * the tracking, weight and optical-size values below are tuned for that.
- * A grotesque is drawn tighter and carries more weight per step than a
- * geometric sans, so the numbers moved: see --t-w-* and --t-track-*.
+ * TYPEFACE. Instrument Sans for text and display, Fira Code for code, both
+ * served from /fonts (OFL, latin and latin-ext). The faces use
+ * font-display: swap with a size-matched Arial fallback, so text renders at
+ * once and barely moves when the face arrives. This replaces the earlier
+ * system-grotesque policy: one face in every product is what makes them read
+ * as one family. The weight and tracking steps below are set for it.
  * ======================================================================== */
 :root {
-  /* -- green: one hue, nine steps, light -> dark ------------------------- */
+  /* -- green: one hue, nine steps, light -> dark. 600 is the shared primary;
+        the other steps are Trevra's washes and illustration tints. ------- */
   --t-green-50: #f0f8f2;
   --t-green-100: #dfeee4;
   --t-green-200: #bed4c2;
   --t-green-300: #7dba99;
   --t-green-400: #38805a;
   --t-green-500: #1f8b5b;
-  --t-green-600: #176b45; /* the one primary green, both surfaces */
+  --t-green-600: var(--primary); /* the one primary green, both surfaces */
   --t-green-700: #12492e;
   --t-green-800: #0d2d1e;
   --t-green-ink: #12492e; /* fixed in both themes: text on a white chip */
 
-  /* -- neutrals ---------------------------------------------------------- */
-  --t-ink: #142019;
-  --t-muted: #5c6a61; /* >= 4.74:1 on every surface in this file */
-  --t-line: #d8ddd3;
-  --t-line-soft: #e6ebe4;
-  --t-line-strong: #b9c2b7;
-  --t-bg: #f5f7f3; /* app canvas, cool */
-  --t-bg-warm: #f5f5ef; /* marketing canvas, paper */
-  --t-surface: #ffffff;
-  --t-surface-warm: #fffef8;
-  --t-surface-2: #f7f9f6;
-  --t-surface-3: #edf2eb;
-  --t-field: #fbfcfb;
+  /* -- neutrals: the shared greys ------------------------------------------ */
+  --t-ink: var(--foreground);
+  --t-muted: var(--muted-foreground); /* checked >= 4.5:1 on bg, card, muted */
+  --t-line: var(--border);
+  --t-line-soft: color-mix(in srgb, var(--border) 60%, var(--card));
+  --t-line-strong: color-mix(in srgb, var(--border), var(--input));
+  --t-bg: var(--background);
+  --t-bg-warm: var(--background);
+  --t-surface: var(--card);
+  --t-surface-warm: var(--card);
+  --t-surface-2: var(--muted);
+  --t-surface-3: color-mix(in srgb, var(--muted), var(--accent));
+  --t-field: var(--background);
+  /* A field's border is the only thing that says where the control is, so it
+     is an indicator and owes 3:1. The shared --input role is checked for it. */
+  --t-field-line: var(--input);
 
-  /* -- the permanent dark console surface, in either theme --------------- */
+  /* -- the permanent dark console surface, in either theme. A Trevra
+        extension: the design system has no always-dark surface. --------- */
   --t-night: #101a15;
   --t-night-2: #16241c;
   --t-night-ink: #eaf4ed;
@@ -59,211 +66,125 @@
   --t-night-blue: #9cb9ff;
   --t-code: #d7f5df;
 
-  /* -- state ------------------------------------------------------------- */
-  --t-amber: #8a5310; /* 5.75:1 on --t-amber-bg */
-  --t-amber-ink: #6f5a34; /* 5.99:1 on --t-amber-bg */
-  --t-amber-bg: #fff3dc;
-  --t-amber-line: #e0c48c;
-  --t-red: #a4473f; /* 5.02:1 on --t-red-bg */
-  --t-red-bg: #fce8e6;
-  --t-red-line: #e2bdb8;
-  --t-blue: #3a628d; /* 5.57:1 on --t-blue-bg */
-  --t-blue-bg: #e9f1fb;
+  /* -- state: the shared status inks. Backgrounds are the 6% badge tint the
+        design system checks each ink against. ---------------------------- */
+  --t-amber: var(--warning);
+  --t-amber-ink: color-mix(in srgb, var(--warning) 75%, var(--foreground));
+  --t-amber-bg: color-mix(in srgb, var(--warning) 6%, var(--card));
+  --t-amber-line: color-mix(in srgb, var(--warning) 35%, var(--card));
+  --t-red: var(--destructive);
+  --t-red-bg: color-mix(in srgb, var(--destructive) 6%, var(--card));
+  --t-red-line: color-mix(in srgb, var(--destructive) 30%, var(--card));
+  --t-blue: var(--info);
+  --t-blue-bg: color-mix(in srgb, var(--info) 6%, var(--card));
 
   /* -- green as a fill, and what stays legible on it --------------------- */
-  --t-green-fill: #176b45;
-  --t-on-green: #ffffff; /* 6.51:1 on --t-green-fill */
-  --t-on-green-2: rgba(255, 255, 255, 0.82); /* 4.95:1 on --t-green-fill */
-  --t-on-green-line: rgba(255, 255, 255, 0.45);
-  --t-on-green-wash: rgba(255, 255, 255, 0.14);
+  --t-green-fill: var(--primary);
+  --t-on-green: var(--primary-foreground); /* checked >= 4.5:1 on --primary */
+  --t-on-green-2: color-mix(in srgb, var(--primary-foreground) 82%, transparent);
+  --t-on-green-line: color-mix(in srgb, var(--primary-foreground) 45%, transparent);
+  --t-on-green-wash: color-mix(in srgb, var(--primary-foreground) 14%, transparent);
 
   /* -- focus ------------------------------------------------------------- */
-  --t-focus: #176b45;
-  --t-focus-on-fill: #ffffff;
+  --t-focus: var(--ring);
+  --t-focus-on-fill: var(--primary-foreground);
 
-  /* -- radius: five steps and the pill. Nothing else. -------------------- */
-  --t-r-xs: 6px;
-  --t-r-sm: 10px;
-  --t-r-md: 14px;
-  --t-r-lg: 20px;
-  --t-r-xl: 26px;
+  /* -- radius: controls 6px, panels 8px, badges 6px; 4px for the smallest
+        marks and the pill for dots, avatars, switches and tracks. -------- */
+  --t-r-xs: 4px;
+  --t-r-sm: var(--radius-control);
+  --t-r-md: var(--radius-panel);
+  --t-r-lg: var(--radius-panel);
+  --t-r-xl: var(--radius-panel);
+  --t-r-badge: var(--radius-badge);
   --t-r-pill: 999px;
 
   /* -- type: rem off a 16px base, so the browser font-size preference is
         honoured. px survives only in borders, radii and shadows. -------- */
-  --t-text-chip: 0.6875rem; /* 11px  chips and badges ONLY */
-  --t-text-xs: 0.75rem; /* 12px  functional floor */
-  --t-text-sm: 0.8125rem; /* 13px */
-  --t-text-md: 0.875rem; /* 14px  body */
-  --t-text-lg: 1rem; /* 16px  lede */
-  --t-text-xl: 1.3125rem; /* 21px */
-  --t-text-2xl: 1.75rem; /* 28px */
-  /* Display type is fluid and sits outside the six body steps. */
+  --t-text-chip: var(--text-2xs); /* 11px  chips and badges ONLY */
+  --t-text-xs: var(--text-xs); /* 12px  functional floor */
+  --t-text-sm: var(--text-sm); /* 13px */
+  --t-text-md: var(--text-base); /* 14px  body */
+  --t-text-lg: var(--text-lg); /* 16px  lede */
+  --t-text-xl: var(--text-xl); /* 20px */
+  --t-text-2xl: var(--text-2xl); /* 24px */
+  /* Display type is fluid and sits outside the shared steps. */
   --t-display-sm: clamp(1.5rem, 2.6vw, 1.9375rem);
   --t-display-md: clamp(2.5rem, 5vw, 3.9375rem);
   --t-display-lg: clamp(3.375rem, 6vw, 5.25rem);
 
-  /* -- weight: the four steps the system stack actually HAS. -------------
-        Nothing between them, and nothing above 700. SF Pro and Segoe UI
-        Variable are variable fonts and would honour 650 or 800 literally,
-        but Roboto is stepped -- 400/500/700/900 -- so CSS font matching
-        rounds 650 up to 700 and 800 up to 900, which is Roboto Black on an
-        11px label. font-synthesis: none means nothing papers over it. These
-        four are the only values that render as asked on all three faces.
-        Everything in both files was snapped onto them: 800 -> 700 (36 rules
-        here), 760/750/720/680 -> 700, 650 -> 600. */
+  /* -- weight: four steps. Instrument Sans is variable from 400 to 700, so
+        each renders exactly as asked; there is nothing above 700 to reach
+        for, and font-synthesis: none keeps the browser from faking one. -- */
   --t-w-body: 400;
   --t-w-medium: 500;
   --t-w-strong: 600;
   --t-w-bold: 700;
 
-  /* -- tracking: negative only where the size earns it. ------------------
-        The old floor was -.04em, set against a geometric face with generous
-        sidebearings that needed pulling in. A grotesque is already drawn
-        tight and the display optical cuts tighten again on their own, so the
-        same values collide letters. Below 20px the correct value is zero,
-        not "a small negative" -- there is nothing to take out. Uppercase is
-        the one place tracking still opens up, because caps never fit on
-        their own sidebearings. */
+  /* -- tracking: negative only where the size earns it. Instrument Sans is
+        spaced for text, so below 20px the value is zero; it tightens a
+        little at display sizes. Uppercase is the one place tracking opens
+        up, because caps never fit on their own sidebearings. ------------ */
   --t-track-display: -0.025em; /* 48px and up */
   --t-track-title: -0.018em; /* 24px to 40px */
   --t-track-heading: -0.01em; /* 20px to 23px */
   --t-track-flat: 0; /* 19px and below */
   --t-track-caps: 0.08em; /* uppercase micro-labels, any size */
 
-  /* -- measure, page, shadow. Shadows carry an offset and a soft blur. --- */
+  /* -- measure, page, shadow. Cards are flat; one shadow for what floats. - */
   --t-measure: 68ch;
   --t-page: 1180px;
-  --t-shadow-sm: 0 1px 2px rgba(20, 32, 25, 0.07);
-  --t-shadow-md: 0 6px 16px -6px rgba(20, 32, 25, 0.18);
-  --t-shadow-lg: 0 18px 40px -16px rgba(20, 32, 25, 0.26);
+  --t-shadow-sm: var(--shadow-card);
+  --t-shadow-md: var(--shadow-float);
+  --t-shadow-lg: var(--shadow-float);
 
-  /* -- families: the decision, not a chain waiting on a download. --------
-        Read TYPEFACE at the top of this block first. Every name here is a
-        face that is already on the machine.
+  /* -- families ---------------------------------------------------------- */
+  --t-display: var(--font-display);
+  --t-body: var(--font-sans);
+  --t-mono: var(--font-mono);
 
-        The two Segoe UI Variable names lead because Windows 11 ships two
-        real optical sizes of one family, and system-ui only ever resolves to
-        the Text cut; naming Display is the only way display type gets the
-        display drawing on Windows. macOS has neither, falls straight through
-        to system-ui, and SF Pro picks its own optical size by point size --
-        which is why --t-display is applied by size below, not by whim.
-        -apple-system and BlinkMacSystemFont are for Safari and Chrome old
-        enough not to know the system-ui keyword; Arial is the last resort
-        that is genuinely everywhere. */
-  --t-display:
-    'Segoe UI Variable Display', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
-  --t-body:
-    'Segoe UI Variable Text', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
-  --t-mono: ui-monospace, SFMono-Regular, 'SF Mono', 'Cascadia Code', Consolas, monospace;
-
-  /* -- interactive floor: 40px pointing, 44px touching ------------------- */
-  --t-tap: 40px;
+  /* -- interactive floor: 40px pointing, 44px touching. The shared density
+        carries both as Trevra's one exception. ---------------------------- */
+  --t-tap: var(--control-h);
 
   color-scheme: light;
 }
 
 @media (pointer: coarse) {
   :root {
-    --t-tap: 44px;
+    --t-tap: var(--control-h-touch);
   }
 }
 
+/* The shared roles change mode by themselves. These three blocks only swap
+   Trevra's extensions: the green ramp and the night console. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --t-green-50: #16261c;
+    --t-green-50: #132119; /* keeps shared muted text >= 4.5:1 on this wash */
     --t-green-100: #1c3427;
     --t-green-200: #2b5540;
     --t-green-300: #409a6b;
     --t-green-400: #63b78a;
     --t-green-500: #84d6aa;
-    --t-green-600: #61c18f;
     --t-green-700: #8ad3a9;
     --t-green-800: #a8e2c1;
-    --t-green-ink: #12492e;
-    --t-ink: #e9f0eb;
-    --t-muted: #9daaa1;
-    --t-line: #26352b;
-    --t-line-soft: #1e2b23;
-    --t-line-strong: #3b4d40;
-    --t-bg: #0d1410;
-    --t-bg-warm: #0d1410;
-    --t-surface: #121c16;
-    --t-surface-warm: #121c16;
-    --t-surface-2: #17231b;
-    --t-surface-3: #101a14;
-    --t-field: #0f1813;
     --t-night: #070c09;
     --t-night-2: #101a14;
-    --t-amber: #e4b45f;
-    --t-amber-ink: #d8c091;
-    --t-amber-bg: #2b210e;
-    --t-amber-line: #5a4718;
-    --t-red: #f0a79c;
-    --t-red-bg: #33201d;
-    --t-red-line: #6a3b35;
-    --t-blue: #9dc0ea;
-    --t-blue-bg: #15243a;
-    --t-green-fill: #61c18f;
-    --t-on-green: #07130c; /* 8.61:1 on --t-green-fill */
-    --t-on-green-2: rgba(7, 19, 12, 0.8); /* 5.97:1 on --t-green-fill */
-    --t-on-green-line: rgba(7, 19, 12, 0.38);
-    --t-on-green-wash: rgba(7, 19, 12, 0.12);
-    --t-focus: #61c18f;
-    --t-focus-on-fill: #07130c;
-    --t-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --t-shadow-md: 0 6px 16px -6px rgba(0, 0, 0, 0.55);
-    --t-shadow-lg: 0 18px 40px -16px rgba(0, 0, 0, 0.7);
     color-scheme: dark;
   }
 }
 
 :root[data-theme='dark'] {
-  --t-green-50: #16261c;
+  --t-green-50: #132119; /* keeps shared muted text >= 4.5:1 on this wash */
   --t-green-100: #1c3427;
   --t-green-200: #2b5540;
   --t-green-300: #409a6b;
   --t-green-400: #63b78a;
   --t-green-500: #84d6aa;
-  --t-green-600: #61c18f;
   --t-green-700: #8ad3a9;
   --t-green-800: #a8e2c1;
-  --t-green-ink: #12492e;
-  --t-ink: #e9f0eb;
-  --t-muted: #9daaa1;
-  --t-line: #26352b;
-  --t-line-soft: #1e2b23;
-  --t-line-strong: #3b4d40;
-  --t-bg: #0d1410;
-  --t-bg-warm: #0d1410;
-  --t-surface: #121c16;
-  --t-surface-warm: #121c16;
-  --t-surface-2: #17231b;
-  --t-surface-3: #101a14;
-  --t-field: #0f1813;
   --t-night: #070c09;
   --t-night-2: #101a14;
-  --t-amber: #e4b45f;
-  --t-amber-ink: #d8c091;
-  --t-amber-bg: #2b210e;
-  --t-amber-line: #5a4718;
-  --t-red: #f0a79c;
-  --t-red-bg: #33201d;
-  --t-red-line: #6a3b35;
-  --t-blue: #9dc0ea;
-  --t-blue-bg: #15243a;
-  --t-green-fill: #61c18f;
-  --t-on-green: #07130c;
-  --t-on-green-2: rgba(7, 19, 12, 0.8);
-  --t-on-green-line: rgba(7, 19, 12, 0.38);
-  --t-on-green-wash: rgba(7, 19, 12, 0.12);
-  --t-focus: #61c18f;
-  --t-focus-on-fill: #07130c;
-  --t-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --t-shadow-md: 0 6px 16px -6px rgba(0, 0, 0, 0.55);
-  --t-shadow-lg: 0 18px 40px -16px rgba(0, 0, 0, 0.7);
   color-scheme: dark;
 }
 
@@ -274,47 +195,14 @@
   --t-green-300: #7dba99;
   --t-green-400: #38805a;
   --t-green-500: #1f8b5b;
-  --t-green-600: #176b45;
   --t-green-700: #12492e;
   --t-green-800: #0d2d1e;
-  --t-green-ink: #12492e;
-  --t-ink: #142019;
-  --t-muted: #5c6a61;
-  --t-line: #d8ddd3;
-  --t-line-soft: #e6ebe4;
-  --t-line-strong: #b9c2b7;
-  --t-bg: #f5f7f3;
-  --t-bg-warm: #f5f5ef;
-  --t-surface: #ffffff;
-  --t-surface-warm: #fffef8;
-  --t-surface-2: #f7f9f6;
-  --t-surface-3: #edf2eb;
-  --t-field: #fbfcfb;
   --t-night: #101a15;
   --t-night-2: #16241c;
-  --t-amber: #8a5310;
-  --t-amber-ink: #6f5a34;
-  --t-amber-bg: #fff3dc;
-  --t-amber-line: #e0c48c;
-  --t-red: #a4473f;
-  --t-red-bg: #fce8e6;
-  --t-red-line: #e2bdb8;
-  --t-blue: #3a628d;
-  --t-blue-bg: #e9f1fb;
-  --t-green-fill: #176b45;
-  --t-on-green: #ffffff;
-  --t-on-green-2: rgba(255, 255, 255, 0.82);
-  --t-on-green-line: rgba(255, 255, 255, 0.45);
-  --t-on-green-wash: rgba(255, 255, 255, 0.14);
-  --t-focus: #176b45;
-  --t-focus-on-fill: #ffffff;
-  --t-shadow-sm: 0 1px 2px rgba(20, 32, 25, 0.07);
-  --t-shadow-md: 0 6px 16px -6px rgba(20, 32, 25, 0.18);
-  --t-shadow-lg: 0 18px 40px -16px rgba(20, 32, 25, 0.26);
   color-scheme: light;
 }
 
-/* --- END MIRRORED BLOCK. Everything below is marketing-only. ------------ */
+/* --- END MIRRORED BLOCK. Everything below is marketing-only. ------------- */
 
 /* Legacy names kept so no markup or sibling stylesheet has to change. They
    are aliases now, not a second palette. */
@@ -400,16 +288,6 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
-    --launch-bg: #0a0e0c;
-    --launch-surface: #111714;
-    --launch-surface-2: #181f1b;
-    --launch-ink: #f1f5f2;
-    --launch-muted: #a4afa8;
-    --launch-line: #29322d;
-    --launch-line-strong: #414d46;
-    --launch-green: #63c98f;
-    --launch-green-bright: #82d7a7;
-    --launch-green-soft: #183326;
     --m-slab: #151c18;
     --m-slab-inset: #0d1210;
     --m-slab-ink: #f0f5f1;
@@ -432,16 +310,6 @@
 }
 
 :root[data-theme='dark'] {
-  --launch-bg: #0a0e0c;
-  --launch-surface: #111714;
-  --launch-surface-2: #181f1b;
-  --launch-ink: #f1f5f2;
-  --launch-muted: #a4afa8;
-  --launch-line: #29322d;
-  --launch-line-strong: #414d46;
-  --launch-green: #63c98f;
-  --launch-green-bright: #82d7a7;
-  --launch-green-soft: #183326;
   --m-slab: #151c18;
   --m-slab-inset: #0d1210;
   --m-slab-ink: #f0f5f1;
@@ -1011,7 +879,7 @@ html:has(.static-launch) {
 .evidence-kind {
   margin-top: 1px;
   padding: 4px 8px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   background: var(--m-slab-green-bg);
   color: var(--m-slab-green);
   font-size: var(--t-text-chip);
@@ -1492,7 +1360,7 @@ html:has(.static-launch) {
 }
 .chip {
   padding: 4px 10px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   background: var(--t-surface-3);
   color: var(--launch-muted);
   font-size: var(--t-text-chip);
@@ -1704,7 +1572,7 @@ html:has(.static-launch) {
 .workspace-agent-state > span {
   width: 7px;
   height: 7px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   background: var(--m-slab-green);
 }
 .workspace-canvas {
@@ -1733,7 +1601,7 @@ html:has(.static-launch) {
 .workspace-status {
   flex: none;
   padding: 5px 10px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   background: var(--t-amber-bg);
   color: var(--t-amber);
   font-size: var(--t-text-chip);
@@ -1772,7 +1640,7 @@ html:has(.static-launch) {
 }
 .workspace-proof-tags span {
   padding: 5px 9px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   background: var(--launch-green-soft);
   color: var(--launch-green);
   font-size: var(--t-text-chip);
@@ -2096,7 +1964,7 @@ html:has(.static-launch) {
 .deploy-status {
   flex: none;
   padding: 4px 10px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   background: var(--launch-green-soft);
   color: var(--launch-green);
   font-size: var(--t-text-xs);
@@ -2790,7 +2658,7 @@ details[open] > summary .disclosure-chevron {
   margin: 28px 0 18px;
   padding: 7px 10px;
   border: 1px solid var(--t-line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   color: var(--t-muted);
   font-size: var(--t-text-sm);
 }

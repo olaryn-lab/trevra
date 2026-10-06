@@ -115,7 +115,7 @@ const VARIANT_IDS = ['a', 'b', 'c', 'd'] as const;
  * the two remaining theme colours inline. Keyed by ID rather than by position
  * on purpose: removing the middle arm must not repaint the survivors.
  */
-const VARIANT_FILL: Readonly<Record<string, string>> = { c: 'var(--amber)', d: 'var(--muted)' };
+const VARIANT_FILL: Readonly<Record<string, string>> = { c: 'var(--amber)', d: 'var(--t-muted)' };
 
 /**
  * Integer weights, summing to exactly 100, keeping the proportions handed in.

@@ -62,6 +62,9 @@ const content = `/*
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+/fonts/*
+  Cache-Control: public, max-age=604800, stale-while-revalidate=2592000
 `;
 await mkdir(dirname(output), { recursive: true });
 await writeFile(output, content);

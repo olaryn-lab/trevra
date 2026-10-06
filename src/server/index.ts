@@ -127,7 +127,7 @@ if (process.env.NODE_ENV === 'production') {
       setHeaders: (res, path) => {
         if (/assets\/.+-[A-Za-z0-9_-]{8,}\.(?:js|css)$/i.test(path)) {
           res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        } else if (/[\\/](?:icons|og)[\\/]|favicon\.svg$/i.test(path)) {
+        } else if (/[\\/](?:icons|og|fonts)[\\/]|favicon\.svg$/i.test(path)) {
           res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=2592000');
         }
       }

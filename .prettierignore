@@ -3,3 +3,5 @@ dist-server
 node_modules
 package-lock.json
 *.min.js
+# Vendored by scripts/sync-design-system.ts; byte-identical to the design system build.
+public/design-system.css

@@ -14,6 +14,8 @@ const APP_SHELL_HTML = `<!doctype html>
   <meta name="theme-color" content="#1f6f4a" />
   <meta name="referrer" content="no-referrer" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="preload" href="/fonts/instrument-sans-latin.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/design-system.css" />
   <script src="/theme.js"></script>
 </head>
 <body>
@@ -64,6 +66,8 @@ function devHomeMarketing(mode: string): Plugin {
   <title>Trevra — Sign in or open your workspace</title>
   <meta name="robots" content="noindex,nofollow" />
   <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+  <link rel="preload" href="/fonts/instrument-sans-latin.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/design-system.css" />
   <link rel="stylesheet" href="/marketing.css" />
   <script src="/theme.js"></script>
 </head>

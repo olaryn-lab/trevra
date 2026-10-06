@@ -67,7 +67,7 @@
 
 .capture-source-card small,
 .capture-metrics small {
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-xs);
 }
 
@@ -158,8 +158,8 @@
   min-height: var(--t-tap);
   border: 1px solid var(--t-line);
   background: var(--t-surface);
-  color: var(--muted);
-  border-radius: var(--t-r-pill);
+  color: var(--t-muted);
+  border-radius: var(--t-r-sm);
   padding: 7px 12px;
   cursor: pointer;
   font-size: var(--t-text-xs);
@@ -233,7 +233,7 @@
 .capture-submission-card header span,
 .capture-submission-card time,
 .capture-submission-meta {
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-xs);
 }
 
@@ -270,10 +270,10 @@
 .capture-tags span,
 .status-pill {
   border: 1px solid var(--t-line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   padding: 4px 8px;
   background: var(--t-surface-2);
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-chip);
   font-weight: var(--t-w-medium);
 }
@@ -320,7 +320,7 @@
 }
 
 .capture-record dt {
-  color: var(--muted);
+  color: var(--t-muted);
 }
 
 .capture-record dd {
@@ -334,7 +334,7 @@
 
 .capture-submission-card summary {
   cursor: pointer;
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-xs);
   font-weight: var(--t-w-medium);
 }

@@ -1,0 +1,209 @@
+/* Vendored from leanchain/design-system@f5f9b2b by scripts/sync-design-system.ts.
+   Do not edit by hand: change the design system, then re-run the script.
+   Fonts are served from /fonts (Instrument Sans and Fira Code, OFL). */
+
+@font-face {
+  font-family: "Instrument Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-stretch: 75% 100%;
+  font-display: swap;
+  src: url("/fonts/instrument-sans-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Instrument Sans";
+  font-style: normal;
+  font-weight: 400 700;
+  font-stretch: 75% 100%;
+  font-display: swap;
+  src: url("/fonts/instrument-sans-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Fira Code";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("/fonts/fira-code-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Fira Code";
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+  src: url("/fonts/fira-code-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Instrument Sans Fallback";
+  src: local("Arial"), local("Liberation Sans"), local("Arimo");
+  size-adjust: 102.60%;
+  ascent-override: 94.54%;
+  descent-override: 24.37%;
+  line-gap-override: 0%;
+}
+
+:root {
+  --font-sans: var(--font-instrument-sans, "Instrument Sans", "Instrument Sans Fallback"), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-instrument-sans, "Instrument Sans", "Instrument Sans Fallback"), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: ui-serif, Georgia, serif;
+  --font-mono: var(--font-fira-code, "Fira Code"), ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius-control: 6px;
+  --radius-panel: 8px;
+  --radius-badge: 6px;
+  --control-h-sm: 32px;
+  --control-h: 40px;
+  --control-h-lg: 44px;
+  --control-h-touch: 44px;
+  --row-h: 40px;
+  --row-h-header: 32px;
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.875rem;
+  --text-base--line-height: 1.25rem;
+  --text-lg: 1rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 2rem;
+  --shadow-card: 0 0 #0000;
+  --shadow-float: 0 12px 32px -12px rgb(0 0 0 / 0.25);
+}
+
+:root,
+.light,
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #FAFAFA;
+  --foreground: #171717;
+  --card: #FFFFFF;
+  --card-foreground: #171717;
+  --popover: #FFFFFF;
+  --popover-foreground: #262626;
+  --primary: #176B45;
+  --primary-foreground: #FFFFFF;
+  --secondary: #F5F5F5;
+  --secondary-foreground: #404040;
+  --muted: #F5F5F5;
+  --muted-foreground: #6B6B6B;
+  --accent: #E5E5E5;
+  --accent-foreground: #0A0A0A;
+  --destructive: #B91C1C;
+  --destructive-foreground: #FFFFFF;
+  --success: #047857;
+  --success-foreground: #FFFFFF;
+  --warning: #B45309;
+  --warning-foreground: #FFFFFF;
+  --info: #0E7490;
+  --info-foreground: #FFFFFF;
+  --border: #E5E5E5;
+  --input: #8A8A8A;
+  --ring: #6B6B6B;
+  --chart-1: #171717;
+  --chart-2: #6B6B6B;
+  --chart-3: #A3A3A3;
+  --chart-4: #0E7490;
+  --chart-5: #B45309;
+  --sidebar: #FAFAFA;
+  --sidebar-foreground: #171717;
+  --sidebar-primary: #176B45;
+  --sidebar-primary-foreground: #FFFFFF;
+  --sidebar-accent: #E5E5E5;
+  --sidebar-accent-foreground: #0A0A0A;
+  --sidebar-border: #E5E5E5;
+  --sidebar-ring: #6B6B6B;
+}
+
+.dark,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --background: #0A0A0A;
+  --foreground: #F5F5F5;
+  --card: #0D0D0D;
+  --card-foreground: #F5F5F5;
+  --popover: #141414;
+  --popover-foreground: #E5E5E5;
+  --primary: #61C18F;
+  --primary-foreground: #0A0A0A;
+  --secondary: #171717;
+  --secondary-foreground: #D4D4D4;
+  --muted: #171717;
+  --muted-foreground: #878787;
+  --accent: #262626;
+  --accent-foreground: #FAFAFA;
+  --destructive: #EF4444;
+  --destructive-foreground: #0A0A0A;
+  --success: #10B981;
+  --success-foreground: #0A0A0A;
+  --warning: #F59E0B;
+  --warning-foreground: #0A0A0A;
+  --info: #06B6D4;
+  --info-foreground: #0A0A0A;
+  --border: #262626;
+  --input: #666666;
+  --ring: #878787;
+  --chart-1: #F5F5F5;
+  --chart-2: #878787;
+  --chart-3: #525252;
+  --chart-4: #06B6D4;
+  --chart-5: #F59E0B;
+  --sidebar: #0A0A0A;
+  --sidebar-foreground: #F5F5F5;
+  --sidebar-primary: #61C18F;
+  --sidebar-primary-foreground: #0A0A0A;
+  --sidebar-accent: #262626;
+  --sidebar-accent-foreground: #FAFAFA;
+  --sidebar-border: #262626;
+  --sidebar-ring: #878787;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light):not([data-theme="light"]) {
+    color-scheme: dark;
+    --background: #0A0A0A;
+    --foreground: #F5F5F5;
+    --card: #0D0D0D;
+    --card-foreground: #F5F5F5;
+    --popover: #141414;
+    --popover-foreground: #E5E5E5;
+    --primary: #61C18F;
+    --primary-foreground: #0A0A0A;
+    --secondary: #171717;
+    --secondary-foreground: #D4D4D4;
+    --muted: #171717;
+    --muted-foreground: #878787;
+    --accent: #262626;
+    --accent-foreground: #FAFAFA;
+    --destructive: #EF4444;
+    --destructive-foreground: #0A0A0A;
+    --success: #10B981;
+    --success-foreground: #0A0A0A;
+    --warning: #F59E0B;
+    --warning-foreground: #0A0A0A;
+    --info: #06B6D4;
+    --info-foreground: #0A0A0A;
+    --border: #262626;
+    --input: #666666;
+    --ring: #878787;
+    --chart-1: #F5F5F5;
+    --chart-2: #878787;
+    --chart-3: #525252;
+    --chart-4: #06B6D4;
+    --chart-5: #F59E0B;
+    --sidebar: #0A0A0A;
+    --sidebar-foreground: #F5F5F5;
+    --sidebar-primary: #61C18F;
+    --sidebar-primary-foreground: #0A0A0A;
+    --sidebar-accent: #262626;
+    --sidebar-accent-foreground: #FAFAFA;
+    --sidebar-border: #262626;
+    --sidebar-ring: #878787;
+  }
+}

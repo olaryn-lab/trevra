@@ -707,7 +707,7 @@ function renderPublicDocument(config: SiteConfig, page: PublicPage, nonce: strin
 <title>${escapeHtml(page.title)}</title><meta name="description" content="${escapeAttr(page.description)}" />
 <meta name="robots" content="${page.noindex ? 'noindex,nofollow' : 'index,follow,max-image-preview:large,max-snippet:-1'}" />
 <link rel="canonical" href="${escapeAttr(canonical)}" /><link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/marketing.css" /><meta name="theme-color" content="#1f6f4a" />
+<link rel="preload" href="/fonts/instrument-sans-latin.woff2" as="font" type="font/woff2" crossorigin /><link rel="stylesheet" href="/design-system.css" /><link rel="stylesheet" href="/marketing.css" /><meta name="theme-color" content="#1f6f4a" />
 <script defer src="/marketing-analytics.js"></script>
 <meta property="og:type" content="website" /><meta property="og:site_name" content="${escapeAttr(config.name)}" />
 <meta property="og:title" content="${escapeAttr(page.title)}" /><meta property="og:description" content="${escapeAttr(page.description)}" />

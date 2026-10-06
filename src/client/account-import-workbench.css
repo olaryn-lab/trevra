@@ -28,9 +28,9 @@
 }
 .acc-import-stats span {
   border: 1px solid var(--line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   padding: 4px 9px;
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-chip);
   white-space: nowrap;
 }
@@ -64,9 +64,9 @@
 .acc-import-filters button {
   min-height: 30px;
   border: 1px solid var(--line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--panel);
-  color: var(--muted);
+  color: var(--t-muted);
   padding: 0 10px;
   font-size: var(--t-text-chip);
   cursor: pointer;
@@ -102,7 +102,7 @@
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
   background: var(--panel);
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-chip);
   font-weight: 700;
   text-transform: uppercase;
@@ -133,14 +133,14 @@
 .acc-import-check {
   align-content: start;
   justify-items: start;
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-chip);
 }
 .acc-import-check input {
   margin: 2px 0 0;
 }
 .acc-import-field-meta {
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-chip);
   line-height: 1.35;
 }
@@ -159,7 +159,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--muted);
+  color: var(--t-muted);
 }
 .acc-import-evidence details summary {
   cursor: pointer;
@@ -179,7 +179,7 @@
 }
 .acc-import-raw > summary {
   cursor: pointer;
-  color: var(--muted);
+  color: var(--t-muted);
   font-size: var(--t-text-xs);
 }
 .acc-import-raw textarea {
@@ -219,7 +219,7 @@
   min-height: 22px;
   padding: 2px 8px;
   border: 1px solid var(--line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-badge);
   font-size: var(--t-text-chip);
   font-weight: 700;
   text-transform: capitalize;
@@ -240,7 +240,7 @@
   border-color: currentColor;
 }
 .acc-provider-health-chip.is-ready {
-  color: var(--muted);
+  color: var(--t-muted);
 }
 .acc-expanded-stack {
   display: grid;
@@ -258,7 +258,7 @@
 }
 .acc-observation-identity p {
   margin: 0;
-  color: var(--muted);
+  color: var(--t-muted);
 }
 .acc-observation-identity-form {
   display: flex;
