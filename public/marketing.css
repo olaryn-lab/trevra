@@ -26,16 +26,16 @@
 :root {
   /* -- green: one hue, nine steps, light -> dark. 600 is the shared primary;
         the other steps are Trevra's washes and illustration tints. ------- */
-  --t-green-50: #f0f8f2;
-  --t-green-100: #dfeee4;
-  --t-green-200: #bed4c2;
-  --t-green-300: #7dba99;
-  --t-green-400: #38805a;
-  --t-green-500: #1f8b5b;
+  --t-green-50: #f1f8f0;
+  --t-green-100: #e3ede1;
+  --t-green-200: #c2d3be;
+  --t-green-300: #8fb889;
+  --t-green-400: #507d48;
+  --t-green-500: #4b8841;
   --t-green-600: var(--primary); /* the one primary green, both surfaces */
-  --t-green-700: #12492e;
-  --t-green-800: #0d2d1e;
-  --t-green-ink: #12492e; /* fixed in both themes: text on a white chip */
+  --t-green-700: #274821;
+  --t-green-800: #182c15;
+  --t-green-ink: #274821; /* fixed in both themes: text on a white chip */
 
   /* -- neutrals: the shared greys ------------------------------------------ */
   --t-ink: var(--foreground);
@@ -160,14 +160,14 @@
    Trevra's extensions: the green ramp and the night console. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --t-green-50: #132119; /* keeps shared muted text >= 4.5:1 on this wash */
-    --t-green-100: #1c3427;
-    --t-green-200: #2b5540;
-    --t-green-300: #409a6b;
-    --t-green-400: #63b78a;
-    --t-green-500: #84d6aa;
-    --t-green-700: #8ad3a9;
-    --t-green-800: #a8e2c1;
+    --t-green-50: #172015; /* keeps shared muted text >= 4.5:1 on this wash */
+    --t-green-100: #243321;
+    --t-green-200: #395335;
+    --t-green-300: #5f9756;
+    --t-green-400: #7eb475;
+    --t-green-500: #9dd394;
+    --t-green-700: #9fd097;
+    --t-green-800: #b8dfb1;
     --t-night: #070c09;
     --t-night-2: #101a14;
     color-scheme: dark;
@@ -175,28 +175,28 @@
 }
 
 :root[data-theme='dark'] {
-  --t-green-50: #132119; /* keeps shared muted text >= 4.5:1 on this wash */
-  --t-green-100: #1c3427;
-  --t-green-200: #2b5540;
-  --t-green-300: #409a6b;
-  --t-green-400: #63b78a;
-  --t-green-500: #84d6aa;
-  --t-green-700: #8ad3a9;
-  --t-green-800: #a8e2c1;
+  --t-green-50: #172015; /* keeps shared muted text >= 4.5:1 on this wash */
+  --t-green-100: #243321;
+  --t-green-200: #395335;
+  --t-green-300: #5f9756;
+  --t-green-400: #7eb475;
+  --t-green-500: #9dd394;
+  --t-green-700: #9fd097;
+  --t-green-800: #b8dfb1;
   --t-night: #070c09;
   --t-night-2: #101a14;
   color-scheme: dark;
 }
 
 :root[data-theme='light'] {
-  --t-green-50: #f0f8f2;
-  --t-green-100: #dfeee4;
-  --t-green-200: #bed4c2;
-  --t-green-300: #7dba99;
-  --t-green-400: #38805a;
-  --t-green-500: #1f8b5b;
-  --t-green-700: #12492e;
-  --t-green-800: #0d2d1e;
+  --t-green-50: #f1f8f0;
+  --t-green-100: #e3ede1;
+  --t-green-200: #c2d3be;
+  --t-green-300: #8fb889;
+  --t-green-400: #507d48;
+  --t-green-500: #4b8841;
+  --t-green-700: #274821;
+  --t-green-800: #182c15;
   --t-night: #101a15;
   --t-night-2: #16241c;
   color-scheme: light;
@@ -258,6 +258,7 @@
   --m-slab-line-soft: rgba(255, 255, 255, 0.055);
   --m-slab-wash: rgba(255, 255, 255, 0.035);
   --m-slab-wash-2: rgba(255, 255, 255, 0.07);
+  --m-slab-green-bg: rgba(126, 216, 165, 0.11);
   --m-slab-amber-bg: rgba(212, 154, 58, 0.11);
   --m-slab-amber-line: rgba(233, 189, 104, 0.28);
   --m-slab-halo: rgba(63, 180, 112, 0.13);
@@ -267,13 +268,13 @@
 
   /* The closing slab. Deep forest in both themes: in dark, --t-green-fill
      resolves to a mint that reads as highlighter at full-bleed size. */
-  --m-cta: #176b45;
+  --m-cta: #2f5e27;
   --m-cta-ink: #ffffff; /* 6.51:1 on --m-cta */
   --m-cta-ink-2: rgba(255, 255, 255, 0.84);
   --m-cta-line: rgba(255, 255, 255, 0.45);
   --m-cta-wash: rgba(255, 255, 255, 0.14);
   --m-cta-btn: #ffffff;
-  --m-cta-btn-ink: #12492e;
+  --m-cta-btn-ink: #274821;
 
   /* Display type is fluid, and the floor is the number that matters: at 200%
      zoom the viewport is 720x450 and the clamp minimum is what renders. The

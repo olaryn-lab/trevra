@@ -3,10 +3,11 @@
  *
  *   npx tsx scripts/sync-design-system.ts <path-to-leanchain/design-system>
  *
- * Writes public/design-system.css (the self-hosted font faces, then the
- * resolved Trevra roles from dist/css/trevra.css) and copies dist/fonts into
- * public/fonts. Every page links /design-system.css before its own sheet, and
- * the --t-* token layer in styles.css and marketing.css reads these roles.
+ * Writes public/design-system.css (the self-hosted font faces Trevra's roles
+ * name, then the resolved Trevra roles from dist/css/trevra.css) and copies
+ * those families' files and OFL licences into public/fonts. Every page links
+ * /design-system.css before its own sheet, and the --t-* token layer in
+ * styles.css and marketing.css reads these roles.
  * Re-run after the design system changes; never edit the outputs by hand.
  */
 import { execFileSync } from 'node:child_process';
@@ -43,26 +44,48 @@ if (dirty) {
   );
 }
 
-const faces = (await readFile(fontsCss, 'utf8'))
+const roles = (await readFile(brandCss, 'utf8')).replace(/^\/\*[\s\S]*?\*\/\n+/, '');
+
+// fonts.css carries every product's faces (Beseam's Lora among them); vendor only
+// the families Trevra's roles actually name, so no unused face or file ships.
+const allFaces = (await readFile(fontsCss, 'utf8'))
   .replace(/^\/\*[\s\S]*?\*\/\n+/gm, '')
-  .replaceAll('url("../fonts/', 'url("/fonts/');
-if (!faces.includes('url("/fonts/')) {
+  .match(/@font-face\s*\{[^}]*\}/g);
+// Every face is either a self-hosted file under ../fonts/ or a local() metric fallback.
+const sourced = (face: string) => face.includes('url("../fonts/') || /src:\s*local\(/.test(face);
+if (!allFaces?.some((face) => face.includes('url("../fonts/')) || !allFaces.every(sourced)) {
   throw new Error(
-    'sync-design-system: fonts.css no longer points at ../fonts/; update this script'
+    'sync-design-system: fonts.css faces no longer point at ../fonts/ or local(); update this script'
   );
 }
-const roles = (await readFile(brandCss, 'utf8')).replace(/^\/\*[\s\S]*?\*\/\n+/, '');
+const familyOf = (face: string) => /font-family:\s*"([^"]+)"/.exec(face)?.[1] ?? '';
+const kept = allFaces.filter((face) => roles.includes(`"${familyOf(face)}"`));
+const families = new Set(kept.map(familyOf));
+if (families.size === 0) {
+  throw new Error(
+    'sync-design-system: dist/css/trevra.css names none of the families in fonts.css'
+  );
+}
+const faces = kept.join('\n').replaceAll('url("../fonts/', 'url("/fonts/');
+const fontFiles = [...faces.matchAll(/url\("\/fonts\/([^"]+)"\)/g)].map((m) => m[1]);
+const hosted = [...new Set(kept.filter((face) => face.includes('url("../fonts/')).map(familyOf))];
+const licences = hosted.map((family) => `OFL-${family.replaceAll(' ', '')}.txt`);
 
 const header = `/* Vendored from leanchain/design-system@${commit} by scripts/sync-design-system.ts.
    Do not edit by hand: change the design system, then re-run the script.
-   Fonts are served from /fonts (Instrument Sans and Fira Code, OFL). */\n\n`;
+   Fonts are served from /fonts (${hosted.join(', ')}; OFL). */\n\n`;
 await writeFile(
   resolve('public/design-system.css'),
   `${header}${faces.trim()}\n\n${roles.trim()}\n`
 );
 
 await mkdir(resolve('public/fonts'), { recursive: true });
-const files = (await readdir(fontsDir)).filter((name) => /\.(woff2|txt)$/.test(name));
+const available = new Set(await readdir(fontsDir));
+const files = [...new Set([...fontFiles, ...licences])];
+const missing = files.filter((name) => !available.has(name));
+if (missing.length > 0) {
+  throw new Error(`sync-design-system: ${fontsDir} is missing ${missing.join(', ')}`);
+}
 for (const name of files) await copyFile(join(fontsDir, name), resolve('public/fonts', name));
 
 console.log(

@@ -26,16 +26,16 @@
 :root {
   /* -- green: one hue, nine steps, light -> dark. 600 is the shared primary;
         the other steps are Trevra's washes and illustration tints. ------- */
-  --t-green-50: #f0f8f2;
-  --t-green-100: #dfeee4;
-  --t-green-200: #bed4c2;
-  --t-green-300: #7dba99;
-  --t-green-400: #38805a;
-  --t-green-500: #1f8b5b;
+  --t-green-50: #f1f8f0;
+  --t-green-100: #e3ede1;
+  --t-green-200: #c2d3be;
+  --t-green-300: #8fb889;
+  --t-green-400: #507d48;
+  --t-green-500: #4b8841;
   --t-green-600: var(--primary); /* the one primary green, both surfaces */
-  --t-green-700: #12492e;
-  --t-green-800: #0d2d1e;
-  --t-green-ink: #12492e; /* fixed in both themes: text on a white chip */
+  --t-green-700: #274821;
+  --t-green-800: #182c15;
+  --t-green-ink: #274821; /* fixed in both themes: text on a white chip */
 
   /* -- neutrals: the shared greys ------------------------------------------ */
   --t-ink: var(--foreground);
@@ -160,14 +160,14 @@
    Trevra's extensions: the green ramp and the night console. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --t-green-50: #132119; /* keeps shared muted text >= 4.5:1 on this wash */
-    --t-green-100: #1c3427;
-    --t-green-200: #2b5540;
-    --t-green-300: #409a6b;
-    --t-green-400: #63b78a;
-    --t-green-500: #84d6aa;
-    --t-green-700: #8ad3a9;
-    --t-green-800: #a8e2c1;
+    --t-green-50: #172015; /* keeps shared muted text >= 4.5:1 on this wash */
+    --t-green-100: #243321;
+    --t-green-200: #395335;
+    --t-green-300: #5f9756;
+    --t-green-400: #7eb475;
+    --t-green-500: #9dd394;
+    --t-green-700: #9fd097;
+    --t-green-800: #b8dfb1;
     --t-night: #070c09;
     --t-night-2: #101a14;
     color-scheme: dark;
@@ -175,28 +175,28 @@
 }
 
 :root[data-theme='dark'] {
-  --t-green-50: #132119; /* keeps shared muted text >= 4.5:1 on this wash */
-  --t-green-100: #1c3427;
-  --t-green-200: #2b5540;
-  --t-green-300: #409a6b;
-  --t-green-400: #63b78a;
-  --t-green-500: #84d6aa;
-  --t-green-700: #8ad3a9;
-  --t-green-800: #a8e2c1;
+  --t-green-50: #172015; /* keeps shared muted text >= 4.5:1 on this wash */
+  --t-green-100: #243321;
+  --t-green-200: #395335;
+  --t-green-300: #5f9756;
+  --t-green-400: #7eb475;
+  --t-green-500: #9dd394;
+  --t-green-700: #9fd097;
+  --t-green-800: #b8dfb1;
   --t-night: #070c09;
   --t-night-2: #101a14;
   color-scheme: dark;
 }
 
 :root[data-theme='light'] {
-  --t-green-50: #f0f8f2;
-  --t-green-100: #dfeee4;
-  --t-green-200: #bed4c2;
-  --t-green-300: #7dba99;
-  --t-green-400: #38805a;
-  --t-green-500: #1f8b5b;
-  --t-green-700: #12492e;
-  --t-green-800: #0d2d1e;
+  --t-green-50: #f1f8f0;
+  --t-green-100: #e3ede1;
+  --t-green-200: #c2d3be;
+  --t-green-300: #8fb889;
+  --t-green-400: #507d48;
+  --t-green-500: #4b8841;
+  --t-green-700: #274821;
+  --t-green-800: #182c15;
   --t-night: #101a15;
   --t-night-2: #16241c;
   color-scheme: light;
@@ -1929,15 +1929,15 @@ button:disabled {
   text-transform: none;
 }
 .client-why .client-status b {
-  color: var(--t-text);
+  color: var(--t-ink);
   font-variant-numeric: tabular-nums;
 }
 .client-why .client-status.is-negative,
 .client-why .client-status.is-negative b {
-  color: var(--danger, #b42318);
+  color: var(--t-red);
 }
 .client-blocked {
-  color: var(--danger, #b42318);
+  color: var(--t-red);
 }
 .client-next strong {
   font-size: var(--t-text-xs);
@@ -3287,7 +3287,7 @@ button:disabled {
 /* Always the dark-green tile with white text, in both themes -- this panel
    does not follow the app's dark-mode green/on-green swap. */
 :root[data-theme='dark'] .auth-story {
-  --t-green-fill: #176b45;
+  --t-green-fill: #2f5e27;
   --t-on-green: #ffffff;
   --t-on-green-2: rgba(255, 255, 255, 0.82);
   --t-on-green-line: rgba(255, 255, 255, 0.45);
@@ -3295,7 +3295,7 @@ button:disabled {
 }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) .auth-story {
-    --t-green-fill: #176b45;
+    --t-green-fill: #2f5e27;
     --t-on-green: #ffffff;
     --t-on-green-2: rgba(255, 255, 255, 0.82);
     --t-on-green-line: rgba(255, 255, 255, 0.45);
@@ -4025,7 +4025,7 @@ button:disabled {
   gap: 12px;
   padding-bottom: 9px;
   margin-bottom: 9px;
-  border-bottom: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--t-line-soft);
 }
 .step-hover-card-head > strong {
   font-size: var(--t-text-sm);
@@ -5447,11 +5447,11 @@ button:disabled {
   --li-grid: color-mix(in srgb, var(--t-muted) 32%, transparent);
   --li-danger: var(--t-red);
   --li-track: var(--t-line-soft);
-  --li-f1: #7dba99;
+  --li-f1: #8fb889;
   --li-f2: #5aa27f;
-  --li-f3: #38805a;
+  --li-f3: #507d48;
   --li-f4: #256647;
-  --li-f5: #12492e;
+  --li-f5: #274821;
   --li-em-1: #07130c;
   --li-em-2: #07130c;
   --li-em-3: #ffffff;
@@ -5462,9 +5462,9 @@ button:disabled {
   .li-viz {
     --li-f1: #1b5d3c;
     --li-f2: #2b7c52;
-    --li-f3: #409a6b;
-    --li-f4: #63b78a;
-    --li-f5: #8ad3a9;
+    --li-f3: #5f9756;
+    --li-f4: #7eb475;
+    --li-f5: #9fd097;
     --li-em-1: #ffffff;
     --li-em-2: #ffffff;
     --li-em-3: #07130c;
@@ -5475,9 +5475,9 @@ button:disabled {
 :root[data-theme='dark'] .li-viz {
   --li-f1: #1b5d3c;
   --li-f2: #2b7c52;
-  --li-f3: #409a6b;
-  --li-f4: #63b78a;
-  --li-f5: #8ad3a9;
+  --li-f3: #5f9756;
+  --li-f4: #7eb475;
+  --li-f5: #9fd097;
   --li-em-1: #ffffff;
   --li-em-2: #ffffff;
   --li-em-3: #07130c;
@@ -5485,11 +5485,11 @@ button:disabled {
   --li-em-5: #07130c;
 }
 :root[data-theme='light'] .li-viz {
-  --li-f1: #7dba99;
+  --li-f1: #8fb889;
   --li-f2: #5aa27f;
-  --li-f3: #38805a;
+  --li-f3: #507d48;
   --li-f4: #256647;
-  --li-f5: #12492e;
+  --li-f5: #274821;
   --li-em-1: #07130c;
   --li-em-2: #07130c;
   --li-em-3: #ffffff;
@@ -7495,7 +7495,7 @@ button:disabled {
   border-left: 2px solid var(--line);
   background: var(--t-surface-2);
   border-radius: var(--t-r-sm);
-  color: var(--fg);
+  color: var(--t-ink);
   font-size: var(--t-text-xs);
   line-height: 1.6;
   max-width: var(--t-measure);
@@ -12662,7 +12662,7 @@ button:disabled {
   display: grid;
   gap: 3px;
   padding: 9px 10px;
-  border: 1px solid var(--line-soft);
+  border: 1px solid var(--t-line-soft);
   border-radius: var(--t-r-sm);
   background: var(--panel);
 }
@@ -13790,7 +13790,7 @@ button:disabled {
   gap: 6px;
 }
 .research-draft-variant details a {
-  color: var(--t-link);
+  color: var(--t-green-600);
   font-size: var(--t-text-chip);
 }
 .research-draft-variant > button {
