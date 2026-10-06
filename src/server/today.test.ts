@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from './db.js';
 import { createAccount } from './accounts/store.js';
+import { ensureDefaultAgent } from './agents.js';
 import { pauseSeat, upsertSeat } from './linkedin/seats.js';
 import { getToday } from './today.js';
 import { runRecommendationEngine } from './recommendation-engine.js';
@@ -29,6 +30,62 @@ afterEach(async () => {
   if (db) await clearWorkspace(WORKSPACE);
   await db?.close();
 });
+async function seedRunningCampaignWithDueProfileView(
+  now: Date,
+  options: { sentEarlier?: boolean } = {}
+): Promise<string> {
+  const campaignId = options.sentEarlier ? 'lcmp_today_capacity' : 'lcmp_today_clock_wait';
+  await upsertSeat(
+    db,
+    WORKSPACE,
+    { label: 'Founder LinkedIn', timezone: 'Europe/Zurich' },
+    new Date('2026-01-05T09:00:00.000Z')
+  );
+  await db
+    .prepare(
+      `INSERT INTO linkedin_campaigns
+       (id,workspace_id,name,status,seat_key,started_at,created_at,updated_at)
+       VALUES (?,?,'Capacity campaign','running','owner',?,?,?)`
+    )
+    .run(
+      campaignId,
+      WORKSPACE,
+      '2026-08-20T08:00:00.000Z',
+      '2026-08-20T08:00:00.000Z',
+      '2026-08-21T07:00:00.000Z'
+    );
+
+  if (options.sentEarlier) {
+    await db
+      .prepare(
+        `INSERT INTO linkedin_actions
+         (id,workspace_id,seat_key,kind,target_ref,campaign_id,status,planned_for,recorded_at,
+          source,replay_scope,created_at)
+         VALUES ('lact_today_capacity_sent',?,'owner','profile_view',
+                 'https://www.linkedin.com/in/already-viewed/',?,'sent',NULL,?,'campaign',
+                 'capacity:sent','2026-08-21T07:00:00.000Z')`
+      )
+      .run(WORKSPACE, campaignId, new Date(now.getTime() - 60 * 60 * 1000).toISOString());
+  }
+
+  await db
+    .prepare(
+      `INSERT INTO linkedin_actions
+       (id,workspace_id,seat_key,kind,target_ref,campaign_id,status,planned_for,recorded_at,
+        source,replay_scope,created_at)
+       VALUES (?,?,'owner','profile_view',
+               'https://www.linkedin.com/in/due-now/',?,'planned',?,NULL,'campaign',
+               'capacity:due',?)`
+    )
+    .run(
+      options.sentEarlier ? 'lact_today_capacity_due' : 'lact_today_clock_due',
+      WORKSPACE,
+      campaignId,
+      now.toISOString(),
+      now.toISOString()
+    );
+  return campaignId;
+}
 
 describe('getToday', () => {
   it('projects durable GTM state into deterministic human-attention order', async () => {
@@ -182,6 +239,284 @@ describe('getToday', () => {
       href: '/research',
       metadata: { score: 92 }
     });
+  });
+
+  it('surfaces a due campaign when the worker safety gate hits actionable capacity', async () => {
+    const campaignId = await seedRunningCampaignWithDueProfileView(NOW, { sentEarlier: true });
+
+    const today = await getToday(db, WORKSPACE, NOW);
+
+    const capacity = today.needsAttention.find((item) => item.kind === 'capacity_block');
+    expect(capacity).toMatchObject({
+      priority: 80,
+      href: '/outreach',
+      reference: { type: 'linkedin_campaign', id: campaignId },
+      metadata: {
+        check: 'day-over-day-delta',
+        channel: 'linkedin',
+        actionKind: 'profile_view',
+        dueNow: 1,
+        seatKey: 'owner'
+      }
+    });
+    expect(capacity?.title).toContain('Capacity campaign');
+    expect(capacity?.detail).toContain("today's ceiling is 1");
+  });
+
+  it('keeps clock-only LinkedIn waits out of Needs you', async () => {
+    const outsideWorkingHours = new Date('2026-08-21T21:00:00.000Z');
+    await seedRunningCampaignWithDueProfileView(outsideWorkingHours);
+
+    const today = await getToday(db, WORKSPACE, outsideWorkingHours);
+
+    expect(today.needsAttention.filter((item) => item.kind === 'capacity_block')).toEqual([]);
+    expect(today.working).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'campaign_working',
+          title: 'Capacity campaign is running'
+        })
+      ])
+    );
+  });
+
+  it('projects live GTM work and recent outcomes from durable state', async () => {
+    const agent = await ensureDefaultAgent(db, WORKSPACE);
+    await db
+      .prepare(
+        `INSERT INTO agent_runs
+         (id,workspace_id,agent_id,trigger,status,goal,step_count,max_steps,started_at)
+         VALUES (?,?,?,'schedule','running',?,2,12,?)`
+      )
+      .run(
+        'arun_today_working',
+        WORKSPACE,
+        agent.id,
+        'Research the hottest accounts and prepare the next safe action.',
+        '2026-08-21T07:15:00.000Z'
+      );
+
+    const personId = 'con_today_result';
+    await db
+      .prepare(
+        `INSERT INTO contacts
+         (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(
+        personId,
+        WORKSPACE,
+        'Lea Müller',
+        'lea@result.example',
+        'lea@result.example',
+        '2026-08-20T08:00:00.000Z',
+        '2026-08-21T07:50:00.000Z'
+      );
+    const account = await createAccount(
+      db,
+      WORKSPACE,
+      { domain: 'result.example', name: 'Result AG', source: 'manual' },
+      new Date('2026-08-20T08:00:00.000Z')
+    );
+    await db
+      .prepare(
+        `INSERT INTO conversations
+         (id,workspace_id,person_id,status,last_activity_at,created_at,updated_at)
+         VALUES (?,?,?,'open',?,?,?)`
+      )
+      .run(
+        'conv_today_result',
+        WORKSPACE,
+        personId,
+        '2026-08-21T07:50:00.000Z',
+        '2026-08-20T08:00:00.000Z',
+        '2026-08-21T07:50:00.000Z'
+      );
+    await db
+      .prepare(
+        `INSERT INTO conversation_messages
+         (id,workspace_id,conversation_id,channel,provider,direction,body,source_type,source_id,
+          outcome_kind,verification_status,occurred_at,created_at)
+         VALUES (?,?,?,'email','gmail','inbound',?,'gmail_message',?,'reply','verified',?,?)`
+      )
+      .run(
+        'cmsg_today_result',
+        WORKSPACE,
+        'conv_today_result',
+        'Yes, let us talk next week.',
+        'gmail-result-1',
+        '2026-08-21T07:50:00.000Z',
+        '2026-08-21T07:50:00.000Z'
+      );
+    await db
+      .prepare(
+        `INSERT INTO conversation_messages
+         (id,workspace_id,conversation_id,channel,provider,direction,body,source_type,source_id,
+          verification_status,occurred_at,created_at)
+         VALUES (?,?,?,'email','gmail','outbound',?,'gmail_message',?,'verified',?,?)`
+      )
+      .run(
+        'cmsg_today_result_followup',
+        WORKSPACE,
+        'conv_today_result',
+        'Great, I will send times.',
+        'gmail-result-2',
+        '2026-08-21T07:52:00.000Z',
+        '2026-08-21T07:52:00.000Z'
+      );
+    await db
+      .prepare(
+        `INSERT INTO gtm_deliveries
+         (id,workspace_id,channel,purpose,recipient,source_type,source_id,idempotency_key,status,
+          provider,external_ref,attempt_count,started_at,sent_at,created_at,updated_at)
+         VALUES (?,?,'email','outreach',?,'test','source-1',?,'sent','gmail','gmail-sent-1',1,?,?,?,?)`
+      )
+      .run(
+        'gdel_today_result',
+        WORKSPACE,
+        'lea@result.example',
+        'today-result-delivery-1',
+        '2026-08-21T07:39:00.000Z',
+        '2026-08-21T07:40:00.000Z',
+        '2026-08-21T07:39:00.000Z',
+        '2026-08-21T07:40:00.000Z'
+      );
+    await db
+      .prepare(
+        `INSERT INTO opportunities
+         (id,workspace_id,person_id,account_id,title,stage,created_at,updated_at,closed_at)
+         VALUES (?,?,?,?,'Pilot discussion','won',?,?,?)`
+      )
+      .run(
+        'opp_today_result',
+        WORKSPACE,
+        personId,
+        account.id,
+        '2026-08-20T08:00:00.000Z',
+        '2026-08-21T07:55:00.000Z',
+        '2026-08-21T07:55:00.000Z'
+      );
+
+    const today = await getToday(db, WORKSPACE, NOW);
+
+    expect(today.working).toHaveLength(1);
+    expect(today.working[0]).toMatchObject({
+      kind: 'agent_working',
+      title: 'GTM Agent is working',
+      reference: { type: 'agent_run', id: 'arun_today_working' },
+      href: '/ledger/run/arun_today_working',
+      metadata: { stepCount: 2, stopping: false }
+    });
+    expect(today.recentResults.map((item) => item.kind)).toEqual([
+      'opportunity_closed',
+      'verified_reply_result',
+      'delivery_sent'
+    ]);
+    expect(today.recentResults[0]).toMatchObject({
+      title: 'Result AG: won',
+      reference: { type: 'opportunity', id: 'opp_today_result' }
+    });
+    expect(today.recentResults[1]).toMatchObject({
+      title: 'Verified reply from Lea Müller',
+      href: '/outreach/inbox'
+    });
+  });
+
+  it("surfaces only an Agent's latest failed run and deep-links to its ledger evidence", async () => {
+    const agent = await ensureDefaultAgent(db, WORKSPACE);
+    for (const [id, startedAt, finishedAt, error] of [
+      [
+        'arun_today_failed_old',
+        '2026-08-21T06:00:00.000Z',
+        '2026-08-21T06:05:00.000Z',
+        'Old provider failure'
+      ],
+      [
+        'arun_today_failed_latest',
+        '2026-08-21T07:00:00.000Z',
+        '2026-08-21T07:05:00.000Z',
+        'Research source unavailable'
+      ]
+    ] as const) {
+      await db
+        .prepare(
+          `INSERT INTO agent_runs
+           (id,workspace_id,agent_id,trigger,status,goal,step_count,max_steps,error,started_at,finished_at)
+           VALUES (?,?,?,'schedule','failed','Research priority accounts',1,12,?,?,?)`
+        )
+        .run(id, WORKSPACE, agent.id, error, startedAt, finishedAt);
+    }
+
+    const failed = await getToday(db, WORKSPACE, NOW);
+    expect(failed.needsAttention.filter((item) => item.kind === 'agent_blocked')).toEqual([
+      expect.objectContaining({
+        title: 'GTM Agent needs attention',
+        detail: 'Research source unavailable',
+        href: '/ledger/run/arun_today_failed_latest',
+        reference: { type: 'agent_run', id: 'arun_today_failed_latest' },
+        metadata: expect.objectContaining({ agentId: agent.id })
+      })
+    ]);
+
+    await db
+      .prepare(
+        `INSERT INTO agent_runs
+         (id,workspace_id,agent_id,trigger,status,goal,step_count,max_steps,summary,started_at,finished_at)
+         VALUES ('arun_today_completed_newer',?,?,'schedule','completed',
+                 'Research priority accounts',2,12,'Completed',?,?)`
+      )
+      .run(WORKSPACE, agent.id, '2026-08-21T07:30:00.000Z', '2026-08-21T07:35:00.000Z');
+
+    const recovered = await getToday(db, WORKSPACE, NOW);
+    expect(recovered.needsAttention.filter((item) => item.kind === 'agent_blocked')).toEqual([]);
+  });
+
+  it('surfaces a latest verified inbound email reply as human attention', async () => {
+    await db
+      .prepare(
+        `INSERT INTO contacts
+         (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES ('con_today_email_attention',?,'Nora Frei','nora@example.com','nora@example.com',?,?)`
+      )
+      .run(WORKSPACE, '2026-08-21T07:00:00.000Z', '2026-08-21T07:45:00.000Z');
+    await db
+      .prepare(
+        `INSERT INTO conversations
+         (id,workspace_id,person_id,status,last_activity_at,created_at,updated_at)
+         VALUES ('conv_today_email_attention',?,'con_today_email_attention','open',?,?,?)`
+      )
+      .run(
+        WORKSPACE,
+        '2026-08-21T07:45:00.000Z',
+        '2026-08-21T07:00:00.000Z',
+        '2026-08-21T07:45:00.000Z'
+      );
+    await db
+      .prepare(
+        `INSERT INTO conversation_messages
+         (id,workspace_id,conversation_id,channel,provider,direction,body,source_type,source_id,
+          outcome_kind,verification_status,occurred_at,created_at)
+         VALUES ('cmsg_today_email_attention',?,'conv_today_email_attention','email','gmail','inbound',
+                 'Can we schedule a call?','gmail_message','gmail-attention-1','reply','verified',
+                 '2026-08-21T07:45:00.000Z','2026-08-21T07:45:00.000Z')`
+      )
+      .run(WORKSPACE);
+
+    const today = await getToday(db, WORKSPACE, NOW);
+
+    expect(today.needsAttention).toEqual([
+      expect.objectContaining({
+        kind: 'verified_reply',
+        title: 'Reply from Nora Frei',
+        href: '/outreach/inbox',
+        reference: { type: 'conversation_message', id: 'cmsg_today_email_attention' },
+        metadata: expect.objectContaining({
+          channel: 'email',
+          personId: 'con_today_email_attention'
+        })
+      })
+    ]);
+    expect(today.recentResults).toEqual([]);
   });
 
   it('never leaks another workspace into the projection', async () => {

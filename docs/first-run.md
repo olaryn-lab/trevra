@@ -1,120 +1,207 @@
-# First run: choose one outcome, get to value
+# First run: get one evidence-backed GTM job working
 
-This is the current first-run contract for Trevra. It replaces the older lead-spine
-plan that predated the shipped account scorer, managed LinkedIn campaigns, inbox,
-agent access, hosted workspaces, and the five-screen GTM shell.
+**Status:** Current
+**Product scope:** GTM only.
 
-The rule is simple: **a new user chooses one outcome first. Trevra never asks them
-to configure both halves of the product before either half becomes useful.**
-Completion is derived from real server state. The choice of which outcome to work
-on first is only a presentation preference.
+This document describes the shipped first-run contract. It must stay aligned with src/client/views/LoopView.tsx, src/client/views/activation.ts, docs/gtm-shell-shape.md, and the canonical GTM OS design.
 
-## Step 0 — sign in
+The rule is simple:
 
-Hosted production uses Google OAuth. Self-hosted deployments may also enable
-email/password auth. Authentication creates or resolves the workspace and lands on
-`/loop`.
+> A new founder should reach one bounded GTM job without first learning Trevra's internal orchestration vocabulary.
 
-No provider connection, model key, LinkedIn password, campaign, or import is
-required on the auth screen.
+No project, contract, invoice, payment, or accounting setup belongs in first run.
 
-## Step 1 — choose the first outcome
+## 1. Sign in
 
-The Loop asks one question:
+Hosted and self-hosted deployments follow their configured authentication boundary, then land on **Loop**.
 
-- **Win new business** — get one outbound campaign ready.
-- **Get paid for work** — connect commercial evidence and surface the first thing
-  that needs a decision.
+Authentication must not require a LinkedIn account, model key, campaign, lead list, CRM, or capture source up front.
 
-Only the selected checklist is expanded. The other outcome remains one click away.
-The preference is remembered locally; it is not business state and it never marks a
-step complete.
+## 2. Workspace activation
 
-## Outcome A — win new business
+Loop derives activation from durable server state. There is no onboarding-completed flag.
 
-Four verifiable steps, in order:
+The current activation sequence is:
 
-1. **Add the LinkedIn account you will send from** → `/outreach/settings`
-   - name the sending account;
-   - set timezone, working days/hours and operator ceilings;
-   - connect/sign in when the deployment supports browser execution.
-2. **Build one lead list** → `/outreach/new`
-   - import people directly, or use the Find people fold at `/outreach/leads`
-     to turn a LinkedIn source into a reviewed list.
-3. **Build one workflow** → `/outreach/new`
-   - view, invite, message, follow, wait, or stop for a manual message.
-4. **Create the campaign** → `/outreach/new`
-   - pick one sending account, one lead list and one workflow;
-   - creation sends nothing; Start is a separate decision.
+1. **Connect an agent**
+   - Claude Code, Codex, Trevra's hosted agent, or another supported MCP client.
+   - Agent access is read/run only. It cannot approve or execute consequential actions.
 
-The campaign screen repeats these prerequisites when there is no campaign yet and
-highlights exactly one next step. This is deliberate redundancy: Loop answers
-"what should I do next?" and Campaigns answers "what does this campaign still need?"
-without requiring the user to remember the route they came from.
+2. **Connect a source**
+   - A GTM data source or a LinkedIn sending identity.
+   - Missing/unreadable provider state is unknown/not connected, never a factual zero.
 
-Every check mark is derived from stored objects: configured LinkedIn account, lead
-list, workflow, campaign. There are no permanently-untracked circles.
+3. **Set the approval boundary**
+   - At least one enabled workspace policy establishes where human judgment is required.
+   - Simplified UI may hide policy mechanics, but execution still evaluates policy.
 
-### Related prospecting routes
+4. **Plan the first job**
+   - The founder chooses one bounded GTM objective.
+   - Trevra shows the deterministic plan before preparing anything.
 
-- `/outreach/accounts` — **Target accounts**: ranked companies and the evidence
-  behind their score. This used to be a sixth primary nav destination at `/leads`.
-  `/leads` remains a compatibility alias and is replaced with this route.
-- `/outreach/leads` — **Find people**: turn LinkedIn searches, posts or keyword
-  sources into people, then save reviewed results into lead lists.
+If Trevra cannot verify one of these states, it says so and offers retry instead of marking the step empty or complete.
 
-These are ways to produce campaign inputs, not primary app destinations.
+## 3. Bounded first jobs
 
-## Outcome B — get paid for work
+The current GTM intent vocabulary is:
 
-Three verifiable steps, in order:
+    Find prospects
+    Research accounts
+    Prepare outreach
+    Watch accounts
+    Capture inbound
 
-1. **Connect Claude Code or Codex** → `/setup/agent`
-   - Trevra creates the scoped token and the exact MCP command;
-   - the agent may read and prepare but cannot approve or execute.
-2. **Connect the source that knows what happened** → `/setup/data`
-   - email/accounting through Nango, or another supported source.
-3. **Bring in clients and agreements** → `/setup/data`
-   - connected sync, agreement upload, marketplace CSV, or generic import.
+Internally these map to:
 
-Once these exist, setup is complete. Recommendations are an outcome of the system,
-not an onboarding checkbox: a healthy workspace is allowed to have nothing that
-needs approval.
+    find_accounts
+    research_accounts
+    prepare_outreach
+    watch_accounts
+    capture_inbound
 
-## The recurring journey
+The common interaction contract is:
 
-After first run, the five primary destinations are stable:
+    Goal
+     -> inspect deterministic plan
+     -> resolve blockers
+     -> prepare only what the plan supports
+     -> no consequential external write without its normal approval boundary
 
-1. **Loop** — where is the GTM loop stuck and what is the one next action?
-2. **Outreach** — sending accounts, prospect inputs, campaigns and replies.
-3. **Money** — prepared work at the paid end: agree, deliver, bill, collect.
-4. **Ledger** — what agents and workflows actually did, with evidence.
-5. **Setup** — access, integrations and limits that are changed occasionally.
+A natural-language adapter may eventually produce the same typed intent, but structured and natural-language requests must converge on the same server contract.
 
-A separate sixth nav item is a regression. A one-time configuration surface in
-primary navigation is a regression.
+## 4. Prepare outreach
 
-## Failure and recovery rules
+The currently executable generic prepare path is intentionally narrow:
 
-- A loading request gets a bounded stall state and a retry; no infinite spinner.
-- A missing prerequisite says what is missing and links to the canonical screen
-  that fixes it.
-- A safety refusal is a decision with a reason, not a generic red error.
-- Destructive operations explain what survives before confirmation.
-- A legacy route is replaced, not duplicated into a second information
-  architecture.
-- Hosted capabilities that are not configured fail closed rather than presenting
-  controls that can never work.
+    known People list
+     -> resolve the LinkedIn sender
+     -> apply the blessed default workflow
+     -> create a draft managed campaign
+     -> stop
 
-## What first run deliberately does not require
+Preparation sends nothing.
 
-- Both product outcomes at once.
-- A hosted model API key; BYO-agent remains the safer/default operator path.
-- LinkedIn server-side automation on hosted deployments that do not have a remote
-  browser provider.
-- A recommendation to exist before setup can be considered complete.
-- Raw IDs, token names, JSON, provider internals, or mechanics a machine can fill.
+The founder must not separately create a workflow merely to get through the common first campaign path. Existing advanced workflow/campaign surfaces remain available for operators who need them.
 
-The implementation lives primarily in `src/client/views/LoopView.tsx`, the route
-contract in `src/client/ui/route.ts`, and the local campaign prerequisite flow in
-`src/client/LinkedInManagerRead.tsx`.
+If People or sender identity are missing, the plan names the exact blocker and links to the canonical surface that resolves it.
+
+## 5. Find / research / watch Accounts
+
+These objectives use the existing Account, Signal, scoring, source-provider, and observation systems.
+
+The product contract is:
+
+- preserve source-backed evidence and observation time;
+- distinguish provider failure from no result;
+- score only from durable components;
+- do not invent an Account or Person to make a plan look complete;
+- surface materially changed high-priority Accounts into Today.
+
+Watch accounts is preparable when the founder supplies explicit domains. Preparation ensures those canonical Accounts exist, preserves any prior not-a-fit/archive decision instead of silently reactivating it, and leaves new active Accounts immediately due for Trevra’s existing paced observation sweep. Find prospects and Research accounts remain inspectable/direct-surface plans until a persistable source or bounded run primitive is explicit; the UI must not pretend those jobs started.
+
+## 6. Capture inbound
+
+Inbound capture is a GTM source contract, not generic application telemetry.
+
+The canonical flow is:
+
+    signed Capture Source
+     -> immutable Inbound Submission
+     -> deterministic Person resolution
+     -> optional explicit Account association
+     -> qualification / Conversation / Opportunity
+
+A website/edge adapter owns its own public-edge validation and bot controls. Trevra owns GTM intake truth once the signed event reaches the capture boundary.
+
+## 7. Returning use: Today
+
+After activation, Loop should answer three different questions from durable state:
+
+### Needs you
+
+Examples:
+
+- sending identity paused/challenged;
+- verified reply that requires attention;
+- ambiguous external delivery outcome;
+- playbook waiting for approval;
+- qualified demand / person-discovery decision;
+- unreviewed inbound submission;
+- newly hot account.
+
+### Working
+
+Examples:
+
+- running Agent;
+- queued/running durable Playbook;
+- active managed Campaign.
+
+This is what Trevra is currently doing without requiring a human decision.
+
+### Recent results
+
+Verified recent GTM outcomes, for example:
+
+- sent email delivery;
+- verified inbound reply;
+- Opportunity closed won/lost.
+
+These are outcomes, not model claims.
+
+## 8. Outbound journey
+
+A representative founder journey is:
+
+    Account / People input
+     -> source-backed research
+     -> score / qualification
+     -> draft Campaign or prepared reply
+     -> policy / exact approval
+     -> delivery
+     -> verified reply
+     -> Opportunity-lite
+     -> outcome feeds future targeting
+
+LinkedIn channel mechanics remain specialized underneath the shared GTM model. The local Companion/browser worker owns browser execution and channel-specific uncertainty/safety behavior.
+
+## 9. Inbound journey
+
+A representative inbound journey is:
+
+    Capture Source
+     -> Person + immutable Submission
+     -> Account association when explicitly known
+     -> qualified-demand recommendation
+     -> prepared response/outreach
+     -> verified conversation
+     -> Opportunity-lite when justified
+
+A Person never requires a fake Account.
+
+## 10. Failure and recovery rules
+
+- A loading request gets a bounded failure state and retry; no infinite spinner.
+- A missing prerequisite names what is missing and links to the canonical fix.
+- A safety refusal is a decision with a reason, not a generic error.
+- prepared, approved, scheduled, claimed, sent, failed, and uncertain are not interchangeable.
+- An ambiguous external side effect is not blindly retried.
+- Repeating a prepare request with the same idempotency key cannot duplicate durable work or side effects.
+- Hosted capabilities fail closed when their required provider/runtime is unavailable.
+- Provider failure must not masquerade as an empty GTM result.
+
+## 11. First-run acceptance test
+
+A founder who does not know Trevra's implementation should be able to reach:
+
+    I want to find / research / reach / watch / capture this GTM target.
+
+    Trevra:
+    Here is the bounded plan.
+    Here is the evidence/source it will use.
+    Here is anything missing.
+    Nothing consequential will leave the workspace without the configured approval boundary.
+
+    [Prepare]
+
+The complexity remains in Trevra's durable identity, evidence, policy, orchestration, delivery, and ledger layers—not in the founder's onboarding checklist.

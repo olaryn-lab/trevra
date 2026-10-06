@@ -8,42 +8,140 @@ web
 
 ## Users
 
-Founders and small-team operators running their own go-to-market — solo, or with one or two people — who today track a curated few-hundred-account watchlist by hand. They import a CSV of target accounts once, then are pulled back in only when Trevra needs a decision: approve outreach, approve an invoice send, approve a change order, connect a new data source. They are the same people running Claude Code or Codex; the agent works inside their own tool via MCP, not a separate app they context-switch into to "use AI." [docs/core-product.md persona; docs/app-spec.md "three jobs"]
+Founders and small GTM teams running a focused account/people pipeline with human and agent operators. They want agents to research, source, score, draft, and prepare work while consequential external actions remain behind deterministic policy and explicit approval.
 
 ## Product Purpose
 
-Trevra is a workspace an agent operates and a human approves. It reconstructs the full commercial timeline — sourced, proposed, agreed, delivered, invoiced, paid — watches a founder-chosen account list for composite intent signals (hiring + site changes + public commentary layered together, never a single trigger treated as a finding), drafts and queues the outreach and collection work behind it, and executes only what was explicitly approved or delegated: through Gmail/Microsoft 365, QuickBooks/Xero/Stripe, HoneyBook/Bonsai, marketplace imports, and LinkedIn via a local Playwright-driven worker. Success means the founder is never asked to do what the agent already does better; every screen exists for one of the three things only a human can do — connect the agent, connect the data, approve or reject.
+Trevra is an open-source GTM operating system and control plane. It helps a workspace find and understand accounts and people, capture inbound demand, operate outreach, manage conversations, qualify opportunities, and learn from GTM outcomes.
+
+Trevra owns the operational truth required to run that loop safely: People, Accounts, Signals, Inbound Submissions, Conversations, Opportunity-lite, Campaigns, Playbooks, agent runs, evidence, policies, approvals, prepared actions, deliveries, and the GTM ledger.
+
+Trevra deliberately does **not** own project delivery, contracts, scope, milestones, customer invoices, payments, accounting, arbitrary application events, generic webhooks, or a general-purpose automation/backend platform.
+
+Canonical boundary: docs/superpowers/specs/2026-08-20-agent-native-gtm-os-design.md.
+Current shell: docs/gtm-shell-shape.md.
+Current journeys: docs/product-journeys-and-autonomous-work.md.
 
 ## Positioning
 
-The composite-signal-plus-hold-for-approval mechanism, together, not either half alone. Every neighboring vendor (Clay, Cargo, Unify, Common Room, Dripify and the rest of docs/competitive-landscape.md) sells either a single-signal trigger or an agent that acts without a hard approval gate. Trevra pairs "a single signal is noise, a combination is an intent" (docs/core-product.md) with "nothing crosses this line without you" (docs/app-spec.md / landing copy), and backs every alert and every prepared action with source-linked, timestamped evidence that a competitor's black-box score can't reproduce after the fact.
+The product promise is outcome-first:
+
+> Know who is worth pursuing and why now. Let agents do the research and preparation. Keep consequential GTM execution under human control.
+
+Trevra combines:
+
+- source-backed account/person research and composite GTM signals;
+- one shared Person/Account/Conversation spine across inbound, LinkedIn, email, and CRM context;
+- durable agent/playbook execution with inspectable evidence;
+- exact-payload approval for consequential external actions;
+- explicit delivery semantics including uncertain outcomes that are never blindly retried;
+- a deterministic Today projection that separates what needs a human, what is currently working, and verified recent results.
 
 ## Operating Context
 
-Five nav destinations, one per stage of one loop: **Loop** (what's stuck), **Outreach** (what goes out, at what pace, is the seat safe), **Money** (what's agreed / delivered / billed / paid, and what isn't), **Ledger** (what the agent actually did, with evidence), **Setup** (what can reach the workspace, what it may spend, what it may do). A stop control (`StopBar`) is reachable on every route outside the nav, not a sub-screen. The operator is always an agent: either the founder's own Claude Code/Codex reaching Trevra over MCP with an agent token (works only while their machine is on), or Trevra's own hosted BYOK agent (works while the laptop is closed, paid for by the founder's own API key). Both hold identical, execute-never scopes. LinkedIn outreach runs through a real local browser worker, not an API — selector rot against LinkedIn's DOM is an accepted, ongoing operating cost, not a one-time integration.
+The recurring founder loop is:
 
-## Capabilities and Constraints
+    Find
+     -> Reach
+     -> Answer
+     -> Qualify / Convert
+     -> learn from results
+     -> Find again
 
-- **PostgreSQL-only.** No SQLite, no embedded dev database, no fallback path — never imply otherwise in copy, diagrams, or UI.
-- **Every signal or finding traces to a source URL and a timestamp**, tagged **HARD FACT** (published, verifiable) vs **REPORTED** (practitioner-measured). Nothing is inferred without a source; a collector that fails says so rather than returning empty.
-- **"Send" is reserved for actions that truly send.** Anything queued, drafted, or awaiting approval is "queue," "prepare," or "draft" — never "send," anywhere in copy or UI.
-- Integrations (Gmail/M365, QuickBooks/Xero/Stripe, HoneyBook/Bonsai, marketplace CSV imports) run through Nango-managed connections; Trevra does not reimplement OAuth, refresh-token rotation, or rate-limit handling itself.
-- Durable playbooks with exact-payload approvals — hashed and pinned, so an edited action can never reuse an old approval — on Temporal or PostgreSQL orchestration.
-- Hosted module registry: Ed25519 publisher identities, signed digest-pinned releases, SBOMs, sandboxed OCI/WASI/remote execution, privacy-safe popularity counters shown publicly.
-- The agent may read, score, draft, and prepare; it may **never** approve or execute — identical for both the BYO-agent (local Claude Code/Codex) and BYOK (hosted) operator, by design, not as a current limitation.
+Primary navigation is intentionally limited to:
 
-## Brand Commitments
+- **Loop** — what needs attention, what is working, and what changed;
+- **Outreach** — targets, campaigns, conversations, replies, opportunities, and channel safety;
+- **Ledger** — agent/skill/playbook runs, evidence, approvals, and action history;
+- **Research** — source-backed market/account/community evidence and signals;
+- **Setup** — access, providers, GTM capture sources, policies, limits, team, and agent configuration.
 
-Name: **Trevra**. Existing wordmark/favicon at `public/logo.svg`, `public/favicon.svg` — an identity to preserve, not repaint, absent an explicit rebrand request. Voice is precise and unhedged, not softened marketing copy: "Billed, not paid." "The money exists; it has not arrived." "Your agent works on a branch. You do the merge." Confidence tags (HARD FACT / REPORTED) belong in visible copy, not only behind a tooltip. No invented testimonials, customer names, logos, or benchmark numbers, anywhere.
+There is no Money/post-sale destination.
 
-## Evidence on Hand
+## Core Data Contracts
 
-No real customer testimonials, logos, or case studies exist yet — future work must not fabricate any. "Guido" in docs/core-product.md is an internal illustrative persona from a GTM research call, not a citable customer; never surface it as a testimonial or named case study. Real, live data that may be shown: the hosted module registry's run counts, success rates, installs, and popularity ranks, already displayed on the public landing page without exposing workspace or customer data.
+### Person and Account
+
+A Person can exist without an Account. Identity resolution is deterministic: email, E.164 phone, LinkedIn profile, provider identity, or explicit source identity. Fuzzy names and guessed company associations are not identity keys.
+
+An Account is a GTM organization with evidence-backed signals and score state. Account-Person association preserves provenance/confidence.
+
+### Signal and evidence
+
+Every meaningful finding preserves source/provenance and observation time. Provider failure is not silently represented as “no result.”
+
+A single trigger is not automatically treated as intent. Composite independent evidence is preferred for account prioritization.
+
+### Conversation and delivery
+
+Founder-facing Conversations converge supported channels around one Person while channel-specific tables remain authoritative for provider mechanics and safety.
+
+Outbound email delivery has explicit sending / sent / failed / uncertain state. An ambiguous provider outcome is never retried as though it definitely failed.
+
+### Opportunity-lite
+
+Trevra stores only the GTM progression it needs:
+
+    new -> qualified -> meeting -> proposal -> won | lost
+
+No amount, forecast, quote, territory, or arbitrary CRM-object platform belongs in Trevra core.
+
+## Agent and Approval Boundary
+
+Agents are durable workspace principals. They may read workspace state, run assigned skills, start playbooks, research, score, draft, and prepare work.
+
+**No agent approves its own consequential work.**
+
+The invariant is:
+
+    decision
+     -> prepared exact action
+     -> payload hash
+     -> policy evaluation
+     -> human approval when required
+     -> deterministic adapter
+     -> durable delivery/outcome
+
+Editing a prepared payload invalidates the old approval. Generic agent tools and generic skill execution do not gain direct send/execute capabilities.
+
+## GTM Intent Surface
+
+The bounded founder-facing objectives are:
+
+- find_accounts
+- research_accounts
+- prepare_outreach
+- watch_accounts
+- capture_inbound
+
+The target interaction is:
+
+    Goal -> deterministic Plan -> Prepare -> Result / decision
+
+The plan must say what Trevra will create, what evidence it requires, whether an external effect exists, and where approval will stop execution.
+
+## Integrations
+
+A connection belongs in Trevra only when it:
+
+1. observes GTM state/evidence; or
+2. executes a named GTM action.
+
+Current product examples include LinkedIn, Gmail/Microsoft 365, CRM context/activity write-back, public/community research, account observation providers, and signed website lead capture.
+
+Provider credentials remain in the provider-appropriate custody layer and are never stored on Agent principals.
 
 ## Product Principles
 
-1. A single signal is noise; a combination, with evidence, is an intent — never ship a bare trigger as if it were a finding.
-2. Nothing with a consequence — a send, an invoice, an irreversible LinkedIn action — crosses without an explicit, exact-payload-hashed approval that an edit cannot silently reuse.
-3. The human never does what the agent does better; a screen built so a person can hand-do the agent's job is not a primary screen.
-4. Evidence is not an appendix; it is the alert, the finding, the approval itself — the recipient decides without leaving the surface.
-5. The browser worker is cheap to build and expensive to keep alive against a DOM that changes whenever LinkedIn likes — treat that maintenance cost as permanent, never as a one-time integration.
+1. **Evidence before confidence.** A score or summary must remain explainable from durable evidence.
+2. **No invented identity.** Missing or conflicting Person/Account identity stays unresolved.
+3. **No invented outcomes.** Prepared, approved, sent, failed, and uncertain remain different states.
+4. **Agents prepare; policy governs; humans approve consequences.**
+5. **Today is deterministic.** A model does not decide which safety exception outranks another.
+6. **Do not rebuild a CRM.** Trevra owns only the GTM state required to operate safely with or without one.
+7. **Do not rebuild post-sale operations.** Project, contract, invoice, payment, and accounting state stay outside core.
+8. **The common path uses founder language.** Internal ids, leases, provider refs, and orchestration mechanics remain inspectable but secondary.
+
+## Evidence on Hand
+
+Do not fabricate customer logos, testimonials, benchmarks, or case studies. Product claims must be supported by shipped behavior or real measured data.

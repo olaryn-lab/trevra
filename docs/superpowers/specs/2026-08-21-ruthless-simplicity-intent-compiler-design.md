@@ -297,7 +297,7 @@ interface TodayPayload {
 }
 ```
 
-Suggested attention item kinds:
+Current deterministic item kinds include:
 
 ```ts
 type TodayItemKind =
@@ -308,7 +308,13 @@ type TodayItemKind =
   | 'inbound_submission'
   | 'qualification_decision'
   | 'high_priority_account'
-  | 'capacity_block';
+  | 'capacity_block'
+  | 'agent_working'
+  | 'playbook_working'
+  | 'campaign_working'
+  | 'delivery_sent'
+  | 'verified_reply_result'
+  | 'opportunity_closed';
 ```
 
 Every item must contain:

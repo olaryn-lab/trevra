@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { Express } from 'express';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAccount } from '../accounts/store.js';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { createApp } from '../app.js';
@@ -100,6 +100,8 @@ async function seedScoredAccount(input: {
 }
 
 beforeAll(async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
   await migrateAuthDatabase();
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   app = createApp(db);
@@ -116,6 +118,7 @@ beforeEach(async () => {
 afterAll(async () => {
   await db.close();
   await closeAuthDatabase();
+  vi.useRealTimers();
 });
 
 describe('account content opportunity API', () => {

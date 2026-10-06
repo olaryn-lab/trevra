@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { BadgeDollarSign, Boxes, Gauge, ReceiptText } from 'lucide-react';
 import {
   getBillingPlans,
@@ -40,6 +40,7 @@ export function BillingSettings() {
   const [plans, setPlans] = useState<BillingPlan[]>([]);
   const [error, setError] = useState('');
   const [busyPlan, setBusyPlan] = useState('');
+  const checkoutKeys = useRef(new Map<string, string>());
 
   useEffect(() => {
     let live = true;
@@ -127,7 +128,12 @@ export function BillingSettings() {
     setBusyPlan(plan.plan_code);
     setError('');
     try {
-      const checkout = await startBillingCheckout(plan.plan_code);
+      let idempotencyKey = checkoutKeys.current.get(plan.plan_code);
+      if (!idempotencyKey) {
+        idempotencyKey = crypto.randomUUID();
+        checkoutKeys.current.set(plan.plan_code, idempotencyKey);
+      }
+      const checkout = await startBillingCheckout(plan.plan_code, idempotencyKey);
       if (checkout.url) {
         window.location.assign(checkout.url);
         return;

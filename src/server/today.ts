@@ -1,4 +1,6 @@
 import type { Db } from './db.js';
+import { campaignExecutionState } from './linkedin/execution-state.js';
+import type { LinkedInCheckName } from './linkedin/guard.js';
 
 export type TodayItemKind =
   | 'safety_block'
@@ -8,7 +10,14 @@ export type TodayItemKind =
   | 'inbound_submission'
   | 'qualification_decision'
   | 'high_priority_account'
-  | 'capacity_block';
+  | 'capacity_block'
+  | 'agent_blocked'
+  | 'agent_working'
+  | 'playbook_working'
+  | 'campaign_working'
+  | 'delivery_sent'
+  | 'verified_reply_result'
+  | 'opportunity_closed';
 
 export interface TodayItem {
   id: string;
@@ -41,6 +50,44 @@ function sortAttention(items: TodayItem[]): TodayItem[] {
   });
 }
 
+function sortRecent(items: TodayItem[]): TodayItem[] {
+  return [...items].sort((left, right) => {
+    const time = right.observedAt.localeCompare(left.observedAt);
+    if (time) return time;
+    if (left.priority !== right.priority) return left.priority - right.priority;
+    return left.id.localeCompare(right.id);
+  });
+}
+
+const ACTIONABLE_CAPACITY_CHECKS = new Set<LinkedInCheckName>([
+  'warmup-ceiling',
+  'campaign-warmup',
+  'rolling-24h',
+  'rolling-7d',
+  'rolling-30d',
+  'day-over-day-delta',
+  'acceptance-rate',
+  'inmail-monthly-quota',
+  'pending-invite-backlog'
+]);
+
+function capacityTitle(campaignName: string, check: LinkedInCheckName, kind: string): string {
+  switch (check) {
+    case 'acceptance-rate':
+      return `${campaignName} is throttled by acceptance rate`;
+    case 'pending-invite-backlog':
+      return `${campaignName} has no invite capacity`;
+    case 'inmail-monthly-quota':
+      return `${campaignName} reached the InMail quota`;
+    case 'campaign-warmup':
+      return `${campaignName} reached its campaign ramp`;
+    case 'warmup-ceiling':
+      return `${campaignName} reached its account warm-up ceiling`;
+    default:
+      return `${campaignName} reached its ${kind.replaceAll('_', ' ')} capacity`;
+  }
+}
+
 /**
  * Deterministic human-attention projection for the GTM OS.
  *
@@ -55,19 +102,33 @@ export async function getToday(
 ): Promise<TodayPayload> {
   const recentSince = new Date(now.getTime() - 7 * 86_400_000).toISOString();
 
-  const [seatRows, replyRows, unknownRows, approvalRows, demandRows, inboundRows, hotRows] =
-    await Promise.all([
-      db
-        .prepare(
-          `SELECT seat_key,label,posture,paused_reason,updated_at
+  const [
+    seatRows,
+    replyRows,
+    unknownRows,
+    approvalRows,
+    demandRows,
+    inboundRows,
+    hotRows,
+    agentRows,
+    failedAgentRows,
+    playbookRows,
+    campaignRows,
+    sentDeliveryRows,
+    verifiedReplyRows,
+    closedOpportunityRows
+  ] = await Promise.all([
+    db
+      .prepare(
+        `SELECT seat_key,label,posture,paused_reason,updated_at
          FROM linkedin_seats
          WHERE workspace_id=? AND posture IN ('paused','cooldown')
          ORDER BY updated_at ASC LIMIT 20`
-        )
-        .all<Record<string, unknown>>(workspaceId),
-      db
-        .prepare(
-          `SELECT t.id,t.name,t.snippet,t.last_message_at,t.synced_at,t.campaign_id
+      )
+      .all<Record<string, unknown>>(workspaceId),
+    db
+      .prepare(
+        `SELECT t.id,t.name,t.snippet,t.last_message_at,t.synced_at,t.campaign_id
          FROM linkedin_threads t
          WHERE t.workspace_id=? AND t.unread=TRUE
            AND EXISTS (
@@ -76,28 +137,28 @@ export async function getToday(
            )
          ORDER BY COALESCE(t.last_message_at,t.synced_at) ASC NULLS LAST,t.id ASC
          LIMIT 50`
-        )
-        .all<Record<string, unknown>>(workspaceId),
-      db
-        .prepare(
-          `SELECT id,campaign_id,member_id,kind,status,outcome_known,last_error,updated_at
+      )
+      .all<Record<string, unknown>>(workspaceId),
+    db
+      .prepare(
+        `SELECT id,campaign_id,member_id,kind,status,outcome_known,last_error,updated_at
          FROM linkedin_campaign_channel_actions
          WHERE workspace_id=? AND (status='unknown' OR outcome_known=FALSE)
          ORDER BY updated_at ASC,id ASC LIMIT 50`
-        )
-        .all<Record<string, unknown>>(workspaceId),
-      db
-        .prepare(
-          `SELECT s.id,s.step_id,s.updated_at,r.id AS run_id,r.playbook_key
+      )
+      .all<Record<string, unknown>>(workspaceId),
+    db
+      .prepare(
+        `SELECT s.id,s.step_id,s.updated_at,r.id AS run_id,r.playbook_key
          FROM playbook_step_runs s
          JOIN playbook_runs r ON r.id=s.playbook_run_id
          WHERE r.workspace_id=? AND s.status='waiting_approval'
          ORDER BY s.updated_at ASC,s.id ASC LIMIT 50`
-        )
-        .all<Record<string, unknown>>(workspaceId),
-      db
-        .prepare(
-          `SELECT r.id,r.type,r.person_id,r.account_id,r.title,r.summary,r.recommended_action,r.updated_at,
+      )
+      .all<Record<string, unknown>>(workspaceId),
+    db
+      .prepare(
+        `SELECT r.id,r.type,r.person_id,r.account_id,r.title,r.summary,r.recommended_action,r.updated_at,
                 p.name AS person_name,p.email AS person_email,a.name AS account_name,
                 EXISTS (
                   SELECT 1 FROM recommendation_evidence re
@@ -121,11 +182,11 @@ export async function getToday(
            AND (r.snoozed_until IS NULL OR r.snoozed_until<=CURRENT_TIMESTAMP)
            AND r.updated_at>=?::timestamptz
          ORDER BY r.updated_at ASC,r.id ASC LIMIT 50`
-        )
-        .all<Record<string, unknown>>(workspaceId, recentSince),
-      db
-        .prepare(
-          `SELECT i.id,i.contact_id,i.account_id,i.kind,i.person_name,i.person_email,i.person_phone,i.message,i.received_at
+      )
+      .all<Record<string, unknown>>(workspaceId, recentSince),
+    db
+      .prepare(
+        `SELECT i.id,i.contact_id,i.account_id,i.kind,i.person_name,i.person_email,i.person_phone,i.message,i.received_at
          FROM inbound_submissions i
          WHERE i.workspace_id=? AND i.received_at>=?::timestamptz
            AND NOT EXISTS (
@@ -140,11 +201,11 @@ export async function getToday(
                AND re.source_id=i.id
            )
          ORDER BY i.received_at ASC,i.id ASC LIMIT 50`
-        )
-        .all<Record<string, unknown>>(workspaceId, recentSince, recentSince),
-      db
-        .prepare(
-          `SELECT a.id,a.name,a.domain,s.score,s.newest_signal_at,s.computed_at
+      )
+      .all<Record<string, unknown>>(workspaceId, recentSince, recentSince),
+    db
+      .prepare(
+        `SELECT a.id,a.name,a.domain,s.score,s.newest_signal_at,s.computed_at
          FROM account_scores s
          JOIN accounts a ON a.id=s.account_id AND a.workspace_id=s.workspace_id
          WHERE s.workspace_id=? AND s.tier='hot'
@@ -158,11 +219,169 @@ export async function getToday(
                AND r.updated_at>=?::timestamptz
            )
          ORDER BY COALESCE(s.newest_signal_at,s.computed_at) ASC,a.id ASC LIMIT 50`
-        )
-        .all<Record<string, unknown>>(workspaceId, recentSince, recentSince)
-    ]);
+      )
+      .all<Record<string, unknown>>(workspaceId, recentSince, recentSince),
+    db
+      .prepare(
+        `SELECT r.id,r.goal,r.step_count,r.started_at,r.stop_requested_at,
+                COALESCE(a.name,'GTM Agent') AS agent_name
+         FROM agent_runs r
+         LEFT JOIN agents a ON a.workspace_id=r.workspace_id AND a.id=r.agent_id
+         WHERE r.workspace_id=? AND r.status='running'
+         ORDER BY r.started_at ASC,r.id ASC LIMIT 20`
+      )
+      .all<Record<string, unknown>>(workspaceId),
+    db
+      .prepare(
+        `SELECT r.id,r.agent_id,r.goal,r.error,r.started_at,r.finished_at,
+                COALESCE(a.name,'GTM Agent') AS agent_name
+         FROM agent_runs r
+         LEFT JOIN agents a ON a.workspace_id=r.workspace_id AND a.id=r.agent_id
+         WHERE r.workspace_id=? AND r.status='failed'
+           AND COALESCE(r.finished_at,r.started_at)>=?::timestamptz
+           AND NOT EXISTS (
+             SELECT 1 FROM agent_runs newer
+             WHERE newer.workspace_id=r.workspace_id
+               AND newer.agent_id=r.agent_id
+               AND (
+                 newer.started_at>r.started_at OR
+                 (newer.started_at=r.started_at AND newer.id>r.id)
+               )
+           )
+         ORDER BY COALESCE(r.finished_at,r.started_at) ASC,r.id ASC
+         LIMIT 20`
+      )
+      .all<Record<string, unknown>>(workspaceId, recentSince),
+    db
+      .prepare(
+        `SELECT id,playbook_key,status,current_step_id,updated_at
+         FROM playbook_runs
+         WHERE workspace_id=? AND status IN ('queued','running')
+         ORDER BY updated_at ASC,id ASC LIMIT 20`
+      )
+      .all<Record<string, unknown>>(workspaceId),
+    db
+      .prepare(
+        `SELECT c.id,c.name,c.started_at,c.updated_at,
+                (SELECT COUNT(*)::int FROM linkedin_campaign_members m
+                 WHERE m.workspace_id=c.workspace_id AND m.campaign_id=c.id
+                   AND m.status IN ('pending','active','waiting','manual','paused')) AS active_count
+         FROM linkedin_campaigns c
+         WHERE c.workspace_id=? AND c.status='running'
+         ORDER BY c.updated_at ASC,c.id ASC LIMIT 20`
+      )
+      .all<Record<string, unknown>>(workspaceId),
+    db
+      .prepare(
+        `SELECT id,recipient,purpose,provider,external_ref,sent_at,updated_at
+         FROM gtm_deliveries
+         WHERE workspace_id=? AND status='sent'
+           AND COALESCE(sent_at,updated_at)>=?::timestamptz
+         ORDER BY COALESCE(sent_at,updated_at) DESC,id DESC LIMIT 50`
+      )
+      .all<Record<string, unknown>>(workspaceId, recentSince),
+    db
+      .prepare(
+        `SELECT m.id,m.conversation_id,m.channel,m.body,m.occurred_at,
+                p.id AS person_id,p.name AS person_name,p.email AS person_email
+         FROM conversation_messages m
+         JOIN conversations c
+           ON c.workspace_id=m.workspace_id AND c.id=m.conversation_id
+         JOIN contacts p
+           ON p.workspace_id=c.workspace_id AND p.id=c.person_id
+         WHERE m.workspace_id=? AND m.direction='inbound'
+           AND m.verification_status='verified' AND m.outcome_kind='reply'
+           AND m.occurred_at>=?::timestamptz
+           AND EXISTS (
+             SELECT 1 FROM conversation_messages later
+             WHERE later.workspace_id=m.workspace_id
+               AND later.conversation_id=m.conversation_id
+               AND later.direction='outbound'
+               AND later.occurred_at>m.occurred_at
+           )
+         ORDER BY m.occurred_at DESC,m.id DESC LIMIT 50`
+      )
+      .all<Record<string, unknown>>(workspaceId, recentSince),
+    db
+      .prepare(
+        `SELECT o.id,o.stage,o.title,o.closed_at,o.person_id,o.account_id,
+                p.name AS person_name,a.name AS account_name
+         FROM opportunities o
+         LEFT JOIN contacts p ON p.workspace_id=o.workspace_id AND p.id=o.person_id
+         LEFT JOIN accounts a ON a.workspace_id=o.workspace_id AND a.id=o.account_id
+         WHERE o.workspace_id=? AND o.stage IN ('won','lost')
+           AND o.closed_at IS NOT NULL AND o.closed_at>=?::timestamptz
+         ORDER BY o.closed_at DESC,o.id DESC LIMIT 50`
+      )
+      .all<Record<string, unknown>>(workspaceId, recentSince)
+  ]);
+
+  const emailReplyRows = await db
+    .prepare(
+      `SELECT c.id AS conversation_id,m.id AS message_id,m.body,m.occurred_at,
+              p.id AS person_id,p.name AS person_name,p.email AS person_email
+       FROM conversations c
+       JOIN contacts p ON p.workspace_id=c.workspace_id AND p.id=c.person_id
+       JOIN LATERAL (
+         SELECT cm.id,cm.body,cm.occurred_at,cm.channel,cm.direction,
+                cm.verification_status,cm.outcome_kind
+         FROM conversation_messages cm
+         WHERE cm.workspace_id=c.workspace_id AND cm.conversation_id=c.id
+         ORDER BY cm.occurred_at DESC,cm.created_at DESC,cm.id DESC
+         LIMIT 1
+       ) m ON TRUE
+       WHERE c.workspace_id=? AND m.channel='email' AND m.direction='inbound'
+         AND m.verification_status='verified' AND m.outcome_kind='reply'
+       ORDER BY m.occurred_at ASC,c.id ASC LIMIT 50`
+    )
+    .all<Record<string, unknown>>(workspaceId);
+
+  // Capacity is only worth human attention when work is due now and the same
+  // pre-execution gate the worker uses is refusing on a tunable/rate boundary.
+  // Clock-only waits (business hours/weekend), cooldowns, target suppression,
+  // duplicate protection and seat posture have their own semantics and must not
+  // be relabeled as capacity incidents here.
+  const capacityCandidateRows = await db
+    .prepare(
+      `SELECT c.id,c.name,c.updated_at,MIN(a.planned_for) AS earliest_due_at
+       FROM linkedin_campaigns c
+       JOIN linkedin_actions a
+         ON a.workspace_id=c.workspace_id AND a.campaign_id=c.id
+       WHERE c.workspace_id=? AND c.status='running'
+         AND a.status='planned' AND a.claimed_at IS NULL
+         AND a.settlement_hold_at IS NULL
+         AND a.planned_for IS NOT NULL AND a.planned_for<=?::timestamptz
+       GROUP BY c.id,c.name,c.updated_at
+       ORDER BY MIN(a.planned_for) ASC,c.id ASC
+       LIMIT 10`
+    )
+    .all<Record<string, unknown>>(workspaceId, now.toISOString());
+
+  const capacityStates = (
+    await Promise.all(
+      capacityCandidateRows.map(async (row) => {
+        try {
+          return {
+            row,
+            state: await campaignExecutionState(db, workspaceId, String(row.id), now)
+          };
+        } catch {
+          return null;
+        }
+      })
+    )
+  ).filter(
+    (
+      entry
+    ): entry is {
+      row: Record<string, unknown>;
+      state: Awaited<ReturnType<typeof campaignExecutionState>>;
+    } => entry !== null
+  );
 
   const items: TodayItem[] = [];
+  const working: TodayItem[] = [];
+  const recentResults: TodayItem[] = [];
 
   for (const row of seatRows) {
     const label = String(row.label ?? row.seat_key ?? 'LinkedIn account');
@@ -196,6 +415,31 @@ export async function getToday(
       metadata: {
         campaignId: row.campaign_id ? String(row.campaign_id) : null,
         channel: 'linkedin'
+      }
+    });
+  }
+
+  for (const row of emailReplyRows) {
+    const name =
+      String(row.person_name ?? '').trim() ||
+      String(row.person_email ?? '').trim() ||
+      'Email reply';
+    items.push({
+      id: `email-reply:${String(row.message_id)}`,
+      kind: 'verified_reply',
+      priority: 20,
+      title: `Reply from ${name}`,
+      detail:
+        String(row.body ?? '')
+          .trim()
+          .slice(0, 240) || 'A verified inbound email needs review.',
+      href: '/outreach/inbox',
+      observedAt: iso(row.occurred_at, now),
+      reference: { type: 'conversation_message', id: String(row.message_id) },
+      metadata: {
+        conversationId: String(row.conversation_id),
+        personId: String(row.person_id),
+        channel: 'email'
       }
     });
   }
@@ -326,9 +570,182 @@ export async function getToday(
     });
   }
 
+  for (const { row, state } of capacityStates) {
+    const check = state.gate?.check ?? null;
+    if (
+      state.dueNow <= 0 ||
+      !state.gate ||
+      state.gate.allowed ||
+      !check ||
+      !ACTIONABLE_CAPACITY_CHECKS.has(check)
+    ) {
+      continue;
+    }
+    const campaignName = String(row.name ?? 'Campaign');
+    items.push({
+      id: `capacity:${String(row.id)}:${check}`,
+      kind: 'capacity_block',
+      priority: 80,
+      title: capacityTitle(campaignName, check, state.gate.kind),
+      detail:
+        `${state.dueNow} due ${state.dueNow === 1 ? 'action is' : 'actions are'} blocked. ` +
+        (state.gate.detail ??
+          'The LinkedIn safety gate has no current capacity for the next action.'),
+      href: '/outreach',
+      observedAt: iso(row.earliest_due_at ?? row.updated_at, now),
+      reference: { type: 'linkedin_campaign', id: String(row.id) },
+      metadata: {
+        check,
+        channel: 'linkedin',
+        actionKind: state.gate.kind,
+        dueNow: state.dueNow,
+        seatKey: state.seatKey
+      }
+    });
+  }
+
+  for (const row of agentRows) {
+    const agentName = String(row.agent_name ?? 'GTM Agent');
+    const stopping = Boolean(row.stop_requested_at);
+    working.push({
+      id: `agent:${String(row.id)}`,
+      kind: 'agent_working',
+      priority: 10,
+      title: stopping ? `${agentName} is stopping` : `${agentName} is working`,
+      detail: String(row.goal ?? 'Working on the current GTM goal.'),
+      href: `/ledger/run/${encodeURIComponent(String(row.id))}`,
+      observedAt: iso(row.started_at, now),
+      reference: { type: 'agent_run', id: String(row.id) },
+      metadata: { stepCount: Number(row.step_count ?? 0), stopping }
+    });
+  }
+
+  for (const row of failedAgentRows) {
+    const agentName = String(row.agent_name ?? 'GTM Agent');
+    const error = String(row.error ?? '').trim();
+    items.push({
+      id: `agent-blocked:${String(row.id)}`,
+      kind: 'agent_blocked',
+      priority: 35,
+      title: `${agentName} needs attention`,
+      detail:
+        error ||
+        `The latest run failed while working on: ${String(row.goal ?? 'the assigned GTM goal')}`,
+      href: `/ledger/run/${encodeURIComponent(String(row.id))}`,
+      observedAt: iso(row.finished_at ?? row.started_at, now),
+      reference: { type: 'agent_run', id: String(row.id) },
+      metadata: {
+        agentId: String(row.agent_id ?? ''),
+        goal: String(row.goal ?? '')
+      }
+    });
+  }
+
+  for (const row of playbookRows) {
+    const status = String(row.status ?? 'running');
+    const currentStep = String(row.current_step_id ?? '').trim();
+    working.push({
+      id: `playbook:${String(row.id)}`,
+      kind: 'playbook_working',
+      priority: 20,
+      title: `${String(row.playbook_key ?? 'GTM playbook')} is ${status === 'queued' ? 'queued' : 'running'}`,
+      detail: currentStep
+        ? `Current step: ${currentStep}.`
+        : 'The durable GTM procedure is in progress.',
+      href: `/ledger/run/${encodeURIComponent(String(row.id))}`,
+      observedAt: iso(row.updated_at, now),
+      reference: { type: 'playbook_run', id: String(row.id) },
+      metadata: { status, currentStep: currentStep || null }
+    });
+  }
+
+  for (const row of campaignRows) {
+    const activeCount = Number(row.active_count ?? 0);
+    working.push({
+      id: `campaign:${String(row.id)}`,
+      kind: 'campaign_working',
+      priority: 30,
+      title: `${String(row.name ?? 'Campaign')} is running`,
+      detail:
+        activeCount === 1
+          ? '1 person is still in this campaign.'
+          : `${activeCount} people are still in this campaign.`,
+      href: '/outreach',
+      observedAt: iso(row.started_at ?? row.updated_at, now),
+      reference: { type: 'linkedin_campaign', id: String(row.id) },
+      metadata: { activeCount }
+    });
+  }
+
+  for (const row of sentDeliveryRows) {
+    const recipient = String(row.recipient ?? '').trim() || 'recipient';
+    recentResults.push({
+      id: `delivery-sent:${String(row.id)}`,
+      kind: 'delivery_sent',
+      priority: 10,
+      title: `Email sent to ${recipient}`,
+      detail: `${String(row.purpose ?? 'outreach')} · ${String(row.provider ?? 'connected mailbox')}`,
+      href: '/ledger',
+      observedAt: iso(row.sent_at ?? row.updated_at, now),
+      reference: { type: 'gtm_delivery', id: String(row.id) },
+      metadata: {
+        recipient,
+        purpose: String(row.purpose ?? ''),
+        provider: row.provider ? String(row.provider) : null,
+        externalRef: row.external_ref ? String(row.external_ref) : null
+      }
+    });
+  }
+
+  for (const row of verifiedReplyRows) {
+    const personName =
+      String(row.person_name ?? '').trim() || String(row.person_email ?? '').trim() || 'A person';
+    recentResults.push({
+      id: `verified-result:${String(row.id)}`,
+      kind: 'verified_reply_result',
+      priority: 20,
+      title: `Verified reply from ${personName}`,
+      detail:
+        String(row.body ?? '')
+          .trim()
+          .slice(0, 240) || 'A verified inbound reply was recorded.',
+      href: '/outreach/inbox',
+      observedAt: iso(row.occurred_at, now),
+      reference: { type: 'conversation_message', id: String(row.id) },
+      metadata: {
+        conversationId: String(row.conversation_id ?? ''),
+        personId: String(row.person_id ?? ''),
+        channel: String(row.channel ?? '')
+      }
+    });
+  }
+
+  for (const row of closedOpportunityRows) {
+    const stage = String(row.stage) === 'won' ? 'won' : 'lost';
+    const who =
+      String(row.account_name ?? '').trim() ||
+      String(row.person_name ?? '').trim() ||
+      String(row.title ?? 'Opportunity');
+    recentResults.push({
+      id: `opportunity-closed:${String(row.id)}`,
+      kind: 'opportunity_closed',
+      priority: 30,
+      title: `${who}: ${stage}`,
+      detail: String(row.title ?? 'GTM opportunity closed.'),
+      href: '/outreach',
+      observedAt: iso(row.closed_at, now),
+      reference: { type: 'opportunity', id: String(row.id) },
+      metadata: {
+        stage,
+        personId: row.person_id ? String(row.person_id) : null,
+        accountId: row.account_id ? String(row.account_id) : null
+      }
+    });
+  }
+
   return {
     needsAttention: sortAttention(items),
-    working: [],
-    recentResults: []
+    working: sortAttention(working),
+    recentResults: sortRecent(recentResults)
   };
 }

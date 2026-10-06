@@ -214,9 +214,11 @@ export class TrevraBillingClient {
     planCode: string;
     successUrl: string;
     cancelUrl: string;
+    idempotencyKey: string;
   }): Promise<BillingCheckout> {
     return this.request<BillingCheckout>(`${this.customerPath(input.workspaceId)}/subscription`, {
       method: 'POST',
+      headers: { 'Idempotency-Key': input.idempotencyKey },
       body: JSON.stringify({
         plan_code: input.planCode,
         success_url: input.successUrl,

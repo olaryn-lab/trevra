@@ -239,10 +239,13 @@ export async function getBillingPlans(): Promise<BillingPlans> {
   return request('/api/billing/plans');
 }
 
-export async function startBillingCheckout(planCode: string): Promise<BillingCheckout> {
+export async function startBillingCheckout(
+  planCode: string,
+  idempotencyKey: string
+): Promise<BillingCheckout> {
   return request('/api/billing/checkout', {
     method: 'POST',
-    body: JSON.stringify({ planCode })
+    body: JSON.stringify({ planCode, idempotencyKey })
   });
 }
 

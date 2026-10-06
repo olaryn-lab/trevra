@@ -1230,7 +1230,10 @@ export function createApp(db: Db) {
     async (req: AuthedRequest, res, next) => {
       try {
         const parsed = z
-          .object({ planCode: z.string().trim().min(3).max(128) })
+          .object({
+            planCode: z.string().trim().min(3).max(128),
+            idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{8,255}$/)
+          })
           .strict()
           .safeParse(req.body);
         if (!parsed.success) return res.status(400).json({ error: 'A valid planCode is required' });
@@ -1255,7 +1258,8 @@ export function createApp(db: Db) {
           workspaceId: workspace.id,
           planCode: parsed.data.planCode,
           successUrl: `${origin}/setup/billing?checkout=success`,
-          cancelUrl: `${origin}/setup/billing?checkout=cancelled`
+          cancelUrl: `${origin}/setup/billing?checkout=cancelled`,
+          idempotencyKey: parsed.data.idempotencyKey
         });
         res.setHeader('Cache-Control', 'no-store');
         res.json(checkout);
@@ -1309,7 +1313,7 @@ export function createApp(db: Db) {
           kind: input.kind
         });
         res.setHeader('Cache-Control', 'no-store');
-        res.status(201).json(created);
+        res.status(201).json({ source: created.source, secret: created.secret });
       } catch (error) {
         next(error);
       }
@@ -3528,7 +3532,11 @@ export function createApp(db: Db) {
         .strict()
         .parse(req.body ?? {});
       res.setHeader('Cache-Control', 'no-store');
-      res.json({ plan: await compileGtmIntent(db, req.auth!.workspaceId, input.intent) });
+      res.json({
+        plan: await compileGtmIntent(db, req.auth!.workspaceId, input.intent, {
+          actorRole: req.auth!.role
+        })
+      });
     } catch (error) {
       if (error instanceof GtmPlanError) {
         return res.status(error.status).json({ error: error.message });
@@ -3551,6 +3559,7 @@ export function createApp(db: Db) {
       const result = await prepareGtmPlan(db, {
         workspaceId: req.auth!.workspaceId,
         actorUserId: req.auth!.userId,
+        actorRole: req.auth!.role,
         plan: input.plan,
         planHash: input.planHash,
         idempotencyKey: input.idempotencyKey

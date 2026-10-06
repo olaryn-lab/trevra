@@ -116,24 +116,63 @@ async function readSecret(
 
 export async function createCaptureSource(
   db: Db,
-  input: { workspaceId: string; actorUserId: string; name: string; kind: CaptureSourceKind },
+  input: {
+    workspaceId: string;
+    actorUserId: string;
+    name: string;
+    kind: CaptureSourceKind;
+    preparationKey?: string | null;
+    preparationHash?: string | null;
+  },
   now: Date = new Date()
-): Promise<{ source: CaptureSourceRecord; secret: string }> {
+): Promise<{ source: CaptureSourceRecord; secret: string; duplicate: boolean }> {
   if (!secretsConfigured())
     throw new LeadCaptureError(
       'This deployment cannot create capture secrets without TREVRA_SECRETS_KEY.',
       409
     );
-  const sourceId = id('cap');
-  const secret = `${SECRET_PREFIX}${randomBytes(32).toString('base64url')}`;
+  const preparationKey = input.preparationKey?.trim() || null;
+  const preparationHash = input.preparationHash?.trim() || null;
+  if (preparationKey && !preparationHash) {
+    throw new LeadCaptureError('Prepared capture sources require a plan hash.', 400);
+  }
   const at = now.toISOString();
-  const source = await db.transaction(async (tx) => {
+
+  return db.transaction(async (tx) => {
+    if (preparationKey) {
+      // Serialize retries for one workspace/idempotency key. The unique index is
+      // still the final invariant; this lock lets the losing request reuse the
+      // completed source without first aborting its transaction on a uniqueness
+      // violation.
+      await tx
+        .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))')
+        .get(`${input.workspaceId}:capture:${preparationKey}`);
+      const existingRow = await tx
+        .prepare('SELECT * FROM capture_sources WHERE workspace_id=? AND preparation_key=? LIMIT 1')
+        .get<Record<string, unknown>>(input.workspaceId, preparationKey);
+      if (existingRow) {
+        if (String(existingRow.preparation_hash ?? '') !== preparationHash) {
+          throw new LeadCaptureError(
+            'This idempotency key was already used for a different capture plan.',
+            409
+          );
+        }
+        const source = toSource(existingRow);
+        const secret = await readSecret(tx, source, 'active', now);
+        if (!secret)
+          throw new LeadCaptureError('Prepared capture source has no readable active secret', 409);
+        return { source, secret, duplicate: true };
+      }
+    }
+
+    const sourceId = id('cap');
+    const secret = `${SECRET_PREFIX}${randomBytes(32).toString('base64url')}`;
     const row = await tx
       .prepare(
         `
         INSERT INTO capture_sources (
-          id,workspace_id,name,key,kind,status,created_by_user_id,created_at,updated_at
-        ) VALUES (?,?,?,?,?,'active',?,?,?) RETURNING *
+          id,workspace_id,name,key,kind,status,created_by_user_id,preparation_key,preparation_hash,created_at,updated_at
+        ) VALUES (?,?,?,?,?,'active',?,?,?,?,?) RETURNING *
       `
       )
       .get<Record<string, unknown>>(
@@ -143,6 +182,8 @@ export async function createCaptureSource(
         sourceId,
         input.kind,
         input.actorUserId,
+        preparationKey,
+        preparationHash,
         at,
         at
       );
@@ -155,11 +196,10 @@ export async function createCaptureSource(
       eventType: 'capture_source.created',
       actorType: 'human',
       actorId: input.actorUserId,
-      payload: { name: input.name.trim(), kind: input.kind }
+      payload: { name: input.name.trim(), kind: input.kind, prepared: Boolean(preparationKey) }
     });
-    return toSource(row);
+    return { source: toSource(row), secret, duplicate: false };
   });
-  return { source, secret };
 }
 
 export async function getCaptureSourceById(

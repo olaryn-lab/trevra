@@ -845,7 +845,7 @@ The target is an evolution, not a rewrite.
 - [~] GTM-specific email delivery state and verified inbound reply ingestion. Campaign email actions already have durable planned/claimed/sent/failed/unknown state and provider-verified reply/bounce ingestion with reply content projected into the shared transcript; a channel-neutral Delivery object is still pending.
 - [x] Shared conversation/operator view across LinkedIn and email, including one Person-centric transcript and exact-payload email reply preparation/approval from the Messages surface.
 - [ ] Durable Agent principal/team product model.
-- [~] Intent-first operator layer: deterministic `Today`, first-run GTM job choices, and narrow retry-safe outreach preparation are implemented; bounded general intent compilation remains.
+- [~] Intent-first operator layer: deterministic `Today`, first-run GTM job choices, retry-safe outreach/capture/watch preparation, capacity blockers, and attributable Agent run drill-down are implemented; bounded Find/Research preparation remains.
 - [ ] Growth-service state migration and complete retirement.
 
 ---
@@ -881,12 +881,12 @@ Exit criterion: a person discovered on LinkedIn, imported by email, or arriving 
 
 This phase adopts `2026-08-21-ruthless-simplicity-intent-compiler-design.md` without changing the GTM domain model. The founder sees jobs and outcomes; Trevra continues to compile them into the durable primitives defined by this spec.
 
-- [x] Add deterministic `GET /api/today` projection for safety blocks, verified replies, unknown deliveries, approvals, inbound submissions, high-priority accounts, and capacity blockers. Qualification-decision projection can be added when that durable state exists.
+- [x] Add deterministic `GET /api/today` projection for safety blocks, verified replies, unknown deliveries, approvals, inbound submissions, qualification decisions, high-priority accounts, attributable running Agents/Playbooks/Campaigns, and verified recent results. LinkedIn and canonical email replies both feed the human-attention queue.
 - [x] Replace first-run implementation-object checklists with founder jobs: Find prospects, Prepare outreach, Watch accounts, Capture inbound.
 - [x] Add narrow `POST /api/outreach/prepare` composition before a general intent compiler: validate sender -> import/reuse canonical People -> create/reuse lead list -> choose versioned safe default workflow -> create draft campaign -> return preview. The endpoint is retry-safe and never starts the campaign.
 - [x] Ship a versioned blessed LinkedIn outreach workflow for ordinary first campaigns; `/outreach/new` now uses the simple CSV-to-draft path by default and keeps the existing list/workflow builder under Advanced.
-- [~] Bounded typed `GtmIntent -> GtmPlan -> prepare` compilation is now implemented without a universal Job table: `POST /api/gtm/plan` deterministically plans all five bounded GTM objectives, Today exposes an inspectable Goal -> Plan surface, and `POST /api/gtm/prepare` currently composes only safe `prepare_outreach` plans through the existing draft-campaign preparation boundary with stale-plan hashing and idempotency. Other objectives remain inspectable/direct-surface plans until their composition primitives are deliberately added. Natural language may later populate the same typed intent but may never directly create arbitrary executable workflows.
-- [~] Keep progressive disclosure strict: the ordinary `/outreach/new` path now hides list/workflow construction under Advanced; extend the same rule to later intent/compiler surfaces.
+- [~] Bounded typed `GtmIntent -> GtmPlan -> prepare` compilation is implemented without a universal Job table: `POST /api/gtm/plan` deterministically plans all five bounded GTM objectives; `POST /api/gtm/prepare` composes safe `prepare_outreach` plans through the existing retry-safe draft-campaign boundary, composes `capture_inbound` into an owner-only signed Capture Source with retry-safe credential creation, and composes `watch_accounts` for explicit domains by ensuring canonical active Accounts that are immediately due for the existing paced observation loop. Find/research remain inspectable/direct-surface plans until their provider/run primitives can be composed without violating retention, provenance, pacing, or provider-availability semantics. Natural language may later populate the same typed intent but may never directly create arbitrary executable workflows.
+- [~] Keep progressive disclosure strict: the ordinary `/outreach/new` path now hides list/workflow construction under Advanced; the Loop planner exposes only founder-level inputs for the composed paths and leaves provider/runtime detail on canonical setup/research surfaces.
 
 Exit criterion: a founder can state a GTM job, inspect what Trevra will prepare, and reach a useful result without learning lead-list/workflow/playbook internals; safety and exact state semantics remain unchanged.
 
@@ -919,7 +919,7 @@ Exit criterion: the GTM operator can work email and LinkedIn around shared Peopl
 - [x] Bind existing agent tokens/runs/schedules to Agent principals.
 - [x] Add capability grants/policy display. Agent credentials grant explicit scopes while provider credentials remain connection-owned; the Team surface shows the granted capabilities.
 - [x] Add GTM team UI for human + agent actors.
-- [ ] Extend the earlier `Today` projection with attributable agent activity, agent blockers, delegated work, and per-agent drill-down.
+- [~] Extend the earlier `Today` projection with attributable agent activity, agent blockers, delegated work, and per-agent drill-down. Running Agent work and the latest unsuperseded failed run per Agent now project into Today with exact `/ledger/run/:id` drill-down; explicit delegated-work ownership beyond the Agent/run relationship remains.
 
 Exit criterion: agents feel like delegated GTM workers whose work is visible, attributable, and governable.
 

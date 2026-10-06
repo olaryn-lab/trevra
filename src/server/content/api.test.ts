@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { Express } from 'express';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { createAccount } from '../accounts/store.js';
 import { createApp } from '../app.js';
@@ -155,6 +155,8 @@ async function seedBrandWatchPulse(workspaceId: string, watchId: string): Promis
 }
 
 beforeAll(async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
   await migrateAuthDatabase();
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   for (const id of [WORKSPACE, OTHER])
@@ -168,6 +170,7 @@ afterAll(async () => {
     await db.prepare('DELETE FROM workspaces WHERE id=?').run(id);
   await db.close();
   await closeAuthDatabase();
+  vi.useRealTimers();
 });
 
 describe('content opportunity API', () => {

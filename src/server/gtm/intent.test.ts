@@ -62,20 +62,13 @@ afterEach(async () => {
 });
 
 describe('bounded GTM intent compiler', () => {
-  it('plans every bounded objective without turning the compiler into an execution engine', async () => {
-    const objectives = [
-      'find_accounts',
-      'research_accounts',
-      'watch_accounts',
-      'capture_inbound'
-    ] as const;
+  it('plans every account objective without turning the compiler into an execution engine', async () => {
+    const objectives = ['find_accounts', 'research_accounts', 'watch_accounts'] as const;
 
     for (const objective of objectives) {
       const plan = await compileGtmIntent(db, WORKSPACE, {
         objective,
-        ...(objective === 'capture_inbound'
-          ? {}
-          : { audience: { description: 'Swiss B2B SaaS companies', quantity: 30 } })
+        audience: { description: 'Swiss B2B SaaS companies', quantity: 30 }
       });
       expect(plan.objective).toBe(objective);
       expect(plan.planHash).toMatch(/^[a-f0-9]{64}$/);
@@ -83,6 +76,225 @@ describe('bounded GTM intent compiler', () => {
       expect(plan.steps.every((step) => step.externalEffect === false)).toBe(true);
       expect(plan.defaults.prepareSupported).toBe(false);
     }
+  });
+
+  it('prepares signed inbound capture idempotently and keeps credential creation owner-only', async () => {
+    const previousSecretsKey = process.env.TREVRA_SECRETS_KEY;
+    process.env.TREVRA_SECRETS_KEY = Buffer.alloc(32, 7).toString('base64');
+    try {
+      const plan = await compileGtmIntent(db, WORKSPACE, {
+        objective: 'capture_inbound',
+        capture: { name: 'Demo requests', kind: 'form' }
+      });
+
+      expect(plan.blockers).toEqual([]);
+      expect(plan.defaults).toMatchObject({
+        prepareSupported: true,
+        sourceName: 'Demo requests',
+        sourceKind: 'form'
+      });
+
+      const memberPlan = await compileGtmIntent(
+        db,
+        WORKSPACE,
+        {
+          objective: 'capture_inbound',
+          capture: { name: 'Demo requests', kind: 'form' }
+        },
+        { actorRole: 'member' }
+      );
+      expect(memberPlan.defaults.prepareSupported).toBe(false);
+      expect(memberPlan.blockers).toEqual(
+        expect.arrayContaining([expect.objectContaining({ code: 'capture_owner_required' })])
+      );
+      await expect(
+        prepareGtmPlan(db, {
+          workspaceId: WORKSPACE,
+          actorUserId: USER,
+          actorRole: 'member',
+          plan: memberPlan,
+          planHash: memberPlan.planHash,
+          idempotencyKey: 'gtm-capture-member-0001'
+        })
+      ).rejects.toMatchObject({
+        status: 403,
+        message: expect.stringMatching(/owners/i)
+      });
+      const prepared = await prepareGtmPlan(db, {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        actorRole: 'owner',
+        plan,
+        planHash: plan.planHash,
+        idempotencyKey: 'gtm-capture-owner-0001'
+      });
+      expect(prepared.objective).toBe('capture_inbound');
+      if (prepared.objective !== 'capture_inbound') throw new Error('Expected capture preparation');
+      expect(prepared.result).toMatchObject({
+        duplicate: false,
+        source: { name: 'Demo requests', kind: 'form', status: 'active' }
+      });
+      expect(prepared.result.secret).toMatch(/^trv_capture_/);
+
+      const replay = await prepareGtmPlan(db, {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        actorRole: 'owner',
+        plan,
+        planHash: plan.planHash,
+        idempotencyKey: 'gtm-capture-owner-0001'
+      });
+      expect(replay.objective).toBe('capture_inbound');
+      if (replay.objective !== 'capture_inbound') throw new Error('Expected capture replay');
+      expect(replay.result.duplicate).toBe(true);
+      expect(replay.artifacts.captureSourceId).toBe(prepared.artifacts.captureSourceId);
+      expect(replay.result.secret).toBe(prepared.result.secret);
+
+      const differentCapturePlan = await compileGtmIntent(db, WORKSPACE, {
+        objective: 'capture_inbound',
+        capture: { name: 'Partner leads', kind: 'partner' }
+      });
+      await expect(
+        prepareGtmPlan(db, {
+          workspaceId: WORKSPACE,
+          actorUserId: USER,
+          actorRole: 'owner',
+          plan: differentCapturePlan,
+          planHash: differentCapturePlan.planHash,
+          idempotencyKey: 'gtm-capture-owner-0001'
+        })
+      ).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringMatching(/idempotency key/i)
+      });
+
+      const count = await db
+        .prepare(
+          'SELECT COUNT(*)::int AS total FROM capture_sources WHERE workspace_id=? AND preparation_key=?'
+        )
+        .get<{ total: number }>(WORKSPACE, 'gtm-capture-owner-0001');
+      expect(count?.total).toBe(1);
+    } finally {
+      if (previousSecretsKey === undefined) delete process.env.TREVRA_SECRETS_KEY;
+      else process.env.TREVRA_SECRETS_KEY = previousSecretsKey;
+    }
+  });
+
+  it('prepares explicit watch domains into active accounts that are due for the paced sweep', async () => {
+    const plan = await compileGtmIntent(db, WORKSPACE, {
+      objective: 'watch_accounts',
+      audience: {
+        description: 'Priority infrastructure accounts',
+        domains: ['https://Watch-One.com/pricing', 'watch-two.com']
+      },
+      timing: { recurring: true }
+    });
+
+    expect(plan.blockers).toEqual([]);
+    expect(plan.intent.audience?.domains).toEqual(['watch-one.com', 'watch-two.com']);
+    expect(plan.defaults).toMatchObject({
+      prepareSupported: true,
+      recurring: true,
+      inactiveDomains: []
+    });
+
+    const prepared = await prepareGtmPlan(db, {
+      workspaceId: WORKSPACE,
+      actorUserId: USER,
+      actorRole: 'owner',
+      plan,
+      planHash: plan.planHash,
+      idempotencyKey: 'gtm-watch-prepare-0001'
+    });
+    expect(prepared.objective).toBe('watch_accounts');
+    if (prepared.objective !== 'watch_accounts') throw new Error('Expected watch preparation');
+    expect(prepared.result.accounts.map((account) => account.domain)).toEqual([
+      'watch-one.com',
+      'watch-two.com'
+    ]);
+    expect(prepared.result.accounts.every((account) => account.status === 'active')).toBe(true);
+    expect(prepared.result.accounts.every((account) => account.nextSweepAt !== null)).toBe(true);
+
+    const replay = await prepareGtmPlan(db, {
+      workspaceId: WORKSPACE,
+      actorUserId: USER,
+      actorRole: 'owner',
+      plan,
+      planHash: plan.planHash,
+      idempotencyKey: 'gtm-watch-prepare-0001'
+    });
+    expect(replay.objective).toBe('watch_accounts');
+    if (replay.objective !== 'watch_accounts') throw new Error('Expected watch replay');
+    expect(replay.artifacts).toEqual(prepared.artifacts);
+
+    const differentWatchPlan = await compileGtmIntent(db, WORKSPACE, {
+      objective: 'watch_accounts',
+      audience: { domains: ['different-watch.com'] }
+    });
+    await expect(
+      prepareGtmPlan(db, {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        actorRole: 'owner',
+        plan: differentWatchPlan,
+        planHash: differentWatchPlan.planHash,
+        idempotencyKey: 'gtm-watch-prepare-0001'
+      })
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/idempotency key/i)
+    });
+    const unexpected = await db
+      .prepare("SELECT id FROM accounts WHERE workspace_id=? AND domain='different-watch.com'")
+      .get<{ id: string }>(WORKSPACE);
+    expect(unexpected).toBeUndefined();
+
+    const count = await db
+      .prepare(
+        "SELECT COUNT(*)::int AS total FROM accounts WHERE workspace_id=? AND domain IN ('watch-one.com','watch-two.com')"
+      )
+      .get<{ total: number }>(WORKSPACE);
+    expect(count?.total).toBe(2);
+  });
+
+  it('does not silently reactivate an excluded account when preparing a watch', async () => {
+    await db
+      .prepare(
+        `INSERT INTO accounts
+         (id,workspace_id,name,domain,source,status,created_at,updated_at)
+         VALUES ('acct_watch_archived',?,'Archived Co','archived-watch.com','manual','archived',?,?)`
+      )
+      .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+
+    const plan = await compileGtmIntent(db, WORKSPACE, {
+      objective: 'watch_accounts',
+      audience: { domains: ['archived-watch.com'] }
+    });
+
+    expect(plan.defaults.prepareSupported).toBe(false);
+    expect(plan.blockers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          code: 'watch_inactive_accounts',
+          actionHref: '/research'
+        })
+      ])
+    );
+    await expect(
+      prepareGtmPlan(db, {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        actorRole: 'owner',
+        plan,
+        planHash: plan.planHash,
+        idempotencyKey: 'gtm-watch-archived-0001'
+      })
+    ).rejects.toMatchObject({ status: 409 });
+
+    const row = await db
+      .prepare("SELECT status FROM accounts WHERE workspace_id=? AND domain='archived-watch.com'")
+      .get<{ status: string }>(WORKSPACE);
+    expect(row?.status).toBe('archived');
   });
 
   it('compiles an existing People list into an inspectable LinkedIn plan and prepares only a draft campaign', async () => {
@@ -113,6 +325,7 @@ describe('bounded GTM intent compiler', () => {
     const prepared = await prepareGtmPlan(db, {
       workspaceId: WORKSPACE,
       actorUserId: USER,
+      actorRole: 'owner',
       plan: firstPlan,
       planHash: firstPlan.planHash,
       idempotencyKey: 'gtm-plan-prepare-0001'
@@ -122,7 +335,7 @@ describe('bounded GTM intent compiler', () => {
       objective: 'prepare_outreach',
       result: { campaign: { status: 'draft', enrolled: 2 } }
     });
-
+    if (prepared.objective !== 'prepare_outreach') throw new Error('Expected outreach preparation');
     const campaign = await db
       .prepare('SELECT status,started_at FROM linkedin_campaigns WHERE workspace_id=? AND id=?')
       .get<{ status: string; started_at: string | null }>(WORKSPACE, prepared.artifacts.campaignId);
@@ -135,10 +348,13 @@ describe('bounded GTM intent compiler', () => {
     const replay = await prepareGtmPlan(db, {
       workspaceId: WORKSPACE,
       actorUserId: USER,
+      actorRole: 'owner',
       plan: firstPlan,
       planHash: firstPlan.planHash,
       idempotencyKey: 'gtm-plan-prepare-0001'
     });
+    expect(replay.objective).toBe('prepare_outreach');
+    if (replay.objective !== 'prepare_outreach') throw new Error('Expected outreach replay');
     expect(replay.artifacts).toEqual(prepared.artifacts);
     expect(replay.result.duplicate).toBe(true);
   });
@@ -160,6 +376,7 @@ describe('bounded GTM intent compiler', () => {
       prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
         actorUserId: USER,
+        actorRole: 'owner',
         plan,
         planHash: plan.planHash,
         idempotencyKey: 'gtm-plan-prepare-0002'

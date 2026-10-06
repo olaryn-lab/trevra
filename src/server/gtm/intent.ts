@@ -1,7 +1,16 @@
 import { z } from 'zod';
 import type { Db } from '../db.js';
+import { importAccounts } from '../accounts/store.js';
+import type { AccountImportResult } from '../accounts/types.js';
 import { canonicalPayloadHash } from '../control-plane/payload.js';
 import { listSeats } from '../linkedin/seats.js';
+import { createCaptureSource } from '../lead-capture/sources.js';
+import {
+  CAPTURE_SOURCE_KINDS,
+  type CaptureSourceKind,
+  type CaptureSourceRecord
+} from '../lead-capture/types.js';
+import { secretsConfigured } from '../secrets/crypto.js';
 import {
   DEFAULT_LINKEDIN_OUTREACH_WORKFLOW_NAME,
   prepareOutreach,
@@ -43,11 +52,18 @@ const timingSchema = z
   })
   .strict();
 
+const captureSchema = z
+  .object({
+    name: z.string().trim().min(1).max(120).optional(),
+    kind: z.enum(CAPTURE_SOURCE_KINDS).optional()
+  })
+  .strict();
 export const gtmIntentSchema = z
   .object({
     objective: z.enum(GTM_OBJECTIVES),
     audience: audienceSchema.optional(),
     people: peopleSchema.optional(),
+    capture: captureSchema.optional(),
     channels: z
       .array(z.enum(['linkedin', 'email', 'community']))
       .max(3)
@@ -91,12 +107,178 @@ export interface GtmPlan {
   planHash: string;
 }
 
-export interface PreparedGtmPlanResult {
+export interface PreparedOutreachGtmPlanResult {
   status: 'prepared';
-  objective: GtmObjective;
+  objective: 'prepare_outreach';
   artifacts: PreparedOutreachResult['artifacts'];
   next: PreparedOutreachResult['next'];
   result: PreparedOutreachResult;
+}
+
+export interface PreparedCaptureGtmPlanResult {
+  status: 'prepared';
+  objective: 'capture_inbound';
+  artifacts: { captureSourceId: string };
+  next: { kind: 'configure_capture_source'; href: '/setup/capture' };
+  result: {
+    source: CaptureSourceRecord;
+    secret: string;
+    duplicate: boolean;
+  };
+}
+
+export interface PreparedWatchGtmPlanResult {
+  status: 'prepared';
+  objective: 'watch_accounts';
+  artifacts: { accountIds: string[] };
+  next: { kind: 'review_accounts'; href: '/research' };
+  result: {
+    accounts: Array<{
+      id: string;
+      domain: string;
+      name: string;
+      status: string;
+      nextSweepAt: string | null;
+    }>;
+    rejected: AccountImportResult['rejected'];
+    recurring: true;
+  };
+}
+
+export type PreparedGtmPlanResult =
+  PreparedOutreachGtmPlanResult | PreparedCaptureGtmPlanResult | PreparedWatchGtmPlanResult;
+
+const watchPreparationResultSchema = z
+  .object({
+    accounts: z.array(
+      z
+        .object({
+          id: z.string(),
+          domain: z.string(),
+          name: z.string(),
+          status: z.string(),
+          nextSweepAt: z.string().nullable()
+        })
+        .strict()
+    ),
+    rejected: z.array(z.object({ line: z.string(), reason: z.string() }).strict()),
+    recurring: z.literal(true)
+  })
+  .strict();
+
+function stringArray(value: unknown): string[] {
+  const parsed =
+    typeof value === 'string'
+      ? (() => {
+          try {
+            return JSON.parse(value) as unknown;
+          } catch {
+            return [];
+          }
+        })()
+      : value;
+  return Array.isArray(parsed)
+    ? parsed.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
+    : [];
+}
+
+async function prepareWatchAccounts(
+  db: Db,
+  input: {
+    workspaceId: string;
+    actorUserId: string;
+    idempotencyKey: string;
+    plan: GtmPlan;
+  }
+): Promise<PreparedWatchGtmPlanResult> {
+  const domains = input.plan.intent.audience?.domains ?? [];
+  if (domains.length === 0)
+    throw new GtmPlanError('Watch accounts requires explicit domains.', 409);
+
+  return db.transaction(async (tx) => {
+    await tx
+      .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))')
+      .get(`${input.workspaceId}:watch:${input.idempotencyKey}`);
+
+    const existing = await tx
+      .prepare(
+        `SELECT plan_hash,account_ids_json,result_json
+         FROM account_watch_preparations
+         WHERE workspace_id=? AND idempotency_key=? LIMIT 1`
+      )
+      .get<{ plan_hash: string; account_ids_json: unknown; result_json: unknown }>(
+        input.workspaceId,
+        input.idempotencyKey
+      );
+    if (existing) {
+      if (existing.plan_hash !== input.plan.planHash) {
+        throw new GtmPlanError(
+          'This idempotency key was already used for a different watch plan.',
+          409
+        );
+      }
+      return {
+        status: 'prepared',
+        objective: 'watch_accounts',
+        artifacts: { accountIds: stringArray(existing.account_ids_json).sort() },
+        next: { kind: 'review_accounts', href: '/research' },
+        result: watchPreparationResultSchema.parse(existing.result_json)
+      };
+    }
+
+    const imported = await importAccounts(tx, input.workspaceId, domains.join('\n'), {
+      source: 'manual',
+      icpNote: input.plan.intent.audience?.description ?? null
+    });
+    const inactive = imported.accounts.filter((account) => account.status !== 'active');
+    if (inactive.length > 0) {
+      throw new GtmPlanError(
+        `${inactive.length} named ${inactive.length === 1 ? 'account is' : 'accounts are'} no longer active. Re-plan before watching.`,
+        409
+      );
+    }
+
+    const accounts = imported.accounts
+      .map((account) => ({
+        id: account.id,
+        domain: account.domain,
+        name: account.name,
+        status: account.status,
+        nextSweepAt: account.nextSweepAt
+      }))
+      .sort(
+        (left, right) => left.domain.localeCompare(right.domain) || left.id.localeCompare(right.id)
+      );
+    const accountIds = accounts.map((account) => account.id).sort();
+    const result = {
+      accounts,
+      rejected: imported.rejected,
+      recurring: true as const
+    };
+
+    await tx
+      .prepare(
+        `INSERT INTO account_watch_preparations
+         (workspace_id,idempotency_key,plan_hash,actor_user_id,account_ids_json,result_json,created_at)
+         VALUES (?,?,?,?,?::jsonb,?::jsonb,CURRENT_TIMESTAMP)`
+      )
+      .run(
+        input.workspaceId,
+        input.idempotencyKey,
+        input.plan.planHash,
+        input.actorUserId,
+        JSON.stringify(accountIds),
+        JSON.stringify(result)
+      );
+
+    return {
+      status: 'prepared',
+      objective: 'watch_accounts',
+      artifacts: { accountIds },
+      next: { kind: 'review_accounts', href: '/research' },
+      result
+    };
+  });
 }
 
 export class GtmPlanError extends Error {
@@ -357,18 +539,51 @@ async function prepareOutreachPlan(
   });
 }
 
-function accountPlan(intent: GtmIntent): GtmPlan {
+async function accountPlan(db: Db, workspaceId: string, intent: GtmIntent): Promise<GtmPlan> {
   const blockers: GtmPlanBlocker[] = [];
-  if (!hasAudience(intent)) {
+  const objective = intent.objective;
+  const domains = intent.audience?.domains ?? [];
+
+  if (objective === 'watch_accounts') {
+    if (domains.length === 0) {
+      blockers.push({
+        code: 'watch_domains_required',
+        message:
+          'Add the specific domains you want Trevra to watch. Free-text discovery stays on Research until a persistable source is selected.',
+        actionHref: '/research'
+      });
+    }
+  } else if (!hasAudience(intent)) {
     blockers.push({
       code: 'audience_required',
       message: 'Describe the accounts you want Trevra to work on.',
       actionHref: '/research'
     });
   }
+
+  let inactiveDomains: string[] = [];
+  if (objective === 'watch_accounts' && domains.length > 0) {
+    const rows = await db
+      .prepare(
+        `SELECT LOWER(domain) AS domain,status
+         FROM accounts
+         WHERE workspace_id=? AND LOWER(domain)=ANY(?::text[])
+           AND status<>'active'
+         ORDER BY LOWER(domain) ASC`
+      )
+      .all<{ domain: string; status: string }>(workspaceId, domains);
+    inactiveDomains = rows.map((row) => row.domain);
+    if (inactiveDomains.length > 0) {
+      blockers.push({
+        code: 'watch_inactive_accounts',
+        message: `${inactiveDomains.length} named ${inactiveDomains.length === 1 ? 'account is' : 'accounts are'} marked not-a-fit or archived. Reactivate ${inactiveDomains.length === 1 ? 'it' : 'them'} in Research before watching.`,
+        actionHref: '/research'
+      });
+    }
+  }
+
   const quantity = intent.audience?.quantity ?? 25;
   const audience = audienceDescription(intent);
-  const objective = intent.objective;
   const common = {
     blockers,
     defaults: {
@@ -436,40 +651,79 @@ function accountPlan(intent: GtmIntent): GtmPlan {
     });
   }
 
+  const named = domains.length;
   return finalizePlan({
     objective: 'watch_accounts',
     intent,
-    summary: `Watch accounts matching ${audience}`,
+    summary:
+      named > 0
+        ? `Watch ${named} named ${named === 1 ? 'account' : 'accounts'} for material GTM changes`
+        : 'Watch named accounts for material GTM changes',
     steps: [
+      {
+        kind: 'accounts',
+        title: 'Accounts',
+        detail:
+          named > 0
+            ? `Ensure ${named} named ${named === 1 ? 'domain is' : 'domains are'} in the workspace without reactivating excluded accounts.`
+            : 'Resolve explicit account domains without inventing company identities.',
+        externalEffect: false
+      },
       {
         kind: 'watch',
         title: 'Watch',
         detail:
-          'Revisit configured account sources and preserve only materially changed GTM evidence.',
+          'Make active accounts due for Trevra’s existing paced observation sweep; no burst crawler or second scheduler is created.',
         externalEffect: false
       },
       {
         kind: 'attention',
         title: 'Surface changes',
-        detail: 'Promote meaningful changes into Today instead of creating generic event noise.',
+        detail:
+          'Store source-backed changes, rescore them, and promote meaningful changes into Today.',
         externalEffect: false
       }
     ],
     ...common,
-    defaults: { ...common.defaults, recurring: intent.timing?.recurring ?? true }
+    defaults: {
+      ...common.defaults,
+      domains,
+      inactiveDomains,
+      recurring: intent.timing?.recurring ?? true,
+      prepareSupported: blockers.length === 0 && domains.length > 0
+    },
+    next: { kind: 'review_accounts', href: '/research' }
   });
 }
 
-function captureInboundPlan(intent: GtmIntent): GtmPlan {
+function captureInboundPlan(intent: GtmIntent, actorRole: 'owner' | 'member'): GtmPlan {
+  const blockers: GtmPlanBlocker[] = [];
+  if (actorRole !== 'owner') {
+    blockers.push({
+      code: 'capture_owner_required',
+      message: 'Only workspace owners can create a lead capture source.',
+      actionHref: '/setup/capture'
+    });
+  }
+  if (!secretsConfigured()) {
+    blockers.push({
+      code: 'capture_secrets_unavailable',
+      message:
+        'This deployment cannot create signed capture sources until secret encryption is configured.',
+      actionHref: '/setup/capture'
+    });
+  }
+  const sourceName = intent.capture?.name?.trim() || 'Website';
+  const sourceKind: CaptureSourceKind = intent.capture?.kind ?? 'website';
   return finalizePlan({
     objective: 'capture_inbound',
     intent,
-    summary: 'Capture website inbound into canonical People and immutable submissions',
+    summary: `Create a signed ${sourceKind} source named ${sourceName}`,
     steps: [
       {
         kind: 'capture_source',
         title: 'Capture source',
-        detail: 'Create or configure a workspace-bound signed GTM capture source.',
+        detail: `Create the workspace-bound signed GTM source “${sourceName}”.`,
         externalEffect: false
       },
       {
@@ -486,21 +740,28 @@ function captureInboundPlan(intent: GtmIntent): GtmPlan {
         externalEffect: false
       }
     ],
-    blockers: [],
-    defaults: { prepareSupported: false, signedIntake: true, accountOptional: true },
+    blockers,
+    defaults: {
+      prepareSupported: blockers.length === 0,
+      signedIntake: true,
+      accountOptional: true,
+      sourceName,
+      sourceKind
+    },
     consequences: {
       createsInternalState: true,
       externalWrites: false,
       approvalRequired: false
     },
-    next: { kind: 'open_inbound', href: '/outreach/inbound' }
+    next: { kind: 'configure_capture_source', href: '/setup/capture' }
   });
 }
 
 export async function compileGtmIntent(
   db: Db,
   workspaceId: string,
-  rawIntent: unknown
+  rawIntent: unknown,
+  context: { actorRole?: 'owner' | 'member' } = {}
 ): Promise<GtmPlan> {
   const intent = normalizeIntent(rawIntent);
   if (intent.objective === 'prepare_outreach') return prepareOutreachPlan(db, workspaceId, intent);
@@ -509,9 +770,9 @@ export async function compileGtmIntent(
     intent.objective === 'research_accounts' ||
     intent.objective === 'watch_accounts'
   ) {
-    return accountPlan(intent);
+    return accountPlan(db, workspaceId, intent);
   }
-  return captureInboundPlan(intent);
+  return captureInboundPlan(intent, context.actorRole ?? 'owner');
 }
 
 export async function prepareGtmPlan(
@@ -519,6 +780,7 @@ export async function prepareGtmPlan(
   input: {
     workspaceId: string;
     actorUserId: string;
+    actorRole: 'owner' | 'member';
     plan: unknown;
     planHash: string;
     idempotencyKey: string;
@@ -528,7 +790,10 @@ export async function prepareGtmPlan(
   if (input.planHash !== supplied.planHash) {
     throw new GtmPlanError('The supplied plan hash does not match the plan.', 409);
   }
-  const current = await compileGtmIntent(db, input.workspaceId, supplied.intent);
+
+  const current = await compileGtmIntent(db, input.workspaceId, supplied.intent, {
+    actorRole: input.actorRole
+  });
   if (current.planHash !== supplied.planHash) {
     throw new GtmPlanError(
       'This GTM plan is stale because workspace state changed. Re-plan before preparing.',
@@ -536,14 +801,51 @@ export async function prepareGtmPlan(
     );
   }
   if (current.blockers.length > 0) {
-    throw new GtmPlanError(current.blockers[0]!.message, 409);
+    const first = current.blockers[0]!;
+    throw new GtmPlanError(first.message, first.code === 'capture_owner_required' ? 403 : 409);
   }
+
+  if (current.objective === 'capture_inbound') {
+    const sourceName =
+      typeof current.defaults.sourceName === 'string' ? current.defaults.sourceName : 'Website';
+    const sourceKind = CAPTURE_SOURCE_KINDS.includes(
+      current.defaults.sourceKind as CaptureSourceKind
+    )
+      ? (current.defaults.sourceKind as CaptureSourceKind)
+      : 'website';
+    const result = await createCaptureSource(db, {
+      workspaceId: input.workspaceId,
+      actorUserId: input.actorUserId,
+      name: sourceName,
+      kind: sourceKind,
+      preparationKey: input.idempotencyKey,
+      preparationHash: current.planHash
+    });
+    return {
+      status: 'prepared',
+      objective: 'capture_inbound',
+      artifacts: { captureSourceId: result.source.id },
+      next: { kind: 'configure_capture_source', href: '/setup/capture' },
+      result
+    };
+  }
+
+  if (current.objective === 'watch_accounts') {
+    return prepareWatchAccounts(db, {
+      workspaceId: input.workspaceId,
+      actorUserId: input.actorUserId,
+      idempotencyKey: input.idempotencyKey,
+      plan: current
+    });
+  }
+
   if (current.objective !== 'prepare_outreach') {
     throw new GtmPlanError(
       'This objective is inspectable but is not yet composed through the generic prepare boundary.',
       409
     );
   }
+
   const existingLeadListId = current.intent.people?.existingListId;
   const senderKey =
     typeof current.defaults.senderKey === 'string' ? current.defaults.senderKey : null;
@@ -563,7 +865,7 @@ export async function prepareGtmPlan(
   });
   return {
     status: 'prepared',
-    objective: current.objective,
+    objective: 'prepare_outreach',
     artifacts: result.artifacts,
     next: result.next,
     result

@@ -1,7 +1,7 @@
 {
   "schemaVersion": "1.0.0",
-  "generatedAt": "2026-08-24T13:32:47+02:00",
-  "sourceRevision": "496cf5d1c30d",
+  "generatedAt": "2026-09-30T13:34:09+02:00",
+  "sourceRevision": "165e17226694",
   "project": "Trevra",
   "contract": {
     "inputs": "Zod-validated input schema",
@@ -569,10 +569,41 @@
       "source": "src/server/skills"
     },
     {
+      "id": "gtm.watch-mentions",
+      "name": "Watch brand and keyword mentions",
+      "version": "1.0.0",
+      "description": "Search the configured community platforms for a named watch's keywords, score each mention's sentiment with the in-repo lexicon, and record new mentions against that watch.",
+      "sideEffect": "network-read",
+      "requiresApproval": false,
+      "runtime": "builtin",
+      "sourceType": "builtin",
+      "publisher": {
+        "slug": "trevra",
+        "name": "Trevra",
+        "verified": true
+      },
+      "trust": {
+        "signed": false,
+        "sbom": true,
+        "verifiedRelease": true
+      },
+      "popularity": {
+        "totalRuns": 0,
+        "successfulRuns": 0,
+        "failedRuns": 0,
+        "successRate": null,
+        "uniqueWorkspaces": 0,
+        "activeInstallations": 0,
+        "lastRunAt": null,
+        "rank": null
+      },
+      "source": "src/server/skills"
+    },
+    {
       "id": "gtm.watch-signal",
       "name": "Watch a domain for change signals",
       "version": "1.0.0",
-      "description": "Capture hiring, pricing, headline, and tech snapshots for a domain and diff them against the previous capture into typed change signals.",
+      "description": "Capture hiring, pricing, release notes, first-party integrations and customer proof, headline, ecommerce app, public product catalog, newsletter signup, and published social-profile snapshots for a domain and diff them into evidence-backed change signals.",
       "sideEffect": "network-read",
       "requiresApproval": false,
       "runtime": "builtin",

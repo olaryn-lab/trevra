@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, ChevronRight, Inbox, LoaderCircle, Send } from 'lucide-react';
+import { CheckCircle2, ChevronRight, Copy, Inbox, LoaderCircle, Send } from 'lucide-react';
 import type { DashboardPayload, PlaybookRun } from '../../shared/types';
 import {
   fetchLoopCost,
@@ -451,6 +451,26 @@ export function LoopView({
           onNavigate={onNavigate}
           onRefresh={() => void loadToday()}
         />
+        {today && (
+          <>
+            <TodayStatusSection
+              title="Working"
+              description="Durable GTM work currently running without needing a decision from you."
+              items={today.working}
+              empty="Nothing is running in the background right now."
+              mode="working"
+              onNavigate={onNavigate}
+            />
+            <TodayStatusSection
+              title="Recent results"
+              description="Verified GTM outcomes from the last seven days."
+              items={today.recentResults}
+              empty="No verified GTM outcomes have landed in the last seven days."
+              mode="results"
+              onNavigate={onNavigate}
+            />
+          </>
+        )}
         <ActivationGuide
           signals={activation.signals}
           problems={activation.problems}
@@ -476,6 +496,26 @@ export function LoopView({
         onNavigate={onNavigate}
         onRefresh={() => void loadToday()}
       />
+      {today && (
+        <>
+          <TodayStatusSection
+            title="Working"
+            description="Durable GTM work currently running without needing a decision from you."
+            items={today.working}
+            empty="Nothing is running in the background right now."
+            mode="working"
+            onNavigate={onNavigate}
+          />
+          <TodayStatusSection
+            title="Recent results"
+            description="Verified GTM outcomes from the last seven days."
+            items={today.recentResults}
+            empty="No verified GTM outcomes have landed in the last seven days."
+            mode="results"
+            onNavigate={onNavigate}
+          />
+        </>
+      )}
 
       {today && today.needsAttention.length === 0 && block && (
         <section className="loop-block" aria-label="Current blocker">
@@ -640,6 +680,61 @@ function Metric({
         <span>{detail}</span>
       </div>
     </article>
+  );
+}
+
+type TodayPayload = Awaited<ReturnType<typeof getToday>>;
+
+function TodayStatusSection({
+  title,
+  description,
+  items,
+  empty,
+  mode,
+  onNavigate
+}: {
+  title: string;
+  description: string;
+  items: TodayPayload['working'];
+  empty: string;
+  mode: 'working' | 'results';
+  onNavigate: (path: string) => void;
+}) {
+  return (
+    <section className="recommendations-panel">
+      <div className="section-heading">
+        <div>
+          <h2>{title}</h2>
+          <p>{description}</p>
+        </div>
+        <span className="status-pill">{items.length}</span>
+      </div>
+      {items.length === 0 ? (
+        <div className="empty-state">
+          {mode === 'working' ? <Send size={22} /> : <CheckCircle2 size={22} />}
+          <p>{empty}</p>
+        </div>
+      ) : (
+        <ol className="onboarding-steps">
+          {items.map((item) => (
+            <li key={item.id}>
+              {mode === 'working' ? <Send size={19} /> : <CheckCircle2 size={19} />}
+              <div>
+                <strong>{item.title}</strong>
+                <small>{item.detail}</small>
+              </div>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => onNavigate(item.href)}
+              >
+                Open <ChevronRight size={15} />
+              </button>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
   );
 }
 
@@ -862,6 +957,16 @@ function plannerPrepareKey(): string {
   const uuid = globalThis.crypto?.randomUUID?.();
   return `gtm-plan-${uuid ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 }
+function plannerDomains(value: string): string[] {
+  return [
+    ...new Set(
+      value
+        .split(/[\s,;]+/)
+        .map((entry) => entry.trim())
+        .filter(Boolean)
+    )
+  ].slice(0, 500);
+}
 
 function PlanWork({
   onNavigate,
@@ -874,6 +979,11 @@ function PlanWork({
   const [objective, setObjective] = useState<PlannerObjective>('find_accounts');
   const [audience, setAudience] = useState('');
   const [quantity, setQuantity] = useState(25);
+  const [accountDomains, setAccountDomains] = useState('');
+  const [captureName, setCaptureName] = useState('Website');
+  const [captureKind, setCaptureKind] = useState<
+    'website' | 'form' | 'signup' | 'partner' | 'integration'
+  >('website');
   const [leadLists, setLeadLists] = useState<
     Awaited<ReturnType<typeof getLinkedInManagerLeadLists>>
   >([]);
@@ -927,14 +1037,29 @@ function PlanWork({
               autonomy: 'approval_required' as const
             }
           : objective === 'capture_inbound'
-            ? { objective }
-            : {
+            ? {
                 objective,
-                audience: {
-                  ...(audience.trim() ? { description: audience.trim() } : {}),
-                  quantity
+                capture: {
+                  name: captureName.trim() || 'Website',
+                  kind: captureKind
                 }
-              };
+              }
+            : objective === 'watch_accounts'
+              ? {
+                  objective,
+                  audience: {
+                    ...(audience.trim() ? { description: audience.trim() } : {}),
+                    domains: plannerDomains(accountDomains)
+                  },
+                  timing: { recurring: true }
+                }
+              : {
+                  objective,
+                  audience: {
+                    ...(audience.trim() ? { description: audience.trim() } : {}),
+                    quantity
+                  }
+                };
       const next = await planGtmIntent(intent);
       setPlan(next);
       setPrepareKey(plannerPrepareKey());
@@ -1019,7 +1144,68 @@ function PlanWork({
                   ))}
                 </Select>
               </label>
-            ) : objective === 'capture_inbound' ? null : (
+            ) : objective === 'capture_inbound' ? (
+              <>
+                <label>
+                  Source name
+                  <input
+                    value={captureName}
+                    onChange={(event) => {
+                      setCaptureName(event.target.value);
+                      resetPlan();
+                    }}
+                    placeholder="Website"
+                    maxLength={120}
+                  />
+                </label>
+                <label>
+                  Type
+                  <Select
+                    value={captureKind}
+                    onChange={(event) => {
+                      setCaptureKind(
+                        event.target.value as
+                          'website' | 'form' | 'signup' | 'partner' | 'integration'
+                      );
+                      resetPlan();
+                    }}
+                  >
+                    <option value="website">Website</option>
+                    <option value="form">Form</option>
+                    <option value="signup">Signup</option>
+                    <option value="partner">Partner</option>
+                    <option value="integration">Integration</option>
+                  </Select>
+                </label>
+              </>
+            ) : objective === 'watch_accounts' ? (
+              <>
+                <label>
+                  Accounts to watch
+                  <textarea
+                    value={accountDomains}
+                    onChange={(event) => {
+                      setAccountDomains(event.target.value);
+                      resetPlan();
+                    }}
+                    placeholder={'acme.com\nnorthstar.ai\nexample.ch'}
+                    rows={4}
+                  />
+                </label>
+                <label>
+                  Context
+                  <input
+                    value={audience}
+                    onChange={(event) => {
+                      setAudience(event.target.value);
+                      resetPlan();
+                    }}
+                    placeholder="Optional: Swiss B2B SaaS targets"
+                    maxLength={500}
+                  />
+                </label>
+              </>
+            ) : (
               <>
                 <label>
                   Audience
@@ -1133,17 +1319,61 @@ function PlanWork({
               {prepared && (
                 <div className="gtm-plan-result">
                   <strong>Prepared</strong>
-                  <span>
-                    {prepared.result.campaign.enrolled} people · campaign remains{' '}
-                    {prepared.result.campaign.status}
-                  </span>
-                  <button
-                    className="primary-button"
-                    type="button"
-                    onClick={() => onNavigate(prepared.next.href)}
-                  >
-                    Review campaign <ChevronRight size={15} />
-                  </button>
+                  {prepared.objective === 'capture_inbound' ? (
+                    <>
+                      <span>
+                        Signed {prepared.result.source.kind} source “{prepared.result.source.name}”
+                        is ready. Copy this signing secret now; it is not listed again after you
+                        leave this result.
+                      </span>
+                      <code>{prepared.result.secret}</code>
+                      <div className="gtm-plan-actions">
+                        <button
+                          className="secondary-button"
+                          type="button"
+                          onClick={() => void navigator.clipboard.writeText(prepared.result.secret)}
+                        >
+                          <Copy size={15} /> Copy secret
+                        </button>
+                        <button
+                          className="primary-button"
+                          type="button"
+                          onClick={() => onNavigate(prepared.next.href)}
+                        >
+                          Configure capture <ChevronRight size={15} />
+                        </button>
+                      </div>
+                    </>
+                  ) : prepared.objective === 'watch_accounts' ? (
+                    <>
+                      <span>
+                        {prepared.result.accounts.length}{' '}
+                        {prepared.result.accounts.length === 1 ? 'account is' : 'accounts are'}{' '}
+                        active and due for Trevra’s paced observation sweep.
+                      </span>
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={() => onNavigate(prepared.next.href)}
+                      >
+                        Review accounts <ChevronRight size={15} />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <span>
+                        {prepared.result.campaign.enrolled} people · campaign remains{' '}
+                        {prepared.result.campaign.status}
+                      </span>
+                      <button
+                        className="primary-button"
+                        type="button"
+                        onClick={() => onNavigate(prepared.next.href)}
+                      >
+                        Review campaign <ChevronRight size={15} />
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
             </div>

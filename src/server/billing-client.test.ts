@@ -133,7 +133,8 @@ describe('TrevraBillingClient', () => {
       workspaceId: 'ws_123',
       planCode: 'growth_monthly_usd',
       successUrl: 'https://app.example.test/setup/billing?checkout=success',
-      cancelUrl: 'https://app.example.test/setup/billing?checkout=cancelled'
+      cancelUrl: 'https://app.example.test/setup/billing?checkout=cancelled',
+      idempotencyKey: 'checkout-attempt-0001'
     });
     expect(checkout.url).toBe('https://checkout.stripe.test/session');
 
@@ -141,6 +142,9 @@ describe('TrevraBillingClient', () => {
       call.url.endsWith('/v1/trevra/customers/ws_123/subscription')
     );
     expect(checkoutCall?.init?.method).toBe('POST');
+    expect(new Headers(checkoutCall?.init?.headers).get('Idempotency-Key')).toBe(
+      'checkout-attempt-0001'
+    );
     expect(JSON.parse(String(checkoutCall?.init?.body))).toEqual({
       plan_code: 'growth_monthly_usd',
       success_url: 'https://app.example.test/setup/billing?checkout=success',
