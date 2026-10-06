@@ -56,15 +56,15 @@
 
   /* -- the permanent dark console surface, in either theme. A Trevra
         extension: the design system has no always-dark surface. --------- */
-  --t-night: #101a15;
-  --t-night-2: #16241c;
-  --t-night-ink: #eaf4ed;
-  --t-night-muted: #8fa294; /* 6.58:1 on --t-night */
+  --t-night: #181818;
+  --t-night-2: #212121;
+  --t-night-ink: #f1f1f1;
+  --t-night-muted: #9d9d9d; /* 6.55:1 on --t-night */
   --t-night-green: #7ed8a5;
   --t-night-amber: #efc97f;
   --t-night-amber-2: #c8b78d;
   --t-night-blue: #9cb9ff;
-  --t-code: #d7f5df;
+  --t-code: #ededed;
 
   /* -- state: the shared status inks. Backgrounds are the 6% badge tint the
         design system checks each ink against. ---------------------------- */
@@ -140,6 +140,8 @@
 
   /* -- families ---------------------------------------------------------- */
   --t-display: var(--font-display);
+  --t-display-weight: var(--type-display-weight);
+  --t-display-stretch: var(--type-display-stretch);
   --t-body: var(--font-sans);
   --t-mono: var(--font-mono);
 
@@ -168,8 +170,8 @@
     --t-green-500: #9dd394;
     --t-green-700: #9fd097;
     --t-green-800: #b8dfb1;
-    --t-night: #070c09;
-    --t-night-2: #101a14;
+    --t-night: #0b0b0b;
+    --t-night-2: #181818;
     color-scheme: dark;
   }
 }
@@ -183,8 +185,8 @@
   --t-green-500: #9dd394;
   --t-green-700: #9fd097;
   --t-green-800: #b8dfb1;
-  --t-night: #070c09;
-  --t-night-2: #101a14;
+  --t-night: #0b0b0b;
+  --t-night-2: #181818;
   color-scheme: dark;
 }
 
@@ -197,8 +199,8 @@
   --t-green-500: #4b8841;
   --t-green-700: #274821;
   --t-green-800: #182c15;
-  --t-night: #101a15;
-  --t-night-2: #16241c;
+  --t-night: #181818;
+  --t-night-2: #212121;
   color-scheme: light;
 }
 
@@ -501,6 +503,7 @@ html:has(.static-launch) {
   align-items: center;
   gap: 10px;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   text-decoration: none;
   font-size: var(--t-text-xl);
   letter-spacing: var(--t-track-heading);
@@ -796,8 +799,9 @@ html:has(.static-launch) {
   max-width: 17ch;
   margin-bottom: 22px;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--m-display-hero);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-display);
   line-height: 1.04;
   text-wrap: balance;
@@ -949,8 +953,9 @@ html:has(.static-launch) {
 .gate-head h2 {
   margin-bottom: 0;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--m-display-sec);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-display);
   line-height: 1.08;
   text-wrap: balance;
@@ -1595,6 +1600,7 @@ html:has(.static-launch) {
 .workspace-canvas-head h3 {
   margin: 5px 0 0;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-display-sm);
   letter-spacing: var(--t-track-title);
   line-height: 1.2;
@@ -1744,6 +1750,7 @@ html:has(.static-launch) {
   max-width: 32ch;
   margin: 0 0 24px;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-display-sm);
   letter-spacing: var(--t-track-title);
   line-height: 1.22;
@@ -1957,8 +1964,9 @@ html:has(.static-launch) {
 .deploy-title-row h3 {
   margin-bottom: 12px;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--m-display-card);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-title);
   line-height: 1.15;
 }
@@ -2186,8 +2194,9 @@ details[open] > summary .disclosure-chevron {
 .deploy-close h3 {
   margin-bottom: 14px;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--m-display-card);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-title);
   line-height: 1.15;
   text-wrap: balance;

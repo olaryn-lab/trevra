@@ -56,15 +56,15 @@
 
   /* -- the permanent dark console surface, in either theme. A Trevra
         extension: the design system has no always-dark surface. --------- */
-  --t-night: #101a15;
-  --t-night-2: #16241c;
-  --t-night-ink: #eaf4ed;
-  --t-night-muted: #8fa294; /* 6.58:1 on --t-night */
+  --t-night: #181818;
+  --t-night-2: #212121;
+  --t-night-ink: #f1f1f1;
+  --t-night-muted: #9d9d9d; /* 6.55:1 on --t-night */
   --t-night-green: #7ed8a5;
   --t-night-amber: #efc97f;
   --t-night-amber-2: #c8b78d;
   --t-night-blue: #9cb9ff;
-  --t-code: #d7f5df;
+  --t-code: #ededed;
 
   /* -- state: the shared status inks. Backgrounds are the 6% badge tint the
         design system checks each ink against. ---------------------------- */
@@ -140,6 +140,8 @@
 
   /* -- families ---------------------------------------------------------- */
   --t-display: var(--font-display);
+  --t-display-weight: var(--type-display-weight);
+  --t-display-stretch: var(--type-display-stretch);
   --t-body: var(--font-sans);
   --t-mono: var(--font-mono);
 
@@ -168,8 +170,8 @@
     --t-green-500: #9dd394;
     --t-green-700: #9fd097;
     --t-green-800: #b8dfb1;
-    --t-night: #070c09;
-    --t-night-2: #101a14;
+    --t-night: #0b0b0b;
+    --t-night-2: #181818;
     color-scheme: dark;
   }
 }
@@ -183,8 +185,8 @@
   --t-green-500: #9dd394;
   --t-green-700: #9fd097;
   --t-green-800: #b8dfb1;
-  --t-night: #070c09;
-  --t-night-2: #101a14;
+  --t-night: #0b0b0b;
+  --t-night-2: #181818;
   color-scheme: dark;
 }
 
@@ -197,8 +199,8 @@
   --t-green-500: #4b8841;
   --t-green-700: #274821;
   --t-green-800: #182c15;
-  --t-night: #101a15;
-  --t-night-2: #16241c;
+  --t-night: #181818;
+  --t-night-2: #212121;
   color-scheme: light;
 }
 
@@ -294,8 +296,8 @@ p {
 /* A scrollable <pre> is a real focus stop in Chromium, and every one of these
    sits on --t-night, which is dark in BOTH themes. The default ring measures
    2.73:1 there in light -- the same class of miss as the input that was left
-   off the invert list below. The night surface gets the night ring: 10.38:1
-   light, 11.50:1 dark. */
+   off the invert list below. The night surface gets the night ring: 10.36:1
+   light, 11.48:1 dark. */
 .agent-command pre:focus-visible,
 .workflow-approval pre:focus-visible,
 .run-output pre:focus-visible,
@@ -1056,8 +1058,9 @@ p {
   gap: 10px;
   padding: 0 8px 14px;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-xl);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-heading);
 }
 .brand-mark {
@@ -1162,8 +1165,9 @@ p {
 h1 {
   margin-bottom: 0;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-2xl);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-title);
 }
 .top-actions {
@@ -3326,6 +3330,7 @@ button:disabled {
   max-width: 16ch;
   margin: 14px 0 16px;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: clamp(2.25rem, 5vw, 4.0625rem);
   line-height: 1.05;
   letter-spacing: var(--t-track-display);
@@ -3377,6 +3382,7 @@ button:disabled {
 .auth-card h2 {
   margin: 20px 0 7px;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-2xl);
   letter-spacing: var(--t-track-title);
 }
@@ -5400,8 +5406,9 @@ button:disabled {
 .li-stat strong {
   display: block;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-2xl);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-title);
   line-height: 1.1;
 }
@@ -5689,8 +5696,9 @@ button:disabled {
 }
 .li-meter-head strong {
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-2xl);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-title);
 }
 .li-meter-head span {
@@ -7821,8 +7829,9 @@ button:disabled {
 }
 .li-backlog-head strong {
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-2xl);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   line-height: 1.1;
   color: var(--green);
 }
@@ -8200,8 +8209,9 @@ button:disabled {
 }
 .loop-stage strong {
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-2xl);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-title);
   font-variant-numeric: tabular-nums;
   line-height: 1.15;
@@ -8350,8 +8360,9 @@ button:disabled {
 .cost-row strong {
   display: block;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-2xl);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-title);
   font-variant-numeric: tabular-nums;
   line-height: 1.15;
@@ -10550,8 +10561,9 @@ button:disabled {
 .li-cap strong {
   display: block;
   font-family: var(--t-display);
+  font-stretch: var(--t-display-stretch);
   font-size: var(--t-text-2xl);
-  font-weight: var(--t-w-bold);
+  font-weight: var(--t-display-weight);
   letter-spacing: var(--t-track-title);
   line-height: 1.1;
   font-variant-numeric: tabular-nums;
