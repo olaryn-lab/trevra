@@ -131,6 +131,11 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Seats survive this file; a confirmed identity must not, or it links a later
+  // file's seat signed in as the same fake member to these ones.
+  await db
+    ?.prepare('DELETE FROM linkedin_seat_identities WHERE workspace_id = ANY(?::text[])')
+    .run([WORKSPACE_ID, OTHER_WORKSPACE_ID]);
   await db?.close();
   if (previousKey === undefined) delete process.env.TREVRA_SECRETS_KEY;
   else process.env.TREVRA_SECRETS_KEY = previousKey;
@@ -974,5 +979,40 @@ describe('detectLinkedInSeat on an account change', () => {
     expect(
       await db.prepare('SELECT id FROM linkedin_threads WHERE workspace_id=?').all(WORKSPACE_ID)
     ).toHaveLength(1);
+  });
+
+  it('confirms which LinkedIn member a seat signs in as, and links it across workspaces by count only', async () => {
+    const { driver } = fakeDriver({ loggedIn: true });
+    for (const workspaceId of [WORKSPACE_ID, OTHER_WORKSPACE_ID])
+      await detectLinkedInSeat(db, config, {
+        workspaceId,
+        timezone: 'Europe/Zurich',
+        now: NOW,
+        driver,
+        page,
+        log: () => {}
+      });
+
+    const result = await detectLinkedInSeat(db, config, {
+      workspaceId: WORKSPACE_ID,
+      timezone: 'Europe/Zurich',
+      now: NOW,
+      driver,
+      page,
+      log: () => {}
+    });
+    expect(result.seat?.identityConfirmedAt).toBe(NOW.toISOString());
+    expect(result.seat?.linkedSeatCount).toBe(1);
+
+    const rows = await db
+      .prepare(
+        `SELECT workspace_id, identity_key FROM linkedin_seat_identities
+           WHERE workspace_id = ANY(?::text[]) ORDER BY workspace_id`
+      )
+      .all<{ workspace_id: string; identity_key: string }>([WORKSPACE_ID, OTHER_WORKSPACE_ID]);
+    expect(rows).toEqual([
+      { workspace_id: WORKSPACE_ID, identity_key: 'https://www.linkedin.com/in/pankaj' },
+      { workspace_id: OTHER_WORKSPACE_ID, identity_key: 'https://www.linkedin.com/in/pankaj' }
+    ]);
   });
 });

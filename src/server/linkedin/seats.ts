@@ -173,6 +173,17 @@ export interface LinkedInSeat {
    * support thread. {@link seatProxyUrl} is the only reader of the stored
    * string and it is server-side only.
    */
+  /**
+   * When the companion last confirmed which LinkedIn member this seat signs in
+   * as (`linkedin_seat_identities`). Null when never: the safety gate then
+   * counts this seat alone.
+   */
+  identityConfirmedAt: string | null;
+  /**
+   * How many OTHER seats, in any workspace, signed in as the same member. Their
+   * sends count against this seat's limits. A count only -- never which seats.
+   */
+  linkedSeatCount: number;
   proxy: SeatProxyView | null;
 }
 
@@ -293,6 +304,8 @@ interface SeatRow {
   proxy_server: string | null;
   proxy_username: string | null;
   proxy_has_password: boolean;
+  identity_confirmed_at: string | null;
+  linked_seat_count: number | null;
 }
 
 /**
@@ -337,7 +350,15 @@ const SEAT_COLUMNS = `
   inmail_paid_credit_cap,
   proxy_server,
   proxy_username,
-  proxy_has_password
+  proxy_has_password,
+  (SELECT TO_CHAR(i.confirmed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+     FROM linkedin_seat_identities i
+    WHERE i.workspace_id = linkedin_seats.workspace_id AND i.seat_key = linkedin_seats.seat_key) AS identity_confirmed_at,
+  (SELECT COUNT(*)::int
+     FROM linkedin_seat_identities mine
+     JOIN linkedin_seat_identities other ON other.identity_key = mine.identity_key
+    WHERE mine.workspace_id = linkedin_seats.workspace_id AND mine.seat_key = linkedin_seats.seat_key
+      AND NOT (other.workspace_id = mine.workspace_id AND other.seat_key = mine.seat_key)) AS linked_seat_count
 `;
 
 function parsedWorkingDays(value: unknown): number[] {
@@ -411,6 +432,8 @@ function toSeat(row: SeatRow): LinkedInSeat {
       row.inmail_monthly_budget === null ? null : Number(row.inmail_monthly_budget),
     inmailPaidCreditCap:
       row.inmail_paid_credit_cap === null ? null : Number(row.inmail_paid_credit_cap),
+    identityConfirmedAt: row.identity_confirmed_at ?? null,
+    linkedSeatCount: Number(row.linked_seat_count ?? 0),
     // Only non-secret metadata crosses the route boundary. The full URL lives
     // in linkedin_seat_proxy_secrets and is decrypted only by seatProxyUrl().
     proxy: row.proxy_server

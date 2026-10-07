@@ -69,7 +69,8 @@ export type LinkedInCheckName =
   | 'weekend'
   | 'inmail-monthly-quota'
   | 'pending-invite-backlog'
-  | 'duplicate-target';
+  | 'duplicate-target'
+  | 'linked-identity';
 
 /** The same names as a tuple, so the skill's output schema cannot drift from the union. */
 export const LINKEDIN_CHECK_NAMES = [
@@ -87,7 +88,8 @@ export const LINKEDIN_CHECK_NAMES = [
   'weekend',
   'inmail-monthly-quota',
   'pending-invite-backlog',
-  'duplicate-target'
+  'duplicate-target',
+  'linked-identity'
 ] as const satisfies readonly LinkedInCheckName[];
 
 export interface LinkedInSafetyCheck {
@@ -378,6 +380,10 @@ interface SeatLedgerFacts {
   campaignUsed24: number;
   duplicate: boolean;
   suppressionReason: string | null;
+  /** Seats counted in the windows above: this one plus every seat confirmed as the same member. */
+  linkedSeats: number;
+  /** Whether the companion ever confirmed which member this seat signs in as. */
+  identityKnown: boolean;
 }
 
 /** The three kinds that share the operator's account-level message ceiling. */
@@ -424,9 +430,21 @@ async function seatLedgerFacts(
   const row = await db
     .prepare(
       `
-      WITH windowed AS (
+      WITH linked AS (
+        -- THIS seat, plus every seat (any workspace) the companion confirmed
+        -- as the same LinkedIn member. Only aggregates over this set leave
+        -- the statement; no row, target or label of another workspace does.
+        SELECT ?::text AS workspace_id, ?::text AS seat_key
+        UNION
+        SELECT other.workspace_id, other.seat_key
+        FROM linkedin_seat_identities mine
+        JOIN linkedin_seat_identities other ON other.identity_key = mine.identity_key
+        WHERE mine.workspace_id=? AND mine.seat_key=?
+      ),
+      windowed AS (
         SELECT kind, status, recorded_at FROM linkedin_actions
-        WHERE workspace_id=? AND seat_key=? AND kind = ANY(?::text[]) AND recorded_at > ?::timestamptz
+        WHERE (workspace_id, seat_key) IN (SELECT workspace_id, seat_key FROM linked)
+          AND kind = ANY(?::text[]) AND recorded_at > ?::timestamptz
       ),
       buckets AS (
         SELECT FLOOR(EXTRACT(EPOCH FROM (?::timestamptz - recorded_at)) / 86400)::int AS bucket, COUNT(*)::int AS total
@@ -444,7 +462,11 @@ async function seatLedgerFacts(
         COUNT(*) FILTER (WHERE kind='invite' AND recorded_at > ?::timestamptz AND status IN ('accepted', 'replied'))::int AS accepted,
         (SELECT COALESCE(jsonb_object_agg(bucket::text, total), '{}'::jsonb) FROM buckets) AS daily,
         (SELECT COUNT(*)::int FROM linkedin_actions
-           WHERE workspace_id=? AND seat_key=? AND kind='invite' AND status IN ('sent', 'exported')) AS pending_invites,
+           WHERE (workspace_id, seat_key) IN (SELECT workspace_id, seat_key FROM linked)
+             AND kind='invite' AND status IN ('sent', 'exported')) AS pending_invites,
+        (SELECT COUNT(*)::int FROM linked) AS linked_seats,
+        EXISTS (SELECT 1 FROM linkedin_seat_identities
+           WHERE workspace_id=? AND seat_key=?) AS identity_known,
         (SELECT COUNT(*)::int FROM linkedin_actions
            WHERE ?::text IS NOT NULL AND workspace_id=? AND campaign_id=?::text AND kind=?
              AND status <> 'skipped' AND recorded_at > ?::timestamptz) AS campaign_used_24,
@@ -478,10 +500,14 @@ async function seatLedgerFacts(
       accepted: number;
       daily: Record<string, number> | string;
       pending_invites: number;
+      linked_seats: number;
+      identity_known: boolean;
       campaign_used_24: number;
       duplicate: boolean;
       suppression_reason: string | null;
     }>(
+      seat.workspaceId,
+      seat.seatKey,
       seat.workspaceId,
       seat.seatKey,
       scanKinds,
@@ -543,7 +569,9 @@ async function seatLedgerFacts(
     pendingInvites: row?.pending_invites ?? 0,
     campaignUsed24: row?.campaign_used_24 ?? 0,
     duplicate: row?.duplicate === true,
-    suppressionReason: row?.suppression_reason ?? null
+    suppressionReason: row?.suppression_reason ?? null,
+    linkedSeats: Number(row?.linked_seats ?? 1),
+    identityKnown: row?.identity_known === true
   };
 }
 
@@ -1032,6 +1060,24 @@ export async function evaluateLinkedInSafety(
     detail: duplicate
       ? `This seat already has a ${input.kind} logged against '${input.targetRef}'${scoped}${subject}. A second one is the thing the ledger's replay guard exists to prevent.`
       : `No prior ${input.kind} against '${input.targetRef}'${scoped}${subject}.`
+  });
+
+  // ONE LINKEDIN MEMBER, ONE BUDGET. Informational and always passing: every
+  // window above already counted each seat confirmed as this member, so any
+  // refusal belongs to those checks. This line only says whose sends were in
+  // the count -- as an integer, never as a name, target or workspace.
+  // lc-debt: `planPacing` (pacing.ts) still spreads each seat's own ceiling; the
+  // gate is the authority across linked seats. Upgrade path: feed linked-seat
+  // usage into planPacing so slots are not planned that the gate will refuse.
+  const otherLinkedSeats = Math.max(0, ledger.linkedSeats - 1);
+  checks.push({
+    check: 'linked-identity',
+    passed: true,
+    detail: !ledger.identityKnown
+      ? 'Trevra has not confirmed which LinkedIn member this seat signs in as, so the limits above count this seat only. Detect the account once to share one budget with any other workspace seat signed in as the same member.'
+      : otherLinkedSeats > 0
+        ? `Counts include ${otherLinkedSeats} other seat${otherLinkedSeats === 1 ? '' : 's'} signed in as the same LinkedIn member. Only counts are shared; no targets, messages or names cross the workspace boundary.`
+        : 'No other workspace seat signs in as this LinkedIn member, so limits count this seat alone.'
   });
 
   const failed = checks.find((entry) => !entry.passed);

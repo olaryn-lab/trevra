@@ -69,6 +69,7 @@ import {
   type LinkedInSeat,
   type SeatPosture
 } from './seats.js';
+import { recordSeatIdentity } from './identity.js';
 
 /**
  * The local Playwright worker (plan 4.5, 4.6): claim a due action, re-run the
@@ -5731,6 +5732,10 @@ export async function detectLinkedInSeat(
     now,
     seatKey
   );
+  // WHICH MEMBER THIS SEAT IS. The profile just read is the companion's own
+  // signed-in page, so it is the one fact that may link this seat's limits to
+  // another workspace's seat signed in as the same person (guard.ts).
+  await recordSeatIdentity(db, options.workspaceId, seatKey, read.profileUrl, now);
 
   return {
     detected: {
@@ -5738,7 +5743,7 @@ export async function detectLinkedInSeat(
       name: read.name,
       connectionsCount: read.connectionsCount
     },
-    seat,
+    seat: (await getSeat(db, options.workspaceId, seatKey)) ?? seat,
     degraded: accountChangeNote ? [accountChangeNote, ...read.degraded] : read.degraded,
     blocked: null,
     failureKind: null
