@@ -32,7 +32,7 @@ The Nango canonical sync surface is intentionally narrow. It accepts only GTM re
 
 ### Inbound mailbox message
 
-The `inbound-messages` syncs in `nango-integrations/` emit `message` records with four extra fields: `mailboxAddress`, `internetMessageId`, `replyToMessageIds` and `autoSubmitted`. Only those syncs set them. `externalUrl` stays optional.
+The `inbound-messages` syncs in `nango-integrations/` emit `message` records with four extra fields: `mailboxAddress`, `internetMessageId`, `replyToMessageIds` and `autoSubmitted`. Only those syncs set them. `internetMessageId` is optional: a message without a Message-ID header omits it. `externalUrl` stays optional.
 
 ```json
 {
@@ -59,7 +59,10 @@ A record that carries `mailboxAddress` is kept only when all three of these hold
 
 Anything else is dropped before Trevra writes source evidence, a message, a Person or a Conversation entry.
 
-The sync skips bulk and mailing-list mail. Unsubscribe requests that arrive as mail suppress the sender, with the sources `email_mailto_unsubscribe` and `email_reply_unsubscribe`.
+The sync skips bulk and mailing-list mail. It only delivers records; suppression from mail is done by Trevra's server-side ingest of those records, never by the sync:
+
+- A mailto unsubscribe (subject `unsubscribe <token>`) suppresses the recipient of the delivery the token names, not the sender of the request, because aliases and forwarding change the From address. The source is `email_mailto_unsubscribe`.
+- A reply asking to stop suppresses its sender only when it threads to an email Trevra sent (`replyToMessageIds` matches a recorded delivery's Message-ID). The source is `email_reply_unsubscribe`. An unthreaded request suppresses nobody and is shown in Today for the founder to review.
 
 ### Opportunity
 
