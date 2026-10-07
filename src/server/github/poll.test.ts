@@ -1,10 +1,11 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { id, openDatabase, type Db } from '../db.js';
 import { getToday } from '../today.js';
 import {
   ERROR_RETRY_MINUTES,
   GITHUB_POLL_BUDGET_MS,
   MAX_NEW_ACCOUNTS_PER_RUN,
+  MAX_STARGAZERS_LISTABLE,
   MAX_STAR_PAGES,
   NOT_FOUND_RETRY_HOURS,
   POLL_INTERVAL_MINUTES,
@@ -17,6 +18,14 @@ import {
   type WatchedRepository
 } from './repos.js';
 import type { GitHubRequest, GitHubResponse, GitHubTransport } from './transport.js';
+
+const notificationMock = vi.hoisted(() => ({
+  notifyIntegrationNeedsReauth: vi.fn(async () => undefined)
+}));
+vi.mock('../notifications.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../notifications.js')>()),
+  notifyIntegrationNeedsReauth: notificationMock.notifyIntegrationNeedsReauth
+}));
 
 /**
  * NO NETWORK, NO CLOCK. GitHub is a table of hand-written answers keyed by
@@ -217,6 +226,7 @@ function poll(transport: GitHubTransport, now = T0, workspaceId = WORKSPACE_ID) 
 }
 
 beforeEach(async () => {
+  notificationMock.notifyIntegrationNeedsReauth.mockClear();
   delete process.env.NANGO_GITHUB_INTEGRATION;
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   await resetWorkspace(WORKSPACE_ID);
@@ -786,6 +796,7 @@ describe('pollWorkspaceRepositories', () => {
     });
 
     expect(result.polled).toBe(1);
+    expect(result.deferredRepositories).toBe(1);
     expect(github.calls.some((call) => call.endpoint.startsWith(OTHER_PATH))).toBe(false);
     const [first, other] = await listWatchedRepositories(db, WORKSPACE_ID);
     expect(first).toMatchObject({ fullName: REPO, status: 'ok' });
@@ -842,7 +853,165 @@ describe('pollWorkspaceRepositories', () => {
       .get<{ lease_until: string | null }>(WORKSPACE_ID);
     expect(lease?.lease_until).toBeNull();
   });
+
+  it('counts the events a spent budget interrupted inside a profile lookup as deferred', async () => {
+    let elapsed = 0;
+    const base = lemoncrowRoutes();
+    const github = fakeGitHub({
+      ...base,
+      // Maya is the first lookup; her org lookup would be the next GitHub call.
+      '/users/maya': (call) => {
+        elapsed = GITHUB_POLL_BUDGET_MS + 1;
+        return base['/users/maya'](call);
+      }
+    });
+    const result = await pollWorkspaceRepositories(db, WORKSPACE_ID, {
+      transport: github,
+      now: T0,
+      clock: () => elapsed
+    });
+    expect(result.deferredRepositories).toBe(0);
+    expect(github.calls.map((call) => call.endpoint)).toEqual([
+      REPO_PATH,
+      `${REPO_PATH}/stargazers`,
+      '/users/maya'
+    ]);
+    // maya (interrupted), sam and lee: none processed, so the cursor has not passed them.
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      starsCursor: null,
+      nextPollAt: T0.toISOString(),
+      lastSummary: { stars: 0, deferred: 3 }
+    });
+    const buyer = await accountByDomain(WORKSPACE_ID, 'buyer.io');
+    expect(await signalRows(WORKSPACE_ID, buyer!.id)).toEqual([]);
+  });
+
+  it('defers every other repository to the reset time when the rate limit stops the first one', async () => {
+    const otherPath = await watchOther();
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        '/users/sam': () => ({
+          status: 403,
+          data: { message: 'API rate limit exceeded' },
+          headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(RESET_EPOCH) }
+        }),
+        [otherPath]: () => ok({ stargazers_count: 0, forks_count: 0 })
+      })
+    );
+    const result = await poll(github);
+    const resetAt = new Date(RESET_EPOCH * 1000).toISOString();
+    expect(result.rateLimitedUntil).toBe(resetAt);
+    expect(github.calls.some((call) => call.endpoint.startsWith(otherPath))).toBe(false);
+    const [first, other] = await listWatchedRepositories(db, WORKSPACE_ID);
+    // sam (interrupted) and lee are still ahead of the cursor.
+    expect(first).toMatchObject({
+      status: 'rate_limited',
+      starsCursor: '2026-10-05T09:00:00.000Z',
+      lastSummary: { stars: 1, deferred: 2 }
+    });
+    expect(other).toMatchObject({
+      fullName: 'lemoncrow-lab/other',
+      status: 'rate_limited',
+      lastError: null,
+      rateLimitedUntil: resetAt,
+      nextPollAt: resetAt,
+      lastPolledAt: null,
+      lastSummary: null
+    });
+  });
+
+  it('marks every other repository for reconnecting, and flips and notifies once, when the token is revoked', async () => {
+    const otherPath = await watchOther();
+    const github = fakeGitHub({
+      [REPO_PATH]: () => ({ status: 401, data: { message: 'Bad credentials' }, headers: {} }),
+      [otherPath]: () => ({ status: 401, data: { message: 'Bad credentials' }, headers: {} })
+    });
+    const result = await poll(github);
+    expect(result.connection).toBe('needs_reauth');
+    expect(github.calls.map((call) => call.endpoint)).toEqual([REPO_PATH]);
+    const [first, other] = await listWatchedRepositories(db, WORKSPACE_ID);
+    expect(first).toMatchObject({ status: 'needs_reauth', lastError: null });
+    expect(other).toMatchObject({
+      fullName: 'lemoncrow-lab/other',
+      status: 'needs_reauth',
+      lastError: null,
+      lastSummary: null
+    });
+    const connection = await db
+      .prepare('SELECT status FROM connections WHERE workspace_id=?')
+      .get<{ status: string }>(WORKSPACE_ID);
+    expect(connection?.status).toBe('needs_reauth');
+    expect(notificationMock.notifyIntegrationNeedsReauth).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the star listing of a repository too large to list, and still reads forks and issues', async () => {
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        [REPO_PATH]: () =>
+          ok({ stargazers_count: MAX_STARGAZERS_LISTABLE + 1, forks_count: 1 }, { etag: '"big"' })
+      })
+    );
+    await poll(github);
+    expect(github.calls.some((call) => call.endpoint.endsWith('/stargazers'))).toBe(false);
+    expect(github.calls.some((call) => call.endpoint.endsWith('/forks'))).toBe(true);
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      lastError: null,
+      starsCursor: null,
+      repoEtag: '"big"',
+      lastSummary: { stars: 0, forks: 1, issues: 1, burstTruncated: false }
+    });
+  });
+
+  it('releases the lease even when recording a failure itself fails', async () => {
+    const github: GitHubTransport = {
+      async get() {
+        throw new Error('socket hang up');
+      }
+    };
+    await expect(
+      pollWorkspaceRepositories(failFirstStatusWrite(db), WORKSPACE_ID, {
+        transport: github,
+        now: T0
+      })
+    ).rejects.toThrow('database went away');
+    const lease = await db
+      .prepare('SELECT lease_until FROM watched_repositories WHERE workspace_id=?')
+      .get<{ lease_until: string | null }>(WORKSPACE_ID);
+    expect(lease?.lease_until).toBeNull();
+  });
 });
+
+/** A second watched repository, claimed after the first. Returns its API path. */
+async function watchOther(): Promise<string> {
+  await watchRepository(
+    db,
+    { workspaceId: WORKSPACE_ID, actorUserId: null, fullName: 'lemoncrow-lab/other' },
+    new Date(T0.getTime() - 30_000)
+  );
+  return '/repos/lemoncrow-lab/other';
+}
+
+/** `db`, except the first repository write that sets a status fails once. */
+function failFirstStatusWrite(real: Db): Db {
+  let failed = false;
+  const wrapper = Object.create(real) as Db;
+  wrapper.prepare = (sql: string) => {
+    const statement = real.prepare(sql);
+    if (failed || !sql.startsWith('UPDATE watched_repositories SET') || !sql.includes('status=')) {
+      return statement;
+    }
+    return {
+      ...statement,
+      run: async () => {
+        failed = true;
+        throw new Error('database went away');
+      }
+    };
+  };
+  return wrapper;
+}
 
 function botIssues(count: number, oldestAt: string | null) {
   return Array.from({ length: count }, (_, index) => ({

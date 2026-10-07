@@ -50,6 +50,16 @@ export const BACKFILL_DAYS = DEFAULT_WINDOW_DAYS;
  * path is the `star` webhook, or a page cursor carried across runs.
  */
 export const MAX_STAR_PAGES = 3;
+/**
+ * GitHub is believed to refuse stargazer pages past 400 (100 per page), so a
+ * repository with more stars than this cannot reach its newest page and its
+ * star listing is skipped; forks and issues still run.
+ *
+ * lc-debt: the newest stars of very large repositories are beyond the REST
+ * listable range; upgrade path is GraphQL `stargazers(orderBy: {field:
+ * STARRED_AT, direction: DESC})`.
+ */
+export const MAX_STARGAZERS_LISTABLE = 40_000;
 /** Distinct GitHub people looked up per workspace run. Remembered people cost nothing. */
 export const MAX_PROFILE_LOOKUPS_PER_RUN = 40;
 /**
@@ -89,6 +99,8 @@ export interface WorkspacePollResult {
   polled: number;
   accountIds: string[];
   rateLimitedUntil: string | null;
+  /** Repositories claimed but not started because the run's time budget was spent; still due. */
+  deferredRepositories: number;
 }
 
 type TractionKind = 'repo-starred' | 'repo-forked' | 'repo-issue-opened';
@@ -215,7 +227,7 @@ async function listNewStars(
     etag: null,
     notModified: false
   };
-  if (stargazersCount <= 0) return listing;
+  if (stargazersCount <= 0 || stargazersCount > MAX_STARGAZERS_LISTABLE) return listing;
   let pagesRead = 0;
   for (let page = Math.ceil(stargazersCount / PAGE_SIZE); page >= 1; page -= 1) {
     if (pagesRead >= MAX_STAR_PAGES) {
@@ -554,7 +566,10 @@ async function processEvent(
 /**
  * Events oldest first. `advance` moves the cursor after each one, so an
  * exception (rate limit, revoked token) keeps everything already written.
- * Returns false when a per-run cap deferred the rest.
+ * Returns false when a per-run cap deferred the rest. A spent time budget or
+ * a rate limit hit mid-listing counts the unprocessed events (the interrupted
+ * one included: its lookup wrote nothing) as `deferred` and rethrows; the
+ * cursor never passes them.
  */
 async function processListing(
   db: Db,
@@ -569,7 +584,15 @@ async function processListing(
 ): Promise<boolean> {
   for (let index = 0; index < listing.events.length; index += 1) {
     const event = listing.events[index];
-    const outcome = await processEvent(db, workspaceId, repo, event, client, run, summary, now);
+    let outcome: 'done' | 'defer';
+    try {
+      outcome = await processEvent(db, workspaceId, repo, event, client, run, summary, now);
+    } catch (error) {
+      if (error instanceof PollBudgetSpentError || error instanceof GitHubRateLimitedError) {
+        summary.deferred += listing.events.length - index;
+      }
+      throw error;
+    }
     if (outcome === 'defer') {
       summary.deferred += listing.events.length - index;
       return false;
@@ -670,8 +693,8 @@ async function pollRepository(
  *
  * A run stops issuing GitHub calls once it has run GITHUB_POLL_BUDGET_MS:
  * the repository in flight keeps what it wrote and counts the rest as
- * `deferred`; repositories not yet started are released untouched and stay
- * due for the next automation tick.
+ * `deferred`; repositories not yet started are released untouched, stay due
+ * for the next automation tick, and are counted in `deferredRepositories`.
  */
 export async function pollWorkspaceRepositories(
   db: Db,
@@ -688,7 +711,8 @@ export async function pollWorkspaceRepositories(
     connection: connection.state,
     polled: 0,
     accountIds: [],
-    rateLimitedUntil: null
+    rateLimitedUntil: null,
+    deferredRepositories: 0
   };
   const repos = await claimDueRepositories(
     db,
@@ -773,6 +797,7 @@ async function pollClaimed(
   /** Out of time before starting: release untouched, still due next tick. */
   const releaseUntouched = async (rest: WatchedRepository[]): Promise<void> => {
     for (const repo of rest) await settle(repo.id, {});
+    result.deferredRepositories += rest.length;
   };
 
   for (let index = 0; index < repos.length; index += 1) {
