@@ -189,4 +189,13 @@ describe('EmailChannelSummary', () => {
     expect(render(channel(), { busy: 'recheck' })).toContain('Checking…');
     expect(render(channel(), { busy: 'inbound:conn_mail_1' })).toContain('Starting…');
   });
+
+  it('disables sibling controls while one is busy', () => {
+    const recheck = render(channel({ inbound: null }), { busy: 'recheck' });
+    expect(recheck).toMatch(/<button[^>]*disabled=""[^>]*>Use for inbound mail/);
+    const stop = render(channel({ inbound: inbound('syncing') }), { busy: 'stop' });
+    expect(stop).toMatch(/<button[^>]*disabled=""[^>]*>Re-check DNS/);
+    const inboundBusy = render(channel(), { busy: 'inbound:conn_mail_1' });
+    expect(inboundBusy).toMatch(/<button[^>]*disabled=""[^>]*>Re-check DNS/);
+  });
 });
