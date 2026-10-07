@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { Skill, SkillContext } from './types.js';
+import { SKILL_DRAFT_UNSUBSCRIBE_LINE } from '../email/compliance.js';
 import { critique, critiqueToInstructions, type Critique, type CriticOptions } from './voice.js';
 
 /**
@@ -19,7 +20,7 @@ import { critique, critiqueToInstructions, type Critique, type CriticOptions } f
  * separator to both the text and the HTML part.
  */
 
-const UNSUBSCRIBE_LINE = "Reply 'unsubscribe' to never hear from us again.";
+const UNSUBSCRIBE_LINE = SKILL_DRAFT_UNSUBSCRIBE_LINE;
 
 /**
  * Word budgets. The reference allowed 120 body words; the anti-slop critic in
@@ -84,7 +85,10 @@ export const DEFAULT_DRAFT_CONFIG: DraftConfig = {
 export function capWords(text: string, maxWords: number): string {
   const words = text.split(/\s+/).filter(Boolean);
   if (words.length <= maxWords) return text;
-  return `${words.slice(0, maxWords).join(' ').replace(/[,;:]+$/, '')}…`;
+  return `${words
+    .slice(0, maxWords)
+    .join(' ')
+    .replace(/[,;:]+$/, '')}…`;
 }
 
 export interface Draft {
@@ -200,7 +204,10 @@ function leadEvidence(lead: DraftLead): string[] {
   );
 }
 
-export async function draftOutreach(lead: DraftLead, options: DraftOptions = {}): Promise<DraftedEmail> {
+export async function draftOutreach(
+  lead: DraftLead,
+  options: DraftOptions = {}
+): Promise<DraftedEmail> {
   const config = options.config ?? DEFAULT_DRAFT_CONFIG;
   const evidence = leadEvidence(lead);
   let draft = templateDraft(lead, config);
@@ -229,9 +236,15 @@ export async function draftOutreach(lead: DraftLead, options: DraftOptions = {})
           `draft for ${lead.domain} failed the slop critic on attempt ${attempt}`,
           verdict.findings
         );
-        revision = { previous: { subject, bodyText }, instructions: critiqueToInstructions(verdict) };
+        revision = {
+          previous: { subject, bodyText },
+          instructions: critiqueToInstructions(verdict)
+        };
       } catch (cause) {
-        options.logger?.warn(`LLM draft failed for lead ${lead.domain}; falling back to template`, cause);
+        options.logger?.warn(
+          `LLM draft failed for lead ${lead.domain}; falling back to template`,
+          cause
+        );
         break;
       }
     }
@@ -291,7 +304,8 @@ export const outreachDraftSkill: Skill<DraftInput, DraftOutput> = {
     outputSchema
   },
   async run(input, ctx) {
-    if (!input.lead.contactEmail) throw new Error(`lead ${input.lead.domain} has no contact email; cannot draft outreach`);
+    if (!input.lead.contactEmail)
+      throw new Error(`lead ${input.lead.domain} has no contact email; cannot draft outreach`);
     const drafted = await draftOutreach(input.lead, { config: input.config, logger: ctx.logger });
     return { ...drafted, toEmail: input.lead.contactEmail };
   }

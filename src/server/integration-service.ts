@@ -28,6 +28,7 @@ import {
   type VerifiedEmailOutcome
 } from './email-outcomes.js';
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
+import { decideInboundMailboxRecord } from './email/inbound-mailbox.js';
 
 const canonicalRecordSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -40,7 +41,12 @@ const canonicalRecordSchema = z.discriminatedUnion('kind', [
     subject: z.string().default(''),
     body: z.string(),
     occurredAt: z.string().datetime(),
-    externalUrl: z.string().url().optional()
+    externalUrl: z.string().url().optional(),
+    // Set only by the inbound-messages sync (nango-integrations/*/syncs/inbound-messages.ts).
+    mailboxAddress: z.string().email().optional(),
+    internetMessageId: z.string().max(998).optional(),
+    replyToMessageIds: z.array(z.string().max(998)).max(50).optional(),
+    autoSubmitted: z.string().max(200).nullable().optional()
   }),
   z.object({
     kind: z.literal('opportunity'),
@@ -1217,6 +1223,78 @@ export interface IngestOptions {
   meetingOrigin?: 'booking';
 }
 
+/**
+ * A record from the designated inbound mailbox's Nango sync. Unlike the legacy
+ * message path it never creates a Person: mail that is not from a known Person,
+ * or did not arrive through the designated mailbox, is dropped before a single
+ * row is written.
+ */
+async function ingestInboundMailboxMessage(
+  db: Db,
+  workspaceId: string,
+  provider: string,
+  connectionId: string | null,
+  record: Extract<CanonicalRecord, { kind: 'message' }>
+): Promise<IngestOutcome> {
+  const now = new Date();
+  const decision = await decideInboundMailboxRecord(db, workspaceId, connectionId, record, now);
+  if (decision.action === 'ignore') return { stored: false };
+  const sourceId = await upsertSourceRecord(
+    db,
+    workspaceId,
+    connectionId,
+    provider,
+    record.kind,
+    record.id,
+    record.externalUrl ?? null,
+    record,
+    record.occurredAt
+  );
+  const accountId = await accountForPerson(db, workspaceId, decision.personId);
+  const existing = await db
+    .prepare('SELECT id FROM messages WHERE workspace_id=? AND source_record_id=?')
+    .get<{ id: string }>(workspaceId, sourceId);
+  const messageId = existing?.id ?? id('msg');
+  if (existing) {
+    await db
+      .prepare(
+        'UPDATE messages SET person_id=?,account_id=?,direction=?,subject=?,body=?,occurred_at=? WHERE id=? AND workspace_id=?'
+      )
+      .run(
+        decision.personId,
+        accountId,
+        'inbound',
+        record.subject,
+        record.body,
+        record.occurredAt,
+        messageId,
+        workspaceId
+      );
+  } else {
+    await db
+      .prepare(
+        'INSERT INTO messages (id,workspace_id,person_id,account_id,direction,subject,body,occurred_at,source_record_id,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
+      )
+      .run(
+        messageId,
+        workspaceId,
+        decision.personId,
+        accountId,
+        'inbound',
+        record.subject,
+        record.body,
+        record.occurredAt,
+        sourceId,
+        now.toISOString()
+      );
+  }
+  await projectCanonicalMessage(db, workspaceId, messageId, now, {
+    sourceType: 'inbound_mailbox_message',
+    outcomeKind: decision.outcomeKind
+  });
+  return { stored: true };
+}
+
 export async function ingestCanonicalRecord(
   db: Db,
   workspaceId: string,
@@ -1226,6 +1304,9 @@ export async function ingestCanonicalRecord(
   options?: IngestOptions
 ): Promise<IngestOutcome> {
   const record = canonicalRecordSchema.parse(input);
+  if (record.kind === 'message' && record.mailboxAddress) {
+    return ingestInboundMailboxMessage(db, workspaceId, provider, connectionId, record);
+  }
   const now = new Date().toISOString();
   if (record.kind === 'meeting') {
     return ingestMeeting(

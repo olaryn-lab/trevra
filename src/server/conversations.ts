@@ -1,5 +1,6 @@
 import { id, type Db } from './db.js';
 import { resolveContact } from './lead-capture/people.js';
+import type { VerifiedEmailOutcome } from './email-outcomes.js';
 
 export type ConversationChannel = 'linkedin' | 'email';
 export type ConversationDirection = 'inbound' | 'outbound';
@@ -251,13 +252,23 @@ export async function projectLinkedInThread(
   return conversation.id;
 }
 
-/** Project an existing canonical connected-email message into the shared view. */
+/**
+ * Project an existing canonical connected-email message into the shared view.
+ * `inbound_mailbox_message` marks mail read through the designated inbound
+ * mailbox; its outcome comes from the verified classifier instead of always
+ * being 'reply'.
+ */
 export async function projectCanonicalMessage(
   db: Db,
   workspaceId: string,
   messageId: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  options: {
+    sourceType?: 'legacy_message' | 'inbound_mailbox_message';
+    outcomeKind?: VerifiedEmailOutcome;
+  } = {}
 ): Promise<string | null> {
+  const sourceType = options.sourceType ?? 'legacy_message';
   const message = await db
     .prepare(
       `
@@ -272,6 +283,19 @@ export async function projectCanonicalMessage(
   if (!message?.person_id) return null;
   const provider = String(message.provider ?? '').toLowerCase();
   if (!['gmail', 'google-mail', 'microsoft', 'outlook'].includes(provider)) return null;
+  const externalRef = message.external_id ? String(message.external_id) : null;
+  if (externalRef) {
+    // lc-debt: a provider message reached through both a NANGO_SYNCS_* message sync and the inbound mailbox sync is projected once, by whichever path stored it first; upgrade path: retire the legacy message syncs once every workspace reads mail through the inbound mailbox.
+    const twin = await db
+      .prepare(
+        `SELECT conversation_id FROM conversation_messages
+         WHERE workspace_id=? AND channel='email' AND provider=? AND external_ref=?
+           AND source_type IN ('legacy_message','inbound_mailbox_message') AND source_type<>?
+         LIMIT 1`
+      )
+      .get<{ conversation_id: string }>(workspaceId, provider, externalRef, sourceType);
+    if (twin) return twin.conversation_id;
+  }
   const occurredAt = iso(message.occurred_at) ?? now.toISOString();
   const conversation = await ensureConversation(
     db,
@@ -286,7 +310,7 @@ export async function projectCanonicalMessage(
       INSERT INTO conversation_messages (
         id,workspace_id,conversation_id,channel,provider,direction,subject,body,external_ref,
         source_type,source_id,outcome_kind,verification_status,occurred_at,created_at
-      ) VALUES (?,?,?,'email',?,?,?,?,?,'legacy_message',?,?,'verified',?,?)
+      ) VALUES (?,?,?,'email',?,?,?,?,?,?,?,?,'verified',?,?)
       ON CONFLICT (workspace_id,source_type,source_id) DO UPDATE SET
         conversation_id=EXCLUDED.conversation_id,
         subject=EXCLUDED.subject,
@@ -304,9 +328,10 @@ export async function projectCanonicalMessage(
       message.direction === 'inbound' ? 'inbound' : 'outbound',
       message.subject ? String(message.subject) : null,
       String(message.body ?? ''),
-      message.external_id ? String(message.external_id) : null,
+      externalRef,
+      sourceType,
       String(message.id),
-      message.direction === 'inbound' ? 'reply' : null,
+      message.direction === 'inbound' ? (options.outcomeKind ?? 'reply') : null,
       occurredAt,
       String(message.created_at ?? now.toISOString())
     );
