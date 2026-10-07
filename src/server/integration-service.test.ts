@@ -40,7 +40,8 @@ const {
   listAvailableIntegrations,
   readConnectedEmailThreadEvents
 } = await import('./integration-service.js');
-const { createSuppression } = await import('./suppressions.js');
+const { createSuppression, findSuppression } = await import('./suppressions.js');
+const { resolveContact } = await import('./lead-capture/people.js');
 const { findUnsubscribeDelivery } = await import('./email/unsubscribe.js');
 
 type DbQueryable = ConstructorParameters<typeof Db>[0];
@@ -405,7 +406,12 @@ describe('connected mailbox threading', () => {
     nangoMock.post
       .mockResolvedValueOnce({ data: { id: 'gmail-first', threadId: 'thread-1' }, headers: {} })
       .mockResolvedValueOnce({ data: { id: 'gmail-second', threadId: 'thread-1' }, headers: {} });
-    nangoMock.get.mockResolvedValueOnce({ data: { threadId: 'thread-1' }, headers: {} });
+    // The post-send Message-ID read-back finds no header; the thread lookup answers.
+    nangoMock.get.mockImplementation(async (config: Record<string, unknown>) =>
+      (config.params as { format?: string } | undefined)?.format === 'minimal'
+        ? { data: { threadId: 'thread-1' }, headers: {} }
+        : { data: {}, headers: {} }
+    );
 
     const first = await executeConnectedAction(database, workspaceId, {
       type: 'email_draft',
@@ -432,7 +438,7 @@ describe('connected mailbox threading', () => {
       payload_hash: 'second-key'
     });
     expect(second).toEqual({ provider: 'gmail', externalRef: 'gmail-second' });
-    expect(nangoMock.get.mock.calls[0]?.[0]).toMatchObject({
+    expect(nangoMock.get.mock.calls[1]?.[0]).toMatchObject({
       endpoint: '/gmail/v1/users/me/messages/gmail-first',
       params: { format: 'minimal' }
     });
@@ -681,6 +687,98 @@ describe('connected mailbox threading', () => {
     expect(Buffer.from(String(followUp.data), 'base64').toString('utf8')).toContain(
       'References: <first@outlook.test>'
     );
+  });
+
+  it('stores the Message-ID Gmail actually sent, so a threaded reply to it suppresses', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    const now = new Date().toISOString();
+    await database
+      .prepare(
+        "INSERT INTO email_inbound_mailboxes (workspace_id,connection_id,address,sync_status,designated_at,updated_at) VALUES (?,?,'box@example.test','syncing',?,?)"
+      )
+      .run(workspaceId, connectionId, now, now);
+    await resolveContact(database, workspaceId, {
+      name: 'Lead Person',
+      email: 'lead@example.test'
+    });
+    nangoMock.post.mockResolvedValueOnce({ data: { id: 'gmail-readback' }, headers: {} });
+    nangoMock.get.mockResolvedValueOnce({
+      data: {
+        id: 'gmail-readback',
+        payload: {
+          headers: [{ name: 'Message-Id', value: ' <CAF.provider-1@mail.gmail.com> ' }]
+        }
+      },
+      headers: {}
+    });
+
+    await executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Hello',
+      body: 'Hi there',
+      structured_payload_json: '{}',
+      payload_hash: 'gmail-readback-key'
+    });
+
+    expect(nangoMock.get).toHaveBeenCalledTimes(1);
+    expect(nangoMock.get.mock.calls[0]?.[0]).toMatchObject({
+      endpoint: '/gmail/v1/users/me/messages/gmail-readback',
+      providerConfigKey: 'trevra-gmail',
+      connectionId: 'gmail-external',
+      params: { format: 'metadata', metadataHeaders: 'Message-ID' }
+    });
+    expect(
+      await database
+        .prepare(
+          'SELECT status,internet_message_id FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?'
+        )
+        .get(workspaceId, 'gmail-readback-key')
+    ).toEqual({ status: 'sent', internet_message_id: '<CAF.provider-1@mail.gmail.com>' });
+
+    await ingestCanonicalRecord(database, workspaceId, 'gmail', connectionId, {
+      kind: 'message',
+      id: 'gmail-readback-reply',
+      personEmail: 'lead@example.test',
+      personName: 'Lead Person',
+      direction: 'inbound',
+      subject: 'Re: Hello',
+      body: 'Please unsubscribe me.',
+      occurredAt: new Date().toISOString(),
+      mailboxAddress: 'box@example.test',
+      replyToMessageIds: ['<CAF.provider-1@mail.gmail.com>']
+    });
+    expect(
+      await findSuppression(database, workspaceId, { channel: 'email', email: 'lead@example.test' })
+    ).toMatchObject({ source: 'email_reply_unsubscribe' });
+  });
+
+  it('keeps the generated Message-ID and the sent delivery when the Gmail read-back fails', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    nangoMock.post.mockResolvedValueOnce({ data: { id: 'gmail-readback-fail' }, headers: {} });
+    nangoMock.get.mockRejectedValueOnce(new Error('Gmail metadata read failed'));
+
+    const result = await executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Hello',
+      body: 'Hi there',
+      structured_payload_json: '{}',
+      payload_hash: 'gmail-readback-fail-key'
+    });
+
+    expect(result).toEqual({ provider: 'gmail', externalRef: 'gmail-readback-fail' });
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    expect(nangoMock.get).toHaveBeenCalledTimes(1);
+    expect(
+      await database
+        .prepare(
+          'SELECT status,internet_message_id FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?'
+        )
+        .get(workspaceId, 'gmail-readback-fail-key')
+    ).toEqual({ status: 'sent', internet_message_id: '<gmail-readback-fail-key@trevra.app>' });
   });
 
   it('keeps the pre-Phase-D path for outreach not approved with one-click unsubscribe', async () => {

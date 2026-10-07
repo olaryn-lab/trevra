@@ -4,6 +4,7 @@ import { createAccount } from './accounts/store.js';
 import { ensureDefaultAgent } from './agents.js';
 import { pauseSeat, upsertSeat } from './linkedin/seats.js';
 import { getToday } from './today.js';
+import { createSuppression } from './suppressions.js';
 import { runRecommendationEngine } from './recommendation-engine.js';
 
 const WORKSPACE = 'ws_today_projection_test';
@@ -903,6 +904,66 @@ describe('getToday', () => {
         metadata: expect.objectContaining({ channel: 'email', inboundMailbox: true })
       })
     ]);
+  });
+
+  it('asks the founder to review an unthreaded unsubscribe from a known Person', async () => {
+    await db
+      .prepare(
+        `INSERT INTO contacts
+         (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES ('con_today_unsub',?,'Nora Frei','nora@client.test','nora@client.test',?,?)`
+      )
+      .run(WORKSPACE, '2026-08-21T07:00:00.000Z', '2026-08-21T07:45:00.000Z');
+    await db
+      .prepare(
+        `INSERT INTO conversations
+         (id,workspace_id,person_id,status,last_activity_at,created_at,updated_at)
+         VALUES ('conv_today_unsub',?,'con_today_unsub','open',?,?,?)`
+      )
+      .run(
+        WORKSPACE,
+        '2026-08-21T07:45:00.000Z',
+        '2026-08-21T07:00:00.000Z',
+        '2026-08-21T07:45:00.000Z'
+      );
+    await db
+      .prepare(
+        `INSERT INTO conversation_messages
+         (id,workspace_id,conversation_id,channel,provider,direction,body,source_type,source_id,
+          outcome_kind,verification_status,occurred_at,created_at)
+         VALUES ('cmsg_today_unsub',?,'conv_today_unsub','email','gmail','inbound',
+                 'Please remove me from your list','inbound_mailbox_message','msg_today_unsub',
+                 'unsubscribe','verified','2026-08-21T07:45:00.000Z','2026-08-21T07:45:00.000Z')`
+      )
+      .run(WORKSPACE);
+
+    const today = await getToday(db, WORKSPACE, NOW);
+
+    expect(today.needsAttention).toEqual([
+      expect.objectContaining({
+        id: 'email-reply:cmsg_today_unsub',
+        kind: 'verified_reply',
+        title: 'Nora Frei may want to unsubscribe',
+        detail: expect.stringMatching(/nobody was suppressed.*Please remove me from your list/),
+        reference: { type: 'conversation_message', id: 'cmsg_today_unsub' },
+        metadata: expect.objectContaining({
+          channel: 'email',
+          inboundMailbox: true,
+          unsubscribeReview: true,
+          personId: 'con_today_unsub'
+        })
+      })
+    ]);
+
+    // Once the Person is suppressed there is nothing left to decide.
+    await createSuppression(db, {
+      workspaceId: WORKSPACE,
+      channel: 'email',
+      personId: 'con_today_unsub',
+      reason: 'Founder confirmed the unsubscribe',
+      source: 'test'
+    });
+    expect((await getToday(db, WORKSPACE, NOW)).needsAttention).toEqual([]);
   });
 
   it('never leaks another workspace into the projection', async () => {

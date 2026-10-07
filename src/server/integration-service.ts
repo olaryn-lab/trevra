@@ -937,16 +937,76 @@ export async function executeConnectedAction(
       retries: 0,
       data: { raw, ...(threadId ? { threadId } : {}) }
     });
+    const gmailMessageId = String(response.data.id ?? '').trim();
     const outcome = {
       provider: 'gmail',
-      externalRef: String(response.data.id ?? id('gmail')),
-      internetMessageId: `<${idempotencyKey}@trevra.app>`
+      externalRef: gmailMessageId || id('gmail'),
+      internetMessageId:
+        (gmailMessageId
+          ? await readGmailMessageIdHeader(nango, {
+              providerConfigKey,
+              connectionId,
+              messageId: gmailMessageId
+            })
+          : null) ?? `<${idempotencyKey}@trevra.app>`
     };
     await markEmailDeliverySent(db, deliveryId, outcome);
     return { provider: outcome.provider, externalRef: outcome.externalRef };
   } catch (error) {
     await markEmailDeliveryFailure(db, deliveryId, error);
     throw error;
+  }
+}
+
+/** Upper bound on the post-send Message-ID read; the send has already happened. */
+export const GMAIL_MESSAGE_ID_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * One RFC 5322 msg-id, normalised exactly as the inbound-messages sync
+ * normalises In-Reply-To/References (nango-integrations/shared/inbound-email.ts
+ * parseMessageIds + its 998-char bound), so a threaded reply compares equal.
+ */
+function normalizedMessageId(value: string): string | null {
+  const match = /<[^<>\s]+>/.exec(value);
+  return match ? match[0].slice(0, 998) : null;
+}
+
+/**
+ * Gmail may replace the Message-ID Trevra wrote, so replies thread to the id
+ * Gmail actually sent. Read it back once after a successful send. Any failure
+ * or timeout returns null and the caller keeps the generated id: the email has
+ * already left, so this must never fail or retry the send.
+ *
+ * lc-debt: a timed-out read is abandoned, not aborted (the Nango SDK proxy takes
+ * no AbortSignal); upgrade path is passing an AbortSignal once the SDK accepts one.
+ */
+async function readGmailMessageIdHeader(
+  nango: ReturnType<typeof getNango>,
+  input: { providerConfigKey: string; connectionId: string; messageId: string }
+): Promise<string | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const timedOut = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), GMAIL_MESSAGE_ID_READ_TIMEOUT_MS);
+    });
+    const read = nango
+      .get<{ payload?: { headers?: Array<{ name?: string; value?: string }> } }>({
+        endpoint: `/gmail/v1/users/me/messages/${encodeURIComponent(input.messageId)}`,
+        providerConfigKey: input.providerConfigKey,
+        connectionId: input.connectionId,
+        retries: 0,
+        params: { format: 'metadata', metadataHeaders: 'Message-ID' }
+      })
+      .then((response) =>
+        normalizedMessageId(headerValue(response.data?.payload?.headers, 'Message-ID'))
+      );
+    // A late rejection after the timeout won must not become unhandled.
+    read.catch(() => undefined);
+    return await Promise.race([read, timedOut]);
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

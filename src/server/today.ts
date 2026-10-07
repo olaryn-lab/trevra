@@ -361,7 +361,7 @@ export async function getToday(
   const emailReplyRows = await db
     .prepare(
       `SELECT c.id AS conversation_id,m.id AS message_id,m.body,m.occurred_at,m.source_type,
-              p.id AS person_id,p.name AS person_name,p.email AS person_email
+              m.outcome_kind,p.id AS person_id,p.name AS person_name,p.email AS person_email
        FROM conversations c
        JOIN contacts p ON p.workspace_id=c.workspace_id AND p.id=c.person_id
        JOIN LATERAL (
@@ -373,7 +373,22 @@ export async function getToday(
          LIMIT 1
        ) m ON TRUE
        WHERE c.workspace_id=? AND m.channel='email' AND m.direction='inbound'
-         AND m.verification_status='verified' AND m.outcome_kind='reply'
+         AND m.verification_status='verified'
+         AND (
+           m.outcome_kind='reply'
+           -- An unsubscribe that did not thread to Trevra's own mail suppressed
+           -- nobody (only a threaded one is verified intent). A founder decides.
+           OR (
+             m.outcome_kind='unsubscribe' AND m.source_type='inbound_mailbox_message'
+             AND NOT EXISTS (
+               SELECT 1 FROM suppressions s
+               WHERE s.workspace_id=c.workspace_id AND s.lifted_at IS NULL
+                 AND s.channel IN ('all','email')
+                 AND (s.person_id=p.id
+                      OR (p.email_normalized IS NOT NULL AND s.email_normalized=p.email_normalized))
+             )
+           )
+         )
        ORDER BY m.occurred_at ASC,c.id ASC LIMIT 50`
     )
     .all<Record<string, unknown>>(workspaceId);
@@ -494,15 +509,22 @@ export async function getToday(
       String(row.person_email ?? '').trim() ||
       'Email reply';
     const inboundMailbox = row.source_type === 'inbound_mailbox_message';
+    const unsubscribeReview = row.outcome_kind === 'unsubscribe';
+    const excerpt = String(row.body ?? '')
+      .trim()
+      .slice(0, 240);
     items.push({
       id: `email-reply:${String(row.message_id)}`,
       kind: 'verified_reply',
       priority: 20,
-      title: inboundMailbox ? `New email from ${name}` : `Reply from ${name}`,
-      detail:
-        String(row.body ?? '')
-          .trim()
-          .slice(0, 240) || 'A verified inbound email needs review.',
+      title: unsubscribeReview
+        ? `${name} may want to unsubscribe`
+        : inboundMailbox
+          ? `New email from ${name}`
+          : `Reply from ${name}`,
+      detail: unsubscribeReview
+        ? `This email did not reply to one Trevra sent, so nobody was suppressed. Review it and suppress ${name} if they asked to stop.${excerpt ? ` "${excerpt}"` : ''}`
+        : excerpt || 'A verified inbound email needs review.',
       href: '/outreach/inbox',
       observedAt: iso(row.occurred_at, now),
       reference: { type: 'conversation_message', id: String(row.message_id) },
@@ -510,7 +532,8 @@ export async function getToday(
         conversationId: String(row.conversation_id),
         personId: String(row.person_id),
         channel: 'email',
-        inboundMailbox
+        inboundMailbox,
+        unsubscribeReview
       }
     });
   }
