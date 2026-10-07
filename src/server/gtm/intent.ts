@@ -11,6 +11,8 @@ import {
   type CaptureSourceRecord
 } from '../lead-capture/types.js';
 import { secretsConfigured } from '../secrets/crypto.js';
+import { emailComplianceProvider } from '../email/compliance.js';
+import { emailOutreachReadiness } from '../email/outreach.js';
 import {
   DEFAULT_LINKEDIN_OUTREACH_WORKFLOW_NAME,
   prepareOutreach,
@@ -412,21 +414,9 @@ function finalizePlan(plan: Omit<GtmPlan, 'planHash'>): GtmPlan {
   return { ...plan, planHash: canonicalPayloadHash(plan) };
 }
 
-async function prepareOutreachPlan(
-  db: Db,
-  workspaceId: string,
-  intent: GtmIntent
-): Promise<GtmPlan> {
+/** People-source blockers shared by the LinkedIn and email outreach plans. */
+function peopleBlockers(intent: GtmIntent): GtmPlanBlocker[] {
   const blockers: GtmPlanBlocker[] = [];
-  const requestedChannels = intent.channels?.length ? intent.channels : ['linkedin'];
-  if (requestedChannels.length !== 1 || requestedChannels[0] !== 'linkedin') {
-    blockers.push({
-      code: 'prepare_outreach_linkedin_only',
-      message: 'The generic preparation compiler currently prepares LinkedIn outreach only.',
-      actionHref: '/outreach/new'
-    });
-  }
-
   const existingListId = intent.people?.existingListId ?? null;
   const uploadedInputRef = intent.people?.uploadedInputRef ?? null;
   if (!existingListId && !uploadedInputRef) {
@@ -451,6 +441,29 @@ async function prepareOutreachPlan(
       actionHref: '/outreach/new'
     });
   }
+  return blockers;
+}
+
+async function prepareOutreachPlan(
+  db: Db,
+  workspaceId: string,
+  intent: GtmIntent
+): Promise<GtmPlan> {
+  const requestedChannels = intent.channels?.length ? intent.channels : ['linkedin'];
+  if (requestedChannels.length === 1 && requestedChannels[0] === 'email') {
+    return emailOutreachPlan(db, workspaceId, intent);
+  }
+  const blockers: GtmPlanBlocker[] = [];
+  if (requestedChannels.length !== 1 || requestedChannels[0] !== 'linkedin') {
+    blockers.push({
+      code: 'prepare_outreach_single_channel',
+      message: 'Prepare outreach for one channel at a time: LinkedIn or email.',
+      actionHref: '/outreach/new'
+    });
+  }
+  blockers.push(...peopleBlockers(intent));
+
+  const existingListId = intent.people?.existingListId ?? null;
 
   const seats = await listSeats(db, workspaceId);
   let senderKey: string | null = seats.length === 1 ? seats[0]!.seatKey : null;
@@ -536,6 +549,83 @@ async function prepareOutreachPlan(
       approvalRequired: true
     },
     next: { kind: 'review_outreach_plan', href: '/outreach/new' }
+  });
+}
+
+async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent): Promise<GtmPlan> {
+  const blockers = peopleBlockers(intent);
+  const existingListId = intent.people?.existingListId ?? null;
+  const readiness = await emailOutreachReadiness(db, workspaceId, { leadListId: existingListId });
+  blockers.push(...readiness.blockers);
+  const compliance = await emailComplianceProvider().blockers(
+    db,
+    workspaceId,
+    existingListId ?? null
+  );
+  blockers.push(
+    ...compliance.map((code) => ({
+      code,
+      message:
+        'Outreach email needs a compliance footer (legal name, postal address, opt-out). Complete sender compliance in Workspace settings.',
+      actionHref: '/setup/workspace'
+    }))
+  );
+  const sender = readiness.sender;
+  const listLabel = readiness.listName ?? 'the selected People list';
+  return finalizePlan({
+    objective: 'prepare_outreach',
+    intent,
+    summary: existingListId
+      ? `Email ${readiness.recipientCount} People in ${listLabel}${sender ? ` from ${sender.address}` : ''}`
+      : 'Prepare outreach email from known People',
+    steps: [
+      {
+        kind: 'people',
+        title: 'People',
+        detail: existingListId
+          ? `Write only to People in ${listLabel} who have an email address and are not marked do-not-contact. Suppressed, already-emailed and already-pending People are skipped.`
+          : 'Resolve the supplied People input without inventing identities.',
+        externalEffect: false
+      },
+      {
+        kind: 'sender',
+        title: 'Sender',
+        detail: sender
+          ? `Send from ${sender.address}. SPF, DKIM and DMARC for its domain must pass.`
+          : 'Connect exactly one Gmail or Microsoft 365 mailbox to send from.',
+        externalEffect: false
+      },
+      {
+        kind: 'approval',
+        title: 'Emails ready for review',
+        detail:
+          'Prepare one first-touch email per Person. Each waits for your approval of its exact text. Preparing sends nothing.',
+        externalEffect: false
+      },
+      {
+        kind: 'send',
+        title: 'Send after approval',
+        detail:
+          'Each approved email leaves from the approved mailbox with a one-click unsubscribe link.',
+        externalEffect: true
+      }
+    ],
+    blockers,
+    defaults: {
+      channel: 'email',
+      leadListId: existingListId,
+      connectionId: sender?.connectionId ?? null,
+      senderAddress: sender?.address ?? null,
+      recipientCount: readiness.recipientCount,
+      warnings: readiness.warnings,
+      prepareSupported: blockers.length === 0 && Boolean(existingListId && sender)
+    },
+    consequences: {
+      createsInternalState: true,
+      externalWrites: false,
+      approvalRequired: true
+    },
+    next: { kind: 'review_email_approvals', href: '/ledger' }
   });
 }
 
@@ -844,6 +934,10 @@ export async function prepareGtmPlan(
       'This objective is inspectable but is not yet composed through the generic prepare boundary.',
       409
     );
+  }
+
+  if (current.defaults.channel === 'email') {
+    throw new GtmPlanError('Email outreach preparation is not available yet.', 409);
   }
 
   const existingLeadListId = current.intent.people?.existingListId;
