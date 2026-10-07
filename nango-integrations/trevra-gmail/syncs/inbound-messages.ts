@@ -2,10 +2,12 @@ import { createSync } from 'nango';
 import * as z from 'zod';
 import {
   BACKFILL_MS,
+  INBOUND_ADDRESS_METADATA_KEY,
   INBOUND_EMAIL_MESSAGE_MODEL,
   MAX_MESSAGES_PER_RUN,
   OVERLAP_MS,
   buildInboundRecord,
+  decodePartData,
   headerValue,
   htmlToText,
   normalizeAddress,
@@ -35,7 +37,7 @@ type GmailMessage = {
 function partText(part: GmailPart | undefined, mimeType: string): string | null {
   if (!part) return null;
   if (part.mimeType === mimeType && part.body?.data) {
-    return Buffer.from(part.body.data, 'base64url').toString('utf8');
+    return decodePartData(part.body.data, part.headers);
   }
   for (const child of part.parts ?? []) {
     const found = partText(child, mimeType);
@@ -63,7 +65,7 @@ export default createSync({
   checkpoint: z.object({ sinceMs: z.number() }),
   exec: async (nango) => {
     const metadata = await nango.getMetadata();
-    const expected = normalizeAddress(metadata?.trevraInboundAddress);
+    const expected = normalizeAddress(metadata?.[INBOUND_ADDRESS_METADATA_KEY]);
     if (!expected) {
       throw new Error('trevraInboundAddress metadata is missing. Designate the mailbox in Trevra.');
     }
@@ -83,6 +85,7 @@ export default createSync({
     const ids: string[] = [];
     let pageToken: string | undefined;
     do {
+      // lc-debt: reads only the inbox at run time; a reply archived or filtered out of the inbox before the next 15-minute run is never read. Upgrade path: query all mail minus sent/drafts/spam/trash (Gmail) or /me/messages excluding those folders (Graph), after deciding the wider stranger-mail exposure in Nango.
       const page = await nango.get<{ messages?: Array<{ id: string }>; nextPageToken?: string }>({
         endpoint: '/gmail/v1/users/me/messages',
         params: {
@@ -118,6 +121,7 @@ export default createSync({
       const message = response.data;
       const headers = message.payload?.headers ?? [];
       const occurredMs = Number(message.internalDate ?? Number.NaN);
+      // lc-debt: emits the body of every person-to-person message, including ones that are not replies to Trevra deliveries (Nango retains them until the connection is deleted); these should be headers-only records. Upgrade path: filter by reply metadata (In-Reply-To/References against Trevra delivery ids) in the sync.
       const record = buildInboundRecord({
         id: message.id,
         mailboxAddress: expected,

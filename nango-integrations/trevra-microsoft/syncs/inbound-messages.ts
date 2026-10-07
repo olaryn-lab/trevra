@@ -2,8 +2,10 @@ import { createSync } from 'nango';
 import * as z from 'zod';
 import {
   BACKFILL_MS,
+  INBOUND_ADDRESS_METADATA_KEY,
   INBOUND_EMAIL_MESSAGE_MODEL,
   MAX_MESSAGES_PER_RUN,
+  OVERLAP_MS,
   buildInboundRecord,
   htmlToText,
   normalizeAddress,
@@ -46,7 +48,7 @@ export default createSync({
   checkpoint: z.object({ since: z.string() }),
   exec: async (nango) => {
     const metadata = await nango.getMetadata();
-    const expected = normalizeAddress(metadata?.trevraInboundAddress);
+    const expected = normalizeAddress(metadata?.[INBOUND_ADDRESS_METADATA_KEY]);
     if (!expected) {
       throw new Error('trevraInboundAddress metadata is missing. Designate the mailbox in Trevra.');
     }
@@ -61,10 +63,14 @@ export default createSync({
       );
     }
 
+    const startedAt = Date.now();
     const checkpoint = await nango.getCheckpoint();
-    const since = checkpoint?.since ?? new Date(Date.now() - BACKFILL_MS).toISOString();
-    let latestMs = Date.parse(since);
+    const since = checkpoint?.since ?? new Date(startedAt - BACKFILL_MS).toISOString();
+    const sinceMs = Date.parse(since);
+    let latestMs = sinceMs;
     let read = 0;
+    let exhausted = true;
+    // lc-debt: reads only the inbox at run time; a reply archived or filtered out of the inbox before the next 15-minute run is never read. Upgrade path: query all mail minus sent/drafts/spam/trash (Gmail) or /me/messages excluding those folders (Graph), after deciding the wider stranger-mail exposure in Nango.
     for await (const page of nango.paginate<GraphMessage>({
       endpoint: '/v1.0/me/mailFolders/inbox/messages',
       // Immutable ids keep a record's id stable when the user files the message.
@@ -86,6 +92,7 @@ export default createSync({
     })) {
       const records: InboundEmailRecord[] = [];
       for (const message of page) {
+        // lc-debt: emits the body of every person-to-person message, including ones that are not replies to Trevra deliveries (Nango retains them until the connection is deleted); these should be headers-only records. Upgrade path: filter by reply metadata (In-Reply-To/References against Trevra delivery ids) in the sync.
         const record = buildInboundRecord({
           id: message.id,
           mailboxAddress: expected,
@@ -105,7 +112,16 @@ export default createSync({
       // `ge` re-reads the boundary message next run; record ids make that idempotent.
       await nango.saveCheckpoint({ since: new Date(latestMs).toISOString() });
       read += page.length;
-      if (read >= MAX_MESSAGES_PER_RUN) break;
+      if (read >= MAX_MESSAGES_PER_RUN) {
+        exhausted = false;
+        break;
+      }
+    }
+    if (exhausted) {
+      // Re-read the last few minutes next run for late-indexed mail, like Gmail.
+      await nango.saveCheckpoint({
+        since: new Date(Math.max(sinceMs, Math.min(latestMs, startedAt - OVERLAP_MS))).toISOString()
+      });
     }
   }
 });

@@ -143,6 +143,15 @@ export function isBulkMail(headers: readonly MailHeader[], subject: string): boo
   return precedence === 'bulk' || precedence === 'list' || precedence === 'junk';
 }
 
+/** Gmail part bodies are base64url; honour the part's Content-Type charset (latin1 family, else utf8). */
+export function decodePartData(data: string, headers: readonly MailHeader[] = []): string {
+  const charset = /charset\s*=\s*"?([^";\s]+)/i.exec(
+    headerValue(headers, 'Content-Type') ?? ''
+  )?.[1];
+  const latin1 = charset ? /^(iso-8859-1|latin1|windows-1252)$/i.test(charset) : false;
+  return Buffer.from(data, 'base64url').toString(latin1 ? 'latin1' : 'utf8');
+}
+
 export function htmlToText(html: string): string {
   return html
     .replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, '')
@@ -163,8 +172,6 @@ export function htmlToText(html: string): string {
  * One provider message as a canonical record, or null when it is not a
  * person-to-person message to this mailbox. Trevra still re-checks everything
  * server-side (decideInboundMailboxRecord); this only avoids shipping noise.
- *
- * lc-debt: headers-only records are emitted for messages that are not replies to Trevra deliveries; upgrade path = filter by reply metadata in the sync
  */
 export function buildInboundRecord(input: {
   id: string;

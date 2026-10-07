@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { INBOUND_ADDRESS_METADATA_KEY } from './inbound-email.js';
 
 /**
  * Field-for-field the InboundEmailRecord type in ./inbound-email.ts, which is
@@ -23,5 +24,5 @@ export const InboundEmailMessage = z.object({
 
 /** Written by Trevra (designateInboundMailbox) before it starts the sync. */
 export const InboundSyncMetadata = z.object({
-  trevraInboundAddress: z.string()
+  [INBOUND_ADDRESS_METADATA_KEY]: z.string()
 });

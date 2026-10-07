@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import {
@@ -9,6 +10,9 @@ import {
   UNSUBSCRIBE_SUBJECT_PATTERN as SYNC_UNSUBSCRIBE_PATTERN,
   buildInboundRecord,
   decodeMimeWords,
+  decodePartData,
+  headerValue,
+  htmlToText,
   isBulkMail,
   normalizeAddress,
   parseAddress,
@@ -60,6 +64,58 @@ describe('inbound-messages sync helpers', () => {
     expect(SYNC_NAME).toBe(INBOUND_SYNC_NAME);
     expect(SYNC_MODEL_NAME).toBe(INBOUND_EMAIL_MESSAGE_MODEL);
     expect(SYNC_METADATA_KEY).toBe(INBOUND_ADDRESS_METADATA_KEY);
+  });
+
+  it('has a sync file per integration that uses the shared constants and model', () => {
+    const root = new URL('../../../nango-integrations/', import.meta.url);
+    for (const integration of ['trevra-gmail', 'trevra-microsoft']) {
+      const source = readFileSync(
+        new URL(`${integration}/syncs/${INBOUND_SYNC_NAME}.ts`, root),
+        'utf8'
+      );
+      expect(source).toContain('models: { InboundEmailMessage }');
+      expect(source).toContain('INBOUND_EMAIL_MESSAGE_MODEL');
+      expect(source).toContain('metadata?.[INBOUND_ADDRESS_METADATA_KEY]');
+    }
+    const model = readFileSync(new URL('shared/inbound-model.ts', root), 'utf8');
+    expect(model).toContain(`export const ${INBOUND_EMAIL_MESSAGE_MODEL} =`);
+    expect(model).toContain('[INBOUND_ADDRESS_METADATA_KEY]');
+  });
+
+  it('reads headers case-insensitively and unfolds multi-line References', () => {
+    expect(headerValue([header('MESSAGE-id', '<a@x.test>')], 'Message-ID')).toBe('<a@x.test>');
+    expect(headerValue([], 'Message-ID')).toBeNull();
+    const record = buildInboundRecord({
+      ...base,
+      headers: [header('references', '<a@x.test>\r\n\t<b@x.test>\r\n <c@x.test>')]
+    });
+    expect(record!.replyToMessageIds).toEqual(['<c@x.test>', '<b@x.test>', '<a@x.test>']);
+  });
+
+  it('converts html to text without double-decoding entities', () => {
+    expect(htmlToText('<p>a &amp;lt; b</p><style>x{}</style><br>c &amp; d')).toBe(
+      'a &lt; b\n\nc & d'
+    );
+    expect(htmlToText('1 &lt; 2 &nbsp;&quot;ok&quot;')).toBe('1 < 2  "ok"');
+  });
+
+  it('passes Auto-Submitted values through', () => {
+    const record = buildInboundRecord({
+      ...base,
+      headers: [header('Auto-Submitted', ' auto-replied ')]
+    });
+    expect(record!.autoSubmitted).toBe('auto-replied');
+  });
+
+  it('decodes Gmail part data by the declared charset', () => {
+    const data = Buffer.from([0x63, 0x61, 0x66, 0xe9]).toString('base64url');
+    const type = (value: string) => [header('Content-Type', value)];
+    expect(decodePartData(data, type('text/plain; charset="ISO-8859-1"'))).toBe('café');
+    expect(decodePartData(data, type('text/plain; charset=windows-1252'))).toBe('café');
+    expect(decodePartData(data, type('text/plain; charset=UTF-8'))).toBe('caf�');
+    expect(decodePartData(data)).toBe('caf�');
+    const utf8 = Buffer.from('café', 'utf8').toString('base64url');
+    expect(decodePartData(utf8, type('text/plain'))).toBe('café');
   });
 
   it('decodes RFC 2047 names and subjects', () => {

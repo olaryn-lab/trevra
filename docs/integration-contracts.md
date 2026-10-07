@@ -104,7 +104,7 @@ Records that cannot be read (an unsupported model, or a calendar event in a shap
 
 The read-only `inbound-messages` sync (model `InboundEmailMessage`) runs on the `trevra-gmail` and `trevra-microsoft` integrations from `nango-integrations/`. Trevra starts it when a workspace designates its inbound mailbox, and it emits canonical `message` records with `mailboxAddress` set. A record with that model but no `mailboxAddress` is skipped, never ingested. The sync drops list and bulk mail and mail sent from the mailbox itself; Trevra re-checks every record server-side and keeps only senders it already knows.
 
-Nango's self-hosted record store retains synced message records until the connection is deleted. Trevra's own tables never store strangers' mail.
+Nango's self-hosted record store retains synced message records, including message bodies, until the connection is deleted. Trevra's own tables never store strangers' mail.
 
 ## Inbound website lead capture
 
