@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { id, type Db } from '../db.js';
 import { appendDomainEvent } from '../control-plane/events.js';
-import { resolveContact, resolveExplicitAccount } from './people.js';
+import { normalizeContactEmail, resolveContact, resolveExplicitAccount } from './people.js';
 import { recordLawfulBasis } from '../compliance/lawful-basis.js';
 import type {
   CaptureSourceRecord,
@@ -233,7 +233,15 @@ export async function acceptInboundSubmission(
     // this person, with the submission as its evidence. Recorded in the same
     // transaction, so it exists exactly when the submission does. A consent
     // timestamp in the future is never trusted; receipt time is used instead.
-    if (input.body.consent?.marketingEmail === true && input.body.person.email) {
+    // Only when the stored address is the one this capture carried: a person
+    // matched by phone or id may hold a different address, which this consent
+    // does not cover.
+    if (
+      input.body.consent?.marketingEmail === true &&
+      normalizeContactEmail(input.body.person.email) !== null &&
+      normalizeContactEmail(input.body.person.email) ===
+        normalizeContactEmail(resolved.contact.email)
+    ) {
       const capturedAt = input.body.consent.capturedAt;
       await recordLawfulBasis(
         tx,

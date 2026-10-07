@@ -453,6 +453,51 @@ describe('generic lead capture', () => {
       .all<{ id: string }>(WORKSPACE_A, declined.body.personId);
     expect(none).toEqual([]);
   });
+
+  it('does not attach consent to a stored address the capture did not carry', async () => {
+    await intake(sourceSecret, 'idem-mismatch-001', {
+      kind: 'contact_message',
+      person: { email: 'stored-b@consent.example', phone: '+14155550123' }
+    }).expect(202);
+    const second = await intake(sourceSecret, 'idem-mismatch-002', {
+      kind: 'demo_request',
+      person: { email: 'given-a@consent.example', phone: '+14155550123' },
+      consent: { marketingEmail: true, privacyAccepted: true }
+    }).expect(202);
+    const rows = await db
+      .prepare('SELECT id FROM contact_lawful_bases WHERE workspace_id=? AND person_id=?')
+      .all<{ id: string }>(WORKSPACE_A, second.body.personId);
+    expect(rows).toEqual([]);
+  });
+
+  it('dates a future consent timestamp at receipt and keeps PII out of the event', async () => {
+    const before = Date.now();
+    const accepted = await intake(sourceSecret, 'idem-consent-future', {
+      kind: 'demo_request',
+      person: { name: 'Fiona Future', email: 'fiona@consent.example' },
+      consent: {
+        marketingEmail: true,
+        privacyAccepted: true,
+        capturedAt: '2999-01-01T00:00:00.000Z'
+      }
+    }).expect(202);
+    const row = await db
+      .prepare(
+        'SELECT recorded_at, created_at FROM contact_lawful_bases WHERE workspace_id=? AND person_id=?'
+      )
+      .get<{ recorded_at: string; created_at: string }>(WORKSPACE_A, accepted.body.personId);
+    expect(new Date(row!.recorded_at).getTime()).toBe(new Date(row!.created_at).getTime());
+    expect(new Date(row!.recorded_at).getTime()).toBeGreaterThanOrEqual(before - 1000);
+    const events = await db
+      .prepare(
+        "SELECT payload_json FROM domain_events WHERE workspace_id=? AND event_type='lawful_basis.recorded' AND stream_id=?"
+      )
+      .all<{ payload_json: unknown }>(WORKSPACE_A, accepted.body.personId);
+    expect(events).toHaveLength(1);
+    const serialized = JSON.stringify(events[0]!.payload_json);
+    expect(serialized).not.toContain('fiona@consent.example');
+    expect(serialized).not.toContain('Fiona');
+  });
   it('derives the workspace only from the Capture Source and rejects body routing fields', async () => {
     const response = await intake(sourceSecret, 'idem-workspace-001', {
       kind: 'contact_message',
