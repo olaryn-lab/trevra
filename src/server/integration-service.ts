@@ -735,12 +735,16 @@ export async function executeConnectedAction(
     await markEmailDeliverySent(db, deliveryId, outcome);
     return { provider: outcome.provider, externalRef: outcome.externalRef };
   }
-  // RFC 8058 one-click unsubscribe on every outreach email. The token is bound
-  // to this delivery's stable id, so a retry of a failed delivery carries the
-  // same link. Anything going wrong here happens before any provider call, so it
-  // is reported as a definite (4xx) failure and the delivery stays retryable.
+  // RFC 8058 one-click unsubscribe on every email approved with it (Phase D
+  // outreach). Every other send, campaign and legacy outreach included, keeps
+  // its pre-Phase-D path: no List-Unsubscribe header and Graph's JSON send. The
+  // token is bound to this delivery's stable id, so a retry of a failed delivery
+  // carries the same link. Anything going wrong here happens before any
+  // provider call, so it is reported as a definite (4xx) failure and the
+  // delivery stays retryable.
+  const requireListUnsubscribe = structuredPayload.requireListUnsubscribe === true;
   let unsubscribeHeaders: string[] = [];
-  if (purpose === 'outreach') {
+  if (requireListUnsubscribe && purpose === 'outreach') {
     try {
       unsubscribeHeaders = await outreachUnsubscribeHeaders(db, {
         workspaceId,
@@ -758,7 +762,7 @@ export async function executeConnectedAction(
       throw wrapped;
     }
   }
-  if (structuredPayload.requireListUnsubscribe === true && unsubscribeHeaders.length === 0) {
+  if (requireListUnsubscribe && unsubscribeHeaders.length === 0) {
     const error = Object.assign(
       new Error(
         purpose === 'outreach'
@@ -788,7 +792,7 @@ export async function executeConnectedAction(
 
   try {
     if (provider === 'microsoft' || provider === 'outlook') {
-      if (unsubscribeHeaders.length > 0) {
+      if (requireListUnsubscribe) {
         // Graph's JSON message API accepts only x- custom headers, so the RFC
         // 8058 List-Unsubscribe headers need Graph's MIME send. A follow-up
         // threads by In-Reply-To/References to the prior delivery's recorded

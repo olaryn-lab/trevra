@@ -585,7 +585,7 @@ describe('connected mailbox threading', () => {
       recipient: 'lead@example.test',
       subject: 'Hello',
       body: 'Hi there',
-      structured_payload_json: '{}',
+      structured_payload_json: JSON.stringify({ requireListUnsubscribe: true }),
       payload_hash: 'outreach-unsubscribe-key'
     });
     const send = nangoMock.post.mock.calls[0]?.[0] as { data?: { raw?: string } };
@@ -636,7 +636,7 @@ describe('connected mailbox threading', () => {
       recipient: 'lead@example.test',
       subject: 'Same subject',
       body: 'First body',
-      structured_payload_json: JSON.stringify({ threaded: true }),
+      structured_payload_json: JSON.stringify({ threaded: true, requireListUnsubscribe: true }),
       payload_hash: 'ms-mime-first-key'
     });
     const draft = nangoMock.post.mock.calls[0]?.[0] as {
@@ -668,7 +668,8 @@ describe('connected mailbox threading', () => {
       structured_payload_json: JSON.stringify({
         threaded: true,
         threadExternalRef: 'ms-mime-first',
-        threadIdempotencyKey: 'ms-mime-first-key'
+        threadIdempotencyKey: 'ms-mime-first-key',
+        requireListUnsubscribe: true
       }),
       payload_hash: 'ms-mime-second-key'
     });
@@ -680,6 +681,66 @@ describe('connected mailbox threading', () => {
     expect(Buffer.from(String(followUp.data), 'base64').toString('utf8')).toContain(
       'References: <first@outlook.test>'
     );
+  });
+
+  it('keeps the pre-Phase-D path for outreach not approved with one-click unsubscribe', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+    vi.stubEnv('TREVRA_SECRETS_KEY', 'legacy-path-secrets-key');
+    const ms = await mailbox('microsoft');
+    nangoMock.post
+      .mockResolvedValueOnce({ data: { id: 'ms-campaign' }, headers: {} })
+      .mockResolvedValueOnce({ data: {}, headers: {} });
+
+    await executeConnectedAction(ms.database, ms.workspaceId, {
+      type: 'email_draft',
+      connection_id: ms.connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Campaign step',
+      body: 'Hello from the campaign',
+      structured_payload_json: JSON.stringify({
+        deliveryPurpose: 'outreach',
+        deliverySourceType: 'campaign_email',
+        deliverySourceId: 'lcca_legacy_path'
+      }),
+      payload_hash: 'ms-campaign-legacy-key'
+    });
+
+    expect(nangoMock.post.mock.calls[0]?.[0]).toEqual({
+      endpoint: '/v1.0/me/messages',
+      providerConfigKey: 'trevra-microsoft',
+      connectionId: 'microsoft-external',
+      retries: 0,
+      data: {
+        subject: 'Campaign step',
+        body: { contentType: 'Text', content: 'Hello from the campaign' },
+        toRecipients: [{ emailAddress: { address: 'lead@example.test' } }],
+        internetMessageHeaders: [
+          { name: 'x-trevra-idempotency-key', value: 'ms-campaign-legacy-key' }
+        ]
+      }
+    });
+    expect(JSON.stringify(nangoMock.post.mock.calls)).not.toContain('List-Unsubscribe');
+  });
+
+  it('adds no List-Unsubscribe header to Gmail outreach not approved with it', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+    vi.stubEnv('TREVRA_SECRETS_KEY', 'legacy-path-secrets-key');
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    nangoMock.post.mockResolvedValueOnce({ data: { id: 'gmail-legacy' }, headers: {} });
+
+    await executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Hello',
+      body: 'Hi there',
+      structured_payload_json: '{}',
+      payload_hash: 'gmail-legacy-key'
+    });
+
+    const send = nangoMock.post.mock.calls[0]?.[0] as { data?: { raw?: string } };
+    const mime = Buffer.from(String(send.data?.raw ?? ''), 'base64url').toString('utf8');
+    expect(mime).not.toContain('List-Unsubscribe');
   });
 
   it('refuses an email approved with unsubscribe when unsubscribe is not configured', async () => {
@@ -738,7 +799,7 @@ describe('connected mailbox threading', () => {
       recipient: 'lead@example.test',
       subject: 'Hello',
       body: 'Hi',
-      structured_payload_json: '{}',
+      structured_payload_json: JSON.stringify({ requireListUnsubscribe: true }),
       payload_hash: 'ms-no-imid-key'
     });
     const row = await database
@@ -812,7 +873,7 @@ describe('connected mailbox threading', () => {
         recipient: 'lead@example.test',
         subject: 'Hello',
         body: 'Hi',
-        structured_payload_json: '{}',
+        structured_payload_json: JSON.stringify({ requireListUnsubscribe: true }),
         payload_hash: 'mailbox-injection-key'
       })
     ).rejects.toMatchObject({ status: 400 });
