@@ -378,6 +378,32 @@
   align-items: end;
 }
 
+.capture-milestone-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.capture-milestone-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.capture-milestone-list small {
+  color: var(--t-muted);
+  font-size: var(--t-text-xs);
+}
+
+.capture-attribution {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+}
+
 @media (max-width: 780px) {
   .capture-create-row,
   .capture-source-grid,

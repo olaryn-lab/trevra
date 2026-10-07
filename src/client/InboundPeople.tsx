@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Ban,
   Briefcase,
@@ -15,6 +15,8 @@ import {
   createOpportunity,
   createSuppression,
   getCaptureSources,
+  getInboundAttribution,
+  getInboundMilestones,
   getInboundPeople,
   getInboundSubmissions,
   getLinkedInManagerLeadLists,
@@ -24,6 +26,8 @@ import {
   importLinkedInManagerLeadCsv,
   liftSuppression,
   type CaptureSourceSummary,
+  type InboundAttributionSummary,
+  type InboundMilestone,
   type InboundPerson,
   type InboundSubmission,
   type RankedAccount,
@@ -34,6 +38,10 @@ import type { OpportunityRecord } from '../shared/types';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import { Select } from './ui/primitives';
+import { isMilestoneKind } from '../shared/milestones';
+import { scrollToId } from './ui/scrollToId';
+import { AttributionTables, attributionChips } from './inbound-attribution';
+import { MilestoneSection } from './inbound-milestones';
 import './lead-capture.css';
 
 /**
@@ -134,6 +142,9 @@ export function InboundPeople({
   const [busy, setBusy] = useState('');
   const [loading, setLoading] = useState(true);
   const [problem, setProblem] = useState('');
+  const [milestones, setMilestones] = useState<InboundMilestone[]>([]);
+  const [attribution, setAttribution] = useState<InboundAttributionSummary | null>(null);
+  const scrolledMilestone = useRef<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -147,11 +158,20 @@ export function InboundPeople({
         getInboundSubmissions(),
         getCaptureSources()
       ]);
-      const [nextOpportunities, nextSuppressions, nextLists, nextAccounts] = await Promise.all([
+      const [
+        nextOpportunities,
+        nextSuppressions,
+        nextLists,
+        nextAccounts,
+        nextMilestones,
+        nextAttribution
+      ] = await Promise.all([
         getOpportunities().catch(() => [] as OpportunityRecord[]),
         getSuppressions().catch(() => [] as SuppressionSummary[]),
         getLinkedInManagerLeadLists().catch(() => [] as LinkedInLeadList[]),
-        getRankedAccounts({ limit: 500 }).catch(() => [] as RankedAccount[])
+        getRankedAccounts({ limit: 500 }).catch(() => [] as RankedAccount[]),
+        getInboundMilestones().catch(() => [] as InboundMilestone[]),
+        getInboundAttribution().catch(() => null)
       ]);
       setPeople(nextPeople);
       setSubmissions(nextSubmissions);
@@ -160,6 +180,8 @@ export function InboundPeople({
       setSuppressions(nextSuppressions);
       setLeadLists(nextLists);
       setAccounts(nextAccounts);
+      setMilestones(nextMilestones);
+      setAttribution(nextAttribution);
       setProblem('');
     } catch (error) {
       setProblem(errorMessage(error, 'Unable to load inbound leads.'));
@@ -171,6 +193,26 @@ export function InboundPeople({
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Milestones are outcomes, not decisions: their submissions stay as
+  // provenance but never render as qualify/pursue cards.
+  const decisionSubmissions = useMemo(
+    () => submissions.filter((submission) => !isMilestoneKind(submission.kind)),
+    [submissions]
+  );
+
+  // `/outreach/inbound?milestone=<id>` is the evidence link on the account
+  // signal and the Today item: scroll to that row once the list has loaded,
+  // once per param value (not on every Refresh).
+  // lc-debt: only the newest 50 milestones are loaded, so an older target does
+  // nothing; upgrade by fetching the milestone by id when it is absent.
+  useEffect(() => {
+    if (loading) return;
+    const target = new URLSearchParams(window.location.search).get('milestone');
+    if (!target || scrolledMilestone.current === target) return;
+    scrolledMilestone.current = target;
+    return scrollToId(`milestone-${target}`);
+  }, [loading]);
 
   const peopleById = useMemo(() => new Map(people.map((person) => [person.id, person])), [people]);
   const sourcesById = useMemo(
@@ -319,25 +361,23 @@ export function InboundPeople({
           </button>
         </div>
         {problem && <div className="error-box">{problem}</div>}
-        {!loading && submissions.length === 0 && (
+        {!loading && decisionSubmissions.length === 0 && (
           <div className="empty-state">
             <Inbox size={26} />
             <h4>No inbound submissions yet</h4>
             <p>Connect a source in Setup → Lead capture.</p>
           </div>
         )}
-        {submissions.length > 0 && (
+        {decisionSubmissions.length > 0 && (
           <div className="capture-submission-list">
-            {submissions.map((submission) => {
+            {decisionSubmissions.map((submission) => {
               const person = peopleById.get(submission.contactId);
               const source = sourcesById.get(submission.captureSourceId);
               const submitted = submission.person;
               const account = submission.accountId
                 ? (accountsById.get(submission.accountId) ?? null)
                 : null;
-              const utm = Object.entries(submission.attribution).filter(
-                ([, value]) => value !== undefined && value !== null && String(value)
-              );
+              const { heardAbout, utm } = attributionChips(submission.attribution);
               const who =
                 submitted.name ||
                 submitted.email ||
@@ -382,11 +422,12 @@ export function InboundPeople({
                     )}
                   </div>
                   {submission.message && <p className="capture-message">{submission.message}</p>}
-                  {utm.length > 0 && (
+                  {(utm.length > 0 || heardAbout) && (
                     <div className="capture-tags">
+                      {heardAbout && <span>Heard about us: {heardAbout}</span>}
                       {utm.map(([key, value]) => (
                         <span key={key}>
-                          {key}={String(value)}
+                          {key}={value}
                         </span>
                       ))}
                     </div>
@@ -538,6 +579,8 @@ export function InboundPeople({
           </div>
         )}
       </section>
+      <MilestoneSection milestones={milestones} />
+      {attribution && <AttributionTables summary={attribution} />}
     </div>
   );
 }

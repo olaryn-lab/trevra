@@ -506,6 +506,8 @@ import {
 } from './lead-capture/sources.js';
 import { listContacts } from './lead-capture/people.js';
 import { listInboundSubmissions } from './lead-capture/submissions.js';
+import { listProductMilestones } from './lead-capture/milestone-recorder.js';
+import { inboundAttributionSummary } from './lead-capture/attribution.js';
 import { persistImportedPeople } from './lead-capture/import.js';
 import { captureSourceCreateSchema, LeadCaptureError } from './lead-capture/types.js';
 import {
@@ -1532,6 +1534,23 @@ export function createApp(db: Db) {
     try {
       const limit = z.coerce.number().int().min(1).max(500).default(100).parse(req.query.limit);
       res.json({ submissions: await listInboundSubmissions(db, req.auth!.workspaceId, limit) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/inbound/milestones', async (req: AuthedRequest, res, next) => {
+    try {
+      const limit = z.coerce.number().int().min(1).max(200).default(50).parse(req.query.limit);
+      res.json({ milestones: await listProductMilestones(db, req.auth!.workspaceId, limit) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/inbound/attribution', async (req: AuthedRequest, res, next) => {
+    try {
+      res.json(await inboundAttributionSummary(db, req.auth!.workspaceId));
     } catch (error) {
       next(error);
     }

@@ -1,3 +1,4 @@
+import type { GtmMilestoneKind } from '../shared/milestones';
 import type {
   AgentBudget,
   AgentPrincipal,
@@ -3631,6 +3632,49 @@ export async function getInboundSubmissions(limit = 200): Promise<InboundSubmiss
     `/api/inbound/submissions?limit=${limit}`
   );
   return result.submissions;
+}
+
+export interface InboundMilestone {
+  id: string;
+  workspaceId: string;
+  kind: GtmMilestoneKind;
+  contactId: string;
+  accountId: string | null;
+  sourceType: 'inbound_submission' | 'stripe_event';
+  sourceId: string;
+  providerEndpointId: string | null;
+  externalObjectId: string | null;
+  occurredAt: string;
+  createdAt: string;
+  label: string;
+  personName: string | null;
+  personEmail: string | null;
+  accountName: string | null;
+}
+
+export async function getInboundMilestones(limit = 50): Promise<InboundMilestone[]> {
+  const result = await request<{ milestones: InboundMilestone[] }>(
+    `/api/inbound/milestones?limit=${limit}`
+  );
+  return result.milestones;
+}
+
+export interface InboundAttributionCount {
+  value: string;
+  submissions: number;
+  people: number;
+  peopleWithOpportunity: number;
+}
+
+export interface InboundAttributionSummary {
+  since: string;
+  days: number;
+  byUtmSource: InboundAttributionCount[];
+  byHeardAbout: InboundAttributionCount[];
+}
+
+export async function getInboundAttribution(): Promise<InboundAttributionSummary> {
+  return request('/api/inbound/attribution');
 }
 
 export async function getSuppressions(): Promise<SuppressionSummary[]> {
