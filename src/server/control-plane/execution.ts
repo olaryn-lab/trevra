@@ -3,6 +3,7 @@ import type { Db } from '../db.js';
 import { executeConnectedAction } from '../integration-service.js';
 import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-address.js';
 import { emailComplianceProvider } from '../email/compliance.js';
+import { assertNotSuppressed, SuppressionError } from '../suppressions.js';
 import { projectPreparedConversationEmail } from '../conversations.js';
 import { communityReplyPayloadSchema, publishCommunityReply } from '../outreach/publish.js';
 import { crmActivityPayloadSchema, logCrmActivity } from '../crm/activity.js';
@@ -53,6 +54,11 @@ export async function executePreparedPlaybookAction(
         );
       }
       await assertOutreachFooter(db, input.workspaceId, payload.body);
+      await assertOutreachRecipientStillReachable(db, input.workspaceId, {
+        metadata,
+        recipient: payload.recipient
+      });
+      await assertRepliesStillSynced(db, input.workspaceId, approvedConnectionId);
     }
     const delivery = await executeConnectedAction(db, input.workspaceId, {
       type: 'email_draft',
@@ -256,6 +262,73 @@ async function assertOutreachFooter(db: Db, workspaceId: string, body: string): 
   if (!body.trimEnd().endsWith(footer)) {
     throw mailboxBindingError(
       'This email does not end with the workspace compliance footer; nothing was sent.'
+    );
+  }
+}
+
+/**
+ * Approval can sit for days. Whatever the founder or the recipient decided in
+ * the meantime wins: the lead marked do-not-contact, or the Person or address
+ * suppressed on any channel that covers email. Re-read at send time, before any
+ * delivery row or provider call.
+ */
+async function assertOutreachRecipientStillReachable(
+  db: Db,
+  workspaceId: string,
+  input: { metadata: Record<string, unknown>; recipient: string }
+): Promise<void> {
+  const personId =
+    typeof input.metadata.personId === 'string' ? input.metadata.personId.trim() : '';
+  const contactId =
+    typeof input.metadata.contactId === 'string' ? input.metadata.contactId.trim() : '';
+  if (!personId || !contactId) {
+    throw mailboxBindingError(
+      'This outreach email was approved without its Person and People list entry; nothing was sent.'
+    );
+  }
+  const lead = await db
+    .prepare('SELECT do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
+    .get<{ do_not_contact: boolean }>(workspaceId, contactId);
+  if (!lead) {
+    throw mailboxBindingError(
+      'The People list entry this email was approved for no longer exists; nothing was sent.'
+    );
+  }
+  if (lead.do_not_contact) {
+    throw mailboxBindingError(
+      'This Person was marked do-not-contact after the email was prepared; nothing was sent.'
+    );
+  }
+  try {
+    await assertNotSuppressed(db, workspaceId, {
+      channel: 'email',
+      personId,
+      email: input.recipient
+    });
+  } catch (error) {
+    if (!(error instanceof SuppressionError)) throw error;
+    throw mailboxBindingError(
+      `This Person is suppressed for email (${error.suppression.reason}); nothing was sent.`
+    );
+  }
+}
+
+/**
+ * Outreach goes out only while replies to the sending mailbox are read into
+ * Conversations, so a reply or a mailto unsubscribe can never land in an inbox
+ * nothing processes. Plan time checked the same; this re-checks at send time.
+ */
+async function assertRepliesStillSynced(
+  db: Db,
+  workspaceId: string,
+  connectionId: string
+): Promise<void> {
+  const inbound = await db
+    .prepare('SELECT connection_id,sync_status FROM email_inbound_mailboxes WHERE workspace_id=?')
+    .get<{ connection_id: string; sync_status: string }>(workspaceId);
+  if (!inbound || inbound.connection_id !== connectionId || inbound.sync_status !== 'syncing') {
+    throw mailboxBindingError(
+      'Replies to the approved sending mailbox are not being read into Conversations right now; nothing was sent. Choose it as the inbound mailbox in Workspace settings, then prepare this email again.'
     );
   }
 }

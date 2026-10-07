@@ -17,7 +17,7 @@ vi.mock('@nangohq/node', () => ({
 
 import { openDatabase, type Db } from '../db.js';
 import { compileGtmIntent, prepareGtmPlan, type PreparedGtmPlanResult } from '../gtm/intent.js';
-import { createLeadList, importLeadCsv } from '../linkedin/lead-lists.js';
+import { createLeadList, importLeadCsv, updateLeadContact } from '../linkedin/lead-lists.js';
 import { decidePlaybookApproval } from '../playbooks/engine.js';
 import { createSuppression } from '../suppressions.js';
 import {
@@ -393,6 +393,41 @@ describe('prepareEmailOutreach', () => {
       )
       .get<{ total: number }>(WORKSPACE);
     expect(runs?.total).toBe(2);
+  });
+
+  it('sends nothing to a lead marked do-not-contact after the email was prepared', async () => {
+    const result = emailResult(await prepare('email-prepare-0001'));
+    const byId = await names();
+    const maya = result.prepared.find((item) => byId.get(item.contactId) === 'Maya')!;
+    await updateLeadContact(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        contactId: maya.contactId,
+        firstName: 'Maya',
+        lastName: 'Chen',
+        company: 'Northwind',
+        email: 'maya@northwind.test',
+        profileUrl: 'https://www.linkedin.com/in/maya-email-prepare/',
+        doNotContact: true
+      },
+      NOW
+    );
+
+    const failed = await decidePlaybookApproval(db, {
+      workspaceId: WORKSPACE,
+      runId: maya.runId,
+      stepId: 'approve-outreach',
+      userId: USER,
+      decision: 'approve'
+    });
+
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toBe(
+      'This Person was marked do-not-contact after the email was prepared; nothing was sent.'
+    );
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(await count('gtm_deliveries')).toBe(1);
   });
 
   it('counts a Person as already emailed once their approved email is sent', async () => {

@@ -20,6 +20,7 @@ import { ensureConversationForPerson } from '../conversations.js';
 import { openDatabase, type Db } from '../db.js';
 import { executeConnectedAction } from '../integration-service.js';
 import { resolveContact } from '../lead-capture/people.js';
+import { createSuppression } from '../suppressions.js';
 import {
   decidePlaybookApproval,
   startPlaybookRun,
@@ -144,6 +145,21 @@ beforeEach(async () => {
     .prepare('INSERT INTO users (id,workspace_id,email,name,created_at) VALUES (?,?,?,?,?)')
     .run(USER, WORKSPACE, 'owner@email-outreach-playbook.test', 'Founder', NOW.toISOString());
   await seedMailbox(CONNECTION, 'founder@acme.test');
+  await db
+    .prepare(
+      `INSERT INTO email_inbound_mailboxes
+       (workspace_id,connection_id,address,sync_status,designated_at,updated_at)
+       VALUES (?,?,'founder@acme.test','syncing',?,?)`
+    )
+    .run(WORKSPACE, CONNECTION, NOW.toISOString(), NOW.toISOString());
+  await db
+    .prepare(
+      `INSERT INTO linkedin_lead_contacts
+       (id,workspace_id,list_id,first_name,last_name,company,email,dedupe_key,created_at,updated_at)
+       VALUES ('lilc_playbook_test',?,NULL,'Maya','Chen','Northwind','maya@northwind.test',
+               'maya-chen-northwind-playbook',?,?)`
+    )
+    .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
 });
 
 afterEach(async () => {
@@ -369,6 +385,71 @@ describe('gtm.email-outreach', () => {
 
     expect(nangoMock.post).not.toHaveBeenCalled();
     expect(await deliveries()).toBe(0);
+  });
+
+  describe('send-time recheck', () => {
+    it('sends nothing to a Person suppressed on every channel after preparation', async () => {
+      const { run, personId } = await prepareRun();
+      // The Person's canonical email moved on, so only the Person id still links
+      // the suppression to the approved recipient.
+      await db
+        .prepare(
+          `UPDATE contacts SET email='maya.chen@elsewhere.test',email_normalized='maya.chen@elsewhere.test'
+           WHERE workspace_id=? AND id=?`
+        )
+        .run(WORKSPACE, personId);
+      await createSuppression(db, {
+        workspaceId: WORKSPACE,
+        channel: 'all',
+        personId,
+        reason: 'Asked to stop everywhere',
+        source: 'test'
+      });
+
+      const failed = await approve(run.id);
+
+      expect(failed.status).toBe('failed');
+      expect(failed.error).toBe(
+        'This Person is suppressed for email (Asked to stop everywhere); nothing was sent.'
+      );
+      expect(nangoMock.post).not.toHaveBeenCalled();
+      expect(await deliveries()).toBe(0);
+    });
+
+    it('answers 409 and sends nothing while replies to the sending mailbox are not synced', async () => {
+      const { run } = await prepareRun();
+      await db
+        .prepare(
+          "UPDATE email_inbound_mailboxes SET sync_status='unavailable' WHERE workspace_id=?"
+        )
+        .run(WORKSPACE);
+
+      await expect(
+        executePreparedPlaybookAction(db, {
+          workspaceId: WORKSPACE,
+          actionType: 'email.send',
+          payload: run.steps.find((step) => step.stepId === 'approve-outreach')?.input,
+          payloadHash: 'inbound-unavailable-key'
+        })
+      ).rejects.toMatchObject({
+        status: 409,
+        message: expect.stringMatching(/not being read into Conversations.*nothing was sent/)
+      });
+
+      // Syncing, but a different mailbox is the inbound one.
+      await seedMailbox('conn_email_outreach_playbook_inbound', 'inbox@acme.test');
+      await db
+        .prepare(
+          "UPDATE email_inbound_mailboxes SET connection_id=?,sync_status='syncing' WHERE workspace_id=?"
+        )
+        .run('conn_email_outreach_playbook_inbound', WORKSPACE);
+      const failed = await approve(run.id);
+
+      expect(failed.status).toBe('failed');
+      expect(failed.error).toMatch(/not being read into Conversations.*nothing was sent/);
+      expect(nangoMock.post).not.toHaveBeenCalled();
+      expect(await deliveries()).toBe(0);
+    });
   });
 
   describe('compliance footer', () => {
