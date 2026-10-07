@@ -8,6 +8,7 @@ import type {
   InboundSubmissionRecord
 } from './types.js';
 import { LeadCaptureError } from './types.js';
+import { MILESTONE_KINDS_SQL } from './milestones.js';
 
 function parseObject(value: unknown): Record<string, unknown> {
   if (value && typeof value === 'object' && !Array.isArray(value))
@@ -237,6 +238,11 @@ export async function acceptInboundSubmission(
   });
 }
 
+/**
+ * The inbound leads to decide on, newest first. Milestone submissions are
+ * outcomes (listed through `listProductMilestones`), so they are excluded here,
+ * before the limit, and can never push a real lead out of the window.
+ */
 export async function listInboundSubmissions(
   db: Db,
   workspaceId: string,
@@ -244,7 +250,9 @@ export async function listInboundSubmissions(
 ): Promise<InboundSubmissionRecord[]> {
   const rows = await db
     .prepare(
-      'SELECT * FROM inbound_submissions WHERE workspace_id=? ORDER BY received_at DESC LIMIT ?'
+      `SELECT * FROM inbound_submissions
+       WHERE workspace_id=? AND kind NOT IN ${MILESTONE_KINDS_SQL}
+       ORDER BY received_at DESC LIMIT ?`
     )
     .all<Record<string, unknown>>(workspaceId, Math.max(1, Math.min(limit, 500)));
   return rows.map(toSubmission);

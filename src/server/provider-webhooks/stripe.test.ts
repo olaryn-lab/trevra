@@ -2,11 +2,12 @@ import { randomBytes } from 'node:crypto';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import request from 'supertest';
 import Stripe from 'stripe';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createApp } from '../app.js';
 import { openDatabase, type Db } from '../db.js';
 import { resolveContact } from '../lead-capture/people.js';
 import { companyDomainFromEmail } from '../lead-capture/freemail.js';
+import { LeadCaptureError } from '../lead-capture/types.js';
 import {
   createProviderWebhookEndpoint,
   registerProviderVerifier,
@@ -14,11 +15,19 @@ import {
   type ProviderWebhookEndpoint
 } from './index.js';
 import {
+  STRIPE_OBSERVED_EVENTS,
+  STRIPE_SIGNATURE_TOLERANCE_SECONDS,
   isSubscriptionUpgrade,
   mapStripeEvent,
   stripeVerifier,
+  verifyStripeSignature,
   type StripeEventEnvelope
 } from './stripe.js';
+
+vi.mock('../lead-capture/people.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../lead-capture/people.js')>();
+  return { ...actual, resolveContact: vi.fn(actual.resolveContact) };
+});
 
 const WS_A = 'ws_stripe_hooks_a';
 const WS_B = 'ws_stripe_hooks_b';
@@ -71,6 +80,25 @@ async function count(sql: string, ...params: unknown[]): Promise<number> {
   const row = await db.prepare(sql).get<{ n: number }>(...params);
   return Number(row?.n ?? 0);
 }
+
+async function eventStatus(eventId: string): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT status FROM webhook_events
+       WHERE workspace_id=? AND provider='hook:stripe' AND external_event_id=?`
+    )
+    .get<{ status: string }>(WS_A, `${endpoint.id}:${eventId}`);
+  return row?.status ?? null;
+}
+
+const paidMilestonesFor = (email: string) =>
+  count(
+    `SELECT COUNT(*)::int AS n FROM product_milestones m
+     JOIN contacts p ON p.workspace_id=m.workspace_id AND p.id=m.contact_id
+     WHERE m.workspace_id=? AND m.kind='paid' AND p.email_normalized=?`,
+    WS_A,
+    email
+  );
 
 const checkout = (eventId: string) =>
   envelope(
@@ -172,6 +200,58 @@ describe('Stripe event mapping (content-free)', () => {
     expect(mapStripeEvent(envelope('charge.refunded', { id: 'ch_1' }), NOW)).toBeNull();
   });
 
+  it('maps a delayed checkout payment exactly like a paid checkout', () => {
+    const session = (paymentStatus: string, mode = 'payment') =>
+      envelope('checkout.session.async_payment_succeeded', {
+        id: 'cs_async',
+        customer: CUSTOMER,
+        customer_details: { email: EMAIL, name: 'Ada Lovelace' },
+        mode,
+        payment_status: paymentStatus
+      });
+    expect(mapStripeEvent(session('paid'), NOW)).toMatchObject({
+      kind: 'paid',
+      objectId: 'cs_async',
+      customerId: CUSTOMER,
+      email: EMAIL,
+      name: 'Ada Lovelace'
+    });
+    expect(mapStripeEvent(session('unpaid'), NOW)).toBeNull();
+    expect(mapStripeEvent(session('paid', 'setup'), NOW)).toBeNull();
+  });
+
+  it('maps every event the founder is told to select', () => {
+    // Keyed by the shared list: adding an event there without a mapping here
+    // fails to compile, and a mapping that drops it fails the assertion.
+    const samples: Record<(typeof STRIPE_OBSERVED_EVENTS)[number], StripeEventEnvelope> = {
+      'checkout.session.completed': checkout('evt_sample_1'),
+      'checkout.session.async_payment_succeeded': {
+        ...checkout('evt_sample_2'),
+        type: 'checkout.session.async_payment_succeeded'
+      },
+      'invoice.paid': envelope('invoice.paid', {
+        id: 'in_sample',
+        customer: CUSTOMER,
+        amount_paid: AMOUNT
+      }),
+      'customer.subscription.updated': envelope(
+        'customer.subscription.updated',
+        {
+          id: 'sub_sample',
+          customer: CUSTOMER,
+          items: { data: [{ price: price(2500, 'month'), quantity: 1 }] }
+        },
+        { items: { data: [{ price: price(1000, 'month'), quantity: 1 }] } }
+      ),
+      'customer.subscription.deleted': envelope('customer.subscription.deleted', {
+        id: 'sub_sample',
+        customer: CUSTOMER
+      })
+    };
+    for (const name of STRIPE_OBSERVED_EVENTS)
+      expect(mapStripeEvent(samples[name], NOW), name).not.toBeNull();
+  });
+
   it('calls a subscription change an upgrade only when the monthly run rate rises', () => {
     const items = (...prices: Array<ReturnType<typeof price>>) =>
       prices.map((p) => ({ price: p, quantity: 1 }));
@@ -223,6 +303,38 @@ describe('Stripe event mapping (content-free)', () => {
     expect(companyDomainFromEmail('ada@gmail.com')).toBeNull();
     expect(companyDomainFromEmail('ada@yahoo.co.uk')).toBeNull();
     expect(companyDomainFromEmail('not-an-email')).toBeNull();
+  });
+});
+
+describe('Stripe signature verification', () => {
+  const signed = (payload: string, timestamp?: number) => ({
+    'stripe-signature': Stripe.webhooks.generateTestHeaderString({
+      payload,
+      secret: SECRET,
+      timestamp
+    })
+  });
+
+  it('rejects a validly signed null body as a 400, never a crash', () => {
+    expect(verifyStripeSignature(Buffer.from('null'), signed('null'), SECRET, new Date())).toEqual({
+      ok: false,
+      status: 400,
+      error: 'Stripe event is missing its id or type'
+    });
+  });
+
+  it('accepts a delivery signed 299s before now and rejects one signed 301s before', () => {
+    expect(STRIPE_SIGNATURE_TOLERANCE_SECONDS).toBe(300);
+    const payload = JSON.stringify(checkout('evt_replay'));
+    const at = (secondsAgo: number) =>
+      verifyStripeSignature(
+        Buffer.from(payload),
+        signed(payload, Math.floor(NOW.getTime() / 1000) - secondsAgo),
+        SECRET,
+        NOW
+      );
+    expect(at(299)).toMatchObject({ ok: true, eventId: 'evt_replay' });
+    expect(at(301)).toEqual({ ok: false, status: 400, error: 'Invalid Stripe signature' });
   });
 });
 
@@ -397,5 +509,86 @@ describe('Stripe webhook delivery', () => {
         WS_A
       )
     ).toBe(0);
+  });
+
+  const asyncCheckout = (
+    type: string,
+    eventId: string,
+    email: string,
+    customer: string,
+    paymentStatus: string
+  ) =>
+    envelope(
+      type,
+      {
+        id: `cs_${customer}`,
+        object: 'checkout.session',
+        customer,
+        customer_details: { email, name: null },
+        mode: 'payment',
+        payment_status: paymentStatus
+      },
+      null,
+      eventId
+    );
+
+  it('records a delayed payment as paid when async_payment_succeeded arrives', async () => {
+    const email = 'grace@hopper-stripe.example';
+    const delivered = await deliver(
+      asyncCheckout(
+        'checkout.session.async_payment_succeeded',
+        'evt_async_only',
+        email,
+        'cus_TestGrace001',
+        'paid'
+      )
+    );
+    expect(delivered.body).toEqual({ received: true, handled: true });
+    expect(await paidMilestonesFor(email)).toBe(1);
+    expect(
+      await count(
+        "SELECT COUNT(*)::int AS n FROM product_milestones WHERE workspace_id=? AND kind='paid' AND source_id='evt_async_only'",
+        WS_A
+      )
+    ).toBe(1);
+  });
+
+  it('turns an unpaid checkout plus its later async success into exactly one payment', async () => {
+    const email = 'hedy@lamarr-stripe.example';
+    const customer = 'cus_TestHedy001';
+    const completed = await deliver(
+      asyncCheckout('checkout.session.completed', 'evt_async_completed', email, customer, 'unpaid')
+    );
+    expect(completed.body).toEqual({ received: true, handled: false });
+    expect(await paidMilestonesFor(email)).toBe(0);
+    const succeeded = asyncCheckout(
+      'checkout.session.async_payment_succeeded',
+      'evt_async_succeeded',
+      email,
+      customer,
+      'paid'
+    );
+    expect((await deliver(succeeded)).body).toEqual({ received: true, handled: true });
+    expect((await deliver(succeeded)).body).toEqual({ received: true, duplicate: true });
+    expect(await paidMilestonesFor(email)).toBe(1);
+  });
+
+  it('ignores, rather than retries for days, an event whose Person cannot be resolved', async () => {
+    vi.mocked(resolveContact).mockRejectedValueOnce(
+      new LeadCaptureError('Person identities resolve to different existing People', 409)
+    );
+    const poison = asyncCheckout(
+      'checkout.session.completed',
+      'evt_unresolvable',
+      'poison@poison-stripe.example',
+      'cus_TestPoison001',
+      'paid'
+    );
+    const delivered = await deliver(poison);
+    expect(delivered.status).toBe(200);
+    expect(delivered.body).toEqual({ received: true, handled: false });
+    expect(await eventStatus('evt_unresolvable')).toBe('ignored');
+    expect((await deliver(poison)).body).toEqual({ received: true, duplicate: true });
+    expect(await paidMilestonesFor('poison@poison-stripe.example')).toBe(0);
   });
 });

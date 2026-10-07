@@ -10,7 +10,11 @@ import {
   recordProviderWebhookAccepted,
   recordProviderWebhookRejected
 } from './store.js';
-import type { ProviderWebhookEndpoint } from './types.js';
+import {
+  ProviderWebhookError,
+  type ProviderWebhookEndpoint,
+  type ProviderWebhookVerification
+} from './types.js';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -91,6 +95,24 @@ async function finishWebhookEvent(
     );
 }
 
+/** Only the error class is kept: messages can carry identifiers, key ids or content. */
+function errorClass(error: unknown): string {
+  return error instanceof Error ? error.name.slice(0, 120) : 'Error';
+}
+
+/** Operator-visible, content-free: endpoint id, provider and error class, never message or body. */
+function logDeliveryFault(
+  what: string,
+  endpoint: Pick<ProviderWebhookEndpoint, 'id' | 'provider'>,
+  error: unknown
+): void {
+  console.error(`provider webhook ${what}`, {
+    endpointId: endpoint.id,
+    provider: endpoint.provider,
+    error: errorClass(error)
+  });
+}
+
 async function handleDelivery(db: Db, req: Request, res: Response, now: Date): Promise<void> {
   const provider = String(req.params.provider ?? '');
   const endpointId = String(req.params.endpointId ?? '');
@@ -112,13 +134,21 @@ async function handleDelivery(db: Db, req: Request, res: Response, now: Date): P
   let secret: string | null = null;
   try {
     secret = await readProviderWebhookSecret(db, endpoint);
-  } catch {
+  } catch (error) {
+    // Usually a deployment key that no longer opens this row (rotation).
+    logDeliveryFault('secret could not be opened', endpoint, error);
     secret = null;
   }
   if (!secret) return void (await reject(503, 'Webhook endpoint secret is unavailable'));
 
   const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
-  const verified = verifier.verify(rawBody, req.headers, secret, now);
+  let verified: ProviderWebhookVerification;
+  try {
+    verified = verifier.verify(rawBody, req.headers, secret, now);
+  } catch (error) {
+    logDeliveryFault('verification threw', endpoint, error);
+    return void (await reject(400, 'Webhook signature could not be verified'));
+  }
   if (!verified.ok) return void (await reject(verified.status, verified.error));
   if (!EVENT_ID_RE.test(verified.eventId))
     return void (await reject(400, 'Webhook event id is invalid'));
@@ -151,16 +181,23 @@ async function handleDelivery(db: Db, req: Request, res: Response, now: Date): P
     );
     res.status(200).json({ received: true, handled: outcome.handled });
   } catch (error) {
-    // Only the error class is stored: messages can carry identifiers or content.
-    await finishWebhookEvent(
-      db,
-      endpoint,
-      verified.eventId,
-      'failed',
-      error instanceof Error ? error.name.slice(0, 120) : 'Error',
-      now,
-      now
-    );
+    // A 4xx from a handler means this payload can never be handled: settle it
+    // as ignored so the provider stops redelivering it. Anything else is ours
+    // to fix, so it fails and the provider retries.
+    if (error instanceof ProviderWebhookError && error.status < 500) {
+      await finishWebhookEvent(
+        db,
+        endpoint,
+        verified.eventId,
+        'ignored',
+        errorClass(error),
+        now,
+        now
+      );
+      res.status(200).json({ received: true, handled: false });
+      return;
+    }
+    await finishWebhookEvent(db, endpoint, verified.eventId, 'failed', errorClass(error), now, now);
     throw error;
   }
 }

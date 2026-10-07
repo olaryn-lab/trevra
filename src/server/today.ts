@@ -219,6 +219,13 @@ export async function getToday(
          JOIN accounts a ON a.id=s.account_id AND a.workspace_id=s.workspace_id
          WHERE s.workspace_id=? AND s.tier='hot'
            AND COALESCE(s.newest_signal_at,s.computed_at)>=?::timestamptz
+           -- A paying customer is not new demand: its milestones can score hot.
+           AND NOT EXISTS (
+             SELECT 1 FROM opportunities o
+             WHERE o.workspace_id=s.workspace_id
+               AND o.account_id=s.account_id
+               AND o.stage='won'
+           )
            AND NOT EXISTS (
              SELECT 1 FROM recommendations r
              WHERE r.workspace_id=s.workspace_id

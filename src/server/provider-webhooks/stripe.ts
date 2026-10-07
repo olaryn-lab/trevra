@@ -35,13 +35,8 @@ import type {
 /** Stripe's documented default; bounds replay of a captured delivery. */
 export const STRIPE_SIGNATURE_TOLERANCE_SECONDS = 300;
 
-/** What the founder selects in the Stripe Dashboard (https://docs.stripe.com/webhooks). */
-export const STRIPE_OBSERVED_EVENTS = [
-  'checkout.session.completed',
-  'invoice.paid',
-  'customer.subscription.updated',
-  'customer.subscription.deleted'
-] as const;
+/** What the founder selects in the Stripe Dashboard; one list for server and client. */
+export { STRIPE_OBSERVED_EVENTS } from '../../shared/stripe-events.js';
 
 /** The event envelope (https://docs.stripe.com/api/events/object), loosely typed. */
 export interface StripeEventEnvelope {
@@ -166,7 +161,11 @@ export function mapStripeEvent(envelope: StripeEventEnvelope, now: Date): Mapped
       : now;
   const customerId = customerIdOf(object.customer);
   switch (envelope.type) {
-    case 'checkout.session.completed': {
+    // A delayed payment method completes the session unpaid, then reports the
+    // money with async_payment_succeeded (https://docs.stripe.com/checkout/fulfillment).
+    // Both carry the same Checkout Session, so the same paid-only rule applies.
+    case 'checkout.session.completed':
+    case 'checkout.session.async_payment_succeeded': {
       if (object.mode === 'setup' || object.payment_status !== 'paid') return null;
       const details = record(object.customer_details);
       return {
@@ -227,7 +226,7 @@ export function verifyStripeSignature(
   const header = headers['stripe-signature'];
   const signature = Array.isArray(header) ? header.join(',') : (header ?? '');
   if (!signature) return { ok: false, status: 400, error: 'Missing Stripe-Signature header' };
-  let event: { id?: unknown; type?: unknown };
+  let event: { id?: unknown; type?: unknown } | null;
   try {
     // receivedAt is in milliseconds; the library rejects deliveries older than
     // the tolerance (https://docs.stripe.com/webhooks/signature).
@@ -242,9 +241,21 @@ export function verifyStripeSignature(
   } catch {
     return { ok: false, status: 400, error: 'Invalid Stripe signature' };
   }
-  if (typeof event.id !== 'string' || typeof event.type !== 'string')
+  // A validly signed body need not be an object: `null` parses to null.
+  if (
+    !event ||
+    typeof event !== 'object' ||
+    typeof event.id !== 'string' ||
+    typeof event.type !== 'string'
+  )
     return { ok: false, status: 400, error: 'Stripe event is missing its id or type' };
   return { ok: true, eventId: event.id, eventType: event.type, payload: event };
+}
+
+function isClientFault(error: unknown): boolean {
+  const status =
+    error && typeof error === 'object' ? (error as { status?: unknown }).status : undefined;
+  return typeof status === 'number' && status >= 400 && status < 500;
 }
 
 export async function handleStripeEvent(
@@ -272,13 +283,21 @@ export async function handleStripeEvent(
     personId = known?.id ?? null;
   }
   if (!personId && mapped.email) {
-    const resolved = await resolveContact(
-      db,
-      workspaceId,
-      { email: mapped.email, name: mapped.name },
-      now
-    );
-    personId = resolved.contact.id;
+    try {
+      const resolved = await resolveContact(
+        db,
+        workspaceId,
+        { email: mapped.email, name: mapped.name },
+        now
+      );
+      personId = resolved.contact.id;
+    } catch (error) {
+      // A Person this payload cannot resolve (a LeadCaptureError, always 4xx)
+      // will not resolve on a retry either: ignore the event instead of making
+      // Stripe redeliver it for days.
+      if (isClientFault(error)) return { handled: false };
+      throw error;
+    }
   }
   // lc-debt: a subscription event for a customer Trevra never saw pay is
   // ignored, because observe-only means no API key to look the customer up;

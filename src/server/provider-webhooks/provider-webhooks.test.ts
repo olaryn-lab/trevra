@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import request from 'supertest';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
 import { resealSecrets, secretsCustodyReport } from '../secrets/custody.js';
 import {
@@ -38,6 +38,8 @@ const fakeVerifier: ProviderWebhookVerifier = {
   async handle(_db, _endpoint, event) {
     handled.push(event.eventId);
     if (event.eventType === 'boom') throw new Error('handler exploded');
+    if (event.eventType === 'poison') throw new ProviderWebhookError('cannot handle this', 422);
+    if (event.eventType === 'unavailable') throw new ProviderWebhookError('try again later', 503);
     if (failOnce.delete(event.eventId)) throw new Error('transient failure');
     if (event.eventType === 'gated' && gate) await gate;
     return { handled: event.eventType !== 'ignored' };
@@ -59,6 +61,14 @@ function deliver(
     .post(`/api/hooks/v1/${provider}/${endpointId}`)
     .set('Content-Type', 'application/json')
     .set('X-Test-Signature', createHmac('sha256', secret).update(raw).digest('hex'))
+    .send(raw);
+}
+
+function deliverRaw(endpointId: string, raw: string) {
+  return request(app)
+    .post(`/api/hooks/v1/calcom/${endpointId}`)
+    .set('Content-Type', 'application/json')
+    .set('X-Test-Signature', createHmac('sha256', SECRET).update(raw).digest('hex'))
     .send(raw);
 }
 
@@ -174,6 +184,71 @@ describe('provider webhook endpoint route', () => {
     const retried = await deliver(endpoint.id, { id: 'evt_boom', type: 'boom' });
     expect(retried.status).toBe(500);
     expect(handled).toEqual(['evt_boom', 'evt_boom']);
+  });
+
+  it('settles a 4xx handler error as ignored so the provider stops redelivering it', async () => {
+    const poisoned = await deliver(endpoint.id, { id: 'evt_poison', type: 'poison' });
+    expect(poisoned.status).toBe(200);
+    expect(poisoned.body).toEqual({ received: true, handled: false });
+    expect(await eventStatus('evt_poison')).toBe('ignored');
+    const row = await db
+      .prepare(`SELECT error FROM webhook_events WHERE workspace_id=? AND external_event_id=?`)
+      .get<{ error: string }>(WS, `${endpoint.id}:evt_poison`);
+    expect(row?.error).toBe('Error');
+    const again = await deliver(endpoint.id, { id: 'evt_poison', type: 'poison' });
+    expect(again.body).toEqual({ received: true, duplicate: true });
+    expect(handled).toEqual(['evt_poison']);
+
+    const unavailable = await deliver(endpoint.id, { id: 'evt_unavailable', type: 'unavailable' });
+    expect(unavailable.status).toBe(500);
+    expect(await eventStatus('evt_unavailable')).toBe('failed');
+  });
+
+  it('rejects a verifier that throws with a 400 and logs only ids and the error class', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const before = await counts(endpoint.id);
+      // Correctly signed, but not JSON: the stand-in verifier's JSON.parse throws.
+      const response = await deliverRaw(endpoint.id, 'not json at all');
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'Webhook signature could not be verified' });
+      expect(await counts(endpoint.id)).toEqual({
+        accepted: before.accepted,
+        rejected: before.rejected + 1
+      });
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('verification'), {
+        endpointId: endpoint.id,
+        provider: 'calcom',
+        error: 'SyntaxError'
+      });
+      expect(JSON.stringify(log.mock.calls)).not.toContain('not json');
+      expect(handled).toEqual([]);
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it('answers 503 and logs the endpoint when its secret cannot be opened', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const saved = process.env.TREVRA_SECRETS_KEY;
+    // A deployment key that did not seal this row: opening it throws.
+    process.env.TREVRA_SECRETS_KEY = randomBytes(32).toString('base64');
+    try {
+      const response = await deliver(endpoint.id, { id: 'evt_no_secret', type: 'ok' });
+      expect(response.status).toBe(503);
+      expect(response.body).toEqual({ error: 'Webhook endpoint secret is unavailable' });
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('secret'), {
+        endpointId: endpoint.id,
+        provider: 'calcom',
+        error: 'Error'
+      });
+      // The thrown message names key ids; only the class may reach the log.
+      expect(JSON.stringify(log.mock.calls)).not.toMatch(/sealed|server key|whsec|test_/);
+      expect(handled).toEqual([]);
+    } finally {
+      process.env.TREVRA_SECRETS_KEY = saved;
+      log.mockRestore();
+    }
   });
 
   it('converges: a failed event is re-run on retry, then answers as a duplicate', async () => {

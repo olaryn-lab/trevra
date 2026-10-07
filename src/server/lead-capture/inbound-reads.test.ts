@@ -139,4 +139,42 @@ describe('inbound reads', () => {
       byHeardAbout: [{ value: 'podcast', submissions: 1, people: 1 }]
     });
   });
+
+  it('keeps an older lead in the inbound list however many milestones arrive after it', async () => {
+    const { source } = await createCaptureSource(db, {
+      workspaceId: WS,
+      actorUserId: USER,
+      name: 'Product',
+      kind: 'signup'
+    });
+    const demo = await acceptInboundSubmission(db, {
+      source,
+      idempotencyKey: 'reads-crowd-demo',
+      body: inboundSubmissionSchema.parse({
+        kind: 'demo_request',
+        person: { email: 'crowd@reads.test' }
+      }),
+      payloadHash: 'reads-crowd-demo',
+      receivedAt: new Date(Date.now() - 3_600_000)
+    });
+    // 201 milestone submissions, every one newer than the demo request.
+    await db
+      .prepare(
+        `INSERT INTO inbound_submissions
+           (id,workspace_id,capture_source_id,contact_id,idempotency_key,kind,payload_hash,received_at,created_at)
+         SELECT 'sub_crowd_' || n, workspace_id, capture_source_id, contact_id, 'reads-crowd-' || n,
+                'signed_up', 'reads-crowd-' || n, received_at + n * interval '1 second', created_at
+         FROM inbound_submissions, generate_series(1,201) AS n
+         WHERE workspace_id=? AND id=?`
+      )
+      .run(WS, demo.submission.id);
+
+    const response = await request(app)
+      .get('/api/inbound/submissions?limit=200')
+      .set('Cookie', `trevra_session=${session}`)
+      .expect(200);
+    const listed = response.body.submissions as Array<{ id: string; kind: string }>;
+    expect(listed.map((submission) => submission.id)).toContain(demo.submission.id);
+    expect(listed.filter((submission) => submission.kind === 'signed_up')).toEqual([]);
+  });
 });

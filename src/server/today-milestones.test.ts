@@ -103,6 +103,41 @@ describe('Today and demand treat milestones as outcomes', () => {
     });
   });
 
+  it('never calls a paying customer high priority; the same score without a win still is', async () => {
+    await submit('signed_up', 'ada@acme-today.test', 'hot-signed-up');
+    await submit('activated', 'ada@acme-today.test', 'hot-activated');
+    await submit('paid', 'ada@acme-today.test', 'hot-paid');
+    const account = await db
+      .prepare(
+        `SELECT a.id,s.score,s.tier FROM accounts a
+         JOIN account_scores s ON s.workspace_id=a.workspace_id AND s.account_id=a.id
+         WHERE a.workspace_id=? AND a.domain='acme-today.io'`
+      )
+      .get<{ id: string; score: number; tier: string }>(WS);
+    expect(Number(account?.score)).toBeGreaterThanOrEqual(HOT_SCORE);
+    expect(account?.tier).toBe('hot');
+    const wonCount = await db
+      .prepare(
+        "SELECT COUNT(*)::int AS n FROM opportunities WHERE workspace_id=? AND account_id=? AND stage='won'"
+      )
+      .get<{ n: number }>(WS, account!.id);
+    expect(wonCount?.n).toBe(1);
+
+    const highPriority = async () =>
+      (await getToday(db, WS, NOW)).needsAttention
+        .filter((item) => item.kind === 'high_priority_account')
+        .map((item) => item.reference.id);
+    expect(await highPriority()).toEqual([]);
+
+    // Same signals and score, but the Opportunity is not won.
+    await db
+      .prepare(
+        "UPDATE opportunities SET stage='proposal',closed_at=NULL WHERE workspace_id=? AND account_id=?"
+      )
+      .run(WS, account!.id);
+    expect(await highPriority()).toEqual([account!.id]);
+  });
+
   it('never turns a milestone submission into demand evidence', async () => {
     const activated = await submit(
       'activated',
