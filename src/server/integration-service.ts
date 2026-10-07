@@ -7,6 +7,13 @@ import { id, type Db } from './db.js';
 import { resolveContact } from './lead-capture/people.js';
 import { accountForPerson, upsertPersonIdentity } from './person-identities.js';
 import { projectCanonicalMessage } from './conversations.js';
+import { applyMeetingRecord, findMeetingPerson } from './meetings/ingest.js';
+import { meetingKnown } from './meetings/store.js';
+import {
+  activeMeetingSchema,
+  canonicalMeetingSchema,
+  type CanonicalMeeting
+} from './meetings/types.js';
 import { assertNotSuppressed } from './suppressions.js';
 import {
   assertEmailDeliveryCapacity,
@@ -44,7 +51,8 @@ const canonicalRecordSchema = z.discriminatedUnion('kind', [
     proposalSentAt: z.string().datetime().optional(),
     expectedResponseAt: z.string().datetime().optional(),
     externalUrl: z.string().url().optional()
-  })
+  }),
+  canonicalMeetingSchema
 ]);
 
 export type CanonicalRecord = z.infer<typeof canonicalRecordSchema>;
@@ -1059,15 +1067,37 @@ export interface NangoSyncResult {
   skipped: number;
 }
 
+/** Whether a canonical record was kept. A calendar meeting with nobody Trevra knows is not. */
+export interface IngestOutcome {
+  stored: boolean;
+}
+
+/** Facts about the ingress path, never read from the record itself. */
+export interface IngestOptions {
+  /** Only the Cal.com webhook passes 'booking'; every other path is a calendar observation. */
+  meetingOrigin?: 'booking';
+}
+
 export async function ingestCanonicalRecord(
   db: Db,
   workspaceId: string,
   provider: string,
   connectionId: string | null,
-  input: CanonicalRecord
-): Promise<void> {
+  input: CanonicalRecord,
+  options?: IngestOptions
+): Promise<IngestOutcome> {
   const record = canonicalRecordSchema.parse(input);
   const now = new Date().toISOString();
+  if (record.kind === 'meeting') {
+    return ingestMeeting(
+      db,
+      workspaceId,
+      provider,
+      connectionId,
+      { ...record, origin: options?.meetingOrigin ?? 'calendar' },
+      now
+    );
+  }
   const sourceId = await upsertSourceRecord(
     db,
     workspaceId,
@@ -1173,6 +1203,72 @@ export async function ingestCanonicalRecord(
       break;
     }
   }
+  return { stored: true };
+}
+
+/**
+ * A meeting is a time and one matched Person.
+ *
+ * Identity differs by origin. A Cal.com booking resolves (and may create) the
+ * Person, because somebody chose to book. A calendar event attaches only to a
+ * Person who already exists, so a dentist appointment or a family dinner never
+ * becomes a contact. Nothing is written for a meeting that will not be kept, so
+ * an ignored event leaves no source record either. `record.origin` is the
+ * ingress-assigned origin, never the payload's.
+ */
+async function ingestMeeting(
+  db: Db,
+  workspaceId: string,
+  provider: string,
+  connectionId: string | null,
+  record: CanonicalMeeting,
+  now: string
+): Promise<IngestOutcome> {
+  if (record.status !== 'cancelled') activeMeetingSchema.parse(record);
+  const identity = !record.personEmail
+    ? { personId: null, accountId: null }
+    : record.origin === 'booking'
+      ? await resolveCanonicalRecordIdentity(
+          db,
+          workspaceId,
+          provider,
+          record.personName,
+          record.personEmail,
+          now
+        )
+      : await findMeetingPerson(db, workspaceId, record.personEmail);
+  if (record.status !== 'cancelled' && !identity.personId) return { stored: false };
+  if (
+    record.status === 'cancelled' &&
+    !(await meetingKnown(db, { workspaceId, provider, externalId: record.id })) &&
+    (!identity.personId || !record.startAt || !record.endAt)
+  ) {
+    return { stored: false };
+  }
+  const sourceId = await upsertSourceRecord(
+    db,
+    workspaceId,
+    connectionId,
+    provider,
+    record.kind,
+    record.id,
+    record.externalUrl ?? null,
+    record,
+    record.startAt ?? now
+  );
+  const applied = await applyMeetingRecord(
+    db,
+    {
+      workspaceId,
+      provider,
+      sourceRecordId: sourceId,
+      personId: identity.personId,
+      accountId: identity.accountId,
+      record
+    },
+    new Date(now)
+  );
+  return { stored: applied.meetingId !== null };
 }
 
 export function getNango(): Nango {

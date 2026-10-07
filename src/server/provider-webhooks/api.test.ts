@@ -199,3 +199,34 @@ describe('/api/setup/webhooks', () => {
     await member.agent.delete(`/api/setup/webhooks/pwh_${'a'.repeat(24)}`).expect(403);
   });
 });
+
+describe('/api/events', () => {
+  it('refuses a meeting record, whatever origin it claims', async () => {
+    const previous = process.env.INGEST_API_KEY;
+    process.env.INGEST_API_KEY = 'test-only-ingest-key';
+    try {
+      const meeting = {
+        kind: 'meeting',
+        id: 'evt-api',
+        personEmail: 'nia@prospect.example',
+        status: 'scheduled',
+        origin: 'booking',
+        startAt: '2026-08-22T09:00:00Z',
+        endAt: '2026-08-22T09:30:00Z'
+      };
+      const refused = await owner()
+        .post('/api/events')
+        .set('x-trevra-ingest-key', 'test-only-ingest-key')
+        .send({ provider: 'calcom', record: meeting })
+        .expect(400);
+      expect(refused.body.error).toMatch(/meeting/i);
+      const count = await db
+        .prepare('SELECT COUNT(*)::int AS n FROM meetings WHERE workspace_id=?')
+        .get<{ n: number }>(WORKSPACE_ID);
+      expect(Number(count?.n)).toBe(0);
+    } finally {
+      if (previous === undefined) delete process.env.INGEST_API_KEY;
+      else process.env.INGEST_API_KEY = previous;
+    }
+  });
+});

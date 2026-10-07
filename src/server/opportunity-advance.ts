@@ -28,7 +28,15 @@ export interface AdvanceOpportunityInput {
   /** e.g. 'product_milestone' | 'meeting'. The pair is the idempotency key. */
   sourceType: string;
   sourceId: string;
+  /** ISO instant. When set, only open Opportunities created at or before it match. */
+  openedAtOrBefore?: string;
 }
+
+/**
+ * `createIfMissing: false` makes the call a pure observation: with no matching
+ * OPEN Opportunity it returns null and creates, closes and records nothing.
+ */
+export type AdvanceOpportunityObservation = AdvanceOpportunityInput & { createIfMissing: false };
 
 export interface AdvanceOpportunityResult {
   opportunityId: string;
@@ -54,18 +62,20 @@ async function latestOpportunity(
   workspaceId: string,
   column: 'person_id' | 'account_id',
   value: string,
-  open: boolean
+  open: boolean,
+  openedAtOrBefore: string | null = null
 ): Promise<StageRow | null> {
+  const bounded = open && openedAtOrBefore !== null;
   // `column` comes from a closed two-member union, never from input.
   const row = await tx
     .prepare(
       `SELECT id,stage FROM opportunities
        WHERE workspace_id=? AND ${column}=?
-         AND stage ${open ? "NOT IN ('won','lost')" : "IN ('won','lost')"}
+         AND stage ${open ? "NOT IN ('won','lost')" : "IN ('won','lost')"}${bounded ? ' AND created_at<=?::timestamptz' : ''}
        ORDER BY updated_at DESC,id DESC
        LIMIT 1${open ? ' FOR UPDATE' : ''}`
     )
-    .get<StageRow>(workspaceId, value);
+    .get<StageRow>(...(bounded ? [workspaceId, value, openedAtOrBefore] : [workspaceId, value]));
   return row ?? null;
 }
 
@@ -81,12 +91,30 @@ async function latestOpportunity(
  * 3. With only closed matches, `won` returns the latest closed row unchanged;
  *    any lower floor creates a fresh row.
  * 4. With no match, a system-owned row is created at `minimumStage`.
+ *
+ * `createIfMissing: false` and `openedAtOrBefore` are applied inside the lock:
+ * the first returns null instead of touching closed rows or creating one, the
+ * second ignores open Opportunities created after the instant.
  */
 export async function advanceOpportunityStage(
   db: Db,
   input: AdvanceOpportunityInput,
+  now?: Date
+): Promise<AdvanceOpportunityResult>;
+export async function advanceOpportunityStage(
+  db: Db,
+  input: AdvanceOpportunityObservation,
+  now?: Date
+): Promise<AdvanceOpportunityResult | null>;
+export async function advanceOpportunityStage(
+  db: Db,
+  input: AdvanceOpportunityInput & { createIfMissing?: boolean },
   now: Date = new Date()
-): Promise<AdvanceOpportunityResult> {
+): Promise<AdvanceOpportunityResult | null> {
+  const createIfMissing = input.createIfMissing !== false;
+  const openedAtOrBefore = input.openedAtOrBefore
+    ? new Date(input.openedAtOrBefore).toISOString()
+    : null;
   const personId = input.personId?.trim() || null;
   const accountId = input.accountId?.trim() || null;
   const sourceType = input.sourceType.trim();
@@ -143,8 +171,13 @@ export async function advanceOpportunityStage(
 
     let result: AdvanceOpportunityResult;
     const open =
-      (personId ? await latestOpportunity(tx, workspaceId, 'person_id', personId, true) : null) ??
-      (accountId ? await latestOpportunity(tx, workspaceId, 'account_id', accountId, true) : null);
+      (personId
+        ? await latestOpportunity(tx, workspaceId, 'person_id', personId, true, openedAtOrBefore)
+        : null) ??
+      (accountId
+        ? await latestOpportunity(tx, workspaceId, 'account_id', accountId, true, openedAtOrBefore)
+        : null);
+    if (!open && !createIfMissing) return null;
 
     if (open) {
       const raise = STAGE_RANK[open.stage] < STAGE_RANK[minimumStage];

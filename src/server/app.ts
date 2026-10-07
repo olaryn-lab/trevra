@@ -4281,6 +4281,10 @@ export function createApp(db: Db) {
     const event = z
       .object({ provider: z.string().default('custom'), record: z.record(z.unknown()) })
       .parse(req.body);
+    // A meeting's origin is set by its ingress path (Cal.com webhook, calendar sync).
+    // This generic route has neither, so it must not be a way to mint one.
+    if (event.record.kind === 'meeting')
+      return res.status(400).json({ error: 'Meetings cannot be ingested through this route' });
     await ingestCanonicalRecord(
       db,
       req.auth!.workspaceId,

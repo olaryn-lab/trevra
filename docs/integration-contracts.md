@@ -49,6 +49,31 @@ The Nango canonical sync surface is intentionally narrow. It accepts only GTM re
 
 Opportunity is minimal GTM progression state. Its bounded stages are `new`, `qualified`, `meeting`, `proposal`, `won`, and `lost`; it does not own amount, forecast, accounting currency, delivery milestones, contracts, projects, or payment state.
 
+### Meeting
+
+```json
+{
+  "kind": "meeting",
+  "id": "provider-event-or-booking-id",
+  "previousId": "booking-id-this-one-replaces",
+  "personName": "Maya Chen",
+  "personEmail": "maya@acme.example",
+  "status": "scheduled",
+  "startAt": "2026-08-20T09:00:00+02:00",
+  "endAt": "2026-08-20T09:30:00+02:00",
+  "externalUrl": "https://www.google.com/calendar/event?eid=abc"
+}
+```
+
+A meeting is a time and one matched Person. Trevra never stores its title, description, location, conference link or guest list. `status` is `scheduled`, `rescheduled` or `cancelled`. A meeting that is not cancelled needs `personEmail`, `startAt` and `endAt`, with a UTC offset.
+
+`origin` is never part of the record. The ingress path sets it: the Cal.com webhook is `booking`, calendar sync (and every other caller) is `calendar`, and `/api/events` does not accept meetings. It sets how much the meeting is allowed to do:
+
+- `calendar` is an observation. It attaches only to a Person already in the workspace, and only raises an Opportunity that already existed when the meeting ended.
+- `booking` is intent. It may create the Person, and an Opportunity at `meeting`.
+
+Stages only move forward. Cancelling a meeting never lowers one. Meetings are deleted with their Person and with the workspace.
+
 ## Explicit GTM execution actions
 
 External writes use Trevra's prepared-action / exact-payload approval boundary. The execution registry is closed, not user-programmable.

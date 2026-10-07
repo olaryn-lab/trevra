@@ -206,4 +206,91 @@ describe('advanceOpportunityStage', () => {
     expect(new Set(results.map((result) => result.opportunityId)).size).toBe(1);
     expect(await opportunityRows()).toHaveLength(1);
   });
+
+  it('createIfMissing false returns null and creates nothing when no open row matches', async () => {
+    const result = await advanceOpportunityStage(
+      db,
+      { ...input({ sourceId: 'pm_observe' }), createIfMissing: false },
+      NOW
+    );
+    expect(result).toBeNull();
+    expect(await opportunityRows()).toHaveLength(0);
+    const recorded = await db
+      .prepare('SELECT COUNT(*)::int AS n FROM opportunity_stage_observations WHERE workspace_id=?')
+      .get<{ n: number }>(WS);
+    expect(Number(recorded?.n)).toBe(0);
+  });
+
+  it('createIfMissing false leaves a closed row untouched', async () => {
+    const won = id('opp');
+    await db
+      .prepare(
+        'INSERT INTO opportunities (id,workspace_id,person_id,account_id,title,stage,created_at,updated_at,closed_at) VALUES (?,?,?,?,?,?,?,?,?)'
+      )
+      .run(
+        won,
+        WS,
+        personId,
+        null,
+        'Closed',
+        'won',
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    const result = await advanceOpportunityStage(
+      db,
+      { ...input({ minimumStage: 'meeting', sourceId: 'pm_closed' }), createIfMissing: false },
+      NOW
+    );
+    expect(result).toBeNull();
+    expect(await opportunityRows()).toEqual([
+      { id: won, stage: 'won', closed_at: expect.anything() }
+    ]);
+  });
+
+  it('openedAtOrBefore ignores an open Opportunity created after the instant', async () => {
+    const later = id('opp');
+    await db
+      .prepare(
+        'INSERT INTO opportunities (id,workspace_id,person_id,account_id,title,stage,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)'
+      )
+      .run(
+        later,
+        WS,
+        personId,
+        null,
+        'Later',
+        'new',
+        '2026-10-06T10:00:00.000Z',
+        '2026-10-06T10:00:00.000Z'
+      );
+    const before = await advanceOpportunityStage(
+      db,
+      {
+        ...input({
+          openedAtOrBefore: '2026-10-06T09:00:00.000Z',
+          minimumStage: 'meeting',
+          sourceId: 'pm_before'
+        }),
+        createIfMissing: false
+      },
+      NOW
+    );
+    expect(before).toBeNull();
+    expect((await opportunityRows())[0].stage).toBe('new');
+    const after = await advanceOpportunityStage(
+      db,
+      {
+        ...input({
+          openedAtOrBefore: '2026-10-06T10:00:00.000Z',
+          minimumStage: 'meeting',
+          sourceId: 'pm_after'
+        }),
+        createIfMissing: false
+      },
+      NOW
+    );
+    expect(after).toMatchObject({ opportunityId: later, stage: 'meeting', changed: true });
+  });
 });
