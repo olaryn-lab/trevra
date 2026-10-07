@@ -23,7 +23,8 @@ import {
 import { errorMessage, useOutreachRefresh, useSeatLimits } from '../LinkedInSafety';
 import { DEFAULT_WINDOW_DAYS, LinkedInFunnel } from '../LinkedInAnalyticsScreen';
 import { ConfidenceTag, WindowPicker } from '../LinkedInViz';
-import { Select } from '../ui/primitives';
+import { Button, Select } from '../ui/primitives';
+import { emailSkipSummary } from './gtmPlanFormat';
 import { ACTIVATION_STEPS, nextActivationStep, type ActivationSignals } from './activation';
 import { money, usd } from './format';
 
@@ -1361,6 +1362,23 @@ function PlanWork({
                       >
                         Review accounts <ChevronRight size={15} />
                       </button>
+                    </>
+                  ) : prepared.channel === 'email' ? (
+                    <>
+                      <span>
+                        {prepared.result.prepared.length}{' '}
+                        {prepared.result.prepared.length === 1 ? 'email waits' : 'emails wait'} for
+                        your approval. Nothing is sent before you approve.
+                        {emailSkipSummary(prepared.result.skipped)
+                          ? ` ${emailSkipSummary(prepared.result.skipped)}`
+                          : ''}
+                        {prepared.result.truncated
+                          ? ' This list is larger than one preparation; prepare again for the rest.'
+                          : ''}
+                      </span>
+                      <Button variant="primary" onClick={() => onNavigate(prepared.next.href)}>
+                        Review approvals <ChevronRight size={15} />
+                      </Button>
                     </>
                   ) : (
                     <>

@@ -1,8 +1,20 @@
+import { createHash } from 'node:crypto';
+import { z } from 'zod';
+import { ensureConversationForPerson } from '../conversations.js';
 import type { Db } from '../db.js';
+import { LEAD_CONTACT_READ_LIMIT } from '../linkedin/lead-lists.js';
+import { startPlaybookRun } from '../playbooks/engine.js';
+import { findSuppression } from '../suppressions.js';
+import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from './compliance.js';
 import { emailDomainOf, type DnsResolver } from './deliverability.js';
 import { listSendingMailboxes, resolveMailboxAddress } from './mailbox-address.js';
 import { getSenderDeliverability } from './sender-deliverability.js';
-import type { EmailChannelIssue, MailProvider } from './types.js';
+import type {
+  EmailChannelIssue,
+  EmailOutreachSkipReason,
+  MailProvider,
+  PreparedEmailOutreachResult
+} from './types.js';
 import { unsubscribeConfigured } from './unsubscribe.js';
 
 export interface EmailOutreachOptions {
@@ -174,4 +186,347 @@ export async function emailOutreachReadiness(
   }
 
   return { blockers, warnings, listName, recipientCount, sender };
+  return { blockers, warnings, listName, recipientCount, sender };
+}
+
+export class EmailOutreachError extends Error {
+  constructor(
+    message: string,
+    public readonly status = 409
+  ) {
+    super(message);
+  }
+}
+
+export const EMAIL_OUTREACH_PLAYBOOK_ID = 'gtm.email-outreach';
+
+// lc-debt: one preparation starts at most 200 approval runs and reads at most LEAD_CONTACT_READ_LIMIT list members; upgrade path: prepare in pages with a cursor stored on email_outreach_preparations once founders approve more than 200 first-touch emails at a time.
+const MAX_PREPARED_PER_CALL = 200;
+
+const recipientSchema = z.string().email();
+
+interface MemberRow {
+  contact_id: string;
+  person_id: string | null;
+  do_not_contact: boolean;
+  first_name: string | null;
+  company: string | null;
+  recipient: string | null;
+}
+
+interface OutreachRunRow {
+  id: string;
+  person_id: string;
+  idempotency_key: string;
+}
+
+interface ReceiptRow {
+  plan_hash: string;
+  result_json: Omit<PreparedEmailOutreachResult, 'duplicate'>;
+}
+
+interface PrepareInput {
+  workspaceId: string;
+  actorUserId: string;
+  idempotencyKey: string;
+  planHash: string;
+  leadListId: string;
+  connectionId: string;
+  senderAddress: string;
+}
+
+/** One deterministic run key per workspace, preparation key and lead-list contact. */
+export function emailOutreachRunKey(
+  workspaceId: string,
+  idempotencyKey: string,
+  contactId: string
+): string {
+  const digest = createHash('sha256')
+    .update(`${workspaceId}:${idempotencyKey}:${contactId}`)
+    .digest('hex');
+  return `eo_${digest.slice(0, 40)}`;
+}
+
+function oneLine(value: string | null | undefined, max: number): string {
+  return (value ?? '').replace(/\s+/g, ' ').trim().slice(0, max);
+}
+
+/**
+ * The first-touch email Trevra prepares. It is short and plain on purpose: the
+ * founder approves its exact text before anything is sent, and the
+ * List-Unsubscribe header carries the one-click opt-out. The sender's
+ * compliance footer is appended by prepareEmailOutreach.
+ */
+export function firstTouchEmail(input: { firstName: string | null; company: string | null }): {
+  subject: string;
+  body: string;
+} {
+  const firstName = oneLine(input.firstName, 80);
+  const company = oneLine(input.company, 120);
+  return {
+    subject: firstName ? `Quick question, ${firstName}` : 'Quick question',
+    body: [
+      firstName ? `Hi ${firstName},` : 'Hi,',
+      '',
+      company
+        ? `I am reaching out because of the work you do at ${company}. Would you be open to a short conversation about it?`
+        : 'Would you be open to a short conversation?',
+      '',
+      OUTREACH_OPT_OUT_SENTENCE
+    ].join('\n')
+  };
+}
+
+async function readReceipt(
+  db: Db,
+  workspaceId: string,
+  idempotencyKey: string
+): Promise<ReceiptRow | undefined> {
+  return db
+    .prepare(
+      'SELECT plan_hash,result_json FROM email_outreach_preparations WHERE workspace_id=? AND idempotency_key=?'
+    )
+    .get<ReceiptRow>(workspaceId, idempotencyKey);
+}
+
+function replayReceipt(receipt: ReceiptRow, planHash: string): PreparedEmailOutreachResult {
+  if (receipt.plan_hash !== planHash) {
+    throw new EmailOutreachError(
+      'This preparation key was already used for a different email plan. Plan again before preparing.'
+    );
+  }
+  return { ...receipt.result_json, duplicate: true };
+}
+
+function errorCode(error: unknown): string {
+  return error && typeof error === 'object' && 'code' in error
+    ? String((error as { code?: unknown }).code)
+    : '';
+}
+
+/**
+ * Start one approval run, or find the run that beat it to the unique indexes.
+ * Returns the run id for this run key, or null when the Person already has an
+ * open outreach email under another key.
+ */
+async function startOutreachRun(
+  db: Db,
+  input: PrepareInput,
+  run: {
+    runKey: string;
+    conversationId: string;
+    personId: string;
+    contactId: string;
+    recipient: string;
+    subject: string;
+    body: string;
+  }
+): Promise<string | null> {
+  try {
+    const started = await startPlaybookRun(db, {
+      workspaceId: input.workspaceId,
+      playbookId: EMAIL_OUTREACH_PLAYBOOK_ID,
+      payload: {
+        idempotencyKey: run.runKey,
+        conversationId: run.conversationId,
+        personId: run.personId,
+        contactId: run.contactId,
+        leadListId: input.leadListId,
+        connectionId: input.connectionId,
+        senderAddress: input.senderAddress,
+        recipient: run.recipient,
+        subject: run.subject,
+        body: run.body
+      },
+      actorType: 'user',
+      actorId: input.actorUserId,
+      prepared: true
+    });
+    return started.id;
+  } catch (error) {
+    if (errorCode(error) !== '23505') throw error;
+    const raced = await db
+      .prepare(
+        `SELECT id,input_json->>'personId' AS person_id,input_json->>'idempotencyKey' AS idempotency_key
+         FROM playbook_runs
+         WHERE workspace_id=? AND playbook_key=?
+           AND (input_json->>'idempotencyKey'=?
+                OR (input_json->>'personId'=? AND status IN ('queued','running','waiting_approval')))
+         ORDER BY CASE WHEN input_json->>'idempotencyKey'=? THEN 0 ELSE 1 END, created_at ASC
+         LIMIT 1`
+      )
+      .get<OutreachRunRow>(
+        input.workspaceId,
+        EMAIL_OUTREACH_PLAYBOOK_ID,
+        run.runKey,
+        run.personId,
+        run.runKey
+      );
+    return raced && raced.idempotency_key === run.runKey ? raced.id : null;
+  }
+}
+
+/**
+ * Prepare first-touch outreach email for a People list: one gtm.email-outreach
+ * run per eligible Person, each waiting for approval of its exact text. Nothing
+ * is sent here. The caller has already re-compiled the plan and checked that it
+ * has no blockers, so the sender passed DNS and unsubscribe checks. Every body
+ * ends with the sender's compliance footer, so the footer is inside the
+ * approved and hashed payload; without a footer nothing is prepared.
+ */
+export async function prepareEmailOutreach(
+  db: Db,
+  input: PrepareInput,
+  now: Date = new Date()
+): Promise<PreparedEmailOutreachResult> {
+  const earlier = await readReceipt(db, input.workspaceId, input.idempotencyKey);
+  if (earlier) return replayReceipt(earlier, input.planHash);
+
+  const footer = (await emailComplianceProvider().footer(db, input.workspaceId))?.trim() ?? '';
+  if (!footer) {
+    throw new EmailOutreachError(
+      'No compliance footer (legal name, postal address, opt-out line) is available for this workspace. Complete sender compliance in Workspace settings before preparing outreach email.'
+    );
+  }
+
+  const rows = await db
+    .prepare(
+      `SELECT lc.id AS contact_id,lc.person_id,lc.do_not_contact,lc.first_name,lc.company,
+              ${RECIPIENT_SQL} AS recipient
+       FROM linkedin_lead_list_members m
+       JOIN linkedin_lead_contacts lc ON lc.workspace_id=m.workspace_id AND lc.id=m.contact_id
+       LEFT JOIN contacts p ON p.workspace_id=lc.workspace_id AND p.id=lc.person_id
+       WHERE m.workspace_id=? AND m.list_id=?
+       ORDER BY m.created_at ASC,lc.id ASC
+       LIMIT ?`
+    )
+    .all<MemberRow>(input.workspaceId, input.leadListId, LEAD_CONTACT_READ_LIMIT + 1);
+  let truncated = rows.length > LEAD_CONTACT_READ_LIMIT;
+
+  const contacted = new Set(
+    (
+      await db
+        .prepare(
+          `SELECT DISTINCT LOWER(recipient) AS recipient FROM gtm_deliveries
+           WHERE workspace_id=? AND channel='email' AND purpose='outreach'
+             AND status IN ('sending','sent','uncertain')`
+        )
+        .all<{ recipient: string }>(input.workspaceId)
+    ).map((row) => row.recipient)
+  );
+  const openRuns = new Map<string, OutreachRunRow>();
+  const open = await db
+    .prepare(
+      `SELECT id,input_json->>'personId' AS person_id,input_json->>'idempotencyKey' AS idempotency_key
+       FROM playbook_runs
+       WHERE workspace_id=? AND playbook_key=? AND status IN ('queued','running','waiting_approval')`
+    )
+    .all<OutreachRunRow>(input.workspaceId, EMAIL_OUTREACH_PLAYBOOK_ID);
+  for (const run of open) openRuns.set(run.person_id, run);
+
+  const prepared: PreparedEmailOutreachResult['prepared'] = [];
+  const skipped: PreparedEmailOutreachResult['skipped'] = [];
+  const batchRecipients = new Set<string>();
+  const skip = (contactId: string, reason: EmailOutreachSkipReason) => {
+    skipped.push({ contactId, reason });
+  };
+
+  for (const member of rows.slice(0, LEAD_CONTACT_READ_LIMIT)) {
+    if (prepared.length >= MAX_PREPARED_PER_CALL) {
+      truncated = true;
+      break;
+    }
+    const recipient =
+      member.recipient && recipientSchema.safeParse(member.recipient).success
+        ? member.recipient
+        : null;
+    if (!recipient) {
+      skip(member.contact_id, 'no_email');
+      continue;
+    }
+    const personId = member.person_id;
+    if (!personId) {
+      skip(member.contact_id, 'unresolved_person');
+      continue;
+    }
+    const runKey = emailOutreachRunKey(input.workspaceId, input.idempotencyKey, member.contact_id);
+    const openRun = openRuns.get(personId);
+    if (openRun && openRun.idempotency_key === runKey) {
+      // A retry of this same preparation after a crash: the run is already ours.
+      prepared.push({ contactId: member.contact_id, personId, runId: openRun.id });
+      batchRecipients.add(recipient);
+      continue;
+    }
+    if (member.do_not_contact) {
+      skip(member.contact_id, 'do_not_contact');
+      continue;
+    }
+    if (
+      await findSuppression(db, input.workspaceId, { channel: 'email', personId, email: recipient })
+    ) {
+      skip(member.contact_id, 'suppressed');
+      continue;
+    }
+    if (contacted.has(recipient)) {
+      skip(member.contact_id, 'already_contacted');
+      continue;
+    }
+    if (openRun || batchRecipients.has(recipient)) {
+      skip(member.contact_id, 'already_pending');
+      continue;
+    }
+
+    const email = firstTouchEmail({ firstName: member.first_name, company: member.company });
+    const conversationId = await ensureConversationForPerson(db, input.workspaceId, personId, now);
+    const runId = await startOutreachRun(db, input, {
+      runKey,
+      conversationId,
+      personId,
+      contactId: member.contact_id,
+      recipient,
+      subject: email.subject,
+      body: `${email.body}\n\n${footer}`
+    });
+    if (!runId) {
+      skip(member.contact_id, 'already_pending');
+      continue;
+    }
+    prepared.push({ contactId: member.contact_id, personId, runId });
+    openRuns.set(personId, { id: runId, person_id: personId, idempotency_key: runKey });
+    batchRecipients.add(recipient);
+  }
+
+  const result: Omit<PreparedEmailOutreachResult, 'duplicate'> = {
+    prepared,
+    skipped,
+    connectionId: input.connectionId,
+    senderAddress: input.senderAddress,
+    truncated
+  };
+  const written = await db
+    .prepare(
+      `INSERT INTO email_outreach_preparations
+       (workspace_id,idempotency_key,plan_hash,actor_user_id,lead_list_id,connection_id,run_ids_json,
+        result_json,created_at)
+       VALUES (?,?,?,?,?,?,?::jsonb,?::jsonb,?)
+       ON CONFLICT (workspace_id,idempotency_key) DO NOTHING`
+    )
+    .run(
+      input.workspaceId,
+      input.idempotencyKey,
+      input.planHash,
+      input.actorUserId,
+      input.leadListId,
+      input.connectionId,
+      JSON.stringify(prepared.map((item) => item.runId)),
+      JSON.stringify(result),
+      now.toISOString()
+    );
+  if (written.changes === 0) {
+    // A concurrent request with the same key wrote its receipt first. Its runs
+    // are these runs (same run keys), so answer as the replay it is.
+    const raced = await readReceipt(db, input.workspaceId, input.idempotencyKey);
+    if (raced) return replayReceipt(raced, input.planHash);
+  }
+  return { ...result, duplicate: false };
 }

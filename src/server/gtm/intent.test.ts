@@ -335,7 +335,8 @@ describe('bounded GTM intent compiler', () => {
       objective: 'prepare_outreach',
       result: { campaign: { status: 'draft', enrolled: 2 } }
     });
-    if (prepared.objective !== 'prepare_outreach') throw new Error('Expected outreach preparation');
+    if (prepared.objective !== 'prepare_outreach' || prepared.channel !== 'linkedin')
+      throw new Error('Expected outreach preparation');
     const campaign = await db
       .prepare('SELECT status,started_at FROM linkedin_campaigns WHERE workspace_id=? AND id=?')
       .get<{ status: string; started_at: string | null }>(WORKSPACE, prepared.artifacts.campaignId);
@@ -354,7 +355,8 @@ describe('bounded GTM intent compiler', () => {
       idempotencyKey: 'gtm-plan-prepare-0001'
     });
     expect(replay.objective).toBe('prepare_outreach');
-    if (replay.objective !== 'prepare_outreach') throw new Error('Expected outreach replay');
+    if (replay.objective !== 'prepare_outreach' || replay.channel !== 'linkedin')
+      throw new Error('Expected outreach replay');
     expect(replay.artifacts).toEqual(prepared.artifacts);
     expect(replay.result.duplicate).toBe(true);
   });

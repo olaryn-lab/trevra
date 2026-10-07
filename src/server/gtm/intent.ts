@@ -12,7 +12,12 @@ import {
 } from '../lead-capture/types.js';
 import { secretsConfigured } from '../secrets/crypto.js';
 import { emailComplianceProvider } from '../email/compliance.js';
-import { emailOutreachReadiness } from '../email/outreach.js';
+import {
+  EmailOutreachError,
+  emailOutreachReadiness,
+  prepareEmailOutreach
+} from '../email/outreach.js';
+import type { PreparedEmailOutreachResult } from '../email/types.js';
 import {
   DEFAULT_LINKEDIN_OUTREACH_WORKFLOW_NAME,
   prepareOutreach,
@@ -112,6 +117,7 @@ export interface GtmPlan {
 export interface PreparedOutreachGtmPlanResult {
   status: 'prepared';
   objective: 'prepare_outreach';
+  channel: 'linkedin';
   artifacts: PreparedOutreachResult['artifacts'];
   next: PreparedOutreachResult['next'];
   result: PreparedOutreachResult;
@@ -147,8 +153,20 @@ export interface PreparedWatchGtmPlanResult {
   };
 }
 
+export interface PreparedEmailOutreachGtmPlanResult {
+  status: 'prepared';
+  objective: 'prepare_outreach';
+  channel: 'email';
+  artifacts: { runIds: string[] };
+  next: { kind: 'review_email_approvals'; href: '/ledger' };
+  result: PreparedEmailOutreachResult;
+}
+
 export type PreparedGtmPlanResult =
-  PreparedOutreachGtmPlanResult | PreparedCaptureGtmPlanResult | PreparedWatchGtmPlanResult;
+  | PreparedOutreachGtmPlanResult
+  | PreparedEmailOutreachGtmPlanResult
+  | PreparedCaptureGtmPlanResult
+  | PreparedWatchGtmPlanResult;
 
 const watchPreparationResultSchema = z
   .object({
@@ -943,7 +961,35 @@ export async function prepareGtmPlan(
   }
 
   if (current.defaults.channel === 'email') {
-    throw new GtmPlanError('Email outreach preparation is not available yet.', 409);
+    const text = (value: unknown) => (typeof value === 'string' && value ? value : null);
+    const leadListId = text(current.defaults.leadListId);
+    const connectionId = text(current.defaults.connectionId);
+    const senderAddress = text(current.defaults.senderAddress);
+    if (!leadListId || !connectionId || !senderAddress) {
+      throw new GtmPlanError('This email plan is missing a People list or sending mailbox.', 409);
+    }
+    try {
+      const result = await prepareEmailOutreach(db, {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId,
+        idempotencyKey: input.idempotencyKey,
+        planHash: current.planHash,
+        leadListId,
+        connectionId,
+        senderAddress
+      });
+      return {
+        status: 'prepared',
+        objective: 'prepare_outreach',
+        channel: 'email',
+        artifacts: { runIds: result.prepared.map((item) => item.runId) },
+        next: { kind: 'review_email_approvals', href: '/ledger' },
+        result
+      };
+    } catch (error) {
+      if (error instanceof EmailOutreachError) throw new GtmPlanError(error.message, error.status);
+      throw error;
+    }
   }
 
   const existingLeadListId = current.intent.people?.existingListId;
@@ -966,6 +1012,7 @@ export async function prepareGtmPlan(
   return {
     status: 'prepared',
     objective: 'prepare_outreach',
+    channel: 'linkedin',
     artifacts: result.artifacts,
     next: result.next,
     result
