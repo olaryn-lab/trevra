@@ -560,6 +560,18 @@ async function inTransaction<T>(db: Db, work: (tx: Db) => Promise<T>): Promise<T
 }
 
 /**
+ * Every proxy write locks the seat row before the proxy row, the same order as
+ * a guarded seat write (seat FOR UPDATE, then upsert, then proxy). Without it the
+ * worker's lazy legacy migration takes the proxy row first and the seat's
+ * key-share lock second (FK), and the two deadlock.
+ */
+async function lockSeatRow(tx: Db, workspaceId: string, seatKey: string): Promise<void> {
+  await tx
+    .prepare('SELECT 1 FROM linkedin_seats WHERE workspace_id=? AND seat_key=? FOR UPDATE')
+    .get(workspaceId, seatKey);
+}
+
+/**
  * Seal or clear one seat's full proxy URL. The seat row stores only metadata
  * the UI is already allowed to display; the legacy plaintext column is always
  * nulled in the same transaction as the secret write.
@@ -574,6 +586,7 @@ export async function putSeatProxySecret(
   const value = raw?.trim() || null;
   if (!value) {
     await inTransaction(db, async (tx) => {
+      await lockSeatRow(tx, workspaceId, seatKey);
       await tx
         .prepare('DELETE FROM linkedin_seat_proxy_secrets WHERE workspace_id=? AND seat_key=?')
         .run(workspaceId, seatKey);
@@ -616,6 +629,7 @@ export async function putSeatProxySecret(
   const hasPassword = Boolean(url.password);
   const now = new Date().toISOString();
   await inTransaction(db, async (tx) => {
+    await lockSeatRow(tx, workspaceId, seatKey);
     await tx
       .prepare(
         `
