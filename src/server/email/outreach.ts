@@ -130,7 +130,16 @@ export async function emailOutreachReadiness(
         { domain, provider: mailbox.providerKey, markOutreach: true },
         { resolver: options.resolver, now: options.now }
       );
-      if (deliverability.status === 'fail') blockers.push(...deliverability.blockers);
+      if (deliverability.status === 'fail') {
+        // Fail closed: a failing check with no stored blocker must still block.
+        if (deliverability.blockers.length > 0) blockers.push(...deliverability.blockers);
+        else
+          blockers.push({
+            code: 'email_deliverability_failed',
+            message: `Email from ${domain} fails SPF, DKIM or DMARC checks. Fix DNS and re-check.`,
+            actionHref: SETUP_HREF
+          });
+      }
       if (deliverability.status === 'unknown') {
         const unanswered = [deliverability.spf, deliverability.dkim, deliverability.dmarc].find(
           (check) => check.status === 'unknown'

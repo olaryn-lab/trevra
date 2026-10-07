@@ -552,6 +552,11 @@ async function prepareOutreachPlan(
   });
 }
 
+const COMPLIANCE_BLOCKER_MESSAGES: Record<string, string> = {
+  email_compliance_footer_unavailable:
+    'Outreach email needs a compliance footer (legal name, postal address, opt-out). Complete sender compliance in Workspace settings.'
+};
+
 async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent): Promise<GtmPlan> {
   const blockers = peopleBlockers(intent);
   const existingListId = intent.people?.existingListId ?? null;
@@ -566,7 +571,8 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
     ...compliance.map((code) => ({
       code,
       message:
-        'Outreach email needs a compliance footer (legal name, postal address, opt-out). Complete sender compliance in Workspace settings.',
+        COMPLIANCE_BLOCKER_MESSAGES[code] ??
+        `Sender compliance is incomplete (${code}). Complete it in Workspace settings.`,
       actionHref: '/setup/workspace'
     }))
   );

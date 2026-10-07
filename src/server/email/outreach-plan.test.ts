@@ -161,6 +161,34 @@ describe('email-only prepare_outreach plans', () => {
     expect(plan.defaults.prepareSupported).toBe(false);
   });
 
+  it('names an unknown compliance code in its blocker', async () => {
+    registerEmailComplianceProvider({
+      footer: async () => null,
+      blockers: async () => ['sender_privacy_url_missing']
+    });
+    await seedMailbox();
+    await seedInbound();
+    await seedCheck('pass');
+    const listId = await peopleList();
+
+    const plan = await compileGtmIntent(db, WORKSPACE, emailIntent(listId));
+    expect(plan.blockers).toHaveLength(1);
+    expect(plan.blockers[0]?.code).toBe('sender_privacy_url_missing');
+    expect(plan.blockers[0]?.message).toContain('sender_privacy_url_missing');
+    expect(plan.blockers[0]?.actionHref).toBe('/setup/workspace');
+  });
+
+  it('fails closed when a failing DNS check stored no blockers', async () => {
+    await seedMailbox();
+    await seedInbound();
+    await seedCheck('fail', []);
+    const listId = await peopleList();
+
+    const plan = await compileGtmIntent(db, WORKSPACE, emailIntent(listId));
+    expect(plan.blockers.map((blocker) => blocker.code)).toEqual(['email_deliverability_failed']);
+    expect(plan.defaults.prepareSupported).toBe(false);
+  });
+
   it('blocks when no inbound mailbox is designated', async () => {
     await seedMailbox();
     await seedCheck('pass');
