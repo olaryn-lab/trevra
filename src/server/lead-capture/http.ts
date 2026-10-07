@@ -10,6 +10,9 @@ import {
   recordCaptureSourceRejected
 } from './sources.js';
 import { acceptInboundSubmission, payloadHash } from './submissions.js';
+import { accountForPerson } from '../person-identities.js';
+import { isMilestoneKind } from './milestones.js';
+import { recordProductMilestone } from './milestone-recorder.js';
 
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_CLOCK_SKEW_SECONDS = 5 * 60;
@@ -83,6 +86,31 @@ async function handleIntake(db: Db, req: Request, res: Response): Promise<void> 
       payloadHash: payloadHash(rawBody)
     });
     await recordCaptureSourceAccepted(db, source.id);
+    const kind = result.submission.kind;
+    if (isMilestoneKind(kind)) {
+      // A milestone is an outcome, not inbound to qualify. The submission row stays as
+      // provenance and the milestone is recorded against it. This also runs on a duplicate,
+      // so a retry heals a crash between the two writes. The submission is already accepted,
+      // so a recorder failure is a server fault (5xx, sender retries), never a rejection.
+      try {
+        await recordProductMilestone(db, {
+          workspaceId: source.workspaceId,
+          kind,
+          contactId: result.contactId,
+          accountId:
+            result.accountId ?? (await accountForPerson(db, source.workspaceId, result.contactId)),
+          sourceType: 'inbound_submission',
+          sourceId: result.submission.id,
+          occurredAt: new Date(result.submission.occurredAt ?? result.submission.receivedAt)
+        });
+      } catch (error) {
+        console.error('milestone recording failed', error);
+        res
+          .status(503)
+          .json({ error: 'Milestone recording failed. Retry with the same idempotency key.' });
+        return;
+      }
+    }
     res.status(result.duplicate ? 200 : 202).json({
       submissionId: result.submission.id,
       personId: result.contactId,
