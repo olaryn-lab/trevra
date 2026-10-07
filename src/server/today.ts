@@ -845,31 +845,40 @@ export async function getToday(
   // Meetings (migration 131), read last and on their own so the queries above are
   // untouched. Upcoming: the next 48 hours. Held: ended inside the same seven-day
   // window every other result uses. In-progress meetings are neither.
-  // lc-debt: 50 meetings per projection; page it if a workspace books more than
-  // that in a 9-day window.
+  // lc-debt: each projection (upcoming, held) is capped at 50 independently; page
+  // them if a workspace books more than that in a 48-hour or 7-day window.
   const meetingHorizon = new Date(now.getTime() + 48 * 3_600_000).toISOString();
   const nowIso = now.toISOString();
-  const [meetingRows, meetingSettings] = await Promise.all([
-    db
-      .prepare(
-        `SELECT m.id,m.provider,m.person_id,m.account_id,
+  const meetingSelect = `SELECT m.id,m.provider,m.person_id,m.account_id,
                 TO_CHAR(m.starts_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS starts_at,
                 TO_CHAR(m.ends_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ends_at,
                 p.name AS person_name,p.email AS person_email,a.name AS account_name
          FROM meetings m
          JOIN contacts p ON p.workspace_id=m.workspace_id AND p.id=m.person_id
          LEFT JOIN accounts a ON a.workspace_id=m.workspace_id AND a.id=m.account_id
-         WHERE m.workspace_id=? AND m.status<>'cancelled'
-           AND ((m.starts_at>?::timestamptz AND m.starts_at<=?::timestamptz)
-             OR (m.ends_at>=?::timestamptz AND m.ends_at<=?::timestamptz))
+         WHERE m.workspace_id=? AND m.status<>'cancelled'`;
+  const [upcomingRows, heldRows, meetingSettings] = await Promise.all([
+    db
+      .prepare(
+        `${meetingSelect}
+           AND m.starts_at>?::timestamptz AND m.starts_at<=?::timestamptz
          ORDER BY m.starts_at ASC,m.id ASC
          LIMIT 50`
       )
-      .all<Record<string, unknown>>(workspaceId, nowIso, meetingHorizon, recentSince, nowIso),
+      .all<Record<string, unknown>>(workspaceId, nowIso, meetingHorizon),
+    db
+      .prepare(
+        `${meetingSelect}
+           AND m.ends_at>=?::timestamptz AND m.ends_at<=?::timestamptz
+         ORDER BY m.ends_at DESC,m.id ASC
+         LIMIT 50`
+      )
+      .all<Record<string, unknown>>(workspaceId, recentSince, nowIso),
     db
       .prepare('SELECT timezone FROM workspace_settings WHERE workspace_id=?')
       .get<{ timezone: string | null }>(workspaceId)
   ]);
+  const meetingRows = [...upcomingRows, ...heldRows];
   const meetingZone = validTimeZone(meetingSettings?.timezone);
   for (const row of meetingRows) {
     const meetingId = String(row.id);

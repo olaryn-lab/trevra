@@ -529,6 +529,91 @@ describe('getToday', () => {
       observedAt: '2026-08-20T10:30:00.000Z'
     });
   });
+
+  it('keeps upcoming meetings when many are held, and hides in-progress and foreign ones', async () => {
+    const stamp = '2026-08-20T08:00:00.000Z';
+    await db
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`
+      )
+      .run('con_cap', WORKSPACE, 'Cap Person', 'cap@cap.example', 'cap@cap.example', stamp, stamp);
+    const insert = db.prepare(
+      `INSERT INTO meetings
+         (id,workspace_id,provider,external_id,status,origin,starts_at,ends_at,person_id,created_at,updated_at)
+         VALUES (?,?,'calcom',?,'scheduled','booking',?,?,?,?,?)`
+    );
+    for (let i = 0; i < 55; i += 1) {
+      const start = new Date(Date.parse('2026-08-15T10:00:00.000Z') + i * 3_600_000);
+      const end = new Date(start.getTime() + 1_800_000);
+      await insert.run(
+        `mtg_cap_held_${i}`,
+        WORKSPACE,
+        `mtg_cap_held_${i}`,
+        start.toISOString(),
+        end.toISOString(),
+        'con_cap',
+        stamp,
+        stamp
+      );
+    }
+    await insert.run(
+      'mtg_cap_soon',
+      WORKSPACE,
+      'mtg_cap_soon',
+      '2026-08-21T11:00:00.000Z',
+      '2026-08-21T11:30:00.000Z',
+      'con_cap',
+      stamp,
+      stamp
+    );
+    await insert.run(
+      'mtg_cap_live',
+      WORKSPACE,
+      'mtg_cap_live',
+      '2026-08-21T07:45:00.000Z',
+      '2026-08-21T08:30:00.000Z',
+      'con_cap',
+      stamp,
+      stamp
+    );
+    await db
+      .prepare('INSERT INTO workspaces (id,name,created_at) VALUES (?,?,?)')
+      .run('ws_today_meet_other', 'Other', stamp);
+    await db
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(
+        'con_foreign',
+        'ws_today_meet_other',
+        'Foreign',
+        'f@f.example',
+        'f@f.example',
+        stamp,
+        stamp
+      );
+    await insert.run(
+      'mtg_foreign',
+      'ws_today_meet_other',
+      'mtg_foreign',
+      '2026-08-21T12:00:00.000Z',
+      '2026-08-21T12:30:00.000Z',
+      'con_foreign',
+      stamp,
+      stamp
+    );
+
+    const today = await getToday(db, WORKSPACE, NOW);
+    const upcoming = today.needsAttention.filter((item) => item.kind === 'meeting_upcoming');
+    expect(upcoming.map((item) => item.id)).toEqual(['meeting-upcoming:mtg_cap_soon']);
+    const held = today.recentResults.filter((item) => item.kind === 'meeting_held');
+    expect(held).toHaveLength(50);
+    expect(held.some((item) => item.id === 'meeting-held:mtg_cap_live')).toBe(false);
+    expect(held.some((item) => item.id === 'meeting-held:mtg_foreign')).toBe(false);
+  });
+
   it("surfaces only an Agent's latest failed run and deep-links to its ledger evidence", async () => {
     const agent = await ensureDefaultAgent(db, WORKSPACE);
     for (const [id, startedAt, finishedAt, error] of [
