@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { id, type Db } from '../db.js';
 import { appendDomainEvent } from '../control-plane/events.js';
 import { resolveContact, resolveExplicitAccount } from './people.js';
+import { recordLawfulBasis } from '../compliance/lawful-basis.js';
 import type {
   CaptureSourceRecord,
   InboundSubmissionInput,
@@ -228,6 +229,30 @@ export async function acceptInboundSubmission(
         kind: input.body.kind
       }
     });
+    // An explicit marketing-email opt-in is a lawful basis for cold email to
+    // this person, with the submission as its evidence. Recorded in the same
+    // transaction, so it exists exactly when the submission does. A consent
+    // timestamp in the future is never trusted; receipt time is used instead.
+    if (input.body.consent?.marketingEmail === true && input.body.person.email) {
+      const capturedAt = input.body.consent.capturedAt;
+      await recordLawfulBasis(
+        tx,
+        {
+          workspaceId: input.source.workspaceId,
+          personId: resolved.contact.id,
+          channel: 'email',
+          basis: 'consent',
+          source: 'inbound_capture',
+          sourceRef: submissionId,
+          recordedAt:
+            capturedAt && Date.parse(capturedAt) <= receivedAt.getTime()
+              ? capturedAt
+              : receivedAt.toISOString(),
+          actorUserId: null
+        },
+        receivedAt
+      );
+    }
 
     return {
       submission: toSubmission(row),

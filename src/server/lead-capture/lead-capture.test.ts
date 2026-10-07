@@ -413,6 +413,46 @@ describe('generic lead capture', () => {
     expect(response.body.error).toContain('different payload');
   });
 
+  it('records marketing-email consent from a capture once, dated when the person gave it', async () => {
+    const body = {
+      kind: 'demo_request',
+      person: { name: 'Lena', email: 'lena@consent.example' },
+      consent: {
+        marketingEmail: true,
+        privacyAccepted: true,
+        capturedAt: '2026-01-05T09:00:00.000Z'
+      }
+    };
+    const first = await intake(sourceSecret, 'idem-consent-001', body).expect(202);
+    await intake(sourceSecret, 'idem-consent-001', body).expect(200);
+
+    const rows = await db
+      .prepare(
+        `SELECT channel,basis,source,source_ref,
+           TO_CHAR(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS recorded_at
+         FROM contact_lawful_bases WHERE workspace_id=? AND person_id=?`
+      )
+      .all<Record<string, unknown>>(WORKSPACE_A, first.body.personId);
+    expect(rows).toEqual([
+      {
+        channel: 'email',
+        basis: 'consent',
+        source: 'inbound_capture',
+        source_ref: first.body.submissionId,
+        recorded_at: '2026-01-05T09:00:00.000Z'
+      }
+    ]);
+
+    const declined = await intake(sourceSecret, 'idem-consent-002', {
+      kind: 'demo_request',
+      person: { email: 'nils@consent.example' },
+      consent: { marketingEmail: false, privacyAccepted: true }
+    }).expect(202);
+    const none = await db
+      .prepare('SELECT id FROM contact_lawful_bases WHERE workspace_id=? AND person_id=?')
+      .all<{ id: string }>(WORKSPACE_A, declined.body.personId);
+    expect(none).toEqual([]);
+  });
   it('derives the workspace only from the Capture Source and rejects body routing fields', async () => {
     const response = await intake(sourceSecret, 'idem-workspace-001', {
       kind: 'contact_message',
