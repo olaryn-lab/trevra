@@ -268,7 +268,7 @@ describe('canonical meeting ingestion', () => {
     expect(today.needsAttention.filter((item) => item.kind === 'meeting_upcoming')).toHaveLength(1);
   });
 
-  it('an unknown booking cancellation never creates a contact, even with times', async () => {
+  it('an unknown booking cancellation with times stores a tombstone for its booker', async () => {
     expect(
       await ingestCanonicalRecord(
         db,
@@ -283,10 +283,13 @@ describe('canonical meeting ingestion', () => {
         },
         BOOKING
       )
-    ).toEqual({ stored: false });
-    expect(await count('contacts')).toBe(0);
-    expect(await count('meetings')).toBe(0);
-    expect(await count('source_records')).toBe(0);
+    ).toEqual({ stored: true });
+    expect(await count('contacts')).toBe(1);
+    const [meeting] = await db
+      .prepare('SELECT status FROM meetings WHERE workspace_id=?')
+      .all<{ status: string }>(WORKSPACE);
+    expect(meeting.status).toBe('cancelled');
+    expect(await opportunities()).toEqual([]);
   });
 
   it('an unknown booking cancellation without times creates no contact', async () => {

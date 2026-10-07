@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { createApp } from '../app.js';
 import { openDatabase, type Db } from '../db.js';
+import { getToday } from '../today.js';
 import { calcomVerifier } from './calcom.js';
 import { createProviderWebhookEndpoint } from './index.js';
 
@@ -253,6 +254,51 @@ describe('Cal.com booking webhooks', () => {
       .all<{ payload: string }>(WORKSPACE);
     expect(sources.length).toBeGreaterThan(0);
     for (const row of sources) expect(row.payload).not.toMatch(/Agenda|Intro call/);
+  });
+
+  it('keeps a new booker cancelled when the cancel of the rescheduled booking arrives first', async () => {
+    // Cal.com: create A, reschedule A -> B, cancel B. Delivered: cancel B, create A, reschedule.
+    const newcomer = {
+      attendees: [{ email: 'newcomer@fresh.example', name: 'New Comer', timeZone: 'UTC' }]
+    };
+    const a = ['2026-10-08T13:00:00.000Z', '2026-10-08T13:30:00.000Z'] as const;
+    const b = ['2026-10-09T13:00:00.000Z', '2026-10-09T13:30:00.000Z'] as const;
+    const deliveries = [
+      envelope(
+        'BOOKING_CANCELLED',
+        bookingPayload('bk-nb-b', ...b, { ...newcomer, status: 'CANCELLED' }),
+        '2026-10-06T11:00:00.000Z'
+      ),
+      envelope(
+        'BOOKING_CREATED',
+        bookingPayload('bk-nb-a', ...a, newcomer),
+        '2026-10-06T11:01:00.000Z'
+      ),
+      envelope(
+        'BOOKING_RESCHEDULED',
+        bookingPayload('bk-nb-b', ...b, { ...newcomer, rescheduleUid: 'bk-nb-a' }),
+        '2026-10-06T11:02:00.000Z'
+      )
+    ];
+    for (const body of deliveries) expect((await deliver(body)).status).toBeLessThan(300);
+
+    const rows = await db
+      .prepare(
+        `SELECT id,external_id,status FROM meetings
+         WHERE workspace_id=? AND external_id IN ('bk-nb-a','bk-nb-b') ORDER BY external_id`
+      )
+      .all<{ id: string; external_id: string; status: string }>(WORKSPACE);
+    expect(rows.map((row) => [row.external_id, row.status])).toEqual([
+      ['bk-nb-a', 'cancelled'],
+      ['bk-nb-b', 'cancelled']
+    ]);
+    const today = await getToday(db, WORKSPACE, new Date('2026-10-08T08:00:00.000Z'));
+    const ids = new Set(rows.map((row) => row.id));
+    expect(
+      today.needsAttention.filter(
+        (item) => item.kind === 'meeting_upcoming' && ids.has(item.reference.id)
+      )
+    ).toEqual([]);
   });
 
   it("attaches the attendee only inside the endpoint's workspace", async () => {

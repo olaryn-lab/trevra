@@ -1263,12 +1263,11 @@ async function ingestMeeting(
   ) {
     return { stored: false };
   }
-  // Only a live booking may create the Person. A cancellation never does: for a
-  // known meeting the stored Person is kept, and for an unknown one there is
-  // nothing to cancel (`meetings.person_id` is NOT NULL, so no person-less tombstone).
+  // A signed booking cancellation may create the Person, like the booking itself:
+  // its tombstone is what keeps a late create or reschedule from reviving it.
   const identity = !record.personEmail
     ? { personId: null, accountId: null }
-    : record.origin === 'booking' && record.status !== 'cancelled'
+    : record.origin === 'booking'
       ? await resolveCanonicalRecordIdentity(
           db,
           workspaceId,
