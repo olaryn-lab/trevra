@@ -22,6 +22,7 @@ import {
   MAX_WATCHED_REPOSITORIES,
   listWatchedRepositories,
   readGitHubConnection,
+  toRepoWatch,
   unwatchRepository,
   watchRepository
 } from './github/repos.js';
@@ -481,6 +482,7 @@ import {
   setAccountStatus
 } from './accounts/store.js';
 import { rescoreAccounts, rescoreWorkspace } from './accounts/score.js';
+import { ACCOUNT_SOURCES } from './accounts/types.js';
 import type { Account, AccountScore, AccountSignal, RankedAccount } from './accounts/types.js';
 import { listProviders as listLeadSourceProviders } from './research/registry.js';
 import { listObservationProviderHealth } from './observations/health.js';
@@ -1466,7 +1468,7 @@ export function createApp(db: Db) {
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         connection: { state: connection.state, lastError: connection.lastError },
-        repos,
+        repos: repos.map(toRepoWatch),
         limit: MAX_WATCHED_REPOSITORIES
       });
     } catch (error) {
@@ -1488,11 +1490,8 @@ export function createApp(db: Db) {
           actorUserId: req.auth!.userId,
           fullName: input.fullName
         });
-        res.status(created ? 201 : 200).json({ repo });
+        res.status(created ? 201 : 200).json({ repo: toRepoWatch(repo) });
       } catch (error) {
-        if (error instanceof GitHubRepoError) {
-          return res.status(error.status).json({ error: error.message });
-        }
         next(error);
       }
     }
@@ -8027,7 +8026,8 @@ export function createApp(db: Db) {
       error instanceof SkillApiError ||
       error instanceof PlaybookError ||
       error instanceof LeadCaptureError ||
-      error instanceof ProviderWebhookError
+      error instanceof ProviderWebhookError ||
+      error instanceof GitHubRepoError
     )
       return res.status(error.status).json({ error: error.message });
     if (error instanceof z.ZodError)
@@ -10116,7 +10116,7 @@ const linkedinEngagementSchema = z
 
 const accountListSchema = z.object({
   tier: z.enum(['hot', 'warm', 'cold']).optional(),
-  source: z.enum(['csv', 'sourced', 'linkedin', 'manual', 'github']).optional(),
+  source: z.enum(ACCOUNT_SOURCES).optional(),
   limit: z.coerce.number().int().min(1).max(500).default(100),
   signalLimit: z.coerce.number().int().min(1).max(50).default(6)
 });

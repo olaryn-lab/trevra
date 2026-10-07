@@ -8,7 +8,8 @@
  * live there, next to the columns, and are not repeated.
  */
 
-export type AccountSource = 'csv' | 'sourced' | 'linkedin' | 'manual' | 'github';
+export const ACCOUNT_SOURCES = ['csv', 'sourced', 'linkedin', 'manual', 'github'] as const;
+export type AccountSource = (typeof ACCOUNT_SOURCES)[number];
 export type AccountStatus = 'active' | 'not_a_fit' | 'archived';
 export type AccountTier = 'hot' | 'warm' | 'cold';
 

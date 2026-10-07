@@ -87,6 +87,23 @@ export interface WatchedRepository {
   createdAt: string;
 }
 
+/** What the API shows a workspace member: no cursors, ETags or workspace id. */
+export function toRepoWatch(repo: WatchedRepository) {
+  return {
+    id: repo.id,
+    fullName: repo.fullName,
+    url: repo.url,
+    status: repo.status,
+    lastError: repo.lastError,
+    rateLimitedUntil: repo.rateLimitedUntil,
+    nextPollAt: repo.nextPollAt,
+    lastPolledAt: repo.lastPolledAt,
+    lastSummary: repo.lastSummary,
+    unresolvedTotal: repo.unresolvedTotal,
+    createdAt: repo.createdAt
+  };
+}
+
 export class GitHubRepoError extends Error {
   constructor(
     message: string,

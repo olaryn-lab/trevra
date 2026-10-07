@@ -8,6 +8,20 @@ let db: Db;
 let app: ReturnType<typeof createApp>;
 let signUpSeq = 0;
 
+const REPO_WATCH_KEYS = [
+  'createdAt',
+  'fullName',
+  'id',
+  'lastError',
+  'lastPolledAt',
+  'lastSummary',
+  'nextPollAt',
+  'rateLimitedUntil',
+  'status',
+  'unresolvedTotal',
+  'url'
+];
+
 beforeAll(async () => {
   delete process.env.NANGO_GITHUB_INTEGRATION;
   await migrateAuthDatabase();
@@ -86,6 +100,9 @@ describe('GitHub watched-repository API', () => {
     const listed = await agent.get('/api/github/repos').expect(200);
     expect(listed.body).toMatchObject({ connection: { state: 'not_connected' }, limit: 10 });
     expect(listed.body.repos).toHaveLength(1);
+    expect(Object.keys(listed.body.repos[0]).sort()).toEqual(REPO_WATCH_KEYS);
+    expect(Object.keys(first.body.repo).sort()).toEqual(REPO_WATCH_KEYS);
+    expect(Object.keys(again.body.repo).sort()).toEqual(REPO_WATCH_KEYS);
   });
 
   it('refuses a name that is not a repository and an eleventh repository', async () => {
@@ -121,7 +138,13 @@ describe('GitHub watched-repository API', () => {
       .send({ fullName: 'lemoncrow-lab/other' })
       .expect(403);
     expect(refusedAdd.body.error).toBe('Only the workspace owner can watch a GitHub repository');
-    await member.agent.delete(`/api/github/repos/${created.body.repo.id}`).expect(403);
+    const refusedDelete = await member.agent
+      .delete(`/api/github/repos/${created.body.repo.id}`)
+      .expect(403);
+    expect(refusedDelete.body.error).toBe(
+      'Only the workspace owner can stop watching a GitHub repository'
+    );
+    expect((await owner.agent.get('/api/github/repos').expect(200)).body.repos).toHaveLength(1);
   });
 
   it('removes a repository only from its own workspace', async () => {
@@ -131,6 +154,7 @@ describe('GitHub watched-repository API', () => {
       .post('/api/github/repos')
       .send({ fullName: 'lemoncrow-lab/lemoncrow' })
       .expect(201);
+    expect((await b.agent.get('/api/github/repos').expect(200)).body.repos).toEqual([]);
     await b.agent.delete(`/api/github/repos/${created.body.repo.id}`).expect(404);
     const removed = await a.agent.delete(`/api/github/repos/${created.body.repo.id}`).expect(200);
     expect(removed.body).toEqual({ removed: true });
@@ -179,6 +203,8 @@ describe('accounts source filter', () => {
     const { workspaceId } = await sessionAuth(agent);
     await insertAccount(workspaceId, 'acme.com', 'csv');
     await insertAccount(workspaceId, 'buyer.io', 'github');
+    const other = await signUpAgent('gh-filter-other');
+    await insertAccount((await sessionAuth(other.agent)).workspaceId, 'elsewhere.io', 'github');
 
     const fromGitHub = await agent.get('/api/accounts?source=github').expect(200);
     expect(
