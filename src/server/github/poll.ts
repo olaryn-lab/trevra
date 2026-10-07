@@ -77,6 +77,15 @@ export const GITHUB_ACCOUNT_TAG = 'github-traction';
  * due for the next tick.
  */
 export const GITHUB_POLL_BUDGET_MS = 20_000;
+/**
+ * How long a repository whose run was cut short by the time budget waits
+ * before the next try. Not zero: every automation tick (60 s) starts a fresh
+ * run, and coming straight back would turn the per-run caps into per-minute
+ * caps. Not POLL_INTERVAL_MINUTES either, because the run did no harm and its
+ * work is still waiting. A run that also reached a per-run cap waits the full
+ * POLL_INTERVAL_MINUTES instead.
+ */
+export const BUDGET_DEFERRAL_MINUTES = 10;
 
 const PAGE_SIZE = 100;
 const DAY_MS = 86_400_000;
@@ -126,6 +135,8 @@ interface Listing {
 interface RunState {
   lookups: number;
   created: number;
+  /** A cap other than the two counters above deferred work this run (the rolling account window). */
+  capHit: boolean;
   touched: Set<string>;
   resolved: Map<string, ResolvedActor | null>;
   overBudget: () => boolean;
@@ -152,6 +163,14 @@ type AttachOutcome =
   | { kind: 'defer' }
   | { kind: 'rejected' }
   | { kind: 'created' | 'attached'; accountId: string; written: number };
+
+function capReached(run: RunState): boolean {
+  return (
+    run.capHit ||
+    run.created >= MAX_NEW_ACCOUNTS_PER_RUN ||
+    run.lookups >= MAX_PROFILE_LOOKUPS_PER_RUN
+  );
+}
 
 function minutesFrom(now: Date, minutes: number): Date {
   return new Date(now.getTime() + minutes * 60_000);
@@ -496,6 +515,19 @@ async function processEvent(
     let created = false;
     if (!match) {
       if (run.created >= MAX_NEW_ACCOUNTS_PER_RUN) return { kind: 'defer' };
+      // The same cap over a rolling hour, read from the rows themselves: runs
+      // cut short by the time budget come back within minutes, and each
+      // starts its in-run counter at zero.
+      const recent = await tx
+        .prepare(
+          `SELECT COUNT(*)::int AS count FROM accounts
+           WHERE workspace_id=? AND source='github' AND created_at > ?::timestamptz`
+        )
+        .get<{ count: number }>(workspaceId, minutesFrom(now, -60).toISOString());
+      if ((recent?.count ?? 0) >= MAX_NEW_ACCOUNTS_PER_RUN) {
+        run.capHit = true;
+        return { kind: 'defer' };
+      }
       // createAccount is idempotent on the domain and returns an existing row
       // unchanged, so a race can never reactivate a rejected company. It does
       // not say which happened: a row stamped with this run's `now` is ours,
@@ -790,6 +822,7 @@ async function pollClaimed(
   const run: RunState = {
     lookups: 0,
     created: 0,
+    capHit: false,
     touched: new Set(),
     resolved: new Map(),
     overBudget
@@ -823,7 +856,8 @@ async function pollClaimed(
       result.polled += 1;
     } catch (error) {
       if (error instanceof PollBudgetSpentError) {
-        // Nothing went wrong: keep what was written and come back next tick.
+        // Nothing went wrong: keep what was written and come back soon, but
+        // never on the very next tick (see BUDGET_DEFERRAL_MINUTES).
         await settle(repo.id, {
           ...progress,
           status: 'ok',
@@ -832,7 +866,10 @@ async function pollClaimed(
           lastPolledAt: now,
           lastSummary: summary,
           addUnresolved: summary.unresolved,
-          nextPollAt: now
+          nextPollAt: minutesFrom(
+            now,
+            capReached(run) ? POLL_INTERVAL_MINUTES : BUDGET_DEFERRAL_MINUTES
+          )
         });
         await releaseUntouched(repos.slice(index + 1));
         break;

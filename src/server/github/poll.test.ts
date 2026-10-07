@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { id, openDatabase, type Db } from '../db.js';
 import { getToday } from '../today.js';
 import {
+  BUDGET_DEFERRAL_MINUTES,
   ERROR_RETRY_MINUTES,
   GITHUB_POLL_BUDGET_MS,
   MAX_NEW_ACCOUNTS_PER_RUN,
@@ -863,10 +864,67 @@ describe('pollWorkspaceRepositories', () => {
       lastError: null,
       starsCursor: null,
       repoEtag: null,
-      nextPollAt: T0.toISOString(),
+      nextPollAt: new Date(T0.getTime() + 10 * 60_000).toISOString(),
       lastSummary: { stars: 0, deferred: 3 }
     });
-    expect(await hasDueRepositories(db, WORKSPACE_ID, T0)).toBe(true);
+    // Not straight back on the next tick: a fresh run would reset the per-run caps.
+    expect(await hasDueRepositories(db, WORKSPACE_ID, T0)).toBe(false);
+    expect(await hasDueRepositories(db, WORKSPACE_ID, new Date(T0.getTime() + 10 * 60_000))).toBe(
+      true
+    );
+  });
+
+  it('comes back BUDGET_DEFERRAL_MINUTES later when only the time budget deferred the run', async () => {
+    expect(BUDGET_DEFERRAL_MINUTES).toBe(10);
+    const { routes } = burstOfPeople(3);
+    let elapsed = 0;
+    const github = fakeGitHub({
+      ...routes,
+      [`${REPO_PATH}/forks`]: (call) => {
+        elapsed = GITHUB_POLL_BUDGET_MS + 1;
+        return routes[`${REPO_PATH}/forks`](call);
+      }
+    });
+    await pollWorkspaceRepositories(db, WORKSPACE_ID, {
+      transport: github,
+      now: T0,
+      clock: () => elapsed
+    });
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      lastSummary: { stars: 3, created: 3 },
+      nextPollAt: new Date(T0.getTime() + 10 * 60_000).toISOString()
+    });
+  });
+
+  it('creates at most MAX_NEW_ACCOUNTS_PER_RUN accounts across back-to-back budget-deferred runs', async () => {
+    const { routes } = burstOfPeople(MAX_NEW_ACCOUNTS_PER_RUN + 2);
+    /** Over budget from the moment `trip`'s profile is read. */
+    const tripping = (trip: string) => {
+      let elapsed = 0;
+      const transport = fakeGitHub({
+        ...routes,
+        [`/users/${trip}`]: (call) => {
+          elapsed = GITHUB_POLL_BUDGET_MS + 1;
+          return routes[`/users/${trip}`](call);
+        }
+      });
+      return { transport, clock: () => elapsed };
+    };
+
+    // Run 1: person1-4 created, then the budget defers the rest. No cap was hit.
+    await pollWorkspaceRepositories(db, WORKSPACE_ID, { now: T0, ...tripping('person4') });
+    expect(await githubAccountCount()).toBe(4);
+    const second = new Date((await repoRow()).nextPollAt);
+    expect(second.getTime()).toBe(T0.getTime() + 10 * 60_000);
+
+    // Run 2, ten minutes later: a fresh run, but the hour already holds 4 new accounts.
+    await pollWorkspaceRepositories(db, WORKSPACE_ID, { now: second, ...tripping('person6') });
+    expect(await githubAccountCount()).toBe(MAX_NEW_ACCOUNTS_PER_RUN);
+    // The cap was reached in this run: back in an hour, not in ten minutes.
+    expect((await repoRow()).nextPollAt).toBe(
+      new Date(second.getTime() + POLL_INTERVAL_MINUTES * 60_000).toISOString()
+    );
   });
 
   it('records an unexpected failure on the repository and releases its lease', async () => {
@@ -914,7 +972,7 @@ describe('pollWorkspaceRepositories', () => {
     expect(await repoRow()).toMatchObject({
       status: 'ok',
       starsCursor: null,
-      nextPollAt: T0.toISOString(),
+      nextPollAt: new Date(T0.getTime() + 10 * 60_000).toISOString(),
       lastSummary: { stars: 0, deferred: 3 }
     });
     const buyer = await accountByDomain(WORKSPACE_ID, 'buyer.io');
@@ -1016,6 +1074,30 @@ describe('pollWorkspaceRepositories', () => {
     expect(lease?.lease_until).toBeNull();
   });
 });
+
+/** `count` new stargazers, each with a company email of their own and nothing else. */
+function burstOfPeople(count: number): { routes: Record<string, Handler> } {
+  const people = Array.from({ length: count }, (_, index) => `person${index + 1}`);
+  const routes = lemoncrowRoutes({
+    [REPO_PATH]: () => ok({ stargazers_count: people.length, forks_count: 0 }),
+    [`${REPO_PATH}/stargazers`]: () =>
+      ok(people.map((login, index) => star(login, `2026-10-05T0${index + 1}:00:00Z`))),
+    [`${REPO_PATH}/forks`]: () => ok([]),
+    [`${REPO_PATH}/issues`]: () => ok([])
+  });
+  people.forEach((login, index) => {
+    routes[`/users/${login}`] = () =>
+      ok({ ...user(login), email: `${login}@company${index + 1}.dev`, company: null, blog: null });
+  });
+  return { routes };
+}
+
+async function githubAccountCount(): Promise<number> {
+  const row = await db
+    .prepare("SELECT COUNT(*)::int AS count FROM accounts WHERE workspace_id=? AND source='github'")
+    .get<{ count: number }>(WORKSPACE_ID);
+  return row?.count ?? 0;
+}
 
 /** A second watched repository, claimed after the first. Returns its API path. */
 async function watchOther(): Promise<string> {
