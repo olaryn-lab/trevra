@@ -35,7 +35,7 @@ import { auth as betterAuth, closeAuthDatabase, migrateAuthDatabase } from '../a
 import { createApp } from '../app.js';
 import { id, openDatabase, type Db } from '../db.js';
 import { handleNangoWebhook } from '../integration-service.js';
-import { getEmailChannelStatus, designateInboundMailbox } from './channel.js';
+import { clearInboundMailbox, getEmailChannelStatus, designateInboundMailbox } from './channel.js';
 import type { DnsResolver } from './deliverability.js';
 
 let db: Db;
@@ -98,6 +98,12 @@ afterAll(async () => {
   await db?.close();
   await closeAuthDatabase();
 });
+
+async function inboundRow(workspaceId: string) {
+  return db
+    .prepare('SELECT sync_status,sync_error FROM email_inbound_mailboxes WHERE workspace_id=?')
+    .get<{ sync_status: string; sync_error: string | null }>(workspaceId);
+}
 
 describe('email channel API', () => {
   it('shows mailboxes with their DNS state without touching real DNS', async () => {
@@ -206,11 +212,6 @@ describe('email channel API', () => {
         error: success ? undefined : { message: 'secret stranger text' }
       });
     }
-    async function inboundRow(workspaceId: string) {
-      return db
-        .prepare('SELECT sync_status,sync_error FROM email_inbound_mailboxes WHERE workspace_id=?')
-        .get<{ sync_status: string; sync_error: string | null }>(workspaceId);
-    }
 
     it('marks the designated mailbox unavailable on a failed sync and recovers on the next success', async () => {
       const { owner, connectionId, external } = await ownerWithMailbox();
@@ -237,16 +238,138 @@ describe('email channel API', () => {
         sync_error: null
       });
       expect(await inboundRow(other.owner.auth.workspaceId)).toBeUndefined();
-      // A different sync failing never touches the designation either.
-      const { external } = await ownerWithMailbox();
-      await handleNangoWebhook(db, syncEvent(external, false, 'something-else'), {});
+    });
+
+    it('ignores a failed webhook of another sync for the designated connection', async () => {
+      const { owner, connectionId, external } = await ownerWithMailbox();
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      expect(
+        await handleNangoWebhook(db, syncEvent(external, false, 'something-else'), {})
+      ).toEqual({
+        duplicate: false,
+        processed: 'ignored'
+      });
+      expect(await inboundRow(owner.auth.workspaceId)).toEqual({
+        sync_status: 'syncing',
+        sync_error: null
+      });
+    });
+
+    it('reports the failed inbound sync and ignores an unknown connection without throwing', async () => {
+      const { owner, connectionId, external } = await ownerWithMailbox();
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      expect(await handleNangoWebhook(db, syncEvent(external, false), {})).toEqual({
+        duplicate: false,
+        processed: 'inbound-sync-failed'
+      });
+      expect(await handleNangoWebhook(db, syncEvent('gmail-nobody', false), {})).toEqual({
+        duplicate: false,
+        processed: 'ignored'
+      });
+    });
+
+    it('does not let a stale Nango ERROR overwrite a newer designation', async () => {
+      const { owner, connectionId } = await ownerWithMailbox();
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      nangoMock.syncStatus.mockResolvedValueOnce({
+        syncs: [{ status: 'ERROR', finishedAt: '2020-01-01T00:00:00.000Z' }]
+      });
+      const response = await owner.agent.get('/api/email/channel').expect(200);
+      expect(response.body.channel.inbound.syncStatus).toBe('syncing');
+      expect((await inboundRow(owner.auth.workspaceId))?.sync_status).toBe('syncing');
+    });
+
+    it('stops waiting for a hung Nango sync status', async () => {
+      const { owner, connectionId } = await ownerWithMailbox();
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      nangoMock.syncStatus.mockImplementationOnce(() => new Promise(() => {}));
+      const started = Date.now();
+      const channel = await getEmailChannelStatus(db, owner.auth.workspaceId, { deadlineMs: 150 });
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(channel.inbound).toMatchObject({ syncStatus: 'syncing', nango: null });
+    });
+  });
+
+  describe('designation changes', () => {
+    async function addMailbox(workspaceId: string, label: string) {
+      const now = new Date().toISOString();
+      await db
+        .prepare(
+          `INSERT INTO connections (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,created_at,updated_at)
+           VALUES (?,?,'gmail','trevra-gmail',?,NULL,'connected',0,?,?)`
+        )
+        .run(`conn_${label}`, workspaceId, `gmail-${label}`, now, now);
+      return { connectionId: `conn_${label}`, external: `gmail-${label}` };
+    }
+
+    it('pauses the previous mailbox sync when the designation switches, and resets last_record_at', async () => {
+      const { owner, connectionId, external } = await ownerWithMailbox();
+      const second = await addMailbox(owner.auth.workspaceId, `second-${Date.now()}`);
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      await db
+        .prepare('UPDATE email_inbound_mailboxes SET last_record_at=now() WHERE workspace_id=?')
+        .run(owner.auth.workspaceId);
+      // Same connection and address keep the record clock.
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      const kept = await db
+        .prepare('SELECT last_record_at FROM email_inbound_mailboxes WHERE workspace_id=?')
+        .get<{ last_record_at: string | null }>(owner.auth.workspaceId);
+      expect(kept?.last_record_at).not.toBeNull();
+      nangoMock.pauseSync.mockClear();
+      await owner.agent
+        .put('/api/email/inbound-mailbox')
+        .send({ connectionId: second.connectionId })
+        .expect(200);
+      expect(nangoMock.pauseSync).toHaveBeenCalledWith(
+        'trevra-gmail',
+        ['inbound-messages'],
+        external
+      );
+      const reset = await db
+        .prepare('SELECT last_record_at FROM email_inbound_mailboxes WHERE workspace_id=?')
+        .get<{ last_record_at: string | null }>(owner.auth.workspaceId);
+      expect(reset?.last_record_at).toBeNull();
+    });
+
+    it('resets last_record_at when the same connection resolves to a new address', async () => {
+      const { owner, connectionId } = await ownerWithMailbox();
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      await db
+        .prepare('UPDATE email_inbound_mailboxes SET last_record_at=now() WHERE workspace_id=?')
+        .run(owner.auth.workspaceId);
+      await db
+        .prepare('UPDATE connections SET mailbox_address=? WHERE id=?')
+        .run('other@acme.test', connectionId);
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      const row = await db
+        .prepare('SELECT last_record_at FROM email_inbound_mailboxes WHERE workspace_id=?')
+        .get<{ last_record_at: string | null }>(owner.auth.workspaceId);
+      expect(row?.last_record_at).toBeNull();
+    });
+
+    it('pauses the sync it just started when a concurrent clear wins the race', async () => {
+      const { owner, connectionId, external } = await ownerWithMailbox();
+      nangoMock.startSync.mockImplementationOnce(async () => {
+        await clearInboundMailbox(db, owner.auth.workspaceId);
+      });
+      nangoMock.pauseSync.mockClear();
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      expect(nangoMock.pauseSync).toHaveBeenCalledWith(
+        'trevra-gmail',
+        ['inbound-messages'],
+        external
+      );
+      const row = await db
+        .prepare('SELECT 1 AS present FROM email_inbound_mailboxes WHERE workspace_id=?')
+        .get(owner.auth.workspaceId);
+      expect(row).toBeUndefined();
     });
 
     it('persists unavailable when Nango reports an error state', async () => {
       const { owner, connectionId } = await ownerWithMailbox();
       await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
       nangoMock.syncStatus.mockResolvedValueOnce({
-        syncs: [{ status: 'ERROR', finishedAt: '2026-10-06T09:05:00.000Z' }]
+        syncs: [{ status: 'ERROR', finishedAt: new Date(Date.now() + 60_000).toISOString() }]
       });
       const response = await owner.agent.get('/api/email/channel').expect(200);
       expect(response.body.channel.inbound).toMatchObject({

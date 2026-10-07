@@ -339,7 +339,16 @@ export async function handleNangoWebhook(
         db,
         String(payload.providerConfigKey),
         String(payload.connectionId)
-      ).catch(() => undefined);
+      ).catch((error: unknown) => {
+        // Only "no such connection" and "several workspaces" are ignorable.
+        if (
+          error instanceof Error &&
+          (error.message === 'Unknown Nango connection' ||
+            error.message.includes('is registered in'))
+        )
+          return undefined;
+        throw error;
+      });
       workspaceId = connection ? String(connection.workspace_id) : null;
     }
   } catch (error) {
