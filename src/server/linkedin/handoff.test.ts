@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
 import { listDomainEvents } from '../control-plane/events.js';
+import { getToday } from '../today.js';
 import { evaluateLinkedInSafety } from './guard.js';
 import {
   assertNoWaitingHandoff,
+  guardSeatSendModeChange,
   handoffTitle,
   listLinkedInHandoffs,
+  presentLinkedInHandoffs,
   resolveLinkedInHandoff
 } from './handoff.js';
 import { FLAT_DAY_SHAPE } from './pacing.js';
@@ -44,6 +47,30 @@ async function plan(
 
 function resolve(actionId: string, resolution: 'sent' | 'skip', workspaceId = WORKSPACE) {
   return resolveLinkedInHandoff(db, { workspaceId, actionId, resolution, actorUserId: null }, NOW);
+}
+
+/** What Today does: list at NOW, then stamp what it shows. */
+async function presentAtNow(): Promise<string[]> {
+  const listed = await listLinkedInHandoffs(db, WORKSPACE, NOW, { dayShape: FLAT_DAY_SHAPE });
+  return (await presentLinkedInHandoffs(db, WORKSPACE, listed, NOW)).map(
+    (handoff) => handoff.actionId
+  );
+}
+
+function todayHandoffIds(at: Date): Promise<string[]> {
+  return getToday(db, WORKSPACE, at).then((today) =>
+    today.needsAttention
+      .filter((item) => item.kind === 'linkedin_handoff_waiting')
+      .map((item) => String(item.reference?.id))
+  );
+}
+
+/** The route's transaction: seat lock, guard, then the seat write. */
+function switchToAutomatic(at: Date) {
+  return db.transaction(async (tx) => {
+    await guardSeatSendModeChange(tx, WORKSPACE, 'owner', 'automated', at);
+    return upsertSeat(tx, WORKSPACE, { sendMode: 'automated' }, at);
+  });
 }
 
 beforeEach(async () => {
@@ -307,13 +334,104 @@ describe('LinkedIn human-send handoffs', () => {
     });
   });
 
-  it('refuses to switch a seat back to automatic while a handoff is waiting', async () => {
-    await expect(
-      assertNoWaitingHandoff(db, WORKSPACE, 'owner', NOW, { dayShape: FLAT_DAY_SHAPE })
-    ).resolves.toBeUndefined();
+  it('refuses to switch a seat back to automatic while a presented handoff is waiting', async () => {
+    await expect(assertNoWaitingHandoff(db, WORKSPACE, 'owner', NOW)).resolves.toBeUndefined();
     await plan('lact_handoff_guard', 'dm', 'https://www.linkedin.com/in/guard/', 'Hello');
-    await expect(
-      assertNoWaitingHandoff(db, WORKSPACE, 'owner', NOW, { dayShape: FLAT_DAY_SHAPE })
-    ).rejects.toMatchObject({ status: 409 });
+    expect(await presentAtNow()).toEqual(['lact_handoff_guard']);
+    await expect(assertNoWaitingHandoff(db, WORKSPACE, 'owner', NOW)).rejects.toMatchObject({
+      status: 409
+    });
+  });
+
+  it('keeps a presented handoff blocking the switch on a day the gate refuses', async () => {
+    await plan('lact_handoff_friday', 'dm', 'https://www.linkedin.com/in/friday/', 'Hello');
+    expect(await presentAtNow()).toEqual(['lact_handoff_friday']);
+
+    // Saturday: the gate would refuse this row, yet the founder may already
+    // have sent it. The switch is refused and Today still shows the row.
+    await expect(switchToAutomatic(SATURDAY)).rejects.toMatchObject({ status: 409 });
+    expect(await todayHandoffIds(SATURDAY)).toEqual(['lact_handoff_friday']);
+    const seat = await db
+      .prepare(`SELECT send_mode FROM linkedin_seats WHERE workspace_id=? AND seat_key='owner'`)
+      .get<{ send_mode: string }>(WORKSPACE);
+    expect(seat?.send_mode).toBe('human');
+
+    await resolveLinkedInHandoff(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        actionId: 'lact_handoff_friday',
+        resolution: 'sent',
+        actorUserId: null
+      },
+      SATURDAY
+    );
+    await expect(switchToAutomatic(SATURDAY)).resolves.toMatchObject({ sendMode: 'automated' });
+  });
+
+  it('keeps a presented handoff answerable after a re-pace moved it into the future', async () => {
+    await plan('lact_handoff_repaced', 'dm', 'https://www.linkedin.com/in/repaced/', 'Hello');
+    expect(await presentAtNow()).toEqual(['lact_handoff_repaced']);
+    await db
+      .prepare(`UPDATE linkedin_actions SET planned_for=? WHERE id=?`)
+      .run(new Date(NOW.getTime() + 3 * 86_400_000).toISOString(), 'lact_handoff_repaced');
+
+    expect(
+      (await listLinkedInHandoffs(db, WORKSPACE, NOW, { dayShape: FLAT_DAY_SHAPE })).map(
+        (handoff) => handoff.actionId
+      )
+    ).toEqual(['lact_handoff_repaced']);
+    await expect(assertNoWaitingHandoff(db, WORKSPACE, 'owner', NOW)).rejects.toMatchObject({
+      status: 409
+    });
+    expect(await resolve('lact_handoff_repaced', 'skip')).toEqual({
+      actionId: 'lact_handoff_repaced',
+      status: 'skipped'
+    });
+    await expect(assertNoWaitingHandoff(db, WORKSPACE, 'owner', NOW)).resolves.toBeUndefined();
+  });
+
+  it('lets a due row that was never presented switch to automatic', async () => {
+    await plan('lact_handoff_unseen', 'dm', 'https://www.linkedin.com/in/unseen/', 'Hello');
+    expect(
+      (await listLinkedInHandoffs(db, WORKSPACE, NOW, { dayShape: FLAT_DAY_SHAPE })).map(
+        (handoff) => handoff.actionId
+      )
+    ).toEqual(['lact_handoff_unseen']);
+    await expect(switchToAutomatic(NOW)).resolves.toMatchObject({ sendMode: 'automated' });
+  });
+
+  it('never stamps or shows a handoff whose seat switched to automatic before the stamp', async () => {
+    await plan('lact_handoff_raced', 'dm', 'https://www.linkedin.com/in/raced/', 'Hello');
+    const listed = await listLinkedInHandoffs(db, WORKSPACE, NOW, { dayShape: FLAT_DAY_SHAPE });
+    expect(listed.map((handoff) => handoff.actionId)).toEqual(['lact_handoff_raced']);
+
+    await switchToAutomatic(NOW);
+    expect(await presentLinkedInHandoffs(db, WORKSPACE, listed, NOW)).toEqual([]);
+    const row = await db
+      .prepare('SELECT handoff_presented_at FROM linkedin_actions WHERE id=?')
+      .get<{ handoff_presented_at: unknown }>('lact_handoff_raced');
+    expect(row?.handoff_presented_at).toBeNull();
+  });
+
+  it('waits for an in-flight switch before stamping, then drops the flipped seat', async () => {
+    await plan('lact_handoff_wait', 'dm', 'https://www.linkedin.com/in/wait/', 'Hello');
+    const listed = await listLinkedInHandoffs(db, WORKSPACE, NOW, { dayShape: FLAT_DAY_SHAPE });
+
+    let release!: () => void;
+    const held = new Promise<void>((resolveHeld) => (release = resolveHeld));
+    let locked!: () => void;
+    const lockTaken = new Promise<void>((resolveLocked) => (locked = resolveLocked));
+    const switching = db.transaction(async (tx) => {
+      await guardSeatSendModeChange(tx, WORKSPACE, 'owner', 'automated', NOW);
+      locked();
+      await held;
+      return upsertSeat(tx, WORKSPACE, { sendMode: 'automated' }, NOW);
+    });
+    await lockTaken;
+    const presenting = presentLinkedInHandoffs(db, WORKSPACE, listed, NOW);
+    release();
+    await switching;
+    expect(await presenting).toEqual([]);
   });
 });

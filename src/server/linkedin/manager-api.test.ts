@@ -467,7 +467,7 @@ describe('LinkedIn manager HTTP surface', () => {
     expect(done.body.handoff).toEqual({ actionId: 'lact_manager_handoff', status: 'sent' });
   });
 
-  it('refuses to switch a seat back to automatic while a handoff waits, and allows it otherwise', async () => {
+  it('refuses to switch a seat back to automatic while a presented handoff waits, and allows it otherwise', async () => {
     vi.useFakeTimers({ toFake: ['Date'], now: NOW });
     try {
       await upsertSeat(db, A, { sendMode: 'human' }, NOW);
@@ -486,11 +486,30 @@ describe('LinkedIn manager HTTP surface', () => {
         .patch('/api/linkedin/manager/seats/owner')
         .send({ label: 'Renamed again' })
         .expect(200);
+      // Today shows it to the founder; from then on it blocks the switch.
+      const today = await as(tokenA).get('/api/today').expect(200);
+      expect(
+        (today.body.needsAttention as { kind: string; reference: { id: string } }[])
+          .filter((item) => item.kind === 'linkedin_handoff_waiting')
+          .map((item) => item.reference.id)
+      ).toEqual(['lact_manager_switch']);
       const refused = await as(tokenA)
         .patch('/api/linkedin/manager/seats/owner')
         .send({ sendMode: 'automated' })
         .expect(409);
       expect(refused.body.error).toContain('A LinkedIn handoff is waiting in Today');
+      // Saturday: the gate would hold the row back, the guard still does not.
+      vi.setSystemTime(new Date('2026-08-15T09:00:00.000Z'));
+      await as(tokenA).put('/api/linkedin/seat').send({ sendMode: 'automated' }).expect(409);
+      await as(tokenA)
+        .post('/api/linkedin/manager/seats')
+        .send({
+          seatKey: 'owner',
+          label: 'Renamed again',
+          timezone: 'Europe/Zurich',
+          sendMode: 'automated'
+        })
+        .expect(409);
       await as(tokenA)
         .post('/api/linkedin/handoffs/lact_manager_switch/resolve')
         .send({ resolution: 'skip' })

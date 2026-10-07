@@ -1,6 +1,6 @@
 import type { Db } from './db.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
-import { handoffTitle, listLinkedInHandoffs } from './linkedin/handoff.js';
+import { handoffTitle, listLinkedInHandoffs, presentLinkedInHandoffs } from './linkedin/handoff.js';
 import type { LinkedInCheckName } from './linkedin/guard.js';
 import {
   MILESTONE_KINDS_SQL,
@@ -723,12 +723,16 @@ export async function getToday(
     });
   }
 
-  // HUMAN-SEND: the next gated invite or message per human-send seat. A read
-  // that cannot list them must not take Today down with it.
-  const handoffs = await listLinkedInHandoffs(db, workspaceId, now).catch((error: unknown) => {
-    console.error(`Failed to list LinkedIn handoffs for workspace ${workspaceId}`, error);
-    return [];
-  });
+  // HUMAN-SEND: the next gated invite or message per human-send seat, stamped
+  // as presented so it stays the founder's (and blocks a switch back to
+  // automatic) until answered. A read that cannot list them must not take
+  // Today down with it.
+  const handoffs = await listLinkedInHandoffs(db, workspaceId, now)
+    .then((listed) => presentLinkedInHandoffs(db, workspaceId, listed, now))
+    .catch((error: unknown) => {
+      console.error(`Failed to list LinkedIn handoffs for workspace ${workspaceId}`, error);
+      return [];
+    });
   for (const handoff of handoffs) {
     items.push({
       id: `linkedin_handoff:${handoff.actionId}`,

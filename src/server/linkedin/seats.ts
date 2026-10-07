@@ -545,6 +545,21 @@ export async function seatProxyUrl(
 }
 
 /**
+ * Run `work` in a transaction, or inside the caller's when there already is
+ * one: the seat routes write the seat inside the transaction that holds its row
+ * lock, and `Db.transaction` refuses to nest (`getPool()` throwing is the only
+ * signal a handle gives).
+ */
+async function inTransaction<T>(db: Db, work: (tx: Db) => Promise<T>): Promise<T> {
+  try {
+    db.getPool();
+  } catch {
+    return work(db);
+  }
+  return db.transaction(work);
+}
+
+/**
  * Seal or clear one seat's full proxy URL. The seat row stores only metadata
  * the UI is already allowed to display; the legacy plaintext column is always
  * nulled in the same transaction as the secret write.
@@ -558,7 +573,7 @@ export async function putSeatProxySecret(
 ): Promise<void> {
   const value = raw?.trim() || null;
   if (!value) {
-    await db.transaction(async (tx) => {
+    await inTransaction(db, async (tx) => {
       await tx
         .prepare('DELETE FROM linkedin_seat_proxy_secrets WHERE workspace_id=? AND seat_key=?')
         .run(workspaceId, seatKey);
@@ -600,7 +615,7 @@ export async function putSeatProxySecret(
   const username = url.username ? decodeURIComponent(url.username) : null;
   const hasPassword = Boolean(url.password);
   const now = new Date().toISOString();
-  await db.transaction(async (tx) => {
+  await inTransaction(db, async (tx) => {
     await tx
       .prepare(
         `

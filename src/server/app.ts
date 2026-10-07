@@ -445,7 +445,7 @@ import {
 } from './linkedin/campaign-channels.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
 import {
-  assertNoWaitingHandoff,
+  guardSeatSendModeChange,
   handoffResolutionSchema,
   resolveLinkedInHandoff
 } from './linkedin/handoff.js';
@@ -4807,19 +4807,21 @@ export function createApp(db: Db) {
   // owns -- paused and cooldown -- have their own routes below, because a kill
   // switch buried in a settings PUT is a kill switch nobody finds.
   //
-  // Switching a human-send seat back to automatic is refused while a handoff is
-  // waiting for the founder (see assertNoWaitingHandoff). Only a request that
-  // sets sendMode 'automated' on a seat that is currently 'human' is checked.
-  async function guardSwitchToAutomatic(
+  // Switching a human-send seat back to automatic is refused while a presented
+  // handoff is still open (see guardSeatSendModeChange). The seat row lock, the
+  // check and the seat write share ONE transaction, so a handoff cannot be
+  // presented between the check and the write.
+  async function writeSeatGuardingSwitch<T>(
     workspaceId: string,
     seatKey: string,
     sendMode: string | undefined,
-    now: Date
-  ): Promise<void> {
-    if (sendMode !== 'automated') return;
-    const existing = await getSeat(db, workspaceId, seatKey);
-    if (existing?.sendMode !== 'human') return;
-    await assertNoWaitingHandoff(db, workspaceId, seatKey, now);
+    now: Date,
+    write: (tx: Db) => Promise<T>
+  ): Promise<T> {
+    return db.transaction(async (tx) => {
+      await guardSeatSendModeChange(tx, workspaceId, seatKey, sendMode, now);
+      return write(tx);
+    });
   }
 
   // Owner-only. The fields this PUT writes are the seat's four daily ceilings
@@ -4836,10 +4838,15 @@ export function createApp(db: Db) {
       const { seatKey = OWNER_SEAT_KEY, ...input } = linkedinSeatSchema.parse(req.body ?? {});
       assertSeatProxyUsable(req.auth!.workspaceId, seatKey, input.proxyUrl);
       const now = new Date();
-      await guardSwitchToAutomatic(req.auth!.workspaceId, seatKey, input.sendMode, now);
       let seat;
       try {
-        seat = await upsertSeat(db, req.auth!.workspaceId, input as SeatPatch, now, seatKey);
+        seat = await writeSeatGuardingSwitch(
+          req.auth!.workspaceId,
+          seatKey,
+          input.sendMode,
+          now,
+          (tx) => upsertSeat(tx, req.auth!.workspaceId, input as SeatPatch, now, seatKey)
+        );
       } catch (error) {
         // seats.ts owns the label/timezone/date rules and its refusals are
         // operator input errors, not faults. Same pattern as the agent config route.
@@ -5710,19 +5717,15 @@ export function createApp(db: Db) {
           ? req.auth!.userId
           : ((await resolveWorkspaceMemberUserId(db, req, input.ownerUserId)) ?? req.auth!.userId);
       assertSeatProxyUsable(req.auth!.workspaceId, input.seatKey, input.proxyUrl);
-      await guardSwitchToAutomatic(
-        req.auth!.workspaceId,
-        input.seatKey,
-        input.sendMode,
-        new Date()
-      );
       try {
-        const seat = await upsertSeat(
-          db,
+        const now = new Date();
+        const seat = await writeSeatGuardingSwitch(
           req.auth!.workspaceId,
-          { ...input, ownerUserId },
-          new Date(),
-          input.seatKey
+          input.seatKey,
+          input.sendMode,
+          now,
+          (tx) =>
+            upsertSeat(tx, req.auth!.workspaceId, { ...input, ownerUserId }, now, input.seatKey)
         );
         res.status(201).json({ seat });
       } catch (error) {
@@ -5744,15 +5747,22 @@ export function createApp(db: Db) {
       assertSeatProxyUsable(req.auth!.workspaceId, seatKey, input.proxyUrl);
       if (!(await getSeat(db, req.auth!.workspaceId, seatKey)))
         throw new LinkedInApiError('LinkedIn account not found', 404);
-      await guardSwitchToAutomatic(req.auth!.workspaceId, seatKey, input.sendMode, new Date());
       try {
+        const now = new Date();
         res.json({
-          seat: await upsertSeat(
-            db,
+          seat: await writeSeatGuardingSwitch(
             req.auth!.workspaceId,
-            { ...input, ...(ownerUserId !== undefined ? { ownerUserId } : {}) },
-            new Date(),
-            seatKey
+            seatKey,
+            input.sendMode,
+            now,
+            (tx) =>
+              upsertSeat(
+                tx,
+                req.auth!.workspaceId,
+                { ...input, ...(ownerUserId !== undefined ? { ownerUserId } : {}) },
+                now,
+                seatKey
+              )
           )
         });
       } catch (error) {
