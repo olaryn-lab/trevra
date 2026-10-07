@@ -78,6 +78,11 @@ CREATE TABLE IF NOT EXISTS linkedin_seat_identities (
   seat_key TEXT NOT NULL,
   identity_key TEXT NOT NULL CHECK (char_length(identity_key) BETWEEN 1 AND 300),
   confirmed_at TIMESTAMPTZ NOT NULL,
+  -- The authenticated Trevra user who asked for the detect that observed this
+  -- identity. The profile page itself is read through a browser the tenant
+  -- controls, so the key alone proves nothing across workspaces: two seats
+  -- share a budget only when one user bound both and is a member of both.
+  bound_user_id TEXT REFERENCES users(id) ON DELETE SET NULL,
   PRIMARY KEY (workspace_id, seat_key),
   FOREIGN KEY (workspace_id, seat_key)
     REFERENCES linkedin_seats(workspace_id, seat_key) ON DELETE CASCADE
@@ -87,7 +92,37 @@ CREATE INDEX IF NOT EXISTS idx_linkedin_seat_identities_identity
   ON linkedin_seat_identities (identity_key);
 
 COMMENT ON TABLE linkedin_seat_identities IS
-  'The LinkedIn member a seat signed in as, read by the companion from its own signed-in profile. Seats sharing identity_key share one safety budget; only counts cross the workspace boundary.';
+  'The LinkedIn member a seat signed in as, read by the companion from its own signed-in profile. Seats sharing identity_key AND bound_user_id, with that user a current member of both workspaces, share one safety budget; only counts cross the workspace boundary.';
+
+-- Who pressed Connect, carried to the worker that performs the detect so the
+-- identity it records is bound to that user (see bound_user_id above).
+ALTER TABLE linkedin_seat_detect_requests
+  ADD COLUMN IF NOT EXISTS requested_by_user_id TEXT REFERENCES users(id) ON DELETE SET NULL;
+
+-- Current workspace membership, as the API checks it: Trevra's users row, the
+-- better-auth user with the same email, and its member row in the
+-- organization whose id is the workspace id. plpgsql so the body is planned
+-- only when called: the better-auth tables are created by its own migrator,
+-- and a database without them has no members, so nothing links (fail closed).
+CREATE OR REPLACE FUNCTION trevra_user_is_workspace_member(p_user_id TEXT, p_workspace_id TEXT)
+RETURNS BOOLEAN
+LANGUAGE plpgsql
+STABLE
+AS $$
+BEGIN
+  IF p_user_id IS NULL OR p_workspace_id IS NULL
+     OR to_regclass('member') IS NULL OR to_regclass('"user"') IS NULL THEN
+    RETURN FALSE;
+  END IF;
+  RETURN EXISTS (
+    SELECT 1
+    FROM users tu
+    JOIN "user" au ON lower(au.email) = lower(tu.email)
+    JOIN member m ON m."userId" = au.id
+    WHERE tu.id = p_user_id AND m."organizationId" = p_workspace_id
+  );
+END;
+$$;
 
 ALTER TABLE linkedin_seats ADD COLUMN IF NOT EXISTS send_mode TEXT NOT NULL DEFAULT 'automated';
 

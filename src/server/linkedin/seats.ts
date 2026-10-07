@@ -164,6 +164,19 @@ export interface LinkedInSeat {
   /** Paid InMail credits this campaign automation may consume. Null means paid credits are not approved. */
   inmailPaidCreditCap: number | null;
   /**
+   * When the companion last confirmed which LinkedIn member this seat signs in
+   * as (`linkedin_seat_identities`). Null when never: the safety gate then
+   * counts this seat alone.
+   */
+  identityConfirmedAt: string | null;
+  /**
+   * How many OTHER seats, in any workspace, signed in as the same member AND
+   * bound by the same Trevra user, who is a current member of both workspaces.
+   * Their sends count against this seat's limits. A count only -- never which
+   * seats.
+   */
+  linkedSeatCount: number;
+  /**
    * This account's own outbound proxy, REDACTED. Null when it has none.
    *
    * The password is never on this type in any form, for the same reason
@@ -173,17 +186,6 @@ export interface LinkedInSeat {
    * support thread. {@link seatProxyUrl} is the only reader of the stored
    * string and it is server-side only.
    */
-  /**
-   * When the companion last confirmed which LinkedIn member this seat signs in
-   * as (`linkedin_seat_identities`). Null when never: the safety gate then
-   * counts this seat alone.
-   */
-  identityConfirmedAt: string | null;
-  /**
-   * How many OTHER seats, in any workspace, signed in as the same member. Their
-   * sends count against this seat's limits. A count only -- never which seats.
-   */
-  linkedSeatCount: number;
   proxy: SeatProxyView | null;
 }
 
@@ -356,9 +358,15 @@ const SEAT_COLUMNS = `
     WHERE i.workspace_id = linkedin_seats.workspace_id AND i.seat_key = linkedin_seats.seat_key) AS identity_confirmed_at,
   (SELECT COUNT(*)::int
      FROM linkedin_seat_identities mine
-     JOIN linkedin_seat_identities other ON other.identity_key = mine.identity_key
+     JOIN linkedin_seat_identities other
+       ON other.identity_key = mine.identity_key AND other.bound_user_id = mine.bound_user_id
     WHERE mine.workspace_id = linkedin_seats.workspace_id AND mine.seat_key = linkedin_seats.seat_key
-      AND NOT (other.workspace_id = mine.workspace_id AND other.seat_key = mine.seat_key)) AS linked_seat_count
+      AND NOT (other.workspace_id = mine.workspace_id AND other.seat_key = mine.seat_key)
+      -- Same user, still a member of both workspaces (migration 134). The
+      -- identity key is read through a tenant-controlled browser, so it alone
+      -- links nothing; this is the same rule the guard's linked set applies.
+      AND trevra_user_is_workspace_member(mine.bound_user_id, mine.workspace_id)
+      AND trevra_user_is_workspace_member(other.bound_user_id, other.workspace_id)) AS linked_seat_count
 `;
 
 function parsedWorkingDays(value: unknown): number[] {

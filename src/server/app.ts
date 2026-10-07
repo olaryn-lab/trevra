@@ -5332,7 +5332,10 @@ export function createApp(db: Db) {
             {
               workspaceId: req.auth!.workspaceId,
               seatKey: input.seatKey,
-              timezone: input.timezone
+              timezone: input.timezone,
+              // Server-resolved from the session, never the body: the user
+              // the recorded LinkedIn identity is bound to (identity.ts).
+              requestedByUserId: req.auth!.userId
             },
             new Date()
           );
@@ -5358,7 +5361,9 @@ export function createApp(db: Db) {
           workspaceId: req.auth!.workspaceId,
           seatKey: input.seatKey,
           timezone: input.timezone,
-          now: new Date()
+          now: new Date(),
+          // Server-resolved from the session, never the body (identity.ts).
+          boundUserId: req.auth!.userId
         });
       } catch (error) {
         // seats.ts owns the timezone rule and its refusal is caller input, not a

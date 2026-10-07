@@ -2385,6 +2385,40 @@ describe.skipIf(!databaseUrl)('the seat detect queue', () => {
     expect(rows?.total).toBe(1);
   });
 
+  it('binds the identity it records to the user who pressed Connect, and to nobody otherwise', async () => {
+    const userId = 'usr_linkedin_detect_queue';
+    await db
+      .prepare('INSERT INTO users (id,workspace_id,email,name,created_at) VALUES (?,?,?,?,?)')
+      .run(userId, WORKSPACE_ID, `${userId}@trevra.test`, 'Queue tester', NOW.toISOString());
+    const { driver } = fakeDriver();
+    const boundTo = async () =>
+      (
+        await db
+          .prepare('SELECT bound_user_id FROM linkedin_seat_identities WHERE workspace_id=?')
+          .get<{ bound_user_id: string | null }>(WORKSPACE_ID)
+      )?.bound_user_id;
+
+    await requestSeatDetect(
+      db,
+      { workspaceId: WORKSPACE_ID, timezone: 'Europe/Zurich', requestedByUserId: userId },
+      NOW
+    );
+    await runPendingSeatDetectRequests(
+      db,
+      { enabled: true },
+      { driver, page, now: NOW, log: () => {} }
+    );
+    expect(await boundTo()).toBe(userId);
+
+    await requestSeatDetect(db, { workspaceId: WORKSPACE_ID, timezone: 'Europe/Zurich' }, NOW);
+    await runPendingSeatDetectRequests(
+      db,
+      { enabled: true },
+      { driver, page, now: NOW, log: () => {} }
+    );
+    expect(await boundTo()).toBeNull();
+  });
+
   it('refuses a timezone the runtime does not know, here rather than on another machine', async () => {
     await expect(
       requestSeatDetect(db, { workspaceId: WORKSPACE_ID, timezone: 'Mars/Olympus' }, NOW)

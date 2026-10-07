@@ -28,13 +28,23 @@ export function seatIdentityKey(profileUrl: string | null | undefined): string |
  * fact written here was observed, not asserted. An unreadable profile removes
  * the link: a seat Trevra cannot identify falls back to its own per-seat
  * budget rather than keeping a stale claim to somebody else's.
+ *
+ * OBSERVED IS NOT PROVEN. In hosted companion mode the page is read through a
+ * browser the tenant controls, so a forged `/in/me/` could name anybody's
+ * profile. The key therefore links nothing on its own: `boundUserId` is the
+ * authenticated Trevra user who asked for this detect (server-resolved, never
+ * client input), and two seats share a budget only when the SAME user is bound
+ * to both and is a current member of both workspaces -- checked at read time
+ * in `seatLedgerFacts` (guard.ts) and `linked_seat_count` (seats.ts). Null
+ * means no user is known; the identity is recorded and links nothing.
  */
 export async function recordSeatIdentity(
   db: Db,
   workspaceId: string,
   seatKey: string,
   profileUrl: string | null | undefined,
-  now: Date
+  now: Date,
+  boundUserId: string | null = null
 ): Promise<string | null> {
   const key = seatIdentityKey(profileUrl);
   if (!key) {
@@ -45,12 +55,13 @@ export async function recordSeatIdentity(
   }
   await db
     .prepare(
-      `INSERT INTO linkedin_seat_identities (workspace_id, seat_key, identity_key, confirmed_at)
-       VALUES (?,?,?,?::timestamptz)
+      `INSERT INTO linkedin_seat_identities (workspace_id, seat_key, identity_key, confirmed_at, bound_user_id)
+       VALUES (?,?,?,?::timestamptz,?)
        ON CONFLICT (workspace_id, seat_key) DO UPDATE SET
          identity_key = excluded.identity_key,
-         confirmed_at = excluded.confirmed_at`
+         confirmed_at = excluded.confirmed_at,
+         bound_user_id = excluded.bound_user_id`
     )
-    .run(workspaceId, seatKey, key, now.toISOString());
+    .run(workspaceId, seatKey, key, now.toISOString(), boundUserId);
   return key;
 }

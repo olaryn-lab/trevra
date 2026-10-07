@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { openDatabase, type Db } from '../db.js';
 import { recordAction, type LinkedInActionKind, type LinkedInActionStatus } from './actions.js';
 import {
@@ -10,7 +11,7 @@ import {
 } from './guard.js';
 import { MAX_OUTSTANDING_INVITES } from './limits.js';
 import { FLAT_DAY_SHAPE, type DayShapeFn } from './pacing.js';
-import { upsertSeat } from './seats.js';
+import { getSeat, upsertSeat } from './seats.js';
 import { recordSeatIdentity } from './identity.js';
 import { createSuppression } from '../suppressions.js';
 
@@ -1530,12 +1531,72 @@ describe('the day shape binds at the gate, not only in the plan', () => {
 describe('one LinkedIn member across workspaces', () => {
   const OTHER = 'ws_linkedin_guard_neighbour';
   const PROFILE = 'https://www.linkedin.com/in/shared-founder/';
+  /** One Trevra user, a member of both workspaces: the founder running both. */
+  const FOUNDER = 'usr_linkedin_guard_founder';
+  /** A member of the neighbour workspace only. */
+  const RIVAL = 'usr_linkedin_guard_rival';
+
+  beforeAll(async () => migrateAuthDatabase());
+  afterAll(async () => closeAuthDatabase());
+
+  /**
+   * Membership exactly as the API checks it: Trevra's `users` row, the
+   * better-auth `user` with the same email, and its `member` row in the
+   * organization whose id is the workspace id.
+   */
+  async function member(userId: string, home: string, workspaceIds: string[]): Promise<void> {
+    const at = NOW.toISOString();
+    const email = `${userId}@trevra.test`;
+    await db
+      .prepare(
+        'INSERT INTO users (id,workspace_id,email,name,created_at) VALUES (?,?,?,?,?) ON CONFLICT (id) DO NOTHING'
+      )
+      .run(userId, home, email, userId, at);
+    await db
+      .prepare(
+        `INSERT INTO "user" (id,name,email,"emailVerified","createdAt","updatedAt")
+         VALUES (?,?,?,false,?,?) ON CONFLICT (id) DO NOTHING`
+      )
+      .run(`au_${userId}`, userId, email, at, at);
+    for (const workspaceId of workspaceIds) {
+      await db
+        .prepare(
+          `INSERT INTO organization (id,name,slug,"createdAt") VALUES (?,?,?,?) ON CONFLICT (id) DO NOTHING`
+        )
+        .run(workspaceId, workspaceId, workspaceId, at);
+      await db
+        .prepare(
+          `INSERT INTO member (id,"organizationId","userId",role,"createdAt") VALUES (?,?,?,'owner',?)`
+        )
+        .run(`mem_${workspaceId}_${userId}`, workspaceId, `au_${userId}`, at);
+    }
+  }
+
+  async function forgetMembers(): Promise<void> {
+    await db
+      ?.prepare('DELETE FROM member WHERE "organizationId" = ANY(?::text[])')
+      .run([WORKSPACE_ID, OTHER]);
+    await db
+      ?.prepare('DELETE FROM organization WHERE id = ANY(?::text[])')
+      .run([WORKSPACE_ID, OTHER]);
+    await db
+      ?.prepare('DELETE FROM "user" WHERE id = ANY(?::text[])')
+      .run([`au_${FOUNDER}`, `au_${RIVAL}`]);
+  }
+
+  /** What detection records: the observed profile, bound to the user who asked. */
+  function confirm(workspaceId: string, userId: string | null = FOUNDER, profile = PROFILE) {
+    return recordSeatIdentity(db, workspaceId, 'owner', profile, NOW, userId);
+  }
 
   beforeEach(async () => {
+    await forgetMembers();
     await db.prepare('DELETE FROM workspaces WHERE id=?').run(OTHER);
     await db
       .prepare('INSERT INTO workspaces (id,name,created_at) VALUES (?,?,?)')
       .run(OTHER, 'Neighbour', NOW.toISOString());
+    await member(FOUNDER, WORKSPACE_ID, [WORKSPACE_ID, OTHER]);
+    await member(RIVAL, OTHER, [OTHER]);
     await upsertSeat(
       db,
       OTHER,
@@ -1557,6 +1618,7 @@ describe('one LinkedIn member across workspaces', () => {
   });
 
   afterEach(async () => {
+    await forgetMembers();
     await db?.prepare('DELETE FROM workspaces WHERE id=?').run(OTHER);
     // This file never deletes its own seat afterwards; a confirmed identity left
     // behind would link the next file's seats to this one on a shared worker.
@@ -1572,8 +1634,8 @@ describe('one LinkedIn member across workspaces', () => {
     expect(check(before, 'linked-identity').passed).toBe(true);
     expect(check(before, 'linked-identity').detail).toContain('has not confirmed');
 
-    await recordSeatIdentity(db, WORKSPACE_ID, 'owner', PROFILE, NOW);
-    await recordSeatIdentity(db, OTHER, 'owner', PROFILE, NOW);
+    await confirm(WORKSPACE_ID);
+    await confirm(OTHER);
     const after = await guard({}, { dayShape: FLAT_DAY_SHAPE });
     expect(check(after, 'rolling-24h').passed).toBe(false);
     expect(check(after, 'rolling-24h').detail).toContain('18 of 18');
@@ -1583,8 +1645,8 @@ describe('one LinkedIn member across workspaces', () => {
 
   it('lets only counts cross the workspace boundary', async () => {
     await seat('2026-01-01');
-    await recordSeatIdentity(db, WORKSPACE_ID, 'owner', PROFILE, NOW);
-    await recordSeatIdentity(db, OTHER, 'owner', PROFILE, NOW);
+    await confirm(WORKSPACE_ID);
+    await confirm(OTHER);
 
     const verdict = await guard({}, { dayShape: FLAT_DAY_SHAPE });
     const serialised = JSON.stringify(verdict);
@@ -1603,8 +1665,8 @@ describe('one LinkedIn member across workspaces', () => {
 
   it('keeps two different LinkedIn members on separate budgets', async () => {
     await seat('2026-01-01');
-    await recordSeatIdentity(db, WORKSPACE_ID, 'owner', PROFILE, NOW);
-    await recordSeatIdentity(db, OTHER, 'owner', 'https://www.linkedin.com/in/someone-else/', NOW);
+    await confirm(WORKSPACE_ID);
+    await confirm(OTHER, FOUNDER, 'https://www.linkedin.com/in/someone-else/');
     const verdict = await guard({}, { dayShape: FLAT_DAY_SHAPE });
     expect(check(verdict, 'rolling-24h').passed).toBe(true);
     expect(check(verdict, 'linked-identity').detail).toContain('No other workspace seat');
@@ -1612,7 +1674,7 @@ describe('one LinkedIn member across workspaces', () => {
 
   it('keeps the per-seat budget while only the other seat is confirmed', async () => {
     await seat('2026-01-01');
-    await recordSeatIdentity(db, OTHER, 'owner', PROFILE, NOW);
+    await confirm(OTHER);
     const verdict = await guard({}, { dayShape: FLAT_DAY_SHAPE });
     expect(check(verdict, 'rolling-24h').passed).toBe(true);
     expect(check(verdict, 'pending-invite-backlog').detail).toContain(
@@ -1636,8 +1698,8 @@ describe('one LinkedIn member across workspaces', () => {
 
   it("counts the linked member's outstanding invites in the backlog", async () => {
     await seat('2026-01-01');
-    await recordSeatIdentity(db, WORKSPACE_ID, 'owner', PROFILE, NOW);
-    await recordSeatIdentity(db, OTHER, 'owner', PROFILE, NOW);
+    await confirm(WORKSPACE_ID);
+    await confirm(OTHER);
     const verdict = await guard({}, { dayShape: FLAT_DAY_SHAPE });
     expect(check(verdict, 'pending-invite-backlog').detail).toContain(
       `18 of ${MAX_OUTSTANDING_INVITES}`
@@ -1651,8 +1713,8 @@ describe('one LinkedIn member across workspaces', () => {
       { label: 'Test seat', timezone: 'UTC', dailyInviteLimit: 10 },
       new Date('2026-01-01T09:00:00.000Z')
     );
-    await recordSeatIdentity(db, WORKSPACE_ID, 'owner', PROFILE, NOW);
-    await recordSeatIdentity(db, OTHER, 'owner', PROFILE, NOW);
+    await confirm(WORKSPACE_ID);
+    await confirm(OTHER);
     await createSuppression(
       db,
       {
@@ -1681,5 +1743,47 @@ describe('one LinkedIn member across workspaces', () => {
     expect(check(verdict, 'campaign-warmup').passed).toBe(true);
     expect(check(verdict, 'campaign-warmup').detail).toContain('0 of 2');
     expect(JSON.stringify(verdict)).not.toContain('Neighbour exclusion');
+  });
+  it('keeps separate budgets when one profile key was bound by two different users', async () => {
+    // The key is read through a browser the tenant controls. A neighbour who
+    // forges the founder's profile must neither drain the founder's budget nor
+    // learn anything about it.
+    await seat('2026-01-01');
+    await confirm(WORKSPACE_ID, FOUNDER);
+    await confirm(OTHER, RIVAL);
+    const verdict = await guard({}, { dayShape: FLAT_DAY_SHAPE });
+    expect(check(verdict, 'rolling-24h').passed).toBe(true);
+    expect(check(verdict, 'linked-identity').detail).toContain('No other workspace seat');
+    expect((await getSeat(db, WORKSPACE_ID, 'owner'))?.linkedSeatCount).toBe(0);
+    expect((await getSeat(db, OTHER, 'owner'))?.linkedSeatCount).toBe(0);
+  });
+
+  it('unlinks once the shared user is no longer a member of one workspace', async () => {
+    await seat('2026-01-01');
+    await confirm(WORKSPACE_ID);
+    await confirm(OTHER);
+    expect(check(await guard({}, { dayShape: FLAT_DAY_SHAPE }), 'rolling-24h').passed).toBe(false);
+
+    await db.prepare('DELETE FROM member WHERE id=?').run(`mem_${OTHER}_${FOUNDER}`);
+    const verdict = await guard({}, { dayShape: FLAT_DAY_SHAPE });
+    expect(check(verdict, 'rolling-24h').passed).toBe(true);
+    expect(check(verdict, 'linked-identity').detail).toContain('No other workspace seat');
+    expect((await getSeat(db, WORKSPACE_ID, 'owner'))?.linkedSeatCount).toBe(0);
+  });
+
+  it('says whose invites are pending: the seat until confirmed, then the LinkedIn member', async () => {
+    await seat('2026-01-01');
+    const message = { kind: 'dm' as const, targetRef: 'https://www.linkedin.com/in/fresh' };
+    const before = await guard(message, { dayShape: FLAT_DAY_SHAPE });
+    expect(check(before, 'pending-invite-backlog').detail).toContain(
+      '0 invite(s) are pending for this seat.'
+    );
+
+    await confirm(WORKSPACE_ID);
+    await confirm(OTHER);
+    const after = await guard(message, { dayShape: FLAT_DAY_SHAPE });
+    expect(check(after, 'pending-invite-backlog').detail).toContain(
+      '18 invite(s) are pending for this LinkedIn member.'
+    );
   });
 });

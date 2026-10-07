@@ -1417,6 +1417,16 @@ describe('GET /api/linkedin/seat and /api/linkedin/analytics', () => {
           .expect(202)
       ).body as { requestedAt: string };
       expect(again.requestedAt).toBe(queued.requestedAt);
+      // The worker binds the identity it records to this user, so the route
+      // stores the session's user -- never anything from the body.
+      expect(
+        await db
+          .prepare(
+            `SELECT requested_by_user_id FROM linkedin_seat_detect_requests
+              WHERE workspace_id=? AND status='pending'`
+          )
+          .get<{ requested_by_user_id: string | null }>(WORKSPACE_A)
+      ).toEqual({ requested_by_user_id: `usr_${WORKSPACE_A}` });
 
       const seatBody = (await as(sessionA).get('/api/linkedin/seat').expect(200)).body as {
         detectRequest: {

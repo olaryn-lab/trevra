@@ -5582,6 +5582,14 @@ export async function detectLinkedInSeat(
      */
     page?: LinkedInPage;
     log?: (message: string) => void;
+    /**
+     * The authenticated Trevra user who asked for this detect, resolved by the
+     * server (the route's session, or the queued request's requester). Bound to
+     * the recorded identity so a profile read through a tenant-controlled
+     * browser cannot link this seat to another user's budget. Absent: the
+     * identity is recorded unbound and links nothing.
+     */
+    boundUserId?: string | null;
   }
 ): Promise<DetectSeatResult> {
   const log = options.log ?? ((message: string) => console.log(message));
@@ -5735,7 +5743,14 @@ export async function detectLinkedInSeat(
   // WHICH MEMBER THIS SEAT IS. The profile just read is the companion's own
   // signed-in page, so it is the one fact that may link this seat's limits to
   // another workspace's seat signed in as the same person (guard.ts).
-  await recordSeatIdentity(db, options.workspaceId, seatKey, read.profileUrl, now);
+  await recordSeatIdentity(
+    db,
+    options.workspaceId,
+    seatKey,
+    read.profileUrl,
+    now,
+    options.boundUserId ?? null
+  );
 
   return {
     detected: {
@@ -5792,10 +5807,11 @@ interface SeatDetectRow {
   requested_at: string;
   finished_at: string | null;
   failure_reason: string | null;
+  requested_by_user_id: string | null;
 }
 
 const SEAT_DETECT_COLUMNS = `
-  id, workspace_id, seat_key, timezone, status, failure_reason,
+  id, workspace_id, seat_key, timezone, status, failure_reason, requested_by_user_id,
   TO_CHAR(requested_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS requested_at,
   TO_CHAR(finished_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS finished_at
 `;
@@ -5828,7 +5844,13 @@ function toSeatDetectRequest(row: SeatDetectRow): SeatDetectRequest {
  */
 export async function requestSeatDetect(
   db: Db,
-  options: { workspaceId: string; timezone: string; seatKey?: string },
+  options: {
+    workspaceId: string;
+    timezone: string;
+    seatKey?: string;
+    /** The authenticated user who pressed Connect (server-resolved); see `detectLinkedInSeat`'s `boundUserId`. */
+    requestedByUserId?: string | null;
+  },
   now: Date = new Date()
 ): Promise<SeatDetectRequest> {
   assertTimezone(options.timezone);
@@ -5836,12 +5858,19 @@ export async function requestSeatDetect(
   await db
     .prepare(
       `
-    INSERT INTO linkedin_seat_detect_requests (id, workspace_id, seat_key, timezone, status, requested_at)
-    VALUES (?,?,?,?,'pending',?)
+    INSERT INTO linkedin_seat_detect_requests (id, workspace_id, seat_key, timezone, status, requested_at, requested_by_user_id)
+    VALUES (?,?,?,?,'pending',?,?)
     ON CONFLICT (workspace_id, seat_key) WHERE status = 'pending' DO NOTHING
   `
     )
-    .run(id('lsdr'), options.workspaceId, seatKey, options.timezone, now.toISOString());
+    .run(
+      id('lsdr'),
+      options.workspaceId,
+      seatKey,
+      options.timezone,
+      now.toISOString(),
+      options.requestedByUserId ?? null
+    );
 
   const row = await db
     .prepare(
@@ -5903,7 +5932,7 @@ async function claimSeatDetectRequest(
   staleClaimMs: number,
   excludeWorkspaces: readonly string[] = [],
   shard: WorkerShard = SINGLE_WORKER_SHARD
-): Promise<SeatDetectRequest | null> {
+): Promise<{ request: SeatDetectRequest; requestedByUserId: string | null } | null> {
   const staleBefore = new Date(now.getTime() - staleClaimMs).toISOString();
   const row = await db
     .prepare(
@@ -5927,7 +5956,10 @@ async function claimSeatDetectRequest(
       [...excludeWorkspaces],
       ...shardParams(shard)
     );
-  return row ? toSeatDetectRequest(row) : null;
+  // The requester stays off `SeatDetectRequest`, which the seat route serialises.
+  return row
+    ? { request: toSeatDetectRequest(row), requestedByUserId: row.requested_by_user_id ?? null }
+    : null;
 }
 
 async function settleSeatDetectRequest(
@@ -6019,16 +6051,17 @@ export async function runPendingSeatDetectRequests(
 
   for (let index = 0; index < maxRequests; index += 1) {
     const now = options.now ?? new Date();
-    let request: SeatDetectRequest | null;
+    let claimed: Awaited<ReturnType<typeof claimSeatDetectRequest>>;
     try {
-      request = await claimSeatDetectRequest(db, now, staleClaimMs, servedWorkspaces, shard);
+      claimed = await claimSeatDetectRequest(db, now, staleClaimMs, servedWorkspaces, shard);
     } catch (cause) {
       log(
         `LinkedIn detect queue could not be read: ${cause instanceof Error ? cause.message : String(cause)}`
       );
       return settled;
     }
-    if (!request) break;
+    if (!claimed) break;
+    const { request, requestedByUserId } = claimed;
     servedWorkspaces.push(request.workspaceId);
 
     // A paired computer is deliberately ephemeral. Do not turn "laptop is
@@ -6059,7 +6092,8 @@ export async function runPendingSeatDetectRequests(
         now,
         driver: options.driver,
         page: options.page,
-        log
+        log,
+        boundUserId: requestedByUserId
       });
       failureReason = result.blocked;
     } catch (cause) {

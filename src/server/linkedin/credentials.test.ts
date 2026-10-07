@@ -136,6 +136,13 @@ afterEach(async () => {
   await db
     ?.prepare('DELETE FROM linkedin_seat_identities WHERE workspace_id = ANY(?::text[])')
     .run([WORKSPACE_ID, OTHER_WORKSPACE_ID]);
+  await db
+    ?.prepare('DELETE FROM member WHERE id = ANY(?::text[])')
+    .run([`mem_${WORKSPACE_ID}`, `mem_${OTHER_WORKSPACE_ID}`]);
+  await db
+    ?.prepare('DELETE FROM organization WHERE id = ANY(?::text[])')
+    .run([WORKSPACE_ID, OTHER_WORKSPACE_ID]);
+  await db?.prepare('DELETE FROM "user" WHERE id=?').run(`au_usr_${WORKSPACE_ID}`);
   await db?.close();
   if (previousKey === undefined) delete process.env.TREVRA_SECRETS_KEY;
   else process.env.TREVRA_SECRETS_KEY = previousKey;
@@ -982,6 +989,30 @@ describe('detectLinkedInSeat on an account change', () => {
   });
 
   it('confirms which LinkedIn member a seat signs in as, and links it across workspaces by count only', async () => {
+    // One Trevra user, a member of both workspaces, pressed Connect in each:
+    // the only shape in which two seats may share a budget (identity.ts).
+    const founder = `usr_${WORKSPACE_ID}`;
+    const at = NOW.toISOString();
+    await db
+      .prepare(
+        `INSERT INTO "user" (id,name,email,"emailVerified","createdAt","updatedAt")
+         VALUES (?,?,?,false,?,?) ON CONFLICT (id) DO NOTHING`
+      )
+      .run(`au_${founder}`, 'Founder', `${founder}@trevra.test`, at, at);
+    for (const workspaceId of [WORKSPACE_ID, OTHER_WORKSPACE_ID]) {
+      await db
+        .prepare(
+          `INSERT INTO organization (id,name,slug,"createdAt") VALUES (?,?,?,?) ON CONFLICT (id) DO NOTHING`
+        )
+        .run(workspaceId, workspaceId, workspaceId, at);
+      await db
+        .prepare(
+          `INSERT INTO member (id,"organizationId","userId",role,"createdAt")
+           VALUES (?,?,?,'owner',?) ON CONFLICT (id) DO NOTHING`
+        )
+        .run(`mem_${workspaceId}`, workspaceId, `au_${founder}`, at);
+    }
+
     const { driver } = fakeDriver({ loggedIn: true });
     for (const workspaceId of [WORKSPACE_ID, OTHER_WORKSPACE_ID])
       await detectLinkedInSeat(db, config, {
@@ -990,7 +1021,8 @@ describe('detectLinkedInSeat on an account change', () => {
         now: NOW,
         driver,
         page,
-        log: () => {}
+        log: () => {},
+        boundUserId: founder
       });
 
     const result = await detectLinkedInSeat(db, config, {
@@ -999,7 +1031,8 @@ describe('detectLinkedInSeat on an account change', () => {
       now: NOW,
       driver,
       page,
-      log: () => {}
+      log: () => {},
+      boundUserId: founder
     });
     expect(result.seat?.identityConfirmedAt).toBe(NOW.toISOString());
     expect(result.seat?.linkedSeatCount).toBe(1);

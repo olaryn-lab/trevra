@@ -389,6 +389,11 @@ interface SeatLedgerFacts {
 /** The three kinds that share the operator's account-level message ceiling. */
 const MESSAGE_KINDS = ['dm', 'reply', 'inmail', 'group_message', 'event_message'] as const;
 
+// lc-debt: linked seats in different workspaces hold different worker leases,
+// so two of them can each pass this gate before either claim lands -- an
+// overshoot of up to (linked seats - 1) actions per race window. Upgrade path:
+// take pg_advisory_xact_lock(hashtext(identity_key)) around the gate and the
+// claim, so linked seats serialise the way one seat's lease already does.
 async function seatLedgerFacts(
   db: Db,
   seat: SeatRef,
@@ -438,8 +443,14 @@ async function seatLedgerFacts(
         UNION
         SELECT other.workspace_id, other.seat_key
         FROM linkedin_seat_identities mine
-        JOIN linkedin_seat_identities other ON other.identity_key = mine.identity_key
+        JOIN linkedin_seat_identities other
+          ON other.identity_key = mine.identity_key AND other.bound_user_id = mine.bound_user_id
         WHERE mine.workspace_id=? AND mine.seat_key=?
+          -- The key is read through a browser the tenant controls, so it alone
+          -- proves nothing: one authenticated Trevra user must have bound both
+          -- seats and still be a member of both workspaces (migration 134).
+          AND trevra_user_is_workspace_member(mine.bound_user_id, mine.workspace_id)
+          AND trevra_user_is_workspace_member(other.bound_user_id, other.workspace_id)
       ),
       windowed AS (
         SELECT kind, status, recorded_at FROM linkedin_actions
@@ -1031,7 +1042,7 @@ export async function evaluateLinkedInSafety(
     detail:
       input.kind === 'invite'
         ? `${pendingInvites} of ${MAX_OUTSTANDING_INVITES} outstanding invites are still awaiting an answer. Withdrawing the stale ones is what returns capacity here; sending more does not. The ceiling is REPORTED, from the same 1.4 figure that puts acceptance at 25-30% above 100 invites a week.`
-        : `The outstanding-invite ceiling applies to invites; this is a ${input.kind}. ${pendingInvites} invite(s) are pending for this seat.`
+        : `The outstanding-invite ceiling applies to invites; this is a ${input.kind}. ${pendingInvites} invite(s) are pending for ${ledger.identityKnown ? 'this LinkedIn member' : 'this seat'}.`
   });
 
   // SCOPED, EXACTLY AS THE LEDGER'S REPLAY INDEX IS SCOPED (migration 047).
