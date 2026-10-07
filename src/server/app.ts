@@ -496,6 +496,7 @@ import {
   setProviderWebhookEndpointStatus,
   withProviderWebhookPath
 } from './provider-webhooks/index.js';
+import { calcomVerifier } from './provider-webhooks/calcom.js';
 import { stripeVerifier } from './provider-webhooks/stripe.js';
 import {
   createCaptureSource,
@@ -903,6 +904,7 @@ export function createApp(db: Db) {
   // raw bytes too, so they register before the JSON parser. The URL's endpoint
   // id decides the workspace; nothing in the payload can.
   registerProviderVerifier(stripeVerifier);
+  registerProviderVerifier(calcomVerifier);
   registerProviderWebhookRoutes(app, db);
 
   app.use(express.json({ limit: '6mb' }));

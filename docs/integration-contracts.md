@@ -117,6 +117,20 @@ Workspace
 
 The request never supplies the destination workspace. The authenticated GTM source determines it.
 
+## Cal.com booking webhooks
+
+An owner creates a Cal.com endpoint on `/setup/capture`. Trevra shows the subscriber URL (`/api/hooks/v1/calcom/<endpoint id>`) and a signing secret, once. The endpoint, not the payload, decides the workspace.
+
+- Signature: `X-Cal-Signature-256` is the hex HMAC-SHA256 of the raw body. The literal `no-secret-provided` is refused with 401.
+- Body: the default `{ triggerEvent, createdAt, payload }`. A custom payload template is refused with 400.
+- Event id: the SHA-256 hex of `<triggerEvent>\n<payload.uid>\n<createdAt>`, which dedupes redeliveries in `webhook_events`.
+- Handled triggers:
+  - `BOOKING_CREATED` becomes `scheduled`.
+  - `BOOKING_RESCHEDULED` becomes `rescheduled`, with `previousId` set from `rescheduleUid`; the replaced booking is cancelled.
+  - `BOOKING_CANCELLED` becomes `cancelled`.
+- Every other trigger, `PING` and the flat `MEETING_STARTED`/`MEETING_ENDED` included, is accepted and ignored. A signed booking Trevra cannot read is recorded as ignored, not retried.
+- The attendee is the first one who is not the organizer and not a workspace user. The booking's title, description, notes and other guests are not stored.
+
 ## CRM integrations
 
 HubSpot and Attio may observe GTM records. CRM activity write-back is a dedicated `crm.log-activity` action behind Trevra's approval/execution boundary. Do not add ungated record mutation to the sync path.
