@@ -10,6 +10,10 @@ import type {
 /** The only DNS surface Trevra uses. Tests inject a fake; production uses node:dns. */
 export interface DnsResolver {
   resolveTxt(name: string): Promise<string[][]>;
+  /** Optional: lets SPF a and exists mechanisms count void lookups. */
+  resolveA?(name: string): Promise<string[]>;
+  /** Optional: lets SPF mx mechanisms count void lookups. */
+  resolveMx?(name: string): Promise<{ exchange: string; priority: number }[]>;
 }
 
 /**
@@ -28,7 +32,11 @@ export function defaultDnsResolver(env: NodeJS.ProcessEnv = process.env): DnsRes
     };
   }
   const resolver = new Resolver({ timeout: 2000, tries: 2 });
-  return { resolveTxt: (name) => resolver.resolveTxt(name) };
+  return {
+    resolveTxt: (name) => resolver.resolveTxt(name),
+    resolveA: (name) => resolver.resolve4(name),
+    resolveMx: (name) => resolver.resolveMx(name)
+  };
 }
 
 export function mailProviderFor(provider: string): MailProvider | null {
@@ -140,63 +148,110 @@ async function walkSpf(
   const terms = record.split(/\s+/).slice(1);
   const hasAll = terms.some((term) => /^[+?~-]?all$/i.test(term));
   const path = new Set(ancestors).add(domain);
+  const invalid = (detail: string): SpfWalk => ({ result: 'invalid', detail, record });
+  const voidLimit = (): SpfWalk =>
+    invalid(
+      `SPF for ${domain} makes more than ${SPF_VOID_LOOKUP_LIMIT} void lookups; receivers treat that as a permanent error.`
+    );
+  for (const name of ['redirect', 'exp']) {
+    const count = terms.filter((term) => new RegExp(`^${name}=`, 'i').test(term)).length;
+    if (count > 1) return invalid(`SPF at ${domain} has more than one ${name}= modifier.`);
+  }
   let authorized = false;
-  // A missing include is a permerror, but it is held until the record is fully walked so
-  // the void-lookup limit can report the more specific cause.
-  let deferredInvalid: string | null = null;
   for (const term of terms) {
-    const match = /^([+?~-]?)([a-z][a-z0-9.-]*)(?:[:=](.*))?$/i.exec(term);
-    if (!match) continue;
-    const qualifier = match[1] || '+';
-    const mechanism = match[2]!.toLowerCase();
+    const modifier = /^([a-z][a-z0-9_.-]*)=(.*)$/i.exec(term);
+    const mechanismMatch = modifier
+      ? null
+      : /^([+?~-]?)(all|include|a|mx|ptr|ip4|ip6|exists)(?::(.*?))?(\/\d+(?:\/\d+)?)?$/i.exec(term);
+    if (!modifier && !mechanismMatch)
+      return invalid(`Unrecognised SPF term "${term}" at ${domain}.`);
+    const qualifier = mechanismMatch ? mechanismMatch[1] || '+' : '+';
+    const mechanism = (modifier ? modifier[1]! : mechanismMatch![2]!).toLowerCase();
+    const raw = (modifier ? modifier[2]! : (mechanismMatch![3] ?? '')).trim();
     // Mechanisms after the first "all" are never evaluated (RFC 7208 section 5.1).
-    if (mechanism === 'all') break;
-    const value = (match[3] ?? '').trim().toLowerCase().replace(/\.$/, '');
+    if (!modifier && mechanism === 'all') {
+      if (raw) return invalid(`Unrecognised SPF term "${term}" at ${domain}.`);
+      break;
+    }
+    if (modifier && mechanism !== 'redirect') continue; // exp and unknown modifiers never authorize
+    const value = raw.toLowerCase().replace(/\.$/, '');
+    if (!modifier && ['ip4', 'ip6', 'exists', 'include'].includes(mechanism) && !value) {
+      return invalid(`SPF ${mechanism} at ${domain} names no value.`);
+    }
     const isRedirect = mechanism === 'redirect' && !hasAll;
+    if (mechanism === 'redirect' && hasAll) continue;
     if (SPF_LOOKUP_MECHANISMS.has(mechanism) || isRedirect) {
       state.lookups += 1;
       if (state.lookups > SPF_LOOKUP_LIMIT) {
-        return {
-          result: 'invalid',
-          detail: `SPF for ${domain} needs more than ${SPF_LOOKUP_LIMIT} DNS lookups; receivers stop evaluating it.`,
-          record
-        };
+        return invalid(
+          `SPF for ${domain} needs more than ${SPF_LOOKUP_LIMIT} DNS lookups; receivers stop evaluating it.`
+        );
       }
     }
-    if (mechanism !== 'include' && !isRedirect) continue;
-    if (!value) {
-      return {
-        result: 'invalid',
-        detail: `SPF ${mechanism} at ${domain} names no domain.`,
-        record
-      };
+    if (mechanism === 'a' || mechanism === 'mx' || mechanism === 'exists') {
+      const name = value || domain;
+      // Macro targets cannot be evaluated statically; skip the query.
+      if (name.includes('%')) continue;
+      const outcome = await probeSpfTarget(resolver, mechanism, name);
+      if (outcome.kind === 'unknown') {
+        return {
+          result: 'unknown',
+          detail: `SPF ${mechanism} lookup for ${name} failed (${outcome.detail}).`
+        };
+      }
+      if (outcome.kind === 'void') {
+        state.voids += 1;
+        if (state.voids > SPF_VOID_LOOKUP_LIMIT) return voidLimit();
+      }
+      continue;
     }
+    if (mechanism !== 'include' && !isRedirect) continue;
+    if (!value) return invalid(`SPF ${mechanism} at ${domain} names no domain.`);
     // Macro targets (%{...}) cannot be evaluated statically; they never count as authorizing.
     if (value.includes('%')) continue;
     const nested = await walkSpf(resolver, value, target, state, path);
     if (nested.result === 'unknown') return nested;
     if (nested.result === 'missing') {
       if (nested.void) state.voids += 1;
-      if (state.voids > SPF_VOID_LOOKUP_LIMIT) {
-        return {
-          result: 'invalid',
-          detail: `SPF for ${domain} makes more than ${SPF_VOID_LOOKUP_LIMIT} void lookups; receivers treat that as a permanent error.`,
-          record
-        };
-      }
-      deferredInvalid ??= `SPF for ${domain} includes ${value}, which publishes no SPF record.`;
-      continue;
+      if (state.voids > SPF_VOID_LOOKUP_LIMIT) return voidLimit();
+      return invalid(`SPF for ${domain} includes ${value}, which publishes no SPF record.`);
     }
     if (nested.result === 'invalid') return { result: 'invalid', detail: nested.detail, record };
     if ((isRedirect || qualifier === '+') && (value === target || nested.authorized)) {
       authorized = true;
     }
   }
-  if (deferredInvalid) return { result: 'invalid', detail: deferredInvalid, record };
   return { result: 'ok', authorized, record };
 }
 
-type Evaluated = { check: DeliverabilityCheck; blocker: EmailChannelIssue | null };
+type SpfProbe = { kind: 'ok' } | { kind: 'void' } | { kind: 'unknown'; detail: string };
+
+/** Resolves the target of an a, mx or exists mechanism when the resolver can; counts voids. */
+async function probeSpfTarget(
+  resolver: DnsResolver,
+  mechanism: 'a' | 'mx' | 'exists',
+  name: string
+): Promise<SpfProbe> {
+  try {
+    const answers =
+      mechanism === 'mx' ? await resolver.resolveMx?.(name) : await resolver.resolveA?.(name);
+    if (answers === undefined) return { kind: 'ok' }; // resolver cannot answer: counted, not resolved
+    return answers.length === 0 ? { kind: 'void' } : { kind: 'ok' };
+  } catch (error) {
+    const code =
+      error && typeof error === 'object' && 'code' in error
+        ? String((error as { code?: unknown }).code)
+        : '';
+    if (code === 'ENODATA' || code === 'ENOTFOUND') return { kind: 'void' };
+    return { kind: 'unknown', detail: code || 'DNS lookup failed' };
+  }
+}
+
+type Evaluated = {
+  check: DeliverabilityCheck;
+  blocker: EmailChannelIssue | null;
+  warning?: EmailChannelIssue;
+};
 
 async function evaluateSpf(
   resolver: DnsResolver,
@@ -247,6 +302,11 @@ async function evaluateSpf(
       )
     };
   }
+  const finalAll = walk.record
+    .split(/\s+/)
+    .slice(1)
+    .find((term) => /^[+?~-]?all$/i.test(term));
+  const permissive = finalAll !== undefined && /^\+?all$/i.test(finalAll);
   return {
     check: {
       status: 'pass',
@@ -254,7 +314,15 @@ async function evaluateSpf(
       record: walk.record,
       lookups: state.lookups
     },
-    blocker: null
+    blocker: null,
+    ...(permissive
+      ? {
+          warning: issue(
+            'email_spf_permissive_all',
+            `The SPF record for ${domain} ends in "${finalAll}", which lets anyone send as ${domain}. Use "~all" or "-all".`
+          )
+        }
+      : {})
   };
 }
 
@@ -337,7 +405,7 @@ async function dmarcAt(resolver: DnsResolver, name: string): Promise<DmarcLookup
   if (lookup.kind === 'absent') return { kind: 'absent' };
   const records = lookup.records
     .map((value) => value.trim())
-    .filter((value) => /^v=DMARC1\s*(?:;|$)/i.test(value));
+    .filter((value) => /^v\s*=\s*DMARC1\s*(?:;|$)/.test(value));
   if (records.length === 0) return { kind: 'absent' };
   if (records.length > 1) {
     return {
@@ -355,9 +423,16 @@ async function dmarcAt(resolver: DnsResolver, name: string): Promise<DmarcLookup
       record: records[0]!
     };
   }
-  const sp = /(?:^|;)\s*sp\s*=\s*([a-z]+)\s*(?:;|$)/i.exec(records[0]!)?.[1]?.toLowerCase();
-  // An unrecognised sp= is ignored, so the subdomain falls back to p=.
-  const subdomainPolicy = sp && ['none', 'quarantine', 'reject'].includes(sp) ? sp : null;
+  const spRaw = /(?:^|;)\s*sp\s*=\s*([^;]*)/i.exec(records[0]!)?.[1];
+  const sp = spRaw?.trim().toLowerCase();
+  if (sp !== undefined && !['none', 'quarantine', 'reject'].includes(sp)) {
+    return {
+      kind: 'invalid',
+      detail: `${name} has no valid DMARC subdomain policy (sp=none, quarantine or reject).`,
+      record: records[0]!
+    };
+  }
+  const subdomainPolicy = sp ?? null;
   return { kind: 'record', record: records[0]!, policy, subdomainPolicy };
 }
 
@@ -458,6 +533,6 @@ export async function evaluateDeliverability(
     dkim: dkim.check,
     dmarc: dmarc.check,
     blockers,
-    warnings: []
+    warnings: [spf.warning].filter((warning): warning is EmailChannelIssue => warning !== undefined)
   };
 }

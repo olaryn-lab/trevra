@@ -120,7 +120,7 @@ describe('email deliverability evaluation', () => {
     expect(result.spf.lookups).toBe(0);
   });
 
-  it('treats more than two void SPF lookups as invalid', async () => {
+  it('treats a missing include as invalid at the first one', async () => {
     const result = await evaluateDeliverability(
       { domain: 'acme.test', provider: 'google' },
       fakeResolver(
@@ -132,7 +132,177 @@ describe('email deliverability evaluation', () => {
       )
     );
     expect(result.blockers.map((blocker) => blocker.code)).toEqual(['email_spf_invalid']);
-    expect(result.spf.detail).toContain('more than 2 void lookups');
+    expect(result.spf.detail).toContain('gone1.acme.test, which publishes no SPF record');
+  });
+
+  it('reports a missing include as invalid even when a later include times out', async () => {
+    const timeout = Object.assign(new Error('ETIMEOUT'), { code: 'ETIMEOUT' });
+    const result = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      fakeResolver(
+        googleDomain({
+          'acme.test': [
+            'v=spf1 include:missing.example include:slow.example include:_spf.google.com -all'
+          ],
+          'slow.example': timeout
+        })
+      )
+    );
+    expect(result.blockers.map((blocker) => blocker.code)).toEqual(['email_spf_invalid']);
+  });
+
+  describe('void lookups for a, mx and exists', () => {
+    function withA(records: Record<string, string[] | Error>, a: Record<string, string[]>) {
+      return {
+        ...fakeResolver(records),
+        async resolveA(name: string) {
+          const answer = a[name];
+          if (!answer) throw Object.assign(new Error(`ENOTFOUND ${name}`), { code: 'ENOTFOUND' });
+          return answer;
+        }
+      };
+    }
+    const record = (voids: number) =>
+      `v=spf1 ${Array.from({ length: voids }, (_, i) => `a:gone${i}.acme.test`).join(' ')} include:_spf.google.com ~all`;
+
+    it('treats three void a lookups as invalid', async () => {
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        withA(googleDomain({ 'acme.test': [record(3)] }), {})
+      );
+      expect(result.blockers.map((blocker) => blocker.code)).toEqual(['email_spf_invalid']);
+      expect(result.spf.detail).toContain('more than 2 void lookups');
+    });
+
+    it('passes with only two void a lookups', async () => {
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        withA(googleDomain({ 'acme.test': [record(2)] }), {})
+      );
+      expect(result.status).toBe('pass');
+    });
+
+    it('reports unknown when an a lookup fails with a temporary error', async () => {
+      const resolver = {
+        ...fakeResolver(googleDomain({ 'acme.test': [record(1)] })),
+        async resolveA(): Promise<string[]> {
+          throw Object.assign(new Error('timeout'), { code: 'ETIMEOUT' });
+        }
+      };
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        resolver
+      );
+      expect(result.spf.status).toBe('unknown');
+    });
+  });
+
+  it('rejects SPF records with unrecognised terms', async () => {
+    for (const spf of [
+      'v=spf1 include:_spf.google.com foo:bar ~all',
+      'v=spf1 ip:203.0.113.5 include:_spf.google.com ~all'
+    ]) {
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        fakeResolver(googleDomain({ 'acme.test': [spf] }))
+      );
+      expect(result.blockers.map((blocker) => blocker.code)).toEqual(['email_spf_invalid']);
+      expect(result.spf.detail).toContain('Unrecognised SPF term');
+    }
+  });
+
+  it('rejects a duplicate redirect modifier and ignores unknown modifiers', async () => {
+    const duplicate = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      fakeResolver(
+        googleDomain({
+          'acme.test': ['v=spf1 redirect=_spf.google.com redirect=_spf.google.com']
+        })
+      )
+    );
+    expect(duplicate.blockers.map((blocker) => blocker.code)).toEqual(['email_spf_invalid']);
+    const unknown = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      fakeResolver(googleDomain({ 'acme.test': ['v=spf1 include:_spf.google.com foo=bar ~all'] }))
+    );
+    expect(unknown.status).toBe('pass');
+  });
+
+  it('warns when SPF ends in +all or a bare all', async () => {
+    for (const all of ['+all', 'all']) {
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        fakeResolver(googleDomain({ 'acme.test': [`v=spf1 include:_spf.google.com ${all}`] }))
+      );
+      expect(result.status).toBe('pass');
+      expect(result.warnings.map((warning) => warning.code)).toEqual(['email_spf_permissive_all']);
+    }
+  });
+
+  it('uses redirect= when there is no all and ignores it when all is present', async () => {
+    const redirected = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      fakeResolver(googleDomain({ 'acme.test': ['v=spf1 redirect=_spf.google.com'] }))
+    );
+    expect(redirected.spf.status).toBe('pass');
+    const ignored = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      fakeResolver(googleDomain({ 'acme.test': ['v=spf1 redirect=_spf.google.com ~all'] }))
+    );
+    expect(ignored.blockers.map((blocker) => blocker.code)).toEqual([
+      'email_spf_provider_not_authorized'
+    ]);
+  });
+
+  it('reports an include loop as invalid', async () => {
+    const result = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      fakeResolver(
+        googleDomain({
+          'acme.test': ['v=spf1 include:loop.acme.test ~all'],
+          'loop.acme.test': ['v=spf1 include:acme.test ~all']
+        })
+      )
+    );
+    expect(result.blockers.map((blocker) => blocker.code)).toEqual(['email_spf_invalid']);
+    expect(result.spf.detail).toContain('include loop');
+  });
+
+  it('joins multi-chunk TXT strings, reads uppercase V=SPF1, and tells ENODATA from SERVFAIL', async () => {
+    const chunked: DnsResolver = {
+      async resolveTxt(name: string) {
+        if (name === 'acme.test') return [['V=SPF1 include:_spf.goo', 'gle.com ~all']];
+        if (name === '_spf.google.com') return [['v=spf1 ip4:203.0.113.0/24 ~all']];
+        if (name === 'google._domainkey.acme.test') return [[DKIM.slice(0, 20), DKIM.slice(20)]];
+        if (name === '_dmarc.acme.test') {
+          throw Object.assign(new Error('ENODATA'), { code: 'ENODATA' });
+        }
+        throw Object.assign(new Error('x'), { code: 'ENOTFOUND' });
+      }
+    };
+    const result = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      chunked
+    );
+    expect(result.spf.status).toBe('pass');
+    expect(result.dkim.status).toBe('pass');
+    expect(result.dmarc.status).toBe('fail');
+    expect(result.blockers.map((blocker) => blocker.code)).toEqual(['email_dmarc_missing']);
+
+    const servfail: DnsResolver = {
+      async resolveTxt(name: string) {
+        return chunked
+          .resolveTxt(name === '_dmarc.acme.test' ? 'servfail.acme.test' : name)
+          .catch(() => {
+            throw Object.assign(new Error('SERVFAIL'), { code: 'ESERVFAIL' });
+          });
+      }
+    };
+    const failed = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      servfail
+    );
+    expect(failed.dmarc.status).toBe('unknown');
   });
 
   it('treats two SPF records as invalid', async () => {
@@ -170,6 +340,24 @@ describe('email deliverability evaluation', () => {
       })
     );
     expect(result.dmarc.detail).toBe('DMARC sp=quarantine, inherited from acme.test.');
+  });
+
+  it('rejects an invalid sp= and an unrecognised DMARC version tag', async () => {
+    const base = {
+      ...GOOGLE_SPF,
+      'acme.test': ['v=spf1 include:_spf.google.com ~all'],
+      'google._domainkey.acme.test': [DKIM]
+    };
+    const bogus = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      fakeResolver({ ...base, '_dmarc.acme.test': ['v=DMARC1; p=reject; sp=bogus'] })
+    );
+    expect(bogus.blockers.map((blocker) => blocker.code)).toEqual(['email_dmarc_invalid']);
+    const lower = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google' },
+      fakeResolver({ ...base, '_dmarc.acme.test': ['v=dmarc1; p=reject'] })
+    );
+    expect(lower.blockers.map((blocker) => blocker.code)).toEqual(['email_dmarc_missing']);
   });
 
   it('reports unknown, never pass, when DNS times out', async () => {
