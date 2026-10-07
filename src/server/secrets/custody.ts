@@ -159,6 +159,13 @@ const CAPTURE_SOURCE_SECRET_ROWS = `
   WHERE (?::text IS NULL OR workspace_id = ?::text)
   ORDER BY workspace_id, capture_source_id, slot
 `;
+const PROVIDER_WEBHOOK_SECRET_ROWS = `
+  SELECT id, workspace_id, id AS seat_key, provider AS kind,
+         secret_key_version AS key_version, secret_key_id AS key_id
+  FROM provider_webhook_endpoints
+  WHERE (?::text IS NULL OR workspace_id = ?::text)
+  ORDER BY workspace_id, id
+`;
 
 /**
  * WHICH ROWS ARE STILL ON THE OLD KEY -- the question the rotation runbook
@@ -328,6 +335,14 @@ function contextFor(row: CustodyRowData): SecretContext {
       kind: row.kind
     };
   }
+  if (row.store === 'provider_webhook_endpoints') {
+    return {
+      store: 'provider_webhook_endpoints',
+      workspaceId: row.workspace_id,
+      seatKey: row.seat_key,
+      kind: row.kind
+    };
+  }
   return seatCredentialContext(
     row.workspace_id,
     row.seat_key,
@@ -337,7 +352,7 @@ function contextFor(row: CustodyRowData): SecretContext {
 
 async function loadCustodyRows(db: Db, workspaceId?: string): Promise<CustodyRowData[]> {
   const scope = workspaceId ?? null;
-  const [workspaceRows, seatRows, proxyRows, captureRows] = await Promise.all([
+  const [workspaceRows, seatRows, proxyRows, captureRows, webhookRows] = await Promise.all([
     db.prepare(WORKSPACE_SECRET_ROWS).all<{
       id: string;
       workspace_id: string;
@@ -368,6 +383,14 @@ async function loadCustodyRows(db: Db, workspaceId?: string): Promise<CustodyRow
       kind: string;
       key_version: number;
       key_id: string | null;
+    }>(scope, scope),
+    db.prepare(PROVIDER_WEBHOOK_SECRET_ROWS).all<{
+      id: string;
+      workspace_id: string;
+      seat_key: string;
+      kind: string;
+      key_version: number;
+      key_id: string | null;
     }>(scope, scope)
   ]);
   return [
@@ -380,14 +403,34 @@ async function loadCustodyRows(db: Db, workspaceId?: string): Promise<CustodyRow
     })),
     ...seatRows.map((row) => ({ store: 'linkedin_seat_credentials' as const, ...row })),
     ...proxyRows.map((row) => ({ store: 'linkedin_seat_proxy_secrets' as const, ...row })),
-    ...captureRows.map((row) => ({ store: 'capture_source_secrets' as const, ...row }))
+    ...captureRows.map((row) => ({ store: 'capture_source_secrets' as const, ...row })),
+    ...webhookRows.map((row) => ({ store: 'provider_webhook_endpoints' as const, ...row }))
   ];
 }
 
+/**
+ * Sealed-envelope column names. `provider_webhook_endpoints` prefixes them with
+ * `secret_` because that row IS the endpoint, not a secret slot. The prefix comes
+ * from the closed `SecretStore` union, never from input.
+ */
+function sealedColumns(store: SecretStore) {
+  const prefix = store === 'provider_webhook_endpoints' ? 'secret_' : '';
+  return {
+    ciphertext: `${prefix}ciphertext`,
+    iv: `${prefix}iv`,
+    authTag: `${prefix}auth_tag`,
+    keyVersion: `${prefix}key_version`,
+    keyId: `${prefix}key_id`
+  };
+}
+
 async function readSealed(db: Db, row: CustodyRowData) {
+  const c = sealedColumns(row.store);
   const stored = await db
     .prepare(
-      `SELECT ciphertext, iv, auth_tag, key_version, key_id FROM ${table(row.store)} WHERE id=?`
+      `SELECT ${c.ciphertext} AS ciphertext, ${c.iv} AS iv, ${c.authTag} AS auth_tag,
+              ${c.keyVersion} AS key_version, ${c.keyId} AS key_id
+       FROM ${table(row.store)} WHERE id=?`
     )
     .get<{
       ciphertext: Buffer;
@@ -419,9 +462,10 @@ async function writeSealed(
 ): Promise<void> {
   // `updated_at` is deliberately NOT touched: it means "when did the operator
   // last change this secret", and a maintenance pass did not.
+  const c = sealedColumns(row.store);
   await db
     .prepare(
-      `UPDATE ${table(row.store)} SET ciphertext=?, iv=?, auth_tag=?, key_version=?, key_id=? WHERE id=?`
+      `UPDATE ${table(row.store)} SET ${c.ciphertext}=?, ${c.iv}=?, ${c.authTag}=?, ${c.keyVersion}=?, ${c.keyId}=? WHERE id=?`
     )
     .run(sealed.ciphertext, sealed.iv, sealed.authTag, sealed.keyVersion, sealed.keyId, row.id);
 }
@@ -447,5 +491,6 @@ function table(store: SecretStore): string {
   if (store === 'linkedin_seat_sessions') return 'linkedin_seat_sessions';
   if (store === 'linkedin_seat_proxy_secrets') return 'linkedin_seat_proxy_secrets';
   if (store === 'capture_source_secrets') return 'capture_source_secrets';
+  if (store === 'provider_webhook_endpoints') return 'provider_webhook_endpoints';
   return 'linkedin_seat_credentials';
 }
