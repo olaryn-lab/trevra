@@ -1240,6 +1240,8 @@ export async function rejectedSignalShapes(
 export interface RankedAccountsOptions {
   limit?: number;
   tier?: AccountTier;
+  /** Only accounts whose first door was this source, e.g. 'github' for ones GitHub activity created. */
+  source?: AccountSource;
   /** Newest signals carried per row. The evidence under the number. */
   signalLimit?: number;
   /** Audit-only: include `not_a_fit` and `archived` rows. Off by default, on purpose. */
@@ -1288,6 +1290,7 @@ export async function listRankedAccounts(
     LEFT JOIN account_scores s ON s.workspace_id = a.workspace_id AND s.account_id = a.id
     WHERE a.workspace_id=?
       AND (?::text IS NULL OR s.tier = ?)
+      AND (?::text IS NULL OR a.source = ?)
       AND (?::bool IS TRUE OR a.status = 'active')
     ORDER BY s.score DESC NULLS LAST, a.created_at DESC, a.id DESC
     LIMIT ?
@@ -1297,6 +1300,8 @@ export async function listRankedAccounts(
       workspaceId,
       opts.tier ?? null,
       opts.tier ?? null,
+      opts.source ?? null,
+      opts.source ?? null,
       opts.includeRejected ?? false,
       limit
     );

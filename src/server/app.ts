@@ -18,6 +18,14 @@ import type { Db } from './db.js';
 import { DEMO_USER_ID, DEMO_WORKSPACE_ID, id, resetDemoData } from './db.js';
 import { listConnections } from './serializers.js';
 import {
+  GitHubRepoError,
+  MAX_WATCHED_REPOSITORIES,
+  listWatchedRepositories,
+  readGitHubConnection,
+  unwatchRepository,
+  watchRepository
+} from './github/repos.js';
+import {
   auth as betterAuth,
   authwardAuthEnabled,
   beginAuthwardMagicLink,
@@ -1437,6 +1445,67 @@ export function createApp(db: Db) {
         });
         res.setHeader('Cache-Control', 'no-store');
         res.json(rotated);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------
+  // GitHub repository traction. Reads are workspace-visible; choosing which
+  // repositories to watch is owner-only. The connection itself is managed by
+  // the existing Connections card (Nango).
+  // ---------------------------------------------------------------------
+  app.get('/api/github/repos', async (req: AuthedRequest, res, next) => {
+    try {
+      const workspaceId = req.auth!.workspaceId;
+      const [connection, repos] = await Promise.all([
+        readGitHubConnection(db, workspaceId),
+        listWatchedRepositories(db, workspaceId)
+      ]);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        connection: { state: connection.state, lastError: connection.lastError },
+        repos,
+        limit: MAX_WATCHED_REPOSITORIES
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post(
+    '/api/github/repos',
+    ownerOnly('watch a GitHub repository'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({ fullName: z.string().trim().min(1).max(300) })
+          .strict()
+          .parse(req.body ?? {});
+        const { repo, created } = await watchRepository(db, {
+          workspaceId: req.auth!.workspaceId,
+          actorUserId: req.auth!.userId,
+          fullName: input.fullName
+        });
+        res.status(created ? 201 : 200).json({ repo });
+      } catch (error) {
+        if (error instanceof GitHubRepoError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        next(error);
+      }
+    }
+  );
+
+  app.delete(
+    '/api/github/repos/:id',
+    ownerOnly('stop watching a GitHub repository'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const removed = await unwatchRepository(db, req.auth!.workspaceId, String(req.params.id));
+        if (!removed) return res.status(404).json({ error: 'Watched repository not found' });
+        res.json({ removed: true });
       } catch (error) {
         next(error);
       }
@@ -10047,6 +10116,7 @@ const linkedinEngagementSchema = z
 
 const accountListSchema = z.object({
   tier: z.enum(['hot', 'warm', 'cold']).optional(),
+  source: z.enum(['csv', 'sourced', 'linkedin', 'manual', 'github']).optional(),
   limit: z.coerce.number().int().min(1).max(500).default(100),
   signalLimit: z.coerce.number().int().min(1).max(50).default(6)
 });
