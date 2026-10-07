@@ -94,6 +94,15 @@ export async function saveSenderIdentity(
 ): Promise<SenderIdentity> {
   const patch = senderIdentitySchema.parse(input.input);
   return db.transaction(async (tx) => {
+    // FOR UPDATE locks nothing while no row exists, so two first saves would
+    // both merge onto an empty identity and the later one would drop the
+    // other's fields. Create the row first; a racing save waits on it.
+    const created = await tx
+      .prepare(
+        `INSERT INTO workspace_sender_identities (workspace_id, created_at, updated_at)
+         VALUES (?,?,?) ON CONFLICT (workspace_id) DO NOTHING RETURNING workspace_id`
+      )
+      .get<{ workspace_id: string }>(input.workspaceId, now.toISOString(), now.toISOString());
     const current = await tx
       .prepare(
         `SELECT legal_name, postal_address, privacy_policy_url
@@ -112,7 +121,14 @@ export async function saveSenderIdentity(
       next[column] = value;
       changed.push(field);
     }
-    if (changed.length === 0) return getSenderIdentity(tx, input.workspaceId);
+    if (changed.length === 0) {
+      // A save that changes nothing leaves no identity behind, not an empty one.
+      if (created)
+        await tx
+          .prepare('DELETE FROM workspace_sender_identities WHERE workspace_id=?')
+          .run(input.workspaceId);
+      return getSenderIdentity(tx, input.workspaceId);
+    }
 
     await tx
       .prepare(

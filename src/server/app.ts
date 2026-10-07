@@ -8231,6 +8231,11 @@ export function createApp(db: Db) {
         );
         res.json({ senderIdentity });
       } catch (error) {
+        // The owner fixes this form by reading why, e.g. an http:// privacy URL.
+        if (error instanceof z.ZodError)
+          return res
+            .status(400)
+            .json({ error: error.issues.map((issue) => issue.message).join(' ') });
         next(error);
       }
     }

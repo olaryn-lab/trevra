@@ -43,6 +43,7 @@ export function SenderIdentityForm({
   onChange,
   onSave,
   busy,
+  loading = false,
   isOwner,
   error,
   gaps
@@ -50,7 +51,10 @@ export function SenderIdentityForm({
   draft: SenderIdentityDraft;
   onChange: (patch: Partial<SenderIdentityDraft>) => void;
   onSave: () => void;
+  /** A save is in flight. */
   busy: boolean;
+  /** The saved identity has not loaded (or failed to): nothing to edit yet. */
+  loading?: boolean;
   isOwner: boolean;
   error: string;
   /** Null until the saved identity has loaded: never claim Complete before knowing. */
@@ -79,7 +83,7 @@ export function SenderIdentityForm({
         <Field label="Legal name">
           <Input
             value={draft.legalName}
-            disabled={!isOwner || busy}
+            disabled={!isOwner || busy || loading}
             maxLength={200}
             onChange={(event) => onChange({ legalName: event.target.value })}
           />
@@ -88,7 +92,7 @@ export function SenderIdentityForm({
           <Textarea
             rows={3}
             value={draft.postalAddress}
-            disabled={!isOwner || busy}
+            disabled={!isOwner || busy || loading}
             maxLength={500}
             onChange={(event) => onChange({ postalAddress: event.target.value })}
           />
@@ -99,7 +103,7 @@ export function SenderIdentityForm({
             inputMode="url"
             placeholder="https://"
             value={draft.privacyPolicyUrl}
-            disabled={!isOwner || busy}
+            disabled={!isOwner || busy || loading}
             maxLength={2048}
             onChange={(event) => onChange({ privacyPolicyUrl: event.target.value })}
           />
@@ -107,7 +111,7 @@ export function SenderIdentityForm({
       </FormGrid>
       {isOwner ? (
         <ActionRow note="Emails prepared before a change will not send. Prepare them again after saving.">
-          <Button variant="primary" disabled={busy} onClick={onSave}>
+          <Button variant="primary" disabled={busy || loading} onClick={onSave}>
             {busy ? 'Saving…' : 'Save sender identity'}
           </Button>
         </ActionRow>
@@ -170,7 +174,8 @@ export function SenderIdentityPanel({
       draft={draft}
       onChange={(patch) => setDraft((current) => ({ ...current, ...patch }))}
       onSave={() => void save()}
-      busy={busy || saved === null}
+      busy={busy}
+      loading={saved === null}
       isOwner={isOwner}
       error={error}
       gaps={saved ? senderIdentityGaps(saved) : null}

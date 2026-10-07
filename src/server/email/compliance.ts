@@ -33,7 +33,7 @@ export function emailComplianceFooterUnavailable(): EmailComplianceIssue {
   return {
     code: 'email_compliance_footer_unavailable',
     message:
-      'Outreach email needs a compliance footer (legal name, postal address, opt-out). Complete sender compliance in Workspace settings.',
+      "Trevra could not build this workspace's email compliance footer (postal address, privacy policy URL, opt-out line). Check the sender identity in Workspace settings, or try again.",
     actionHref: '/setup/workspace'
   };
 }

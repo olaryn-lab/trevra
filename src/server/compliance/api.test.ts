@@ -109,4 +109,15 @@ describe('sender identity API', () => {
     );
     expect(await senderComplianceProvider.footer(db, outsider.auth.workspaceId)).toBeNull();
   });
+
+  it('tells the owner why an http privacy policy URL is refused', async () => {
+    const owner = await signUp('compliance-http');
+    const refused = await owner.agent
+      .put('/api/workspace/sender-identity')
+      .send({ privacyPolicyUrl: 'http://example.com/privacy' })
+      .expect(400);
+    expect(refused.body.error).toContain('must start with https://');
+    const stored = await owner.agent.get('/api/workspace/sender-identity').expect(200);
+    expect(stored.body.senderIdentity.privacyPolicyUrl).toBeNull();
+  });
 });

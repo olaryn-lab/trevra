@@ -93,6 +93,30 @@ describe('workspace sender identity', () => {
     ]);
   });
 
+  it('keeps both fields when two first saves race', async () => {
+    for (let round = 0; round < 5; round += 1) {
+      await db
+        .prepare('DELETE FROM workspace_sender_identities WHERE workspace_id=?')
+        .run(WORKSPACE);
+      await Promise.all([save({ legalName: 'Northwind GmbH' }), save({ postalAddress: ADDRESS })]);
+      expect(await getSenderIdentity(db, WORKSPACE)).toMatchObject({
+        legalName: 'Northwind GmbH',
+        postalAddress: ADDRESS
+      });
+    }
+  });
+
+  it('stores nothing for a save that changes nothing', async () => {
+    await save({});
+    expect(await getSenderIdentity(db, WORKSPACE)).toEqual({
+      legalName: null,
+      postalAddress: null,
+      privacyPolicyUrl: null,
+      updatedAt: null
+    });
+    expect(await updates()).toEqual([]);
+  });
+
   it('refuses a privacy policy URL that is not https, and unknown fields', async () => {
     await expect(
       save({ privacyPolicyUrl: 'http://northwind.example/privacy' })

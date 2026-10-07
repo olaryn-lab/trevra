@@ -439,9 +439,13 @@ describe('bounded GTM intent compiler', () => {
     const codes = async (raw: unknown) =>
       (await compileGtmIntent(db, WORKSPACE, raw)).blockers.map((blocker) => blocker.code);
 
-    expect(await codes(intent)).toEqual(
-      expect.arrayContaining(['sender_postal_address_missing', 'sender_privacy_url_missing'])
-    );
+    // Exactly the two named causes: no redundant generic footer blocker beside them.
+    const compliance = (all: string[]) =>
+      all.filter((code) => code.startsWith('sender_') || code.startsWith('email_compliance_'));
+    expect(compliance(await codes(intent))).toEqual([
+      'sender_postal_address_missing',
+      'sender_privacy_url_missing'
+    ]);
     expect(await codes({ ...intent, channels: ['linkedin'] })).not.toContain(
       'sender_postal_address_missing'
     );

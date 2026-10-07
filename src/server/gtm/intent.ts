@@ -578,12 +578,11 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
   const provider = emailComplianceProvider();
   const compliance = [...(await provider.blockers(db, workspaceId, existingListId ?? null))];
   // Preparing refuses without a footer, so a plan that promises it can prepare
-  // must not pass while the footer is missing, whatever the provider's blockers say.
+  // must not pass while the footer is missing. Any provider issue already
+  // blocks the plan and names the cause; only a provider that reports nothing
+  // while having no footer needs the generic blocker.
   const footer = (await provider.footer(db, workspaceId))?.trim() ?? '';
-  const unavailable = emailComplianceFooterUnavailable();
-  if (!footer && !compliance.some((issue) => issue.code === unavailable.code)) {
-    compliance.push(unavailable);
-  }
+  if (!footer && compliance.length === 0) compliance.push(emailComplianceFooterUnavailable());
   blockers.push(...compliance);
   const sender = readiness.sender;
   const listLabel = readiness.listName ?? 'the selected People list';

@@ -76,7 +76,8 @@ describe('sender identity panel', () => {
         draft={draftFromIdentity(EMPTY)}
         onChange={() => undefined}
         onSave={() => undefined}
-        busy
+        busy={false}
+        loading
         isOwner
         error=""
         gaps={null}
@@ -84,5 +85,8 @@ describe('sender identity panel', () => {
     );
     expect(html).not.toContain('Complete');
     expect(html).not.toContain('Email outreach blocked');
+    // Disabled with its idle label: nothing is saving.
+    expect(html).not.toContain('Saving');
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Save sender identity<\/button>/);
   });
 });
