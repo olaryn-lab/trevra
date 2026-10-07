@@ -648,6 +648,13 @@ describe('connected mailbox threading', () => {
     expect(draft.headers).toEqual({ 'Content-Type': 'text/plain' });
     const mime = Buffer.from(String(draft.data), 'base64').toString('utf8');
     expect(mime).toContain('List-Unsubscribe: <https://api.trevra.test/u/del_');
+    expect(mime).toContain('List-Unsubscribe-Post: List-Unsubscribe=One-Click');
+    const firstRow = await database
+      .prepare(
+        'SELECT internet_message_id FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?'
+      )
+      .get<{ internet_message_id: string | null }>(workspaceId, 'ms-mime-first-key');
+    expect(firstRow?.internet_message_id).toBe('<first@outlook.test>');
     expect(nangoMock.post.mock.calls[1]?.[0]).toMatchObject({
       endpoint: '/v1.0/me/messages/ms-mime-first/send'
     });
@@ -669,6 +676,9 @@ describe('connected mailbox threading', () => {
     expect(followUp.endpoint).toBe('/v1.0/me/messages');
     expect(Buffer.from(String(followUp.data), 'base64').toString('utf8')).toContain(
       'In-Reply-To: <first@outlook.test>'
+    );
+    expect(Buffer.from(String(followUp.data), 'base64').toString('utf8')).toContain(
+      'References: <first@outlook.test>'
     );
   });
 
@@ -693,6 +703,52 @@ describe('connected mailbox threading', () => {
     expect(row?.status).toBe('failed');
   });
 
+  it('refuses requireListUnsubscribe on a non-outreach send with its own message', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test',
+        subject: 'Re: Hello',
+        body: 'Hi',
+        structured_payload_json: JSON.stringify({
+          deliveryPurpose: 'reply',
+          requireListUnsubscribe: true
+        }),
+        payload_hash: 'require-unsubscribe-reply-key'
+      })
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('apply only to outreach')
+    });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
+  it('records no internet message id when Graph returns none for MIME outreach', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+    const { database, workspaceId, connectionId } = await mailbox('microsoft');
+    nangoMock.post
+      .mockResolvedValueOnce({ data: { id: 'ms-no-imid' }, headers: {} })
+      .mockResolvedValueOnce({ data: {}, headers: {} });
+    await executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Hello',
+      body: 'Hi',
+      structured_payload_json: '{}',
+      payload_hash: 'ms-no-imid-key'
+    });
+    const row = await database
+      .prepare(
+        'SELECT internet_message_id FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?'
+      )
+      .get<{ internet_message_id: string | null }>(workspaceId, 'ms-no-imid-key');
+    expect(row?.internet_message_id).toBeNull();
+  });
+
   it('rejects header injection before contacting the provider', async () => {
     expect(() =>
       buildMimeMessage({
@@ -709,7 +765,18 @@ describe('connected mailbox threading', () => {
         body: 'y',
         idempotencyKey: 'k'
       })
-    ).toThrow(/line breaks/);
+    ).toThrow(/line breaks or NUL characters/);
+    for (const bad of ['no colon here', 'Bad Name: x', ': empty', 'X-Ok:nospace']) {
+      expect(() =>
+        buildMimeMessage({
+          recipient: 'lead@example.test',
+          subject: 'x',
+          body: 'y',
+          idempotencyKey: 'k',
+          extraHeaders: [bad]
+        })
+      ).toThrow(/Name: value/);
+    }
     const { database, workspaceId, connectionId } = await mailbox('gmail');
     await expect(
       executeConnectedAction(database, workspaceId, {
@@ -750,6 +817,10 @@ describe('connected mailbox threading', () => {
       })
     ).rejects.toMatchObject({ status: 400 });
     expect(nangoMock.post).not.toHaveBeenCalled();
+    const row = await database
+      .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+      .get<{ status: string }>(workspaceId, 'mailbox-injection-key');
+    expect(row?.status).toBe('failed');
   });
 
   it('reads Microsoft conversation replies and NDRs as provider events', async () => {

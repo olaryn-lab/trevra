@@ -668,7 +668,9 @@ export async function executeConnectedAction(
   if (structuredPayload.requireListUnsubscribe === true && unsubscribeHeaders.length === 0) {
     const error = Object.assign(
       new Error(
-        'This email was approved with a one-click unsubscribe link, but this deployment has no HTTPS public origin (TREVRA_PUBLIC_API_URL) or TREVRA_SECRETS_KEY; nothing was sent.'
+        purpose === 'outreach'
+          ? 'This email was approved with a one-click unsubscribe link, but this deployment has no HTTPS public origin (TREVRA_PUBLIC_API_URL) or TREVRA_SECRETS_KEY; nothing was sent.'
+          : 'This email requires a one-click unsubscribe link, but unsubscribe headers apply only to outreach sends; nothing was sent.'
       ),
       { status: 409 }
     );
@@ -735,7 +737,7 @@ export async function executeConnectedAction(
         const outcome = {
           provider: 'microsoft',
           externalRef: mimeDraftId,
-          internetMessageId: mimeDraft.data.internetMessageId ?? `<${idempotencyKey}@trevra.app>`
+          internetMessageId: mimeDraft.data.internetMessageId ?? null
         };
         await markEmailDeliverySent(db, deliveryId, outcome);
         return { provider: outcome.provider, externalRef: outcome.externalRef };
@@ -1712,7 +1714,13 @@ export function buildMimeMessage(input: {
       /[\r\n\0]/.test(value)
     )
   ) {
-    throw Object.assign(new Error('Email header values cannot contain line breaks.'), {
+    throw Object.assign(
+      new Error('Email header values cannot contain line breaks or NUL characters.'),
+      { status: 400 }
+    );
+  }
+  if (extraHeaders.some((header) => !/^[!-9;-~]+: /.test(header))) {
+    throw Object.assign(new Error('Extra email headers must be "Name: value" lines.'), {
       status: 400
     });
   }
