@@ -15,10 +15,16 @@ import type { ProviderWebhookEndpoint } from './types.js';
 const MAX_BODY_BYTES = 1024 * 1024;
 const EVENT_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
+// lc-debt: a crashed handler holds its lease for this long before a retry may
+// re-run it; upgrade path is a heartbeat or per-event lease token.
+const STALE_LEASE_INTERVAL = '2 minutes';
+
 /**
- * Claim the event in `webhook_events` (migration 058 index). A row already
- * processed or ignored is a duplicate; a row left `received` or `failed` is
- * re-run, which is safe because every handler is idempotent.
+ * Claim the event in `webhook_events` as an atomic lease (migration 058 index).
+ * One statement inserts a new row, or takes over a `failed` row or a `received`
+ * row whose lease went stale. A returned row means this delivery owns the event.
+ * Otherwise the event is `done` (processed or ignored) or `busy` (another
+ * delivery holds a fresh lease), so at most one handler runs per event at a time.
  */
 async function claimWebhookEvent(
   db: Db,
@@ -26,16 +32,21 @@ async function claimWebhookEvent(
   eventId: string,
   rawBody: Buffer,
   now: Date
-): Promise<'claimed' | 'done'> {
+): Promise<'claimed' | 'done' | 'busy'> {
   const provider = `hook:${endpoint.provider}`;
   const externalEventId = `${endpoint.id}:${eventId}`;
-  const inserted = await db
+  const claimed = await db
     .prepare(
       `INSERT INTO webhook_events (id,provider,external_event_id,workspace_id,payload_hash,status,received_at)
        VALUES (?,?,?,?,?,'received',?)
-       ON CONFLICT (COALESCE(workspace_id,'@unresolved'),provider,external_event_id) DO NOTHING`
+       ON CONFLICT (COALESCE(workspace_id,'@unresolved'),provider,external_event_id)
+       DO UPDATE SET status='received', error=NULL, received_at=EXCLUDED.received_at
+       WHERE webhook_events.status='failed'
+          OR (webhook_events.status='received'
+              AND webhook_events.received_at < EXCLUDED.received_at - interval '${STALE_LEASE_INTERVAL}')
+       RETURNING id`
     )
-    .run(
+    .get<{ id: string }>(
       id('webhook'),
       provider,
       externalEventId,
@@ -43,13 +54,13 @@ async function claimWebhookEvent(
       createHash('sha256').update(rawBody).digest('hex'),
       now.toISOString()
     );
-  if (inserted.changes > 0) return 'claimed';
+  if (claimed) return 'claimed';
   const prior = await db
     .prepare(
       'SELECT status FROM webhook_events WHERE workspace_id=? AND provider=? AND external_event_id=?'
     )
     .get<{ status: string }>(endpoint.workspaceId, provider, externalEventId);
-  return prior && (prior.status === 'processed' || prior.status === 'ignored') ? 'done' : 'claimed';
+  return prior && (prior.status === 'processed' || prior.status === 'ignored') ? 'done' : 'busy';
 }
 
 async function finishWebhookEvent(
@@ -58,12 +69,16 @@ async function finishWebhookEvent(
   eventId: string,
   status: 'processed' | 'ignored' | 'failed',
   error: string | null,
+  claimedAt: Date,
   now: Date
 ): Promise<void> {
   await db
     .prepare(
+      // Only the lease holder may finish: a stale finisher must not overwrite
+      // a row another delivery re-claimed or already processed.
       `UPDATE webhook_events SET status=?,error=?,processed_at=?
-       WHERE workspace_id=? AND provider=? AND external_event_id=?`
+       WHERE workspace_id=? AND provider=? AND external_event_id=?
+         AND status='received' AND received_at=?`
     )
     .run(
       status,
@@ -71,7 +86,8 @@ async function finishWebhookEvent(
       now.toISOString(),
       endpoint.workspaceId,
       `hook:${endpoint.provider}`,
-      `${endpoint.id}:${eventId}`
+      `${endpoint.id}:${eventId}`,
+      claimedAt.toISOString()
     );
 }
 
@@ -108,8 +124,13 @@ async function handleDelivery(db: Db, req: Request, res: Response, now: Date): P
     return void (await reject(400, 'Webhook event id is invalid'));
   await recordProviderWebhookAccepted(db, endpoint.id, now);
 
-  if ((await claimWebhookEvent(db, endpoint, verified.eventId, rawBody, now)) === 'done') {
+  const claim = await claimWebhookEvent(db, endpoint, verified.eventId, rawBody, now);
+  if (claim === 'done') {
     res.status(200).json({ received: true, duplicate: true });
+    return;
+  }
+  if (claim === 'busy') {
+    res.status(503).json({ error: 'Webhook event is in progress' });
     return;
   }
   try {
@@ -125,6 +146,7 @@ async function handleDelivery(db: Db, req: Request, res: Response, now: Date): P
       verified.eventId,
       outcome.handled ? 'processed' : 'ignored',
       null,
+      now,
       now
     );
     res.status(200).json({ received: true, handled: outcome.handled });
@@ -136,6 +158,7 @@ async function handleDelivery(db: Db, req: Request, res: Response, now: Date): P
       verified.eventId,
       'failed',
       error instanceof Error ? error.name.slice(0, 120) : 'Error',
+      now,
       now
     );
     throw error;

@@ -36,7 +36,9 @@ export interface ProviderWebhookEvent {
 /**
  * One provider's half of an inbound webhook. `verify` sees the exact raw bytes
  * and must not touch the database; `handle` runs only after verification and
- * after the event was claimed in `webhook_events`, and must be idempotent.
+ * after the event was claimed in `webhook_events`. Handlers must be idempotent
+ * (a failed or crashed event is re-run); the module guarantees at most one
+ * concurrent invocation per event.
  */
 export interface ProviderWebhookVerifier {
   provider: WebhookProvider;

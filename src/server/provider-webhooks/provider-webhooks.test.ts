@@ -23,6 +23,7 @@ const OTHER_USER = 'usr_provider_hooks_other';
 const SECRET = `test_${randomBytes(16).toString('hex')}`;
 const handled: string[] = [];
 const failOnce = new Set<string>();
+let gate: Promise<void> | null = null;
 
 // A stand-in verifier on the 'calcom' slot: HMAC of the raw body.
 const fakeVerifier: ProviderWebhookVerifier = {
@@ -38,6 +39,7 @@ const fakeVerifier: ProviderWebhookVerifier = {
     handled.push(event.eventId);
     if (event.eventType === 'boom') throw new Error('handler exploded');
     if (failOnce.delete(event.eventId)) throw new Error('transient failure');
+    if (event.eventType === 'gated' && gate) await gate;
     return { handled: event.eventType !== 'ignored' };
   }
 };
@@ -190,6 +192,29 @@ describe('provider webhook endpoint route', () => {
     const again = await deliver(endpoint.id, { id: 'evt_flaky', type: 'ok' });
     expect(again.body).toEqual({ received: true, duplicate: true });
     expect(handled).toEqual(['evt_flaky', 'evt_flaky']);
+  });
+
+  it('runs one handler per event: a concurrent delivery gets 503, a later one a duplicate', async () => {
+    let release!: () => void;
+    gate = new Promise<void>((resolve) => (release = resolve));
+    try {
+      const body = { id: 'evt_gated', type: 'gated' };
+      const first = deliver(endpoint.id, body).then((r) => r);
+      while (handled.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+      const second = await deliver(endpoint.id, body);
+      expect(second.status).toBe(503);
+      expect(second.body).toEqual({ error: 'Webhook event is in progress' });
+      expect(handled).toEqual(['evt_gated']);
+      release();
+      expect((await first).status).toBe(200);
+    } finally {
+      release();
+      gate = null;
+    }
+    expect(await eventStatus('evt_gated')).toBe('processed');
+    const again = await deliver(endpoint.id, { id: 'evt_gated', type: 'gated' });
+    expect(again.body).toEqual({ received: true, duplicate: true });
+    expect(handled).toEqual(['evt_gated']);
   });
 
   it('answers 404 for an unknown endpoint or a provider that does not match', async () => {
