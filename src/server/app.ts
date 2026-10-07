@@ -450,6 +450,16 @@ import {
   resolveLinkedInHandoff
 } from './linkedin/handoff.js';
 import { getSenderIdentity, saveSenderIdentity } from './compliance/sender-identity.js';
+import { ComplianceError } from './compliance/errors.js';
+import {
+  countryInputSchema,
+  lawfulBasisInputSchema,
+  personComplianceView,
+  recordLawfulBasis,
+  setAccountCountry,
+  setContactCountry,
+  withdrawLawfulBasis
+} from './compliance/lawful-basis.js';
 import {
   applyLatestWorkflowToPendingMembers,
   campaignAdmissionSummary,
@@ -8241,6 +8251,111 @@ export function createApp(db: Db) {
     }
   );
 
+  // LAWFUL BASIS AND COUNTRY. Recording a basis or a country can UNBLOCK cold
+  // email, so only the owner may; a withdrawal only ever blocks, so any member
+  // may. Not legal advice; verify with counsel.
+  app.get('/api/compliance/people/:personId', async (req: AuthedRequest, res, next) => {
+    try {
+      res.json({
+        person: await personComplianceView(db, req.auth!.workspaceId, String(req.params.personId))
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put(
+    '/api/compliance/people/:personId/country',
+    ownerOnly('set a person country'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = countryInputSchema.parse(req.body ?? {});
+        res.json(
+          await setContactCountry(
+            db,
+            {
+              workspaceId: req.auth!.workspaceId,
+              personId: String(req.params.personId),
+              countryCode: input.countryCode,
+              actorUserId: req.auth!.userId
+            },
+            new Date()
+          )
+        );
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.put(
+    '/api/compliance/accounts/:accountId/country',
+    ownerOnly('set an account country'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = countryInputSchema.parse(req.body ?? {});
+        res.json(
+          await setAccountCountry(
+            db,
+            {
+              workspaceId: req.auth!.workspaceId,
+              accountId: String(req.params.accountId),
+              countryCode: input.countryCode,
+              actorUserId: req.auth!.userId
+            },
+            new Date()
+          )
+        );
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.post(
+    '/api/compliance/people/:personId/lawful-bases',
+    ownerOnly('record a lawful basis'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = lawfulBasisInputSchema.parse(req.body ?? {});
+        const { record, created } = await recordLawfulBasis(
+          db,
+          {
+            workspaceId: req.auth!.workspaceId,
+            personId: String(req.params.personId),
+            channel: input.channel,
+            basis: input.basis,
+            source: 'operator',
+            sourceRef: input.sourceRef ?? null,
+            actorUserId: req.auth!.userId
+          },
+          new Date()
+        );
+        res.status(created ? 201 : 200).json({ lawfulBasis: record });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.post('/api/compliance/lawful-bases/:id/withdraw', async (req: AuthedRequest, res, next) => {
+    try {
+      res.json({
+        lawfulBasis: await withdrawLawfulBasis(
+          db,
+          {
+            workspaceId: req.auth!.workspaceId,
+            lawfulBasisId: String(req.params.id),
+            actorUserId: req.auth!.userId
+          },
+          new Date()
+        )
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found' }));
 
   app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
@@ -8250,7 +8365,8 @@ export function createApp(db: Db) {
       error instanceof PlaybookError ||
       error instanceof LeadCaptureError ||
       error instanceof ProviderWebhookError ||
-      error instanceof GitHubRepoError
+      error instanceof GitHubRepoError ||
+      error instanceof ComplianceError
     )
       return res.status(error.status).json({ error: error.message });
     if (error instanceof z.ZodError)

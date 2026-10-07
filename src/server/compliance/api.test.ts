@@ -121,3 +121,85 @@ describe('sender identity API', () => {
     expect(stored.body.senderIdentity.privacyPolicyUrl).toBeNull();
   });
 });
+
+describe('lawful basis API', () => {
+  it('lets only the owner unblock, lets any member block, and stays inside the workspace', async () => {
+    const { owner, member } = await ownerAndMember();
+    const outsider = await signUp('compliance-lb-outsider');
+    const now = new Date().toISOString();
+    const suffix = `${Date.now()}_${signUpSeq}`;
+    const personId = `con_compliance_api_${suffix}`;
+    const accountId = `acc_compliance_api_${suffix}`;
+    await db
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES (?,?,'Maya','maya@acme-gmbh.de','maya@acme-gmbh.de',?,?)`
+      )
+      .run(personId, owner.auth.workspaceId, now, now);
+    await db
+      .prepare(
+        `INSERT INTO accounts (id,workspace_id,name,domain,created_at,updated_at)
+         VALUES (?,?,'Acme GmbH','acme-gmbh.de',?,?)`
+      )
+      .run(accountId, owner.auth.workspaceId, now, now);
+
+    await outsider.agent.get(`/api/compliance/people/${personId}`).expect(404);
+    const before = await member.agent.get(`/api/compliance/people/${personId}`).expect(200);
+    expect(before.body.person.emailDecision).toMatchObject({ status: 'missing' });
+    expect(before.body.person.disclaimer).toBe('Not legal advice; verify with counsel.');
+
+    await member.agent
+      .put(`/api/compliance/people/${personId}/country`)
+      .send({ countryCode: 'DE' })
+      .expect(403);
+    await owner.agent
+      .put(`/api/compliance/people/${personId}/country`)
+      .send({ countryCode: 'Atlantis' })
+      .expect(400);
+    const country = await owner.agent
+      .put(`/api/compliance/people/${personId}/country`)
+      .send({ countryCode: 'Germany' })
+      .expect(200);
+    expect(country.body).toEqual({ countryCode: 'DE' });
+    await outsider.agent
+      .put(`/api/compliance/accounts/${accountId}/country`)
+      .send({ countryCode: 'CH' })
+      .expect(404);
+    await owner.agent
+      .put(`/api/compliance/accounts/${accountId}/country`)
+      .send({ countryCode: 'CH' })
+      .expect(200);
+
+    await member.agent
+      .post(`/api/compliance/people/${personId}/lawful-bases`)
+      .send({ channel: 'email', basis: 'consent' })
+      .expect(403);
+    await owner.agent
+      .post(`/api/compliance/people/${personId}/lawful-bases`)
+      .send({ channel: 'email', basis: 'consented' })
+      .expect(400);
+    const created = await owner.agent
+      .post(`/api/compliance/people/${personId}/lawful-bases`)
+      .send({ channel: 'email', basis: 'consent', sourceRef: 'signed-form-2026-08' })
+      .expect(201);
+    await owner.agent
+      .post(`/api/compliance/people/${personId}/lawful-bases`)
+      .send({ channel: 'email', basis: 'consent', sourceRef: 'signed-form-2026-08' })
+      .expect(200);
+    const covered = await member.agent.get(`/api/compliance/people/${personId}`).expect(200);
+    expect(covered.body.person.emailDecision).toMatchObject({
+      status: 'satisfied',
+      country: 'DE',
+      basis: 'consent'
+    });
+
+    const lawfulBasisId = created.body.lawfulBasis.id as string;
+    await outsider.agent.post(`/api/compliance/lawful-bases/${lawfulBasisId}/withdraw`).expect(404);
+    const withdrawn = await member.agent
+      .post(`/api/compliance/lawful-bases/${lawfulBasisId}/withdraw`)
+      .expect(200);
+    expect(withdrawn.body.lawfulBasis.withdrawnAt).not.toBeNull();
+    const after = await member.agent.get(`/api/compliance/people/${personId}`).expect(200);
+    expect(after.body.person.emailDecision).toMatchObject({ status: 'missing' });
+  });
+});
