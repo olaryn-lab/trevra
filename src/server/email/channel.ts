@@ -1,0 +1,291 @@
+import { z } from 'zod';
+import type { Db } from '../db.js';
+import { getNango } from '../integration-service.js';
+import { emailDomainOf, type DnsResolver } from './deliverability.js';
+import { INBOUND_SYNC_FAILED_ERROR, INBOUND_SYNC_NAME } from './inbound-mailbox.js';
+import { listSendingMailboxes, resolveMailboxAddress } from './mailbox-address.js';
+import { getSenderDeliverability } from './sender-deliverability.js';
+import { unsubscribeConfigured } from './unsubscribe.js';
+import type {
+  EmailChannelStatus,
+  EmailInboundMailboxState,
+  InboundSyncStatus,
+  StoredDeliverability
+} from './types.js';
+
+/** Connection metadata the sync verifies the provider profile against. */
+export const INBOUND_ADDRESS_METADATA_KEY = 'trevraInboundAddress';
+
+/** Nango's sync error state (SyncStatus in @nangohq/types). */
+const NANGO_SYNC_ERROR = 'ERROR';
+
+const designatedAddressSchema = z.string().trim().toLowerCase().email();
+
+export class EmailChannelError extends Error {
+  constructor(
+    message: string,
+    readonly status: number
+  ) {
+    super(message);
+    this.name = 'EmailChannelError';
+  }
+}
+
+export interface EmailChannelOptions {
+  resolver?: DnsResolver;
+  now?: Date;
+  env?: NodeJS.ProcessEnv;
+  /** Overrides the per-lookup deadlines (tests use a short one). */
+  deadlineMs?: number;
+}
+
+interface InboundRow {
+  connection_id: string;
+  address: string;
+  sync_status: InboundSyncStatus;
+  sync_error: string | null;
+  designated_at: string;
+  last_record_at: string | null;
+  provider_config_key: string;
+  external_connection_id: string;
+}
+
+async function readInbound(db: Db, workspaceId: string): Promise<InboundRow | undefined> {
+  return db
+    .prepare(
+      `SELECT m.connection_id,m.address,m.sync_status,m.sync_error,m.designated_at,m.last_record_at,
+              c.provider_config_key,c.external_connection_id
+       FROM email_inbound_mailboxes m
+       JOIN connections c ON c.workspace_id=m.workspace_id AND c.id=m.connection_id
+       WHERE m.workspace_id=?`
+    )
+    .get<InboundRow>(workspaceId);
+}
+
+async function nangoSyncState(row: InboundRow): Promise<EmailInboundMailboxState['nango']> {
+  try {
+    const response = await getNango().syncStatus(
+      row.provider_config_key,
+      [INBOUND_SYNC_NAME],
+      row.external_connection_id
+    );
+    const sync = response.syncs[0];
+    return sync ? { status: sync.status, finishedAt: sync.finishedAt ?? null } : null;
+  } catch {
+    return null;
+  }
+}
+
+async function pauseInboundSync(row: InboundRow): Promise<void> {
+  try {
+    await getNango().pauseSync(
+      row.provider_config_key,
+      [INBOUND_SYNC_NAME],
+      row.external_connection_id
+    );
+  } catch (error) {
+    // Best effort: the ingest path also ignores records from a mailbox that is
+    // no longer designated, so a sync that keeps running stores nothing.
+    console.error(
+      'Could not pause the inbound mailbox sync',
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+}
+
+function isoOrNull(value: string | null): string | null {
+  return value ? new Date(value).toISOString() : null;
+}
+
+export async function getEmailChannelStatus(
+  db: Db,
+  workspaceId: string,
+  options: EmailChannelOptions = {}
+): Promise<EmailChannelStatus> {
+  const env = options.env ?? process.env;
+  const mailboxes = await listSendingMailboxes(db, workspaceId);
+  // In parallel: each lookup is bounded by its own deadline, so the whole
+  // request waits for the slowest mailbox, not the sum of all of them.
+  const rows: EmailChannelStatus['mailboxes'] = await Promise.all(
+    mailboxes.map(async (mailbox) => {
+      const address = await resolveMailboxAddress(db, workspaceId, mailbox, {
+        deadlineMs: options.deadlineMs
+      });
+      const domain = address ? emailDomainOf(address) : null;
+      const deliverability: StoredDeliverability | null = domain
+        ? await getSenderDeliverability(
+            db,
+            workspaceId,
+            { domain, provider: mailbox.providerKey },
+            { resolver: options.resolver, now: options.now, deadlineMs: options.deadlineMs }
+          )
+        : null;
+      // Deliberately field by field: provider config keys and Nango connection
+      // ids never reach the browser.
+      return {
+        connectionId: mailbox.connectionId,
+        provider: mailbox.provider,
+        providerKey: mailbox.providerKey,
+        displayName: mailbox.displayName,
+        address,
+        deliverability
+      };
+    })
+  );
+  const row = await readInbound(db, workspaceId);
+  let inbound: EmailInboundMailboxState | null = null;
+  if (row) {
+    const nango = row.sync_status === 'unavailable' ? null : await nangoSyncState(row);
+    let syncStatus = row.sync_status;
+    let syncError = row.sync_error;
+    if (nango?.status === NANGO_SYNC_ERROR && syncStatus !== 'unavailable') {
+      // Nango says the sync is failing: stop claiming the inbox is read. Fixed,
+      // content-free text; a later successful sync webhook flips it back.
+      await db
+        .prepare(
+          `UPDATE email_inbound_mailboxes SET sync_status='unavailable',sync_error=?,updated_at=?::timestamptz
+           WHERE workspace_id=? AND connection_id=?`
+        )
+        .run(INBOUND_SYNC_FAILED_ERROR, new Date().toISOString(), workspaceId, row.connection_id);
+      syncStatus = 'unavailable';
+      syncError = INBOUND_SYNC_FAILED_ERROR;
+    }
+    inbound = {
+      connectionId: row.connection_id,
+      address: row.address,
+      syncStatus,
+      syncError,
+      designatedAt: new Date(row.designated_at).toISOString(),
+      lastRecordAt: isoOrNull(row.last_record_at),
+      nango
+    };
+  }
+  const oneClick = unsubscribeConfigured(env);
+  const mailto =
+    oneClick &&
+    inbound?.syncStatus === 'syncing' &&
+    mailboxes.some((mailbox) => mailbox.connectionId === inbound.connectionId);
+  return {
+    unsubscribe: {
+      oneClick,
+      mailto,
+      detail: !oneClick
+        ? 'One-click unsubscribe needs an HTTPS TREVRA_PUBLIC_API_URL and TREVRA_SECRETS_KEY on the server. Email outreach stays blocked until both are set.'
+        : mailto
+          ? `Every outreach email offers one-click unsubscribe and mailto:${inbound!.address}.`
+          : 'Every outreach email offers one-click unsubscribe.'
+    },
+    mailboxes: rows,
+    inbound
+  };
+}
+
+/**
+ * Make one connected mailbox the workspace's inbound mailbox. The address comes
+ * from the provider and is written into Nango connection metadata; the sync
+ * refuses to emit anything if the mailbox's profile no longer matches it.
+ */
+export async function designateInboundMailbox(
+  db: Db,
+  input: { workspaceId: string; connectionId: string; actorUserId: string },
+  now: Date = new Date()
+): Promise<InboundSyncStatus> {
+  const mailbox = (await listSendingMailboxes(db, input.workspaceId)).find(
+    (candidate) => candidate.connectionId === input.connectionId
+  );
+  if (!mailbox) {
+    throw new EmailChannelError(
+      'Connect this Gmail or Microsoft 365 mailbox before using it for inbound mail.',
+      404
+    );
+  }
+  const resolved = await resolveMailboxAddress(db, input.workspaceId, mailbox);
+  // The address is stored, written into Nango metadata and shown in a mailto:,
+  // so it must be one plain address: no CR/LF, no `>`, no `,`.
+  const parsed = resolved ? designatedAddressSchema.safeParse(resolved) : null;
+  if (!parsed?.success) {
+    throw new EmailChannelError(
+      'Trevra could not read this mailbox address from the provider. Reconnect the mailbox and try again.',
+      409
+    );
+  }
+  const address = parsed.data;
+  const previous = await readInbound(db, input.workspaceId);
+  if (previous && previous.connection_id !== mailbox.connectionId) await pauseInboundSync(previous);
+  const at = now.toISOString();
+  await db
+    .prepare(
+      `INSERT INTO email_inbound_mailboxes
+         (workspace_id,connection_id,address,sync_status,sync_error,designated_by_user_id,designated_at,last_record_at,updated_at)
+       VALUES (?,?,?,'starting',NULL,?,?::timestamptz,NULL,?::timestamptz)
+       ON CONFLICT (workspace_id) DO UPDATE SET
+         connection_id=excluded.connection_id,address=excluded.address,sync_status='starting',sync_error=NULL,
+         designated_by_user_id=excluded.designated_by_user_id,designated_at=excluded.designated_at,
+         last_record_at=CASE
+           WHEN email_inbound_mailboxes.connection_id=excluded.connection_id
+            AND email_inbound_mailboxes.address=excluded.address
+           THEN email_inbound_mailboxes.last_record_at ELSE NULL END,
+         updated_at=excluded.updated_at`
+    )
+    .run(input.workspaceId, mailbox.connectionId, address, input.actorUserId, at, at);
+
+  let status: InboundSyncStatus = 'syncing';
+  let syncError: string | null = null;
+  try {
+    const nango = getNango();
+    await nango.updateMetadata(mailbox.providerConfigKey, mailbox.externalConnectionId, {
+      [INBOUND_ADDRESS_METADATA_KEY]: address
+    });
+    await nango.startSync(
+      mailbox.providerConfigKey,
+      [INBOUND_SYNC_NAME],
+      mailbox.externalConnectionId
+    );
+  } catch (error) {
+    // Free self-hosted Nango has no syncs, and a deployment may not have pushed
+    // nango-integrations/ yet. Say so instead of claiming the inbox is read.
+    status = 'unavailable';
+    syncError =
+      `Nango could not start the ${INBOUND_SYNC_NAME} sync: ${error instanceof Error ? error.message : String(error)}`.slice(
+        0,
+        500
+      );
+  }
+  await db
+    .prepare(
+      `UPDATE email_inbound_mailboxes SET sync_status=?,sync_error=?,updated_at=?::timestamptz
+       WHERE workspace_id=? AND connection_id=?`
+    )
+    .run(status, syncError, new Date().toISOString(), input.workspaceId, mailbox.connectionId);
+  return status;
+}
+
+export async function clearInboundMailbox(db: Db, workspaceId: string): Promise<boolean> {
+  const row = await readInbound(db, workspaceId);
+  const deleted = await db
+    .prepare('DELETE FROM email_inbound_mailboxes WHERE workspace_id=?')
+    .run(workspaceId);
+  if (row) await pauseInboundSync(row);
+  return deleted.changes > 0;
+}
+
+/** Force a fresh DNS evaluation for every sending mailbox's domain. */
+export async function recheckEmailDeliverability(
+  db: Db,
+  workspaceId: string,
+  options: { resolver?: DnsResolver; now?: Date; deadlineMs?: number } = {}
+): Promise<void> {
+  for (const mailbox of await listSendingMailboxes(db, workspaceId)) {
+    const address = await resolveMailboxAddress(db, workspaceId, mailbox, {
+      deadlineMs: options.deadlineMs
+    });
+    const domain = address ? emailDomainOf(address) : null;
+    if (!domain) continue;
+    await getSenderDeliverability(
+      db,
+      workspaceId,
+      { domain, provider: mailbox.providerKey, force: true },
+      options
+    );
+  }
+}

@@ -175,6 +175,13 @@ import {
 import { DemandActionError, prepareDemandAction } from './demand/actions.js';
 import { listConversationMessages, listConversations } from './conversations.js';
 import { listEmailDeliveries } from './email-deliveries.js';
+import {
+  EmailChannelError,
+  clearInboundMailbox,
+  designateInboundMailbox,
+  getEmailChannelStatus,
+  recheckEmailDeliverability
+} from './email/channel.js';
 import { ConversationReplyError, prepareConversationEmailReply } from './conversation-replies.js';
 import { PrepareOutreachError, prepareOutreach } from './outreach/prepare.js';
 import { GtmPlanError, compileGtmIntent, prepareGtmPlan } from './gtm/intent.js';
@@ -4160,6 +4167,64 @@ export function createApp(db: Db) {
       res
         .status(400)
         .json({ error: error instanceof Error ? error.message : 'Unable to disconnect' });
+    }
+  });
+
+  app.get('/api/email/channel', async (req: AuthedRequest, res, next) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ channel: await getEmailChannelStatus(db, req.auth!.workspaceId) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put(
+    '/api/email/inbound-mailbox',
+    ownerOnly('choose the inbound mailbox'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({ connectionId: z.string().trim().min(1).max(200) })
+          .strict()
+          .parse(req.body ?? {});
+        await designateInboundMailbox(db, {
+          workspaceId: req.auth!.workspaceId,
+          connectionId: input.connectionId,
+          actorUserId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ channel: await getEmailChannelStatus(db, req.auth!.workspaceId) });
+      } catch (error) {
+        if (error instanceof EmailChannelError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        next(error);
+      }
+    }
+  );
+
+  app.delete(
+    '/api/email/inbound-mailbox',
+    ownerOnly('stop reading the inbound mailbox'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        await clearInboundMailbox(db, req.auth!.workspaceId);
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ channel: await getEmailChannelStatus(db, req.auth!.workspaceId) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.post('/api/email/deliverability/recheck', async (req: AuthedRequest, res, next) => {
+    try {
+      await recheckEmailDeliverability(db, req.auth!.workspaceId);
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ channel: await getEmailChannelStatus(db, req.auth!.workspaceId) });
+    } catch (error) {
+      next(error);
     }
   });
 

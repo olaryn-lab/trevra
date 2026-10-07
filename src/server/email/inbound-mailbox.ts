@@ -20,6 +20,11 @@ import { UNSUBSCRIBE_SUBJECT_PATTERN, applyUnsubscribeToken } from './unsubscrib
 /** The Nango model the inbound-messages sync emits. Its records may only enter through the designated mailbox. */
 export const INBOUND_EMAIL_MESSAGE_MODEL = 'InboundEmailMessage';
 
+/** The Nango sync in nango-integrations/<integration>/syncs/inbound-messages.ts. */
+export const INBOUND_SYNC_NAME = 'inbound-messages';
+/** Fixed and content-free: stored as sync_error when Nango reports the sync failed. */
+export const INBOUND_SYNC_FAILED_ERROR = 'Nango reported that the inbound-messages sync failed.';
+
 export interface InboundMailboxRecord {
   id: string;
   personEmail?: string;

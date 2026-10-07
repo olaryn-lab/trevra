@@ -30,6 +30,8 @@ import {
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
 import {
   INBOUND_EMAIL_MESSAGE_MODEL,
+  INBOUND_SYNC_FAILED_ERROR,
+  INBOUND_SYNC_NAME,
   decideInboundMailboxRecord
 } from './email/inbound-mailbox.js';
 
@@ -326,6 +328,19 @@ export async function handleNangoWebhook(
         String(payload.connectionId)
       );
       workspaceId = String(connection.workspace_id);
+    } else if (
+      payload.type === 'sync' &&
+      payload.success === false &&
+      payload.syncName === INBOUND_SYNC_NAME
+    ) {
+      // A failure webhook for an unknown or ambiguous connection stays ignored,
+      // as every failed sync webhook was before it could close a designation.
+      connection = await resolveNangoConnection(
+        db,
+        String(payload.providerConfigKey),
+        String(payload.connectionId)
+      ).catch(() => undefined);
+      workspaceId = connection ? String(connection.workspace_id) : null;
     }
   } catch (error) {
     if (await recordWebhook(db, 'nango', externalEventId, null, payloadHash)) {
@@ -409,6 +424,36 @@ export async function handleNangoWebhook(
       };
     }
 
+    if (
+      payload.type === 'sync' &&
+      payload.success === false &&
+      payload.syncName === INBOUND_SYNC_NAME &&
+      connection
+    ) {
+      // Only the designated mailbox's own row. Content-free text: nothing from
+      // the payload is stored.
+      await db
+        .prepare(
+          `UPDATE email_inbound_mailboxes SET sync_status='unavailable',sync_error=?,updated_at=?::timestamptz
+           WHERE workspace_id=? AND connection_id=?`
+        )
+        .run(
+          INBOUND_SYNC_FAILED_ERROR,
+          new Date().toISOString(),
+          String(connection.workspace_id),
+          String(connection.id)
+        );
+      await completeWebhook(
+        db,
+        'nango',
+        externalEventId,
+        'processed',
+        null,
+        String(connection.workspace_id)
+      );
+      return { duplicate: false, processed: 'inbound-sync-failed' };
+    }
+
     if (payload.type === 'sync' && payload.success === true && connection) {
       const connectionId = String(payload.connectionId);
       const providerConfigKey = String(payload.providerConfigKey);
@@ -432,6 +477,15 @@ export async function handleNangoWebhook(
           "UPDATE connections SET status='connected',last_synced_at=?,last_error=?,updated_at=? WHERE id=?"
         )
         .run(new Date().toISOString(), dropped, new Date().toISOString(), String(connection.id));
+      if (payload.syncName === INBOUND_SYNC_NAME) {
+        // Recovery half of the failure closer: one transient failure must not stick.
+        await db
+          .prepare(
+            `UPDATE email_inbound_mailboxes SET sync_status='syncing',sync_error=NULL,updated_at=?::timestamptz
+             WHERE workspace_id=? AND connection_id=?`
+          )
+          .run(new Date().toISOString(), String(connection.workspace_id), String(connection.id));
+      }
       await completeWebhook(
         db,
         'nango',
@@ -541,6 +595,10 @@ export async function disconnectIntegration(
   await db
     .prepare("UPDATE connections SET status='disconnected',updated_at=? WHERE id=?")
     .run(new Date().toISOString(), localConnectionId);
+  // A disconnected mailbox cannot be read; Nango deleted its syncs with the connection.
+  await db
+    .prepare('DELETE FROM email_inbound_mailboxes WHERE workspace_id=? AND connection_id=?')
+    .run(workspaceId, localConnectionId);
 }
 
 export async function executeConnectedAction(
