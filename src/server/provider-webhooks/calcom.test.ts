@@ -8,7 +8,7 @@ import { openDatabase, type Db } from '../db.js';
 import { calcomVerifier } from './calcom.js';
 import { createProviderWebhookEndpoint } from './index.js';
 
-const SECRET = 'calcom-test-signing-secret';
+const SECRET = 'calcom-test-signing-secret-at-least-32-chars';
 const WORKSPACE = 'ws_calcom_hooks_a';
 const OTHER = 'ws_calcom_hooks_b';
 const OWNER = 'usr_calcom_hooks_owner';

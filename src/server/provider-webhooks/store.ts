@@ -17,12 +17,19 @@ import {
 
 const ENDPOINT_ID_RE = /^pwh_[a-f0-9]{24}$/;
 const MAX_SECRET_LENGTH = 500;
+/** A pasted secret for a provider whose secret Trevra issues is never weaker than one Trevra would mint. */
+const MIN_TREVRA_SECRET_LENGTH = 32;
 const COLUMNS =
   'id,workspace_id,provider,status,created_by_user_id,last_seen_at,accepted_count,rejected_count,created_at,updated_at';
 
 /** Unguessable, but not the credential: the sealed signing secret is. */
 export function draftProviderWebhookEndpointId(): string {
   return `pwh_${randomBytes(12).toString('hex')}`;
+}
+
+/** 32 random bytes, base64url (43 characters), for providers with `secretSource: 'trevra'`. */
+export function generateProviderWebhookSecret(): string {
+  return randomBytes(32).toString('base64url');
 }
 
 export function isProviderWebhookEndpointId(value: string): boolean {
@@ -124,6 +131,11 @@ export async function createProviderWebhookEndpoint(
     throw new ProviderWebhookError('A signing secret is required.', 400);
   if (verifier.secretPattern && !verifier.secretPattern.test(secret))
     throw new ProviderWebhookError("That does not look like this provider's signing secret.", 400);
+  if (verifier.secretSource === 'trevra' && secret.length < MIN_TREVRA_SECRET_LENGTH)
+    throw new ProviderWebhookError(
+      `A signing secret for this provider must be at least ${MIN_TREVRA_SECRET_LENGTH} characters. Leave it out and Trevra generates one.`,
+      400
+    );
   const endpointId = input.endpointId?.trim() || draftProviderWebhookEndpointId();
   if (!isProviderWebhookEndpointId(endpointId))
     throw new ProviderWebhookError('Invalid webhook endpoint id.', 400);

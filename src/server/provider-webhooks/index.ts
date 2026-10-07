@@ -8,6 +8,7 @@ export {
   createProviderWebhookEndpoint,
   deleteProviderWebhookEndpoint,
   draftProviderWebhookEndpointId,
+  generateProviderWebhookSecret,
   getProviderWebhookEndpointById,
   isProviderWebhookEndpointId,
   listProviderWebhookEndpoints,

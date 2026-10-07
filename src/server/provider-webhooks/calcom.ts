@@ -68,6 +68,8 @@ function header(headers: Record<string, string | string[] | undefined>, name: st
 
 export const calcomVerifier: ProviderWebhookVerifier = {
   provider: 'calcom',
+  // Cal.com takes whatever secret the owner types, so Trevra mints a strong one.
+  secretSource: 'trevra',
 
   verify(rawBody, headers, secret) {
     const signature = header(headers, 'x-cal-signature-256');

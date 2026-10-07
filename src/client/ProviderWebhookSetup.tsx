@@ -84,7 +84,7 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
     setBusy('save');
     setProblem('');
     try {
-      const endpoint = await createProviderWebhook({
+      const { endpoint } = await createProviderWebhook({
         provider: 'stripe',
         endpointId: draft.endpointId,
         signingSecret: signingSecret.trim()

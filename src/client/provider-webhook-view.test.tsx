@@ -83,6 +83,23 @@ describe('Stripe webhook setup view', () => {
     expect(html).not.toContain('whsec_');
   });
 
+  it('names the provider it is given instead of Stripe', () => {
+    const html = renderToStaticMarkup(
+      <WebhookEndpointRow
+        providerLabel="Cal.com"
+        endpoint={{ ...endpoint, provider: 'calcom', path: '/api/hooks/v1/calcom/x' }}
+        url="https://app.trevra.example/api/hooks/v1/calcom/x"
+        lastDelivery="None yet"
+        busy={false}
+        onToggle={() => undefined}
+        onRemove={() => undefined}
+      />
+    );
+    expect(html).toContain('Cal.com endpoint');
+    expect(html).toContain('Endpoint URL in Cal.com');
+    expect(html).not.toContain('Stripe');
+  });
+
   it('keeps the panel visible when loading failed, never a silent blank', () => {
     expect(showStripePanel('error', false)).toBe(true);
     expect(showStripePanel('ok', false)).toBe(false);

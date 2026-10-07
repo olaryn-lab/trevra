@@ -44,6 +44,12 @@ export interface ProviderWebhookVerifier {
   provider: WebhookProvider;
   /** Shape check for the secret an owner pastes, so a typo fails at setup. */
   secretPattern?: RegExp;
+  /**
+   * Who issues the signing secret. 'provider' (the default; Stripe) means the
+   * owner pastes the secret the provider shows. 'trevra' (Cal.com) means setup
+   * may omit it: the server generates one, seals it, and returns it exactly once.
+   */
+  secretSource?: 'provider' | 'trevra';
   verify(
     rawBody: Buffer,
     headers: WebhookHeaders,

@@ -487,6 +487,7 @@ import {
   createProviderWebhookEndpoint,
   deleteProviderWebhookEndpoint,
   draftProviderWebhookEndpointId,
+  generateProviderWebhookSecret,
   getProviderVerifier,
   listProviderWebhookEndpoints,
   providerWebhookPath,
@@ -497,6 +498,8 @@ import {
   withProviderWebhookPath
 } from './provider-webhooks/index.js';
 import { calcomVerifier } from './provider-webhooks/calcom.js';
+import { BookingUrlError, setBookingUrl } from './meetings/booking-link.js';
+import { readMeetingsSetup } from './meetings/setup.js';
 import { stripeVerifier } from './provider-webhooks/stripe.js';
 import {
   createCaptureSource,
@@ -1314,6 +1317,44 @@ export function createApp(db: Db) {
   });
 
   // ---------------------------------------------------------------------
+  // Meetings setup: the workspace booking link and a content-free view of the
+  // calendar and Cal.com connections. Reads are workspace-visible; changing
+  // outbound copy is owner-only. Cal.com endpoints use /api/setup/webhooks.
+  // ---------------------------------------------------------------------
+  app.get('/api/setup/meetings', async (req: AuthedRequest, res, next) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(await readMeetingsSetup(db, req.auth!.workspaceId));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put(
+    '/api/setup/meetings/booking-link',
+    ownerOnly('change the booking link'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({ bookingUrl: z.string().max(2000).nullable() })
+          .strict()
+          .parse(req.body ?? {});
+        const bookingUrl = await setBookingUrl(
+          db,
+          req.auth!.workspaceId,
+          input.bookingUrl,
+          new Date()
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ bookingUrl });
+      } catch (error) {
+        if (error instanceof BookingUrlError) return res.status(400).json({ error: error.message });
+        next(error);
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------
   // Generic GTM lead capture management. Reads are workspace-visible; source
   // creation/rotation/disable changes credentials and are owner-only.
   // ---------------------------------------------------------------------
@@ -1403,9 +1444,10 @@ export function createApp(db: Db) {
   );
 
   // ---------------------------------------------------------------------
-  // Observed provider webhooks (Stripe now; Cal.com in Phase B). Every route
-  // here exposes or changes an endpoint that receives a signing secret, so all
-  // of them -- reads included -- are owner-only. Secrets are never returned.
+  // Observed provider webhooks (Stripe and Cal.com). Every route here exposes
+  // or changes an endpoint that receives a signing secret, so all of them --
+  // reads included -- are owner-only. A stored secret is never returned; one
+  // Trevra generates (secretSource 'trevra') is returned once, at creation.
   // ---------------------------------------------------------------------
   const webhookEndpointIdSchema = z
     .string()
@@ -1462,19 +1504,43 @@ export function createApp(db: Db) {
           .object({
             provider: z.enum(WEBHOOK_PROVIDERS),
             endpointId: webhookEndpointIdSchema,
-            signingSecret: z.string().trim().min(1).max(500)
+            signingSecret: z.string().trim().min(1).max(500).optional()
           })
           .strict()
           .parse(req.body ?? {});
+        const workspaceId = req.auth!.workspaceId;
+        let generated: string | null = null;
+        if (input.signingSecret === undefined) {
+          // The registered verifier decides who issues the secret; a client cannot assert it.
+          if (getProviderVerifier(input.provider)?.secretSource !== 'trevra')
+            throw new ProviderWebhookError(
+              'A signing secret is required: paste the one the provider shows for this endpoint.',
+              400
+            );
+          // A generated secret is shown once; a repeat must not mint a second one.
+          const existing = await listProviderWebhookEndpoints(db, workspaceId);
+          if (existing.some((endpoint) => endpoint.id === input.endpointId))
+            throw new ProviderWebhookError(
+              'This endpoint is already connected and its signing secret was shown once. To get a new secret, remove the endpoint and connect again.',
+              409
+            );
+          generated = generateProviderWebhookSecret();
+        }
         const endpoint = await createProviderWebhookEndpoint(db, {
-          workspaceId: req.auth!.workspaceId,
+          workspaceId,
           actorUserId: req.auth!.userId,
           provider: input.provider,
-          signingSecret: input.signingSecret,
+          signingSecret: input.signingSecret ?? generated!,
           endpointId: input.endpointId
         });
         res.setHeader('Cache-Control', 'no-store');
-        res.status(201).json({ endpoint: withProviderWebhookPath(endpoint) });
+        res
+          .status(201)
+          .json(
+            generated === null
+              ? { endpoint: withProviderWebhookPath(endpoint) }
+              : { endpoint: withProviderWebhookPath(endpoint), secret: generated }
+          );
       } catch (error) {
         next(error);
       }

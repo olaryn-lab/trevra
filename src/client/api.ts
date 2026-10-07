@@ -3569,16 +3569,16 @@ export async function draftProviderWebhook(
   });
 }
 
+/**
+ * Omit `signingSecret` for a provider whose secret Trevra issues (Cal.com): the
+ * reply then carries the generated `secret`, and no later read ever returns it.
+ */
 export async function createProviderWebhook(input: {
   provider: WebhookProvider;
   endpointId: string;
-  signingSecret: string;
-}): Promise<ProviderWebhookEndpointSummary> {
-  const result = await request<{ endpoint: ProviderWebhookEndpointSummary }>(
-    '/api/setup/webhooks',
-    { method: 'POST', body: JSON.stringify(input) }
-  );
-  return result.endpoint;
+  signingSecret?: string;
+}): Promise<{ endpoint: ProviderWebhookEndpointSummary; secret?: string }> {
+  return request('/api/setup/webhooks', { method: 'POST', body: JSON.stringify(input) });
 }
 
 export async function setProviderWebhookStatus(
@@ -3594,6 +3594,32 @@ export async function setProviderWebhookStatus(
 
 export async function removeProviderWebhook(id: string): Promise<void> {
   await request<void>(`/api/setup/webhooks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+/** Workspace-visible and content-free; Cal.com endpoints themselves are owner-only. */
+export interface MeetingsSetupState {
+  bookingUrl: string | null;
+  secretsConfigured: boolean;
+  googleCalendar: {
+    connected: boolean;
+    status: string | null;
+    lastSyncedAt: string | null;
+    lastError: string | null;
+  };
+  calcomConnected: boolean;
+}
+
+export async function getMeetingsSetup(): Promise<MeetingsSetupState> {
+  return request<MeetingsSetupState>('/api/setup/meetings');
+}
+
+export async function saveBookingLink(
+  bookingUrl: string | null
+): Promise<{ bookingUrl: string | null }> {
+  return request('/api/setup/meetings/booking-link', {
+    method: 'PUT',
+    body: JSON.stringify({ bookingUrl })
+  });
 }
 
 export interface EmailDeliverySummary {

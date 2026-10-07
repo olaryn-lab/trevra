@@ -21,6 +21,7 @@ import { Button, Field, Input, Select } from './ui/primitives';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import { ProviderWebhookSetup } from './ProviderWebhookSetup';
+import { MeetingsSetup } from './MeetingsSetup';
 import './lead-capture.css';
 
 const SOURCE_KINDS: Array<{ value: CaptureSourceSummary['kind']; label: string }> = [
@@ -397,6 +398,7 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
         )}
       </section>
       {isOwner && <ProviderWebhookSetup setToast={setToast} />}
+      <MeetingsSetup setToast={setToast} />
     </div>
   );
 }

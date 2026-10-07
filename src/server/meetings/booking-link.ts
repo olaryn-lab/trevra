@@ -21,6 +21,11 @@ export function normalizeBookingUrl(value: string | null | undefined): string | 
       `The booking link must be ${BOOKING_URL_MAX_LENGTH} characters or fewer.`
     );
   }
+  // The URL parser percent-encodes most control characters instead of refusing them.
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+    throw new BookingUrlError('The booking link must not contain control characters.');
+  }
   if (/\s/.test(trimmed)) throw new BookingUrlError(NOT_HTTPS);
   let url: URL;
   try {

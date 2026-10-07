@@ -54,7 +54,8 @@ export function WebhookEndpointRow({
   lastDelivery,
   busy,
   onToggle,
-  onRemove
+  onRemove,
+  providerLabel = 'Stripe'
 }: {
   endpoint: ProviderWebhookEndpointSummary;
   url: string;
@@ -62,18 +63,19 @@ export function WebhookEndpointRow({
   busy: boolean;
   onToggle: () => void;
   onRemove: () => void;
+  providerLabel?: string;
 }) {
   const active = endpoint.status === 'active';
   return (
     <article className="capture-webhook-endpoint">
       <header>
-        <strong>Stripe endpoint</strong>
+        <strong>{providerLabel} endpoint</strong>
         <span className={active ? 'status-pill ok' : 'status-pill'}>
           {active ? 'Listening' : 'Paused'}
         </span>
       </header>
       <div className="capture-secret">
-        <strong>Endpoint URL in Stripe</strong>
+        <strong>Endpoint URL in {providerLabel}</strong>
         <code>{url}</code>
       </div>
       <div className="capture-metrics">
