@@ -2,6 +2,8 @@ import type { Db } from './db.js';
 import { runAccountSweep } from './accounts/sweep.js';
 import { rescoreAccounts } from './accounts/score.js';
 import { rejectedSignalShapes } from './accounts/store.js';
+import { hasDueRepositories } from './github/repos.js';
+import { pollWorkspaceRepositories } from './github/poll.js';
 import { runRecommendationEngine } from './recommendation-engine.js';
 import { promoteVerifiedDemandRepliesToOpportunities } from './demand/opportunities.js';
 import { buildCompanyChangeOpportunities } from './content/opportunity-builder.js';
@@ -64,6 +66,21 @@ export async function runAutomationCycle(db: Db, workspaceId: string): Promise<A
     } catch {
       result.failed += 1;
     }
+  }
+
+  // GitHub repository traction. Guarded by one indexed existence check, like
+  // the sweep, because almost no workspace watches a repository. The poll
+  // writes account signals and rescores what it touched itself, BEFORE the
+  // recommendation refresh below so a newly hot account is seen this turn.
+  // GitHub conditions (not connected, needs reconnecting, rate limited) are
+  // recorded on the repository row, not thrown; this catch is for a database
+  // failure, and it must not cost the rest of the cycle its turn.
+  try {
+    if (await hasDueRepositories(db, workspaceId, new Date())) {
+      await pollWorkspaceRepositories(db, workspaceId);
+    }
+  } catch {
+    result.failed += 1;
   }
 
   // Recommendations are a projection over durable GTM evidence. Refresh them
