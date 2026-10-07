@@ -211,6 +211,81 @@ describe('applying an unsubscribe', () => {
   });
 });
 
+describe('unsubscribing the Person an outreach email was approved for', () => {
+  const RUN_KEY = 'eo_unsubscribe_person_0001';
+
+  async function insertPerson(id: string, email: string) {
+    await db
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(id, WORKSPACE, id, email, email, NOW.toISOString(), NOW.toISOString());
+  }
+
+  async function insertOutreachRun(personId: string) {
+    await db
+      .prepare(
+        `INSERT INTO playbook_runs
+         (id,workspace_id,playbook_key,playbook_version,status,actor_type,actor_id,input_json,correlation_id)
+         VALUES ('pbr_unsubscribe_person',?,'gtm.email-outreach','1.0.0','completed','user',NULL,?::jsonb,'corr_unsub')`
+      )
+      .run(WORKSPACE, JSON.stringify({ idempotencyKey: RUN_KEY, personId }));
+  }
+
+  async function suppressionPerson(): Promise<string | null | undefined> {
+    const row = await db
+      .prepare('SELECT person_id FROM suppressions WHERE workspace_id=?')
+      .get<{ person_id: string | null }>(WORKSPACE);
+    return row?.person_id;
+  }
+
+  beforeEach(async () => {
+    await insertDelivery({
+      id: 'del_00000000000000e5',
+      sourceType: 'email_outreach',
+      sourceId: RUN_KEY
+    });
+  });
+
+  it("suppresses the run's Person, not just the address", async () => {
+    // The Person's canonical email differs from the address the lead was mailed at.
+    await insertPerson('con_unsub_person', 'lead.person@elsewhere.test');
+    await insertOutreachRun('con_unsub_person');
+
+    const value = token(WORKSPACE, 'del_00000000000000e5');
+    expect(
+      await applyUnsubscribeToken(db, value, { source: 'email_one_click_unsubscribe' }, NOW, ENV)
+    ).toEqual({ applied: true, workspaceId: WORKSPACE });
+
+    expect(await suppressionPerson()).toBe('con_unsub_person');
+    expect(
+      await findSuppression(db, WORKSPACE, { channel: 'email', personId: 'con_unsub_person' })
+    ).toMatchObject({ email: 'lead@example.test', sourceRef: 'del_00000000000000e5' });
+  });
+
+  it('falls back to the address alone when the run is gone', async () => {
+    const value = token(WORKSPACE, 'del_00000000000000e5');
+    expect(
+      await applyUnsubscribeToken(db, value, { source: 'email_one_click_unsubscribe' }, NOW, ENV)
+    ).toEqual({ applied: true, workspaceId: WORKSPACE });
+    expect(await suppressionPerson()).toBeNull();
+  });
+
+  it('falls back to the address alone, without throwing, when the address is another Person', async () => {
+    await insertPerson('con_unsub_person', 'lead.person@elsewhere.test');
+    await insertPerson('con_unsub_owner', 'lead@example.test');
+    await insertOutreachRun('con_unsub_person');
+
+    const value = token(WORKSPACE, 'del_00000000000000e5');
+    expect(
+      await applyUnsubscribeToken(db, value, { source: 'email_one_click_unsubscribe' }, NOW, ENV)
+    ).toEqual({ applied: true, workspaceId: WORKSPACE });
+    // createSuppression attributes the address to the Person who owns it.
+    expect(await suppressionPerson()).toBe('con_unsub_owner');
+  });
+});
+
 describe('RFC 8058 headers', () => {
   it('needs a key and an HTTPS public origin', () => {
     expect(unsubscribeConfigured(ENV)).toBe(true);

@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import type { Db } from '../db.js';
+import { normalizeContactEmail } from '../lead-capture/people.js';
 import { createSuppression } from '../suppressions.js';
 import { publicEmailOrigin } from './public-origin.js';
 
@@ -155,6 +156,32 @@ export async function findUnsubscribeDelivery(
 }
 
 /**
+ * The Person an outreach delivery was approved for: the personId in its
+ * gtm.email-outreach run's input (the delivery's source id is the run's
+ * idempotency key). Null, so the suppression stays email-only, when the
+ * delivery came from anywhere else, the run or Person is gone, or the
+ * recipient's address already belongs to a different Person.
+ */
+async function unsubscribePersonId(db: Db, delivery: UnsubscribeDelivery): Promise<string | null> {
+  if (delivery.sourceType !== 'email_outreach') return null;
+  const run = await db
+    .prepare(
+      `SELECT r.input_json->>'personId' AS person_id FROM playbook_runs r
+       JOIN contacts p ON p.workspace_id=r.workspace_id AND p.id=r.input_json->>'personId'
+       WHERE r.workspace_id=? AND r.playbook_key='gtm.email-outreach'
+         AND r.input_json->>'idempotencyKey'=?
+       LIMIT 2`
+    )
+    .all<{ person_id: string }>(delivery.workspaceId, delivery.sourceId);
+  if (run.length !== 1) return null;
+  const personId = run[0]!.person_id;
+  const owner = await db
+    .prepare('SELECT id FROM contacts WHERE workspace_id=? AND email_normalized=? LIMIT 1')
+    .get<{ id: string }>(delivery.workspaceId, normalizeContactEmail(delivery.recipient));
+  return owner && owner.id !== personId ? null : personId;
+}
+
+/**
  * Suppress the delivery's recipient for email in the delivery's workspace.
  * `workspaceId`, when given (the mailto path knows which inbox received the
  * request), must match the token's workspace or nothing happens. Repeating it
@@ -177,6 +204,7 @@ export async function applyUnsubscribeToken(
     {
       workspaceId: delivery.workspaceId,
       channel: 'email',
+      personId: await unsubscribePersonId(db, delivery),
       email: delivery.recipient,
       reason: 'Recipient unsubscribed from email',
       source: input.source,
