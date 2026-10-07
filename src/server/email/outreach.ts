@@ -1,12 +1,11 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
 import { ensureConversationForPerson } from '../conversations.js';
 import type { Db } from '../db.js';
 import { LEAD_CONTACT_READ_LIMIT } from '../linkedin/lead-lists.js';
 import { startPlaybookRun } from '../playbooks/engine.js';
 import { findSuppression } from '../suppressions.js';
 import { emailComplianceProvider } from './compliance.js';
-import { RECIPIENT_SQL } from './recipient-sql.js';
+import { RECIPIENT_SQL, recipientSchema } from './recipient-sql.js';
 import { emailDomainOf, type DnsResolver } from './deliverability.js';
 import { listSendingMailboxes, resolveMailboxAddress } from './mailbox-address.js';
 import { getSenderDeliverability } from './sender-deliverability.js';
@@ -196,8 +195,6 @@ export const EMAIL_OUTREACH_PLAYBOOK_ID = 'gtm.email-outreach';
 
 // lc-debt: one preparation starts at most 200 approval runs and reads at most LEAD_CONTACT_READ_LIMIT list members; upgrade path: prepare in pages with a cursor stored on email_outreach_preparations once founders approve more than 200 first-touch emails at a time.
 const MAX_PREPARED_PER_CALL = 200;
-
-const recipientSchema = z.string().email();
 
 interface MemberRow {
   contact_id: string;

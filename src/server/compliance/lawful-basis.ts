@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { id, type Db } from '../db.js';
 import { appendDomainEvent } from '../control-plane/events.js';
-import { RECIPIENT_SQL } from '../email/recipient-sql.js';
+import { RECIPIENT_SQL, recipientSchema } from '../email/recipient-sql.js';
 import { findSuppression } from '../suppressions.js';
 import { ComplianceError } from './errors.js';
 import {
@@ -142,7 +142,11 @@ export async function recordLawfulBasis(
       input.source,
       sourceRef ?? ''
     );
-  if (!row) throw new Error('Lawful basis could not be recorded');
+  if (!row)
+    throw new ComplianceError(
+      'That lawful basis changed while it was being recorded. Try again.',
+      409
+    );
   if (inserted)
     await appendDomainEvent(db, {
       workspaceId: input.workspaceId,
@@ -342,8 +346,13 @@ export async function evaluateEmailLawfulBases(
       FROM input i
       LEFT JOIN contacts c
         ON c.workspace_id=?
-       AND ((i.person_id IS NOT NULL AND c.id=i.person_id)
-         OR (i.person_id IS NULL AND c.email_normalized=i.email))
+       AND ((i.person_id IS NOT NULL AND c.id=i.person_id
+             AND (c.email_normalized=i.email
+               OR EXISTS (
+                 SELECT 1 FROM linkedin_lead_contacts l
+                 WHERE l.workspace_id=c.workspace_id AND l.person_id=c.id
+                   AND LOWER(BTRIM(l.email))=i.email)))
+         OR c.email_normalized=i.email)
       LEFT JOIN LATERAL (
         SELECT a.country_code, a.domain
         FROM account_contacts ac
@@ -353,7 +362,7 @@ export async function evaluateEmailLawfulBases(
                  a.updated_at DESC, a.id ASC
         LIMIT 1
       ) acct ON TRUE
-      ORDER BY i.ord
+      ORDER BY i.ord, (c.id=i.person_id) DESC NULLS LAST, c.id
     `
     )
     .all<RecipientFactsRow>(
@@ -365,7 +374,9 @@ export async function evaluateEmailLawfulBases(
       workspaceId,
       workspaceId
     );
-  const byOrd = new Map(rows.map((row) => [Number(row.ord), row]));
+  // A bound personId sorts first; keep the first row per input.
+  const byOrd = new Map<number, RecipientFactsRow>();
+  for (const row of rows) if (!byOrd.has(Number(row.ord))) byOrd.set(Number(row.ord), row);
   return inputs.map((input, index) => {
     const row = byOrd.get(index + 1);
     const resolved = resolveRecipientCountry({
@@ -400,17 +411,19 @@ function plainObject(value: unknown): Record<string, unknown> {
     : {};
 }
 
-/** The same keys, in the same order, that `policyAttributesFrom` counts. */
+/**
+ * Every address the send could reach: the de-duplicated, normalized union of
+ * `recipients`, `to` and `recipient` (execution sends to `payload.recipient`).
+ */
 function recipientsOf(source: Record<string, unknown>): string[] {
+  const found = new Set<string>();
   for (const key of ['recipients', 'to', 'recipient']) {
     const value = source[key];
-    if (Array.isArray(value))
-      return value.filter(
-        (entry): entry is string => typeof entry === 'string' && entry.trim() !== ''
-      );
-    if (typeof value === 'string' && value.trim() !== '') return [value];
+    const entries = Array.isArray(value) ? value : [value];
+    for (const entry of entries)
+      if (typeof entry === 'string' && entry.trim() !== '') found.add(entry.trim().toLowerCase());
   }
-  return [];
+  return [...found];
 }
 
 /**
@@ -444,11 +457,19 @@ export async function emailLawfulBasisAttributes(
     recipients.length === 1 && typeof metadata.contactId === 'string' && metadata.contactId.trim()
       ? metadata.contactId.trim()
       : null;
+  // The lead must be this recipient (by address, or by the Person bound to it).
   const leadCountry = contactId
     ? ((
         await db
-          .prepare('SELECT country FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
-          .get<{ country: string | null }>(workspaceId, contactId)
+          .prepare(
+            `SELECT l.country FROM linkedin_lead_contacts l
+             WHERE l.workspace_id=? AND l.id=?
+               AND (LOWER(BTRIM(l.email))=?
+                 OR EXISTS (
+                   SELECT 1 FROM contacts c
+                   WHERE c.workspace_id=l.workspace_id AND c.id=l.person_id AND c.email_normalized=?))`
+          )
+          .get<{ country: string | null }>(workspaceId, contactId, recipients[0], recipients[0])
       )?.country ?? null)
     : null;
   const decisions = await evaluateEmailLawfulBases(
@@ -482,7 +503,7 @@ export async function countLeadListMissingEmailBasis(
        JOIN linkedin_lead_contacts lc ON lc.workspace_id=m.workspace_id AND lc.id=m.contact_id
        LEFT JOIN contacts p ON p.workspace_id=lc.workspace_id AND p.id=lc.person_id
        WHERE m.workspace_id=? AND m.list_id=? AND lc.do_not_contact=FALSE
-         AND ${RECIPIENT_SQL} IS NOT NULL
+         AND lc.person_id IS NOT NULL AND ${RECIPIENT_SQL} IS NOT NULL
        ORDER BY m.created_at ASC, lc.id ASC
        LIMIT ?::int`
     )
@@ -494,6 +515,7 @@ export async function countLeadListMissingEmailBasis(
   const window = rows.slice(0, LEAD_LIST_BASIS_CHECK_LIMIT);
   const checked: typeof window = [];
   for (const row of window) {
+    if (!recipientSchema.safeParse(row.recipient).success) continue;
     // lc-debt: N suppression lookups per check; upgrade path: set-based NOT EXISTS against suppressions
     const suppressed = await findSuppression(db, workspaceId, {
       channel: 'email',

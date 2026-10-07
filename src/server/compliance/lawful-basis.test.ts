@@ -321,7 +321,30 @@ describe('lead-list country and recipients', () => {
          VALUES ('con_lb_reserved',?,'Rae','rae@example.com','rae@example.com',?,?)`
       )
       .run(WORKSPACE, iso, iso);
-    await lead('llc_lb_counted', { email: 'one@acme-gmbh.de', country: 'DE' });
+    await db
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES ('con_lb_counted',?,'Cal','cal@acme-gmbh.de','cal@acme-gmbh.de',?,?)`
+      )
+      .run(WORKSPACE, iso, iso);
+    await db
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,created_at,updated_at)
+         VALUES ('con_lb_bare',?,'Bo',?,?)`
+      )
+      .run(WORKSPACE, iso, iso);
+    // Prepare skips a lead with no resolved Person and an address that is not an email.
+    await lead('llc_lb_noperson', { email: 'noperson@acme-gmbh.de', country: 'DE' });
+    await lead('llc_lb_badaddr', {
+      email: 'not an address',
+      country: 'DE',
+      personId: 'con_lb_bare'
+    });
+    await lead('llc_lb_counted', {
+      personId: 'con_lb_counted',
+      email: 'one@acme-gmbh.de',
+      country: 'DE'
+    });
     await lead('llc_lb_dnc', { email: 'dnc@acme-gmbh.de', country: 'DE', doNotContact: true });
     await lead('llc_lb_suppressed', { email: 'Stop@acme-gmbh.de', country: 'DE' });
     await lead('llc_lb_noemail', { email: null, country: 'DE' });
@@ -353,5 +376,131 @@ describe('lead-list country and recipients', () => {
       missing: 0,
       truncated: false
     });
+  });
+});
+
+describe('a payload cannot lend one person basis to another address', () => {
+  const STRANGER = 'stranger@northwind-gmbh.de';
+  const iso = NOW.toISOString();
+
+  async function inboundEmailFrom(personId: string) {
+    await db
+      .prepare(
+        `INSERT INTO conversations (id,workspace_id,person_id,last_activity_at,created_at,updated_at)
+         VALUES ('cv_lb_1',?,?,?,?,?)`
+      )
+      .run(WORKSPACE, personId, iso, iso, iso);
+    await db
+      .prepare(
+        `INSERT INTO conversation_messages
+           (id,workspace_id,conversation_id,channel,provider,direction,body,source_type,source_id,occurred_at)
+         VALUES ('cm_lb_1',?,'cv_lb_1','email','test','inbound','hello','test','src_1',?)`
+      )
+      .run(WORKSPACE, iso);
+  }
+
+  it('does not honour a personId whose email differs from the recipient', async () => {
+    await inboundEmailFrom(MAYA);
+    const foreign = await evaluateEmailLawfulBasis(db, WORKSPACE, {
+      email: STRANGER,
+      personId: MAYA,
+      purpose: 'reply'
+    });
+    expect(foreign).toMatchObject({ status: 'missing', countrySource: 'unknown' });
+    expect(
+      await evaluateEmailLawfulBasis(db, WORKSPACE, {
+        email: EMAIL,
+        personId: MAYA,
+        purpose: 'reply'
+      })
+    ).toMatchObject({ status: 'not_required' });
+
+    await db.prepare('DELETE FROM conversations WHERE id=?').run('cv_lb_1');
+    await recordLawfulBasis(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        personId: MAYA,
+        channel: 'email',
+        basis: 'consent',
+        source: 'operator',
+        actorUserId: null
+      },
+      NOW
+    );
+    expect(
+      await evaluateEmailLawfulBasis(db, WORKSPACE, { email: STRANGER, personId: MAYA })
+    ).toMatchObject({ status: 'missing' });
+    expect(
+      await evaluateEmailLawfulBasis(db, WORKSPACE, { email: EMAIL, personId: MAYA })
+    ).toMatchObject({ status: 'satisfied', basis: 'consent' });
+  });
+
+  it('honours a personId bound through that person lead-contact email', async () => {
+    await recordLawfulBasis(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        personId: MAYA,
+        channel: 'email',
+        basis: 'consent',
+        source: 'operator',
+        actorUserId: null
+      },
+      NOW
+    );
+    await db
+      .prepare(
+        'INSERT INTO linkedin_lead_lists (id,workspace_id,name,created_at,updated_at) VALUES (?,?,?,?,?)'
+      )
+      .run('lll_lb_bind', WORKSPACE, 'Bind', iso, iso);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_lead_contacts
+           (id,workspace_id,list_id,first_name,last_name,company,email,person_id,dedupe_key)
+         VALUES ('llc_lb_bind',?,'lll_lb_bind','Maya','M','Acme',?,?,'dedupe_bind')`
+      )
+      .run(WORKSPACE, 'maya.work@acme-gmbh.de', MAYA);
+    expect(
+      await evaluateEmailLawfulBasis(db, WORKSPACE, {
+        email: 'maya.work@acme-gmbh.de',
+        personId: MAYA
+      })
+    ).toMatchObject({ status: 'satisfied', basis: 'consent' });
+  });
+
+  it('reads a lead-contact country only for that recipient, and evaluates every payload key', async () => {
+    await db
+      .prepare(
+        'INSERT INTO linkedin_lead_lists (id,workspace_id,name,created_at,updated_at) VALUES (?,?,?,?,?)'
+      )
+      .run('lll_lb_c2', WORKSPACE, 'C2', iso, iso);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_lead_contacts
+           (id,workspace_id,list_id,first_name,last_name,company,email,country,dedupe_key)
+         VALUES ('llc_lb_us_other',?,'lll_lb_c2','Us','Lead','Other','someone@other.com','US','dedupe_us')`
+      )
+      .run(WORKSPACE);
+    const attrs = await emailLawfulBasisAttributes(db, WORKSPACE, {
+      recipient: 'buyer@northwind-gmbh.de',
+      metadata: { contactId: 'llc_lb_us_other' }
+    });
+    expect(attrs).toMatchObject({ lawfulBasisStatus: 'missing', recipientsMissingBasis: 1 });
+    expect(attrs.lawfulBasisReason).toContain('unknown country');
+
+    // execution.ts sends to payload.recipient, so that address must be evaluated.
+    expect(
+      await emailLawfulBasisAttributes(db, WORKSPACE, {
+        recipients: ['lead@example.com'],
+        recipient: 'buyer@northwind-gmbh.de'
+      })
+    ).toMatchObject({ lawfulBasisStatus: 'missing', recipientsMissingBasis: 1 });
+    expect(
+      await emailLawfulBasisAttributes(db, WORKSPACE, {
+        recipients: [],
+        recipient: 'buyer@northwind-gmbh.de'
+      })
+    ).toMatchObject({ lawfulBasisStatus: 'missing' });
   });
 });
