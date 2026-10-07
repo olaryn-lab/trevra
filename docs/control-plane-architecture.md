@@ -32,7 +32,7 @@ Playbooks are versioned graphs of typed skill, approval, and action steps. Every
 
 Built-in closed loops include:
 
-- `gtm.audit-led-outreach`: score, audit, draft, approve, and send;
+- `gtm.audit-led-outreach`: score, audit, draft, approve, and send; it runs only as a prepared run, never from the generic playbook routes;
 - `revenue.invoice-delivered-work`: approve and create an invoice;
 - `revenue.protect-scope`: approve and create a change order.
 

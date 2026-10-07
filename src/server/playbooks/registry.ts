@@ -104,7 +104,10 @@ export const auditLedOutreachPlaybook: PlaybookDefinition = {
     score: { $ref: '$.steps.score.output' },
     audit: { $ref: '$.steps.audit.output' }
   },
-  source: { type: 'builtin' }
+  source: { type: 'builtin' },
+  // Its send carries outreach approval metadata, and only a prepared run has
+  // been through the outreach plan's footer, DNC and suppression checks.
+  preparedOnly: true
 };
 
 /**

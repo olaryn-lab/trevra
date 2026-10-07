@@ -485,6 +485,34 @@ describe('GTM-only prepared action boundary', () => {
       );
   }
 
+  it('refuses to start audit-led outreach except as a prepared run', async () => {
+    const database = await openTestDb();
+    await expect(
+      startPlaybookRun(database, {
+        workspaceId: DEMO_WORKSPACE_ID,
+        playbookId: 'gtm.audit-led-outreach',
+        payload: {
+          lead: { domain: 'northwind.test', contactEmail: 'maya@northwind.test' },
+          draftConfig: {
+            offer: 'Audit',
+            senderName: 'Founder',
+            postalAddress: '1 Main St'
+          }
+        },
+        actorType: 'user',
+        actorId: DEMO_USER_ID
+      })
+    ).rejects.toMatchObject({
+      status: 409,
+      message: 'Email outreach starts only from a prepared outreach plan.'
+    });
+    const runs = await database
+      .prepare(
+        "SELECT COUNT(*)::int AS total FROM playbook_runs WHERE workspace_id=? AND playbook_key='gtm.audit-led-outreach'"
+      )
+      .get<{ total: number }>(DEMO_WORKSPACE_ID);
+    expect(runs?.total).toBe(0);
+  });
   it('lets a human edit the body before approval and pins the action to the edited text', async () => {
     const database = await openTestDb();
     const waiting = await startPlaybookRun(database, {
