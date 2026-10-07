@@ -194,7 +194,7 @@ describe('provider webhook endpoint route', () => {
     const row = await db
       .prepare(`SELECT error FROM webhook_events WHERE workspace_id=? AND external_event_id=?`)
       .get<{ error: string }>(WS, `${endpoint.id}:evt_poison`);
-    expect(row?.error).toBe('Error');
+    expect(row?.error).toBe('ProviderWebhookError');
     const again = await deliver(endpoint.id, { id: 'evt_poison', type: 'poison' });
     expect(again.body).toEqual({ received: true, duplicate: true });
     expect(handled).toEqual(['evt_poison']);
@@ -202,6 +202,21 @@ describe('provider webhook endpoint route', () => {
     const unavailable = await deliver(endpoint.id, { id: 'evt_unavailable', type: 'unavailable' });
     expect(unavailable.status).toBe(500);
     expect(await eventStatus('evt_unavailable')).toBe('failed');
+  });
+
+  it('logs an ignored 4xx handler error with the class only, never its message', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      await deliver(endpoint.id, { id: 'evt_poison_log', type: 'poison' });
+      expect(log).toHaveBeenCalledWith(expect.stringContaining('ignored'), {
+        endpointId: endpoint.id,
+        provider: 'calcom',
+        error: 'ProviderWebhookError'
+      });
+      expect(JSON.stringify(log.mock.calls)).not.toMatch(/cannot handle this/);
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('rejects a verifier that throws with a 400 and logs only ids and the error class', async () => {

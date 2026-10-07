@@ -33,16 +33,29 @@ const envelopeSchema = z.object({
   payload: z.record(z.unknown()).optional()
 });
 
-const bookingSchema = z.object({
-  uid: z.string().min(1).max(1024),
-  rescheduleUid: z.string().min(1).max(1024).nullish(),
-  startTime: z.string().datetime({ offset: true }),
-  endTime: z.string().datetime({ offset: true }),
-  organizer: z.object({ email: z.string().optional() }).optional(),
-  attendees: z
-    .array(z.object({ email: z.string().optional(), name: z.string().optional() }))
-    .default([])
-});
+const bookingSchema = z
+  .object({
+    uid: z.string().min(1).max(1024),
+    // Only BOOKING_RESCHEDULED uses it; "" or junk elsewhere must not drop a usable booking.
+    rescheduleUid: z
+      .string()
+      .min(1)
+      .max(1024)
+      .nullish()
+      .transform((value) => value ?? undefined)
+      .catch(undefined),
+    startTime: z.string().datetime({ offset: true }),
+    endTime: z.string().datetime({ offset: true }),
+    organizer: z.object({ email: z.string().nullish() }).nullish(),
+    attendees: z
+      .array(z.object({ email: z.string().nullish(), name: z.string().nullish() }))
+      .nullish()
+      .transform((value) => value ?? [])
+  })
+  .refine((booking) => Date.parse(booking.endTime) >= Date.parse(booking.startTime), {
+    message: 'endTime must not be before startTime',
+    path: ['endTime']
+  });
 
 const emailSchema = z.string().email();
 
@@ -139,7 +152,9 @@ export const calcomVerifier: ProviderWebhookVerifier = {
       {
         kind: 'meeting',
         id: booking.uid,
-        ...(rescheduled && booking.rescheduleUid ? { previousId: booking.rescheduleUid } : {}),
+        ...(rescheduled && booking.rescheduleUid && booking.rescheduleUid !== booking.uid
+          ? { previousId: booking.rescheduleUid }
+          : {}),
         personEmail: attendee.email.trim().toLowerCase(),
         ...(attendee.name?.trim() ? { personName: attendee.name.trim() } : {}),
         status:

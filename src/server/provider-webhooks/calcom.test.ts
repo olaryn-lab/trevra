@@ -94,6 +94,17 @@ describe('Cal.com verifier', () => {
     }
   });
 
+  it('reads an array-valued signature header', () => {
+    expect(
+      calcomVerifier.verify(
+        Buffer.from(body),
+        { 'x-cal-signature-256': [sign(body), 'ignored'] },
+        SECRET,
+        new Date()
+      )
+    ).toMatchObject({ ok: true });
+  });
+
   it('refuses a custom payload template with a message that says how to fix it', () => {
     const custom = JSON.stringify({ booking: 'custom' });
     expect(
@@ -306,6 +317,56 @@ describe('Cal.com booking webhooks', () => {
     expect((await deliver(flat)).status).toBeLessThan(300);
     const malformed = envelope('BOOKING_CREATED', { uid: 'bk-bad' }, '2026-10-06T14:05:00.000Z');
     expect((await deliver(malformed)).status).toBeLessThan(300);
+    // 'ignored' settlement (not 'failed') means a redelivery is a duplicate.
+    expect((await deliver(malformed)).body).toMatchObject({ duplicate: true });
+    const backwards = envelope(
+      'BOOKING_CREATED',
+      bookingPayload('bk-back', '2026-10-13T10:00:00.000Z', '2026-10-13T09:00:00.000Z'),
+      '2026-10-06T14:10:00.000Z'
+    );
+    const backwardsResponse = await deliver(backwards);
+    expect(backwardsResponse.status).toBe(200);
+    expect((await deliver(backwards)).body).toMatchObject({ duplicate: true });
     expect((await meetings(WORKSPACE)).length).toBe(before);
+  });
+
+  it('stores a booking whose fields irrelevant to the trigger are empty or null', async () => {
+    const body = envelope(
+      'BOOKING_CREATED',
+      bookingPayload('bk-sparse', '2026-10-14T09:00:00.000Z', '2026-10-14T09:30:00.000Z', {
+        rescheduleUid: '',
+        organizer: null
+      }),
+      '2026-10-06T15:00:00.000Z'
+    );
+    expect((await deliver(body)).status).toBeLessThan(300);
+    expect((await meetings(WORKSPACE)).map((row) => row.external_id)).toContain('bk-sparse');
+    const noAttendees = envelope(
+      'BOOKING_CREATED',
+      bookingPayload('bk-none', '2026-10-15T09:00:00.000Z', '2026-10-15T09:30:00.000Z', {
+        attendees: null
+      }),
+      '2026-10-06T15:05:00.000Z'
+    );
+    const response = await deliver(noAttendees);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ handled: false });
+    expect((await meetings(WORKSPACE)).map((row) => row.external_id)).not.toContain('bk-none');
+  });
+
+  it('does not let a reschedule that points at itself cancel its own row', async () => {
+    const body = envelope(
+      'BOOKING_RESCHEDULED',
+      bookingPayload('bk-self', '2026-10-16T09:00:00.000Z', '2026-10-16T09:30:00.000Z', {
+        rescheduleUid: 'bk-self'
+      }),
+      '2026-10-06T16:00:00.000Z'
+    );
+    expect((await deliver(body)).status).toBeLessThan(300);
+    expect((await meetings(WORKSPACE)).find((row) => row.external_id === 'bk-self')).toEqual({
+      external_id: 'bk-self',
+      previous_external_id: null,
+      status: 'rescheduled'
+    });
   });
 });

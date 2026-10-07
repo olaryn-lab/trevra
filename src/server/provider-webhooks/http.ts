@@ -185,6 +185,7 @@ async function handleDelivery(db: Db, req: Request, res: Response, now: Date): P
     // as ignored so the provider stops redelivering it. Anything else is ours
     // to fix, so it fails and the provider retries.
     if (error instanceof ProviderWebhookError && error.status < 500) {
+      logDeliveryFault('event ignored', endpoint, error);
       await finishWebhookEvent(
         db,
         endpoint,

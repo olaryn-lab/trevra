@@ -64,5 +64,6 @@ export class ProviderWebhookError extends Error {
     public readonly status = 400
   ) {
     super(message);
+    this.name = 'ProviderWebhookError';
   }
 }
