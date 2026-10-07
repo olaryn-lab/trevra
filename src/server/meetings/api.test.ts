@@ -192,6 +192,32 @@ describe('meetings setup API', () => {
     expect((await owner.agent.get('/api/setup/webhooks').expect(200)).body.endpoints).toEqual([]);
   });
 
+  it('refuses to reuse a Stripe endpoint id for Cal.com without touching the Stripe endpoint', async () => {
+    const { owner } = await ownerAndMember();
+    const endpointId = await draftCalcom(owner.agent);
+    await owner.agent
+      .post('/api/setup/webhooks')
+      .send({
+        provider: 'stripe',
+        endpointId,
+        signingSecret: `whsec_${randomBytes(24).toString('hex')}`
+      })
+      .expect(201);
+    const before = (await owner.agent.get('/api/setup/webhooks').expect(200)).body.endpoints;
+    expect(before).toEqual([expect.objectContaining({ id: endpointId, provider: 'stripe' })]);
+
+    const refused = await owner.agent
+      .post('/api/setup/webhooks')
+      .send({ provider: 'calcom', endpointId })
+      .expect(409);
+    expect(refused.body.error).toMatch(/already in use/);
+    expect(refused.body.error).not.toMatch(/shown once/);
+    expect(refused.body).not.toHaveProperty('secret');
+    expect((await owner.agent.get('/api/setup/webhooks').expect(200)).body.endpoints).toEqual(
+      before
+    );
+  });
+
   it('refuses a short pasted Cal.com secret and keeps a strong one unrevealed', async () => {
     const { owner } = await ownerAndMember();
     const endpointId = await draftCalcom(owner.agent);

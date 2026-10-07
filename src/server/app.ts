@@ -1512,14 +1512,25 @@ export function createApp(db: Db) {
         let generated: string | null = null;
         if (input.signingSecret === undefined) {
           // The registered verifier decides who issues the secret; a client cannot assert it.
-          if (getProviderVerifier(input.provider)?.secretSource !== 'trevra')
+          const verifier = getProviderVerifier(input.provider);
+          if (!verifier)
+            throw new ProviderWebhookError(
+              `${input.provider} webhooks are not available on this deployment.`,
+              400
+            );
+          if (verifier.secretSource !== 'trevra')
             throw new ProviderWebhookError(
               'A signing secret is required: paste the one the provider shows for this endpoint.',
               400
             );
-          // A generated secret is shown once; a repeat must not mint a second one.
+          // A generated secret is shown once; a repeat must not mint a second one. An id
+          // held by another provider falls through to the store's "already in use" 409.
           const existing = await listProviderWebhookEndpoints(db, workspaceId);
-          if (existing.some((endpoint) => endpoint.id === input.endpointId))
+          if (
+            existing.some(
+              (endpoint) => endpoint.id === input.endpointId && endpoint.provider === input.provider
+            )
+          )
             throw new ProviderWebhookError(
               'This endpoint is already connected and its signing secret was shown once. To get a new secret, remove the endpoint and connect again.',
               409

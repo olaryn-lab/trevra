@@ -159,7 +159,7 @@ export function MeetingsSetup({ setToast }: { setToast: (message: string) => voi
       ) : setup ? (
         <p className="li-hint">
           {setup.calcomConnected
-            ? 'Connected. Bookings made on Cal.com arrive here.'
+            ? 'Cal.com webhook is set up.'
             : 'Not connected. The workspace owner can connect Cal.com here.'}
         </p>
       ) : null}
@@ -237,6 +237,9 @@ function CalcomWebhooks({ setToast }: { setToast: (message: string) => void }) {
         );
       }
     } catch (error) {
+      // The create may have committed with its response lost: reload so an orphan
+      // endpoint shows up and can be removed. reload() clears the problem first.
+      reload();
       setProblem(errorMessage(error, 'Unable to create the Cal.com webhook.'));
     } finally {
       setBusy('');
