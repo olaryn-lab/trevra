@@ -482,6 +482,11 @@ import {
 } from './research/types.js';
 import { registerLeadCaptureIntake } from './lead-capture/http.js';
 import {
+  registerProviderVerifier,
+  registerProviderWebhookRoutes
+} from './provider-webhooks/index.js';
+import { stripeVerifier } from './provider-webhooks/stripe.js';
+import {
   createCaptureSource,
   getWorkspaceCaptureSource,
   listCaptureSources,
@@ -880,6 +885,12 @@ export function createApp(db: Db) {
   // Register it before the global JSON parser; the route derives the workspace
   // from its encrypted Capture Source credential, never from request-body data.
   registerLeadCaptureIntake(app, db);
+
+  // Observed provider webhooks (Stripe now; Cal.com in Phase B) verify exact
+  // raw bytes too, so they register before the JSON parser. The URL's endpoint
+  // id decides the workspace; nothing in the payload can.
+  registerProviderVerifier(stripeVerifier);
+  registerProviderWebhookRoutes(app, db);
 
   app.use(express.json({ limit: '6mb' }));
   app.use(enforceAllowedOrigin);
