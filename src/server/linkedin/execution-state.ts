@@ -3,7 +3,7 @@ import { evaluateLinkedInSafety, type LinkedInCheckName } from './guard.js';
 import type { PacedKind } from './limits.js';
 import { EXECUTABLE_KINDS, KINDS_REQUIRING_BODY } from './local-worker.js';
 import { seatRestingUntil } from './seat-events.js';
-import { getSeat, OWNER_SEAT_KEY } from './seats.js';
+import { getSeat, isHumanSendKind, OWNER_SEAT_KEY } from './seats.js';
 
 /* ---------------------------------------------------------------------------
  * WHY NOTHING IS HAPPENING, ANSWERED BY THE THING THAT KNOWS.
@@ -98,6 +98,11 @@ export interface LinkedInCampaignExecution {
   restingUntil: string | null;
   /** Null when nothing is claimable, or when the gate itself could not be read. */
   gate: LinkedInCampaignExecutionGate | null;
+  /**
+   * The next due row is an invite or message on a human-send seat: nothing is
+   * broken, the founder sends it by hand from Today.
+   */
+  humanSendNext: boolean;
 }
 
 interface NextDueRow {
@@ -213,7 +218,8 @@ export async function campaignExecutionState(
     // value -- is what says the seat is resting.
     restingUntil:
       restingUntil && restingUntil.getTime() > now.getTime() ? restingUntil.toISOString() : null,
-    gate: dueRow ? await gateVerdict(db, workspaceId, dueRow, now) : null
+    gate: dueRow ? await gateVerdict(db, workspaceId, dueRow, now) : null,
+    humanSendNext: seat?.sendMode === 'human' && Boolean(dueRow) && isHumanSendKind(dueRow!.kind)
   };
 }
 

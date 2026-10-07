@@ -425,6 +425,24 @@ describe('LinkedIn manager HTTP surface', () => {
     ).toHaveLength(1);
   });
 
+  it('round-trips human-send mode through the manager seat PATCH API', async () => {
+    const updated = (
+      await as(tokenA)
+        .patch('/api/linkedin/manager/seats/owner')
+        .send({ sendMode: 'human' })
+        .expect(200)
+    ).body.seat as { sendMode: string };
+    expect(updated.sendMode).toBe('human');
+    await as(tokenA)
+      .patch('/api/linkedin/manager/seats/owner')
+      .send({ sendMode: 'robot' })
+      .expect(400);
+    const listed = (await as(tokenB).get('/api/linkedin/manager/seats').expect(200)).body.seats as {
+      sendMode: string;
+    }[];
+    expect(listed.map((seat) => seat.sendMode)).toEqual(['automated']);
+  });
+
   it('round-trips the account warm-up override through the manager seat PATCH API', async () => {
     const updated = (
       await as(tokenA)

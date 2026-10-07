@@ -63,6 +63,27 @@ export type SeatPosture = 'warmup' | 'steady' | 'paused' | 'cooldown';
  */
 export const OWNER_SEAT_KEY = 'owner';
 
+/**
+ * The kinds a founder in human-send mode sends by hand: everything that puts
+ * words or an invitation in front of a person. Passive kinds (views, follows,
+ * likes, endorsements, company/event/group invitations) stay automated.
+ */
+export const HUMAN_SEND_KINDS = [
+  'invite',
+  'dm',
+  'reply',
+  'inmail',
+  'group_message',
+  'event_message'
+] as const;
+export type HumanSendKind = (typeof HUMAN_SEND_KINDS)[number];
+export function isHumanSendKind(kind: string): kind is HumanSendKind {
+  return (HUMAN_SEND_KINDS as readonly string[]).includes(kind);
+}
+
+/** `automated`: the browser worker sends. `human`: Today hands invites and messages to the founder. */
+export type SeatSendMode = 'automated' | 'human';
+
 export interface LinkedInSeat {
   workspaceId: string;
   seatKey: string;
@@ -136,6 +157,8 @@ export interface LinkedInSeat {
   safetyBandOverride: boolean;
   /** Explicit operator opt-out from Trevra's account-level automation warm-up. */
   warmupOverride: boolean;
+  /** Who sends this seat's invites and messages. See `HUMAN_SEND_KINDS`. */
+  sendMode: SeatSendMode;
   capabilities: {
     inmail: 'unknown' | 'available' | 'unavailable';
     premium: boolean;
@@ -262,6 +285,8 @@ export interface SeatPatch {
   safetyBandOverride?: boolean;
   /** Explicitly skip the account-level automation warm-up. Absent means unchanged. */
   warmupOverride?: boolean;
+  /** Absent means unchanged. */
+  sendMode?: SeatSendMode;
   /**
    * This account's outbound proxy, as a full `scheme://user:pass@host:port`.
    *
@@ -308,6 +333,7 @@ interface SeatRow {
   proxy_has_password: boolean;
   identity_confirmed_at: string | null;
   linked_seat_count: number | null;
+  send_mode: string | null;
 }
 
 /**
@@ -347,6 +373,7 @@ const SEAT_COLUMNS = `
   daily_follow_limit,
   safety_band_override,
   warmup_override,
+  send_mode,
   capabilities_json,
   inmail_monthly_budget,
   inmail_paid_credit_cap,
@@ -435,6 +462,7 @@ function toSeat(row: SeatRow): LinkedInSeat {
     // override, it is a seat nobody has opted in for.
     safetyBandOverride: row.safety_band_override === true,
     warmupOverride: row.warmup_override === true,
+    sendMode: row.send_mode === 'human' ? 'human' : 'automated',
     capabilities: parsedCapabilities(row.capabilities_json),
     inmailMonthlyBudget:
       row.inmail_monthly_budget === null ? null : Number(row.inmail_monthly_budget),
@@ -877,6 +905,7 @@ export async function upsertSeat(
   // been opted in is false. There is no path that turns this on by inference.
   const safetyBandOverride = patch.safetyBandOverride ?? existing?.safetyBandOverride ?? false;
   const warmupOverride = patch.warmupOverride ?? existing?.warmupOverride ?? false;
+  const sendMode: SeatSendMode = patch.sendMode ?? existing?.sendMode ?? 'automated';
   const timestamp = now.toISOString();
 
   await db
@@ -886,8 +915,8 @@ export async function upsertSeat(
       workspace_id, seat_key, owner_user_id, label, profile_url, account_opened_on, connections_count,
       timezone, activated_at, detected_at, session_valid_at, posture, paused_reason,
       working_days, work_start_minute, work_end_minute, daily_invite_limit,
-      daily_message_limit, daily_profile_view_limit, daily_follow_limit, safety_band_override, warmup_override, created_at, updated_at
-    ) VALUES (?,?,?,?, ?,?::date,?::int,?,?::timestamptz,?::timestamptz,?::timestamptz,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?)
+      daily_message_limit, daily_profile_view_limit, daily_follow_limit, safety_band_override, warmup_override, send_mode, created_at, updated_at
+    ) VALUES (?,?,?,?, ?,?::date,?::int,?,?::timestamptz,?::timestamptz,?::timestamptz,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT (workspace_id, seat_key) DO UPDATE SET
       owner_user_id = COALESCE(excluded.owner_user_id, linkedin_seats.owner_user_id),
       label = excluded.label,
@@ -911,6 +940,7 @@ export async function upsertSeat(
       daily_follow_limit = excluded.daily_follow_limit,
       safety_band_override = excluded.safety_band_override,
       warmup_override = excluded.warmup_override,
+      send_mode = excluded.send_mode,
       updated_at = excluded.updated_at
     RETURNING workspace_id
   `
@@ -940,6 +970,7 @@ export async function upsertSeat(
       dailyFollowLimit,
       safetyBandOverride,
       warmupOverride,
+      sendMode,
       timestamp,
       timestamp
     );

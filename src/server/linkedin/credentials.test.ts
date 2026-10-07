@@ -882,6 +882,38 @@ describe('detectLinkedInSeat on an account change', () => {
   const PREVIOUS_PROFILE = 'https://www.linkedin.com/in/pankaj/';
   const NEW_PROFILE = 'https://www.linkedin.com/in/daryna-radiichuk/';
 
+  it('keeps human-send mode across an account change', async () => {
+    await upsertSeat(
+      db,
+      WORKSPACE_ID,
+      {
+        label: 'Pankaj (founder)',
+        timezone: 'Europe/Zurich',
+        profileUrl: PREVIOUS_PROFILE,
+        sendMode: 'human'
+      },
+      NOW
+    );
+    const { driver } = fakeDriver({ loggedIn: true });
+    driver.readSeat = async () => ({
+      ok: true,
+      profileUrl: NEW_PROFILE,
+      name: 'Daryna Radiichuk',
+      connectionsCount: 512,
+      degraded: []
+    });
+    const result = await detectLinkedInSeat(db, config, {
+      workspaceId: WORKSPACE_ID,
+      timezone: 'Europe/Zurich',
+      now: new Date(NOW.getTime() + 86_400_000),
+      driver,
+      page,
+      log: () => {}
+    });
+    expect(result.seat?.profileUrl).toBe(NEW_PROFILE);
+    expect(result.seat?.sendMode).toBe('human');
+  });
+
   it('wipes the stored inbox and restarts the ramp when a different LinkedIn account signs in', async () => {
     await upsertSeat(
       db,

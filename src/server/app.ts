@@ -9573,6 +9573,7 @@ const linkedinSeatSchema = z
     safetyBandOverride: z.boolean().optional(),
     /** Explicitly skip Trevra's account-level automation warm-up for an established account. */
     warmupOverride: z.boolean().optional(),
+    sendMode: z.enum(['automated', 'human']).optional(),
     /**
      * This account's own outbound proxy, `scheme://user:pass@host:port`.
      *

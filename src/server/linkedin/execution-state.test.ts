@@ -88,6 +88,14 @@ async function insertAction(input: {
 }
 
 describe('campaign execution state', () => {
+  it('says the next due row waits for a person when the seat sends invites and messages by hand', async () => {
+    await insertAction({ id: 'lact_exec_human', kind: 'invite', handle: 'human-next' });
+    expect((await campaignExecutionState(db, WORKSPACE, CAMPAIGN, NOW)).humanSendNext).toBe(false);
+
+    await upsertSeat(db, WORKSPACE, { sendMode: 'human' }, NOW, SEAT);
+    expect((await campaignExecutionState(db, WORKSPACE, CAMPAIGN, NOW)).humanSendNext).toBe(true);
+  });
+
   it('counts only the rows a browser could actually claim', async () => {
     for (const handle of ['a', 'b', 'c'])
       await insertAction({ id: `lact_due_${handle}`, kind: 'profile_view', handle });

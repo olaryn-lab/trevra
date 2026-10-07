@@ -53,6 +53,7 @@ function execution(patch: Partial<LinkedInCampaignExecution> = {}): LinkedInCamp
       detail:
         "Previous business day carried 0 profile_view(s), so today's ceiling is 1 (+35%); 1 used so far."
     },
+    humanSendNext: false,
     ...patch
   };
 }

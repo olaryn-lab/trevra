@@ -2902,6 +2902,41 @@ describe.skipIf(!databaseUrl)('multi-seat draining', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('NEVER CLAIMS AN INVITE OR MESSAGE FROM A HUMAN-SEND SEAT, but still claims its profile views', async () => {
+    await upsertSeat(db, WORKSPACE_ID, { sendMode: 'human' }, LONG_AGO, 'sales');
+    await db
+      .prepare(
+        `INSERT INTO linkedin_actions (id,workspace_id,seat_key,kind,target_ref,status,planned_for,source,body,created_at)
+         VALUES ('lact_human_dm',?,'sales','dm','https://www.linkedin.com/in/human-dm/','planned',?,'manual','Hello by hand',?),
+                ('lact_human_invite',?,'sales','invite','https://www.linkedin.com/in/human-invite/','planned',?,'export',NULL,?)`
+      )
+      .run(
+        WORKSPACE_ID,
+        NOW.toISOString(),
+        NOW.toISOString(),
+        WORKSPACE_ID,
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    await plan('sales', 'lact_human_view', 'https://www.linkedin.com/in/human-view/');
+
+    const store = postgresLocalWorkerStore(db, WORKSPACE_ID, 'sales');
+    const batchId = await store.openBatch(NOW);
+    expect((await store.claimNextDueAction(batchId, NOW))?.id).toBe('lact_human_view');
+    expect(await store.claimNextDueAction(batchId, NOW)).toBeNull();
+    // A manual DM would normally wake the browser outside working hours.
+    expect(await dueManualWork(db, WORKSPACE_ID, 'sales', NOW)).toBe(false);
+    // Nothing left that a browser may take, so discovery does not list the seat.
+    expect(
+      (await seatsWithDueActions(db, NOW)).filter((seat) => seat.workspaceId === WORKSPACE_ID)
+    ).toEqual([]);
+
+    // Switching back hands the same rows straight back to the worker.
+    await upsertSeat(db, WORKSPACE_ID, { sendMode: 'automated' }, NOW, 'sales');
+    const claimed = await store.claimNextDueAction(batchId, NOW);
+    expect(['lact_human_dm', 'lact_human_invite']).toContain(claimed?.id);
+  });
+
   it("claims only its own seat's rows, never the neighbouring account's", async () => {
     await plan('owner', 'lact_owner_1', 'https://www.linkedin.com/in/owner-target/');
     await plan('sales', 'lact_sales_1', 'https://www.linkedin.com/in/sales-target/');

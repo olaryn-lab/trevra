@@ -58,6 +58,7 @@ import { campaignSnapshotSteps } from './managed-campaigns.js';
 import { campaignPriorityWeight } from './runner.js';
 import { delayMilliseconds } from './workflows.js';
 import {
+  HUMAN_SEND_KINDS,
   OWNER_SEAT_KEY,
   assertTimezone,
   deleteSeat,
@@ -761,6 +762,7 @@ export async function dueManualWork(
       SELECT 1 AS due FROM linkedin_actions
       WHERE workspace_id = ? AND seat_key = ? AND status = 'planned' AND planned_for <= ?
         AND (source = 'manual' OR (kind = 'reply' AND reply_to_inbound = true))
+        AND NOT ${humanSendHandoffPredicate('linkedin_actions')}
       LIMIT 1
     `
       )
@@ -1872,6 +1874,19 @@ export const KINDS_REQUIRING_BODY: readonly ExecutableKind[] = [
   'event_message'
 ];
 const BODY_REQUIRED_LIST = KINDS_REQUIRING_BODY.map((kind) => `'${kind}'`).join(', ');
+const HUMAN_SEND_KIND_LIST = HUMAN_SEND_KINDS.map((kind) => `'${kind}'`).join(', ');
+/**
+ * A row the founder sends by hand: an invite or message on a seat in
+ * human-send mode. No browser may claim it, wake for it, or list its seat as
+ * having work -- `handoff.ts` puts it in Today instead. `table` is the alias
+ * (or bare table name) the surrounding statement uses for linkedin_actions.
+ */
+function humanSendHandoffPredicate(table: string): string {
+  return `(${table}.kind IN (${HUMAN_SEND_KIND_LIST}) AND EXISTS (
+    SELECT 1 FROM linkedin_seats hs
+    WHERE hs.workspace_id = ${table}.workspace_id AND hs.seat_key = ${table}.seat_key
+      AND hs.send_mode = 'human'))`;
+}
 
 const UTC_ISO_FORMAT = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
 
@@ -2140,6 +2155,8 @@ export function postgresLocalWorkerStore(
             AND planned_for IS NOT NULL AND planned_for <= ?
             AND kind IN (${EXECUTABLE_KIND_LIST})
             AND target_ref IS NOT NULL
+            -- Human-send mode: the founder sends these by hand from Today.
+            AND NOT ${humanSendHandoffPredicate('linkedin_actions')}
             -- A message with no approved body is not this worker's to send.
             -- Left planned rather than skipped: the export path can still
             -- deliver it, and "executes approved bytes only" (plan 4.6) means
@@ -2691,6 +2708,7 @@ export async function dueSeatsForWorker(
           AND a.status='planned' AND a.claimed_at IS NULL
           AND a.planned_for IS NOT NULL AND a.planned_for <= ?
           AND a.kind IN (${EXECUTABLE_KIND_LIST})
+          AND NOT ${humanSendHandoffPredicate('a')}
         ORDER BY a.planned_for ASC
         LIMIT 1
       ) due
@@ -2741,6 +2759,7 @@ export async function dueSeatsForWorker(
         WHERE a.status='planned' AND a.claimed_at IS NULL
           AND a.planned_for IS NOT NULL AND a.planned_for <= ?
           AND a.kind IN (${EXECUTABLE_KIND_LIST})
+          AND NOT ${humanSendHandoffPredicate('a')}
           AND (?::text IS NULL OR a.seat_key = ?::text)
           AND ${shardPredicate("a.workspace_id || '/' || a.seat_key")}
         ORDER BY a.planned_for ASC
@@ -5735,7 +5754,10 @@ export async function detectLinkedInSeat(
       detectedAt: now.toISOString(),
       // A successful `readSeat` IS the confirmation: we just loaded this
       // member's own signed-in profile page.
-      sessionValidAt: now.toISOString()
+      sessionValidAt: now.toISOString(),
+      // How the founder chose to work survives an account change, like the
+      // label: it describes this workspace's seat, not the LinkedIn account.
+      ...(existing ? { sendMode: existing.sendMode } : {})
     },
     now,
     seatKey
