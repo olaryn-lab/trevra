@@ -18,6 +18,11 @@ import type { Db } from './db.js';
 import { DEMO_USER_ID, DEMO_WORKSPACE_ID, id, resetDemoData } from './db.js';
 import { listConnections } from './serializers.js';
 import {
+  applyUnsubscribeToken,
+  findUnsubscribeDelivery,
+  renderUnsubscribePage
+} from './email/unsubscribe.js';
+import {
   GitHubRepoError,
   MAX_WATCHED_REPOSITORIES,
   listWatchedRepositories,
@@ -687,6 +692,61 @@ export function createApp(db: Db) {
     }
     res.redirect(302, target);
   });
+
+  // RFC 8058 one-click unsubscribe. GET only renders a confirmation page: mail
+  // security scanners fetch every link in a message, and a GET that
+  // unsubscribed would let a scanner opt the recipient out. Only POST -- the
+  // page's button or a mail client's one-click POST -- suppresses.
+  const unsubscribeLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 120,
+    standardHeaders: true,
+    legacyHeaders: false
+  });
+  const unsubscribePageHeaders = (res: Response) => {
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.type('html');
+  };
+  app.get('/u/:token', unsubscribeLimiter, async (req, res) => {
+    unsubscribePageHeaders(res);
+    const token = String(req.params.token);
+    try {
+      const delivery = await findUnsubscribeDelivery(db, token);
+      res
+        .status(delivery ? 200 : 404)
+        .send(renderUnsubscribePage(delivery ? 'confirm' : 'invalid', token));
+    } catch (error) {
+      console.error(
+        'Unsubscribe page failed',
+        error instanceof Error ? error.message : String(error)
+      );
+      res.status(500).send(renderUnsubscribePage('error'));
+    }
+  });
+  app.post(
+    '/u/:token',
+    unsubscribeLimiter,
+    express.raw({ type: () => true, limit: '8kb' }),
+    async (req, res) => {
+      unsubscribePageHeaders(res);
+      try {
+        const result = await applyUnsubscribeToken(db, String(req.params.token), {
+          source: 'email_one_click_unsubscribe'
+        });
+        res
+          .status(result.applied ? 200 : 404)
+          .send(renderUnsubscribePage(result.applied ? 'done' : 'invalid'));
+      } catch (error) {
+        console.error(
+          'One-click unsubscribe failed',
+          error instanceof Error ? error.message : String(error)
+        );
+        res.status(500).send(renderUnsubscribePage('error'));
+      }
+    }
+  );
 
   app.post(
     '/api/webhooks/nango',
