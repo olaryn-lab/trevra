@@ -20,18 +20,24 @@ import {
   type PacedKind
 } from './limits.js';
 import {
+  BOOKING_LINK_MISSING_MESSAGE,
+  BOOKING_LINK_PREVIEW_PLACEHOLDER,
+  BookingLinkMissingError,
   delayMilliseconds,
   diagnoseWorkflow,
   getWorkflow,
   parseWorkflowSteps,
   renderWorkflowTemplate,
+  stepUsesBookingLink,
   workflowMergeVariables,
   workflowStepsSchema,
+  workflowUsesBookingLink,
   type WorkflowDiagnostic,
   type WorkflowMergeLead,
   type WorkflowStep,
   type WorkflowVariableCoverage
 } from './workflows.js';
+import { getBookingUrl } from '../meetings/booking-link.js';
 
 /**
  * AN ALIAS, NOT A SECOND UNION.
@@ -1538,6 +1544,11 @@ export async function startManagedCampaign(
     throw new Error(`A ${campaign.status} campaign cannot be started again.`);
   const workflow = await getWorkflow(db, workspaceId, campaign.workflowId);
   if (!workflow) throw new Error('Campaign workflow no longer exists.');
+  // Refuse before anything moves. The runner re-checks per member, because the
+  // link can be removed after this point.
+  if (workflowUsesBookingLink(workflow.steps) && !(await getBookingUrl(db, workspaceId))) {
+    throw new BookingLinkMissingError();
+  }
   const timestamp = now.toISOString();
   // Resume is lossless. Workflow upgrades are explicit through
   // applyLatestWorkflowToPendingMembers; a pause/resume must never mutate the
@@ -2316,6 +2327,15 @@ export async function previewManagedCampaignLaunch(
     workflowMergeVariables(workflow.steps)
   );
   const diagnostics = diagnoseWorkflow(workflow.steps, variableCoverage);
+  const bookingLink = await getBookingUrl(db, input.workspaceId);
+  if (!bookingLink && workflowUsesBookingLink(workflow.steps)) {
+    diagnostics.push({
+      code: 'missing_booking_link',
+      severity: 'warning',
+      message: BOOKING_LINK_MISSING_MESSAGE,
+      stepIds: workflow.steps.filter(stepUsesBookingLink).map((step) => step.id)
+    });
+  }
   const sampleRows = await db
     .prepare(
       `SELECT c.id,c.first_name,c.last_name,c.company,c.email,c.phone,c.country,c.custom_fields_json
@@ -2340,6 +2360,7 @@ export async function previewManagedCampaignLaunch(
       email: row.email,
       phone: row.phone,
       country: row.country,
+      bookingLink: bookingLink ?? BOOKING_LINK_PREVIEW_PLACEHOLDER,
       customFields: parseJsonObject(row.custom_fields_json) as Record<
         string,
         string | number | boolean | null | undefined

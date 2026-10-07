@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  BOOKING_LINK_MISSING_MESSAGE,
+  BookingLinkMissingError,
   MESSAGE_VARIANT_MAX,
   chooseMessageVariant,
   delayMilliseconds,
   diagnoseWorkflow,
   parseWorkflowSteps,
   renderWorkflowTemplate,
+  stepUsesBookingLink,
   unsupportedVariables,
-  workflowStepsSchema
+  workflowStepsSchema,
+  workflowUsesBookingLink
 } from './workflows.js';
 describe('LinkedIn manager workflows', () => {
   it('accepts the supported actions and hour/day delays', () => {
@@ -543,5 +547,44 @@ describe('LinkedIn manager workflows', () => {
     // Diagnostics are advisory: the already-parsed input is unchanged.
     expect(diagnosticSteps).toHaveLength(5);
     expect(diagnosticSteps[1]?.action).toBe('message');
+  });
+});
+
+describe('booking link merge field', () => {
+  const lead = { firstName: 'Maya', lastName: 'Smith', company: 'Acme' };
+
+  it('renders the workspace booking link', () => {
+    expect(
+      renderWorkflowTemplate('Pick a time: {{booking_link}}', {
+        ...lead,
+        bookingLink: 'https://cal.com/founder/intro'
+      })
+    ).toBe('Pick a time: https://cal.com/founder/intro');
+  });
+
+  it('refuses to render it blank', () => {
+    expect(() =>
+      renderWorkflowTemplate('Pick a time: {{booking_link}}', { ...lead, bookingLink: '  ' })
+    ).toThrow(BookingLinkMissingError);
+    expect(() => renderWorkflowTemplate('Pick a time: {{booking_link}}', lead)).toThrow(
+      BOOKING_LINK_MISSING_MESSAGE
+    );
+    // A template that does not use it still renders without a link.
+    expect(renderWorkflowTemplate('Hi {{first_name}}', lead)).toBe('Hi Maya');
+  });
+
+  it('is accepted at save time and reports which steps use it', () => {
+    expect(unsupportedVariables('Pick a time: {{booking_link}}')).toEqual([]);
+    const steps = workflowStepsSchema.parse([
+      { id: 'view', action: 'profile_view', delayBefore: { amount: 0, unit: 'hours' }, config: {} },
+      {
+        id: 'ask',
+        action: 'manual_message',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: { suggestedTemplate: 'Pick a time: {{ booking_link }}' }
+      }
+    ]);
+    expect(workflowUsesBookingLink(steps)).toBe(true);
+    expect(steps.filter(stepUsesBookingLink).map((step) => step.id)).toEqual(['ask']);
   });
 });

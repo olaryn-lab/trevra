@@ -26,7 +26,8 @@ import {
 } from './runner.js';
 import { postgresLocalWorkerStore } from './local-worker.js';
 import { upsertSeat } from './seats.js';
-import { getWorkflow, saveWorkflow } from './workflows.js';
+import { BOOKING_LINK_MISSING_MESSAGE, getWorkflow, saveWorkflow } from './workflows.js';
+import { setBookingUrl } from '../meetings/booking-link.js';
 
 let db: Db;
 const WORKSPACE = 'ws_linkedin_runner_test';
@@ -1721,6 +1722,91 @@ describe('managed campaign runner', () => {
       postUrl: 'https://www.linkedin.com/posts/maya-comment-example/',
       suggestedBody: 'Thoughtful note for Maya'
     });
+  });
+
+  it('merges the workspace booking link into a manual task', async () => {
+    await setBookingUrl(db, WORKSPACE, 'https://cal.com/founder/intro', NOW);
+    try {
+      const listId = await seededList('Booking link', [
+        { first: 'Maya', last: 'Book', company: 'Acme', slug: 'maya-book' }
+      ]);
+      const workflowId = (
+        await saveWorkflow(
+          db,
+          {
+            workspaceId: WORKSPACE,
+            name: 'Booking link task',
+            steps: [
+              {
+                id: 'invite-call',
+                action: 'manual_message',
+                delayBefore: { amount: 0, unit: 'hours' },
+                config: { suggestedTemplate: 'Hi {{first_name}}, grab a slot: {{booking_link}}' }
+              }
+            ]
+          },
+          NOW
+        )
+      ).id;
+      const campaignId = await runningCampaign(listId, workflowId, 'Booking link');
+      expect((await runManagedCampaigns(db, WORKSPACE, NOW)).manualTasksCreated).toBe(1);
+      const task = (await listManualTasks(db, WORKSPACE)).find(
+        (row) => row.campaignId === campaignId
+      );
+      expect(task?.suggestedBody).toBe('Hi Maya, grab a slot: https://cal.com/founder/intro');
+    } finally {
+      await setBookingUrl(db, WORKSPACE, null, NOW);
+    }
+  });
+
+  it('refuses to start, and blocks instead of sending blank, when the booking link is missing', async () => {
+    await setBookingUrl(db, WORKSPACE, null, NOW);
+    const listId = await seededList('Booking link missing', [
+      { first: 'Lea', last: 'Book', company: 'Acme', slug: 'lea-book' }
+    ]);
+    const workflowId = (
+      await saveWorkflow(
+        db,
+        {
+          workspaceId: WORKSPACE,
+          name: 'Booking link missing',
+          steps: [
+            {
+              id: 'invite-call',
+              action: 'manual_message',
+              delayBefore: { amount: 0, unit: 'hours' },
+              config: { suggestedTemplate: 'Hi {{first_name}}, grab a slot: {{booking_link}}' }
+            }
+          ]
+        },
+        NOW
+      )
+    ).id;
+    const made = await createManagedCampaign(
+      db,
+      { workspaceId: WORKSPACE, name: 'Booking link missing', leadListId: listId, workflowId },
+      NOW
+    );
+    await expect(startManagedCampaign(db, WORKSPACE, made.campaign.id, NOW)).rejects.toThrow(
+      BOOKING_LINK_MISSING_MESSAGE
+    );
+    expect(await campaignStatus(made.campaign.id)).not.toBe('running');
+
+    await setBookingUrl(db, WORKSPACE, 'https://cal.com/founder/intro', NOW);
+    await startManagedCampaign(db, WORKSPACE, made.campaign.id, NOW);
+    // Removed after the campaign started: the runner must hold, not send blank.
+    await setBookingUrl(db, WORKSPACE, null, NOW);
+
+    const tick = await runManagedCampaigns(db, WORKSPACE, NOW);
+    expect(tick.manualTasksCreated).toBe(0);
+    expect(tick.membersBlocked).toBe(1);
+    const blocked = await db
+      .prepare(
+        `SELECT status,branch_state_json->'blocked:invite-call'->>'reason' AS reason
+           FROM linkedin_campaign_members WHERE workspace_id=? AND campaign_id=?`
+      )
+      .all<{ status: string; reason: string | null }>(WORKSPACE, made.campaign.id);
+    expect(blocked).toEqual([{ status: 'waiting', reason: BOOKING_LINK_MISSING_MESSAGE }]);
   });
 
   it("applies the next step's delay when a manual task is completed", async () => {

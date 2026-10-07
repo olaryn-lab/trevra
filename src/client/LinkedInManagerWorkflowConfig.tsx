@@ -61,7 +61,8 @@ const MANAGER_VARIABLES = [
   'company',
   'email',
   'phone',
-  'country'
+  'country',
+  'booking_link'
 ] as const;
 type ManagerVariable = (typeof MANAGER_VARIABLES)[number];
 
@@ -157,7 +158,8 @@ const SAMPLE_LEAD: Record<ManagerVariable, string> = {
   company: 'Analytical Engines',
   email: 'ada@analyticalengines.example',
   phone: '+44 20 7946 0958',
-  country: 'United Kingdom'
+  country: 'United Kingdom',
+  booking_link: 'https://cal.com/you/intro'
 };
 
 const MERGE_TOKEN = /\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)\s*\}\}/g;

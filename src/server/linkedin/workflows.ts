@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { id, type Db } from '../db.js';
 import { actionKindSupportsBranch } from './branching.js';
 import type { LinkedInActionKind } from './actions.js';
+import { LinkedInApiError } from './errors.js';
 
 /**
  * The merge fields a managed-workflow template may use.
@@ -27,7 +28,10 @@ export const MANAGER_VARIABLES = [
   'company',
   'email',
   'phone',
-  'country'
+  'country',
+  // Workspace-level, not a contact column: `workspace_settings.booking_url`.
+  // Rendering it blank throws (`BookingLinkMissingError`) instead of sending a gap.
+  'booking_link'
 ] as const;
 export type ManagerVariable = (typeof MANAGER_VARIABLES)[number];
 
@@ -622,7 +626,8 @@ export interface WorkflowDiagnostic {
     | 'repeated_action_bottleneck'
     | 'missing_reply_monitor'
     | 'missing_invite_cleanup'
-    | 'missing_variable_coverage';
+    | 'missing_variable_coverage'
+    | 'missing_booking_link';
   severity: 'warning' | 'info';
   message: string;
   stepIds: string[];
@@ -793,6 +798,32 @@ export function unsupportedVariables(template: string): string[] {
   return [...found];
 }
 
+/** What a refused start, a blocked member and the launch preview tell the operator. */
+export const BOOKING_LINK_MISSING_MESSAGE =
+  'This sequence uses {{booking_link}}, but this workspace has no booking link yet. Add one under Setup → Lead capture → Meetings, then try again.';
+
+/** What a launch preview shows in place of a link that is not set. Never sent. */
+export const BOOKING_LINK_PREVIEW_PLACEHOLDER = '[booking link not set]';
+
+/**
+ * A template asked for the booking link and the workspace has none.
+ * A LinkedInApiError, so the manager routes already answer 409 with the message.
+ */
+export class BookingLinkMissingError extends LinkedInApiError {
+  constructor() {
+    super(BOOKING_LINK_MISSING_MESSAGE, 409);
+    this.name = 'BookingLinkMissingError';
+  }
+}
+
+export function stepUsesBookingLink(step: WorkflowStep): boolean {
+  return workflowMergeVariables([step]).includes('booking_link');
+}
+
+export function workflowUsesBookingLink(steps: readonly WorkflowStep[]): boolean {
+  return steps.some(stepUsesBookingLink);
+}
+
 export function delayMilliseconds(delay: WorkflowDelay): number {
   const hours = delay.unit === 'days' ? delay.amount * 24 : delay.amount;
   return hours * 3_600_000;
@@ -812,6 +843,8 @@ export interface WorkflowMergeLead {
   email?: string | null;
   phone?: string | null;
   country?: string | null;
+  /** The workspace booking link (`workspace_settings.booking_url`), shared by every lead. */
+  bookingLink?: string | null;
   customFields?: Record<string, string | number | boolean | null | undefined>;
 }
 
@@ -835,7 +868,8 @@ export function renderWorkflowTemplate(template: string, lead: WorkflowMergeLead
     company: lead.company ?? '',
     email: lead.email ?? '',
     phone: lead.phone ?? '',
-    country: lead.country ?? ''
+    country: lead.country ?? '',
+    booking_link: lead.bookingLink?.trim() ?? ''
   };
   return template.replace(/\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)\s*\}\}/g, (whole, name: string) => {
     if (name.startsWith('custom.')) {
@@ -843,6 +877,9 @@ export function renderWorkflowTemplate(template: string, lead: WorkflowMergeLead
       return value === null || value === undefined ? '' : String(value);
     }
     const canonical = resolveManagerVariable(name);
+    // A blank booking link is the one field that must never render as a gap:
+    // "grab a slot: " with nothing after it is worse than not sending.
+    if (canonical === 'booking_link' && !values.booking_link) throw new BookingLinkMissingError();
     // Saved workflows reject unknown tokens; fail closed here too rather than sending raw {{tokens}}.
     return canonical === null ? '' : values[canonical];
   });

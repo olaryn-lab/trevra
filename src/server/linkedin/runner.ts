@@ -28,12 +28,15 @@ import { addLocalDays, localDateOf, weekdayOf, zonedToUtc } from './pacing.js';
 import { effectivePosture, getSeat, warmupWeekOf, type LinkedInSeat } from './seats.js';
 import { enqueueWithdrawals, selectWithdrawalCandidates } from './withdraw.js';
 import {
+  BOOKING_LINK_MISSING_MESSAGE,
   chooseMessageVariant,
   delayMilliseconds,
   getWorkflow,
   renderWorkflowTemplate,
+  stepUsesBookingLink,
   type WorkflowStep
 } from './workflows.js';
+import { getBookingUrl } from '../meetings/booking-link.js';
 
 /**
  * The managed-campaign RUNTIME: the tick that turns a workflow into ledger rows.
@@ -1068,6 +1071,8 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
     )
     .all<CampaignRow>(workspaceId);
   if (campaigns.length === 0) return result;
+  // Read once per tick: every member of every campaign in this workspace shares it.
+  const bookingLink = await getBookingUrl(db, workspaceId);
 
   const seats = new Map<string, LinkedInSeat | null>();
   const floors = new Map<string, Date | null>();
@@ -1532,6 +1537,7 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
           email: member.email,
           phone: member.phone,
           country: member.country,
+          bookingLink,
           customFields: parseJsonObject(member.custom_fields_json) as Record<
             string,
             string | number | boolean | null | undefined
@@ -1607,6 +1613,27 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
               updatedAt: nowIso
             });
           }
+          continue;
+        }
+
+        // The link was removed after start (start itself refuses without one).
+        // Hold the member and say why; never render the step with a blank link.
+        if (!bookingLink && stepUsesBookingLink(step)) {
+          memberWrites.set(
+            member.id,
+            stayOnStep(
+              stepIndex,
+              step.id,
+              completedStepIds,
+              new Date(now.getTime() + 3_600_000),
+              now,
+              branchStatePatch(`blocked:${step.id}`, {
+                reason: BOOKING_LINK_MISSING_MESSAGE,
+                at: nowIso
+              })
+            )
+          );
+          result.membersBlocked += 1;
           continue;
         }
 
