@@ -298,16 +298,32 @@ function replayReceipt(receipt: ReceiptRow, planHash: string): PreparedEmailOutr
   return { ...receipt.result_json, duplicate: true };
 }
 
-function errorCode(error: unknown): string {
-  return error && typeof error === 'object' && 'code' in error
-    ? String((error as { code?: unknown }).code)
-    : '';
+/** The migration-133 unique indexes a racing or retried preparation can hit. */
+const OUTREACH_RUN_INDEXES = new Set([
+  'idx_playbook_runs_email_outreach_idempotency',
+  'idx_playbook_runs_email_outreach_open_person'
+]);
+
+/** Run statuses idx_playbook_runs_email_outreach_open_person treats as open. */
+const OPEN_RUN_STATUSES = new Set(['queued', 'running', 'waiting_approval']);
+
+/** True only for a unique violation on one of the two outreach-run indexes. */
+export function isOutreachRunConflict(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const { code, constraint } = error as { code?: unknown; constraint?: unknown };
+  return (
+    String(code) === '23505' &&
+    typeof constraint === 'string' &&
+    OUTREACH_RUN_INDEXES.has(constraint)
+  );
 }
 
 /**
  * Start one approval run, or find the run that beat it to the unique indexes.
- * Returns the run id for this run key, or null when the Person already has an
- * open outreach email under another key.
+ * Returns the run id while this run key's run is still open. Otherwise it
+ * returns the skip reason: `already_contacted` when an outreach delivery to the
+ * recipient exists, else `already_pending` (an open run for the Person under
+ * another key, or this key's run already ended without a delivery).
  */
 async function startOutreachRun(
   db: Db,
@@ -321,7 +337,7 @@ async function startOutreachRun(
     subject: string;
     body: string;
   }
-): Promise<string | null> {
+): Promise<{ runId: string } | { skip: EmailOutreachSkipReason }> {
   try {
     const started = await startPlaybookRun(db, {
       workspaceId: input.workspaceId,
@@ -342,12 +358,13 @@ async function startOutreachRun(
       actorId: input.actorUserId,
       prepared: true
     });
-    return started.id;
+    return { runId: started.id };
   } catch (error) {
-    if (errorCode(error) !== '23505') throw error;
+    if (!isOutreachRunConflict(error)) throw error;
     const raced = await db
       .prepare(
-        `SELECT id,input_json->>'personId' AS person_id,input_json->>'idempotencyKey' AS idempotency_key
+        `SELECT id,status,input_json->>'personId' AS person_id,
+                input_json->>'idempotencyKey' AS idempotency_key
          FROM playbook_runs
          WHERE workspace_id=? AND playbook_key=?
            AND (input_json->>'idempotencyKey'=?
@@ -355,14 +372,25 @@ async function startOutreachRun(
          ORDER BY CASE WHEN input_json->>'idempotencyKey'=? THEN 0 ELSE 1 END, created_at ASC
          LIMIT 1`
       )
-      .get<OutreachRunRow>(
+      .get<OutreachRunRow & { status: string }>(
         input.workspaceId,
         EMAIL_OUTREACH_PLAYBOOK_ID,
         run.runKey,
         run.personId,
         run.runKey
       );
-    return raced && raced.idempotency_key === run.runKey ? raced.id : null;
+    if (raced && raced.idempotency_key === run.runKey && OPEN_RUN_STATUSES.has(raced.status)) {
+      return { runId: raced.id };
+    }
+    const delivered = await db
+      .prepare(
+        `SELECT 1 AS hit FROM gtm_deliveries
+         WHERE workspace_id=? AND channel='email' AND purpose='outreach'
+           AND LOWER(recipient)=? AND status IN ('sending','sent','uncertain')
+         LIMIT 1`
+      )
+      .get<{ hit: number }>(input.workspaceId, run.recipient);
+    return { skip: delivered ? 'already_contacted' : 'already_pending' };
   }
 }
 
@@ -478,7 +506,7 @@ export async function prepareEmailOutreach(
 
     const email = firstTouchEmail({ firstName: member.first_name, company: member.company });
     const conversationId = await ensureConversationForPerson(db, input.workspaceId, personId, now);
-    const runId = await startOutreachRun(db, input, {
+    const started = await startOutreachRun(db, input, {
       runKey,
       conversationId,
       personId,
@@ -487,10 +515,11 @@ export async function prepareEmailOutreach(
       subject: email.subject,
       body: `${email.body}\n\n${footer}`
     });
-    if (!runId) {
-      skip(member.contact_id, 'already_pending');
+    if ('skip' in started) {
+      skip(member.contact_id, started.skip);
       continue;
     }
+    const runId = started.runId;
     prepared.push({ contactId: member.contact_id, personId, runId });
     openRuns.set(personId, { id: runId, person_id: personId, idempotency_key: runKey });
     batchRecipients.add(recipient);

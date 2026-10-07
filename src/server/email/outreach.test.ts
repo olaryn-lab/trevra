@@ -25,6 +25,7 @@ import {
   registerEmailComplianceProvider,
   resetEmailComplianceProvider
 } from './compliance.js';
+import { isOutreachRunConflict } from './outreach.js';
 import type { PreparedEmailOutreachResult } from './types.js';
 
 const WORKSPACE = 'ws_email_outreach_prepare';
@@ -296,6 +297,57 @@ describe('prepareEmailOutreach', () => {
 
     expect(replay.duplicate).toBe(true);
     expect(replay.prepared).toEqual(first.prepared);
+  });
+
+  it('never lists a run that already ended as prepared when a crashed preparation is retried', async () => {
+    const first = emailResult(await prepare('email-prepare-0001'));
+    const byId = await names();
+    const maya = first.prepared.find((item) => byId.get(item.contactId) === 'Maya')!;
+    // Crash before the receipt was written: the runs exist, the receipt does not.
+    await db.prepare('DELETE FROM email_outreach_preparations WHERE workspace_id=?').run(WORKSPACE);
+    const rejected = await decidePlaybookApproval(db, {
+      workspaceId: WORKSPACE,
+      runId: maya.runId,
+      stepId: 'approve-outreach',
+      userId: USER,
+      decision: 'reject'
+    });
+    expect(rejected.status).not.toBe('waiting_approval');
+
+    const retry = emailResult(await prepare('email-prepare-0001'));
+
+    expect(retry.duplicate).toBe(false);
+    expect(retry.prepared.map((item) => item.runId)).not.toContain(maya.runId);
+    expect(await outcome(retry)).toMatchObject({
+      prepared: ['Ana'],
+      skipped: { Maya: 'already_pending' }
+    });
+    expect(await count('playbook_runs')).toBe(2);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
+  it('maps only unique violations on the two outreach-run indexes', () => {
+    expect(
+      isOutreachRunConflict({
+        code: '23505',
+        constraint: 'idx_playbook_runs_email_outreach_idempotency'
+      })
+    ).toBe(true);
+    expect(
+      isOutreachRunConflict({
+        code: '23505',
+        constraint: 'idx_playbook_runs_email_outreach_open_person'
+      })
+    ).toBe(true);
+    expect(isOutreachRunConflict({ code: '23505', constraint: 'playbook_runs_pkey' })).toBe(false);
+    expect(isOutreachRunConflict({ code: '23505' })).toBe(false);
+    expect(
+      isOutreachRunConflict({
+        code: '23503',
+        constraint: 'idx_playbook_runs_email_outreach_idempotency'
+      })
+    ).toBe(false);
+    expect(isOutreachRunConflict(null)).toBe(false);
   });
 
   it('refuses a reused key for another plan and never queues a second email per Person', async () => {
