@@ -164,4 +164,29 @@ describe('self-reported attribution', () => {
     const [listed] = await listOpportunities(db, WS);
     expect(listed).toMatchObject({ sourceUtmSource: 'linkedin', sourceHeardAbout: 'social' });
   });
+
+  it('ignores an earlier milestone submission when choosing the first touch', async () => {
+    const milestone = await submit(
+      source,
+      'attr-ms-001',
+      'signed_up',
+      'fay@attr.test',
+      { utm_source: 'x', heard_about: 'Podcast' },
+      new Date(NOW.getTime() - 3 * 86_400_000)
+    );
+    await submit(
+      source,
+      'attr-ms-002',
+      'demo_request',
+      'fay@attr.test',
+      { utm_source: 'y' },
+      new Date(NOW.getTime() - 1 * 86_400_000)
+    );
+    const opportunity = await createOpportunity(
+      db,
+      { workspaceId: WS, personId: milestone.contactId, title: 'Fay' },
+      NOW
+    );
+    expect(opportunity).toMatchObject({ sourceUtmSource: 'y', sourceHeardAbout: null });
+  });
 });
