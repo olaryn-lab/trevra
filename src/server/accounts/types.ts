@@ -76,6 +76,17 @@ export const FIRST_PARTY_SIGNAL_KINDS = [
   'customer-cancelled'
 ] as const satisfies readonly AccountSignalKind[];
 
+/**
+ * Kinds that are never cited as evidence outside the workspace: in content
+ * drafts, market pulse, demand recommendations, or from an external provider.
+ * `first-capture` is a baseline, not news; the first-party kinds are the
+ * founder's own product and billing data.
+ */
+export const UNCITABLE_SIGNAL_KINDS = ['first-capture', ...FIRST_PARTY_SIGNAL_KINDS] as const;
+
+/** `('first-capture',...)` for `kind NOT IN ${...}`. Built from the closed tuple only. */
+export const UNCITABLE_SIGNAL_KINDS_SQL = `(${UNCITABLE_SIGNAL_KINDS.map((kind) => `'${kind}'`).join(',')})`;
+
 export interface Account {
   id: string;
   workspaceId: string;

@@ -1,4 +1,5 @@
 import type { Db } from '../db.js';
+import { UNCITABLE_SIGNAL_KINDS_SQL } from '../accounts/types.js';
 import { isHighIntentInboundKind } from './opportunities.js';
 
 export type DemandQualification = 'act_now' | 'watch' | 'ignore';
@@ -154,7 +155,7 @@ async function loadAccountSignals(
       SELECT id,kind,detail,evidence_url,observed_at
       FROM account_signals
       WHERE workspace_id=? AND account_id=?
-        AND kind<>'first-capture'
+        AND kind NOT IN ${UNCITABLE_SIGNAL_KINDS_SQL}
         AND observed_at>=?::timestamptz
       ORDER BY observed_at DESC,id DESC
       LIMIT ?

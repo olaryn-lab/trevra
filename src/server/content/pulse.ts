@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Db } from '../db.js';
+import { UNCITABLE_SIGNAL_KINDS_SQL } from '../accounts/types.js';
 import { upsertContentOpportunity } from './opportunities.js';
 import type { ContentEvidenceRef, ContentOpportunity } from './types.js';
 
@@ -103,7 +104,7 @@ export async function compileAccountMarketPulse(
        FROM account_signals s
        JOIN accounts a ON a.workspace_id=s.workspace_id AND a.id=s.account_id
        WHERE s.workspace_id=? AND a.status='active'
-         AND s.kind<>'first-capture'
+         AND s.kind NOT IN ${UNCITABLE_SIGNAL_KINDS_SQL}
          AND s.evidence_url IS NOT NULL AND NULLIF(BTRIM(s.evidence_url),'') IS NOT NULL
          AND s.observed_at>=?::timestamptz AND s.observed_at<?::timestamptz${scope.clause}`
     )
@@ -121,7 +122,7 @@ export async function compileAccountMarketPulse(
        FROM account_signals s
        JOIN accounts a ON a.workspace_id=s.workspace_id AND a.id=s.account_id
        WHERE s.workspace_id=? AND a.status='active'
-         AND s.kind<>'first-capture'
+         AND s.kind NOT IN ${UNCITABLE_SIGNAL_KINDS_SQL}
          AND s.evidence_url IS NOT NULL AND NULLIF(BTRIM(s.evidence_url),'') IS NOT NULL
          AND s.observed_at>=?::timestamptz AND s.observed_at<?::timestamptz${scope.clause}
        GROUP BY s.kind

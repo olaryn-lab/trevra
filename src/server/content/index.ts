@@ -1,4 +1,5 @@
 import type { Db } from '../db.js';
+import { UNCITABLE_SIGNAL_KINDS_SQL } from '../accounts/types.js';
 import type { MarketPulseDays } from './pulse.js';
 
 const DAY_MS = 86_400_000;
@@ -97,7 +98,7 @@ export async function compileAccountMomentumIndex(
        FROM accounts a
        JOIN account_signals s
          ON s.workspace_id=a.workspace_id AND s.account_id=a.id
-        AND s.kind<>'first-capture'
+        AND s.kind NOT IN ${UNCITABLE_SIGNAL_KINDS_SQL}
         AND s.evidence_url IS NOT NULL AND NULLIF(BTRIM(s.evidence_url),'') IS NOT NULL
         AND s.observed_at>=?::timestamptz AND s.observed_at<?::timestamptz
        WHERE a.workspace_id=? AND a.status='active'${scope.clause}
@@ -113,7 +114,7 @@ export async function compileAccountMomentumIndex(
         `SELECT s.account_id,s.kind,s.detail,s.evidence_url,s.observed_at
          FROM account_signals s
          WHERE s.workspace_id=? AND s.account_id=ANY(?)
-           AND s.kind<>'first-capture'
+           AND s.kind NOT IN ${UNCITABLE_SIGNAL_KINDS_SQL}
            AND s.evidence_url IS NOT NULL AND NULLIF(BTRIM(s.evidence_url),'') IS NOT NULL
            AND s.observed_at>=?::timestamptz AND s.observed_at<?::timestamptz
          ORDER BY s.account_id,s.observed_at DESC,s.id DESC`

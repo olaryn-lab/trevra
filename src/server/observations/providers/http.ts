@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ACCOUNT_SIGNAL_KINDS } from '../../accounts/types.js';
+import { ACCOUNT_SIGNAL_KINDS, FIRST_PARTY_SIGNAL_KINDS } from '../../accounts/types.js';
 import { normalizeDomain } from '../../skills/ladder.js';
 import type { CredentialAccessor } from '../../research/types.js';
 import {
@@ -13,7 +13,12 @@ import {
 
 const REQUEST_TIMEOUT_MS = 30_000;
 const MAX_OBSERVATIONS_PER_RUN = 100;
-const KNOWN_SIGNAL_KINDS = new Set<string>(ACCOUNT_SIGNAL_KINDS);
+// First-party kinds are observed in the founder's own product and billing. An
+// external provider claiming one is confused or forging, so it is "unknown".
+const FIRST_PARTY_KINDS = new Set<string>(FIRST_PARTY_SIGNAL_KINDS);
+const KNOWN_SIGNAL_KINDS = new Set<string>(
+  ACCOUNT_SIGNAL_KINDS.filter((kind) => !FIRST_PARTY_KINDS.has(kind))
+);
 
 const providerSpecSchema = z
   .object({

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { Db } from '../db.js';
+import { UNCITABLE_SIGNAL_KINDS_SQL } from '../accounts/types.js';
 import { upsertContentOpportunity } from './opportunities.js';
 import type { ContentEvidenceRef, ContentOpportunity } from './types.js';
 
@@ -36,7 +37,7 @@ async function buildAccountOpportunity(
     .prepare(
       `SELECT id,kind,detail,evidence_url,observed_at
        FROM account_signals
-       WHERE workspace_id=? AND account_id=? AND kind<>'first-capture'
+       WHERE workspace_id=? AND account_id=? AND kind NOT IN ${UNCITABLE_SIGNAL_KINDS_SQL}
          AND evidence_url IS NOT NULL AND NULLIF(BTRIM(evidence_url),'') IS NOT NULL
          AND observed_at>=?::timestamptz
        ORDER BY observed_at DESC,id DESC LIMIT ?`
