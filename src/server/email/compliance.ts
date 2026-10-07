@@ -15,7 +15,7 @@ export interface EmailComplianceIssue {
 }
 
 export interface EmailComplianceProvider {
-  /** Footer appended to every outreach email body (legal name, postal address, opt-out line), or null if unavailable. */
+  /** Footer appended to every outreach email body (postal address, privacy policy URL, opt-out line), or null if unavailable. */
   footer(db: Db, workspaceId: string): Promise<string | null>;
   /** Plan blockers (sender_postal_address_missing, sender_privacy_url_missing, ...). */
   blockers(db: Db, workspaceId: string, listId: string | null): Promise<EmailComplianceIssue[]>;

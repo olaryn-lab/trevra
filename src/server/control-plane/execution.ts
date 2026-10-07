@@ -246,17 +246,17 @@ async function approvedMailboxConnection(
 }
 
 /**
- * Outreach email leaves only with the sender's compliance footer (legal name,
- * postal address, opt-out line) as its last text. The footer is re-read at send
- * time, not trusted from drafting: the approval flow can edit the body, and this
- * is the check that makes the footer non-removable. Runs before any delivery
- * row or provider call.
+ * Outreach email leaves only with the sender's compliance footer (postal
+ * address, privacy policy URL, opt-out line) as its last text. The footer is
+ * re-read at send time, not trusted from drafting: the approval flow can edit
+ * the body, and this is the check that makes the footer non-removable. Runs
+ * before any delivery row or provider call.
  */
 async function assertOutreachFooter(db: Db, workspaceId: string, body: string): Promise<void> {
   const footer = (await emailComplianceProvider().footer(db, workspaceId))?.trim() ?? '';
   if (!footer) {
     throw mailboxBindingError(
-      'No compliance footer (legal name, postal address, opt-out line) is available for this workspace; nothing was sent.'
+      'No compliance footer (postal address, privacy policy URL, opt-out line) is available for this workspace; nothing was sent.'
     );
   }
   const tail = body.trimEnd();
