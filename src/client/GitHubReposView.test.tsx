@@ -29,14 +29,18 @@ function state(
   return { connection: { state: connection, lastError: null }, repos, limit: 10 };
 }
 
-function render(value: GitHubReposState | null, isOwner = true): string {
+function render(
+  value: GitHubReposState | null,
+  isOwner = true,
+  extra: { error?: string; busy?: string | null } = {}
+): string {
   return renderToStaticMarkup(
     <GitHubReposView
       state={value}
-      error=""
+      error={extra.error ?? ''}
       isOwner={isOwner}
       draft=""
-      busy={null}
+      busy={extra.busy ?? null}
       formatTime={formatTime}
       onDraftChange={() => undefined}
       onAdd={() => undefined}
@@ -107,5 +111,40 @@ describe('GitHubReposView', () => {
     const html = render(state(full));
     expect(html).toContain('You are watching the maximum of 10. Remove one to add another.');
     expect(html).toMatch(/<input[^>]*disabled=""/);
+  });
+
+  it('says so when a check left work for later or skipped the oldest activity', () => {
+    const summary = {
+      stars: 2,
+      forks: 0,
+      issues: 0,
+      attached: 0,
+      created: 0,
+      unresolved: 0,
+      ignoredRejected: 0,
+      deferred: 3,
+      burstTruncated: true
+    };
+    const copy = repoStatusCopy(repo({ lastSummary: summary }), formatTime);
+    expect(copy).toContain('3 left for the next check');
+    expect(copy).toContain('more activity arrived than one check reads, so the oldest was skipped');
+
+    const idle = repoStatusCopy(
+      repo({ lastSummary: { ...summary, stars: 0, burstTruncated: false } }),
+      formatTime
+    );
+    expect(idle).toContain('3 left for the next check');
+    expect(idle).not.toContain('Nothing new since the previous check');
+  });
+
+  it('shows errors and disables every control while an action is in flight', () => {
+    const failed = render(state([repo()]), true, { error: 'Repository limit reached.' });
+    expect(failed).toContain('role="alert"');
+    expect(failed).toContain('Repository limit reached.');
+
+    const busy = render(state([repo()]), true, { busy: 'add' });
+    expect(busy).toMatch(/<input[^>]*disabled=""/);
+    expect(busy).toMatch(/<button[^>]*aria-label="Stop watching[^"]*"[^>]*disabled=""/);
+    expect(busy).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);
   });
 });

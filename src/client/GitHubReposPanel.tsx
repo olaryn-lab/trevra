@@ -29,7 +29,7 @@ export function GitHubReposPanel({ setToast }: { setToast: (message: string) => 
 
   const add = async () => {
     const fullName = draft.trim();
-    if (!fullName) return;
+    if (!fullName || busy !== null) return;
     setBusy('add');
     try {
       const repo = await watchGitHubRepo(fullName);
@@ -44,6 +44,7 @@ export function GitHubReposPanel({ setToast }: { setToast: (message: string) => 
   };
 
   const remove = async (repoId: string, fullName: string) => {
+    if (busy !== null) return;
     setBusy(repoId);
     try {
       await unwatchGitHubRepo(repoId);

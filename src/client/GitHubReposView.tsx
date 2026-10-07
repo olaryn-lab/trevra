@@ -40,8 +40,18 @@ export function connectionNotice(state: GitHubConnectionState): string | null {
 function checkedCopy(repo: GitHubRepoWatch, formatTime: (iso: string) => string): string {
   const when = repo.lastPolledAt ? formatTime(repo.lastPolledAt) : 'recently';
   const summary = repo.lastSummary;
+  const carryNotes = summary
+    ? [
+        summary.deferred > 0 ? `${summary.deferred} left for the next check` : null,
+        summary.burstTruncated
+          ? 'more activity arrived than one check reads, so the oldest was skipped'
+          : null
+      ].filter((note): note is string => note !== null)
+    : [];
   if (!summary || summary.stars + summary.forks + summary.issues === 0) {
-    return `Checked ${when}. Nothing new since the previous check.`;
+    return carryNotes.length === 0
+      ? `Checked ${when}. Nothing new since the previous check.`
+      : `Checked ${when}: ${carryNotes.join('; ')}.`;
   }
   const seen = [
     plural(summary.stars, 'new star'),
@@ -56,10 +66,7 @@ function checkedCopy(repo: GitHubRepoWatch, formatTime: (iso: string) => string)
     summary.ignoredRejected > 0
       ? `${summary.ignoredRejected} from companies marked not a fit`
       : null,
-    summary.deferred > 0 ? `${summary.deferred} left for the next check` : null,
-    summary.burstTruncated
-      ? 'more activity arrived than one check reads, so the oldest was skipped'
-      : null
+    ...carryNotes
   ].filter((note): note is string => note !== null);
   return `Checked ${when}: ${seen}. ${notes.join('; ')}.`;
 }
@@ -144,7 +151,7 @@ export function GitHubReposView({
           {state.repos.map((repo) => (
             <li className="gh-repos-row" key={repo.id}>
               <div className="gh-repos-main">
-                <a href={repo.url} target="_blank" rel="noreferrer">
+                <a href={repo.url} target="_blank" rel="noopener noreferrer">
                   {repo.fullName} <ExternalLink size={12} aria-hidden="true" />
                 </a>
                 <span className={statusClass(repo.status)}>{STATUS_LABELS[repo.status]}</span>
@@ -160,7 +167,7 @@ export function GitHubReposView({
                 <Button
                   variant="ghost"
                   aria-label={`Stop watching ${repo.fullName}`}
-                  disabled={busy === repo.id}
+                  disabled={busy !== null}
                   onClick={() => onRemove(repo)}
                 >
                   <Trash2 size={16} aria-hidden="true" />
@@ -191,14 +198,14 @@ export function GitHubReposView({
               placeholder="lemoncrow-lab/lemoncrow"
               autoComplete="off"
               spellCheck={false}
-              disabled={atLimit || busy === 'add'}
+              disabled={atLimit || busy !== null}
               onChange={(event) => onDraftChange(event.target.value)}
             />
           </Field>
           <Button
             variant="primary"
             type="submit"
-            disabled={atLimit || busy === 'add' || draft.trim() === ''}
+            disabled={atLimit || busy !== null || draft.trim() === ''}
           >
             Watch repository
           </Button>

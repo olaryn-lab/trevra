@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   Building2,
   ChevronDown,
@@ -199,20 +199,25 @@ export function AccountsScreen({
   /** '' shows every account; 'github' only the ones GitHub activity created. */
   const [originFilter, setOriginFilter] = useState<'' | 'github'>('');
 
+  const loadSeq = useRef(0);
+
   const load = useCallback(async () => {
+    const seq = ++loadSeq.current;
     setLoading(true);
     try {
       const [ranked, providerHealth] = await Promise.all([
         getRankedAccounts({ limit: 200, source: originFilter || undefined }),
         getObservationProviderHealth().catch(() => [] as ObservationProviderHealth[])
       ]);
+      if (seq !== loadSeq.current) return;
       setAccounts(ranked);
       setObservationProviders(providerHealth);
       setError('');
     } catch (err) {
+      if (seq !== loadSeq.current) return;
       setError(errorMessage(err, 'Unable to load accounts. Try again.'));
     } finally {
-      setLoading(false);
+      if (seq === loadSeq.current) setLoading(false);
     }
   }, [originFilter]);
 
