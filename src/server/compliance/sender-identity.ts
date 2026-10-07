@@ -184,11 +184,3 @@ export function identityBlockers(identity: SenderIdentity): SenderIdentityBlocke
     });
   return blockers;
 }
-
-/** GTM plan blockers for any plan that would send commercial email. */
-export async function senderIdentityBlockers(
-  db: Db,
-  workspaceId: string
-): Promise<SenderIdentityBlocker[]> {
-  return identityBlockers(await getSenderIdentity(db, workspaceId));
-}
