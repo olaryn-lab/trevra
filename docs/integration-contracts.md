@@ -135,6 +135,17 @@ An owner creates a Cal.com endpoint on `/setup/capture`. Trevra shows the subscr
 
 HubSpot and Attio may observe GTM records. CRM activity write-back is a dedicated `crm.log-activity` action behind Trevra's approval/execution boundary. Do not add ungated record mutation to the sync path.
 
+## GitHub repository traction (proxy reads)
+
+GitHub is an observe-only connection: Nango provider `github`, integration id `NANGO_GITHUB_INTEGRATION` (default `trevra-github`), no OAuth scopes. There is no Nango sync and no canonical record kind; the worker reads through the Nango proxy, at most hourly per watched repository, and writes account signals.
+
+- **Watched repositories:** the workspace owner lists up to 10 public `owner/name` repositories under Setup -> Workspace. Stored in `watched_repositories` with per-kind cursors and ETags, never credentials.
+- **Reads:** `GET /repos/{owner}/{repo}` (ETag), `/stargazers` with `Accept: application/vnd.github.star+json` (for `starred_at`), `/forks?sort=newest`, `/issues?state=all&sort=created&since=...` (ETag; pull requests and `OWNER`/`MEMBER`/`COLLABORATOR` authors skipped), `/users/{login}`, `/orgs/{org}`.
+- **Resolution:** public data only. A `@org` handle in the profile `company` whose organization lists a website; else the public email domain (freemail skipped); else the profile `blog` domain (personal platforms such as `github.io` or `medium.com` skipped). A plain-text company name is never turned into a company.
+- **Writes:** `repo-starred`, `repo-forked` and `repo-issue-opened` account signals through `recordSignals`; evidence is the GitHub profile URL or the issue URL. Existing accounts are attached by domain; new accounts (`source = 'github'`, tag `github-traction`) are created at most 5 per poll run; `not_a_fit` and `archived` accounts are never reactivated. Resolved logins are kept in `github_repo_actors` (login, profile URL); unresolved people are counted on the repository and never stored.
+- **Honest state:** a 401 or a Nango authorization failure flips the connection to `needs_reauth`; an exhausted rate limit pauses polling until GitHub's reset time; both show on the Setup card instead of zero activity.
+- **Upgrade path:** GitHub App webhooks (`star`, `fork`, `issues`) through Nango's `github-app` provider replace polling.
+
 ## Provider admission rule
 
 A connector belongs in Trevra only when it does at least one of these:

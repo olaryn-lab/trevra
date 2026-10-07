@@ -34,6 +34,7 @@ const {
   defaultConnectSessionIntegrations,
   handleNangoWebhook,
   executeConnectedAction,
+  githubProviderConfigKey,
   ingestCanonicalRecord,
   listAvailableIntegrations,
   readConnectedEmailThreadEvents
@@ -60,7 +61,8 @@ const managedEnv = [
   'NANGO_ATTIO_INTEGRATION',
   'NANGO_EXA_INTEGRATION',
   'NANGO_REDDIT_INTEGRATION',
-  'NANGO_BUFFER_INTEGRATION'
+  'NANGO_BUFFER_INTEGRATION',
+  'NANGO_GITHUB_INTEGRATION'
 ];
 
 let live: LiveDb | undefined;
@@ -180,6 +182,24 @@ describe('integration catalog', () => {
         'provider'
       ]);
     }
+  });
+
+  it('offers GitHub as a read-only OAuth data source', async () => {
+    const integrations = await listAvailableIntegrations(stubDb(), 'ws_test');
+    expect(integrations.find((item) => item.provider === 'github')).toMatchObject({
+      key: 'trevra-github',
+      name: 'GitHub',
+      category: 'data',
+      mode: 'oauth',
+      connected: false
+    });
+    expect(defaultConnectSessionIntegrations()).toContain('trevra-github');
+  });
+
+  it('resolves the GitHub integration id from NANGO_GITHUB_INTEGRATION', () => {
+    expect(githubProviderConfigKey()).toBe('trevra-github');
+    process.env.NANGO_GITHUB_INTEGRATION = 'acme-github';
+    expect(githubProviderConfigKey()).toBe('acme-github');
   });
 });
 

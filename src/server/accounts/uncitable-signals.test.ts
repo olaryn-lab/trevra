@@ -2,7 +2,11 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { id, openDatabase, type Db } from '../db.js';
-import { UNCITABLE_SIGNAL_KINDS_SQL } from './types.js';
+import {
+  TREVRA_OBSERVED_SIGNAL_KINDS,
+  UNCITABLE_SIGNAL_KINDS,
+  UNCITABLE_SIGNAL_KINDS_SQL
+} from './types.js';
 import { recordSignals } from './sweep.js';
 import { buildDemandCandidates } from '../demand/candidates.js';
 import { httpObservationProvider } from '../observations/providers/http.js';
@@ -21,6 +25,12 @@ describe('uncitable signal kinds', () => {
     expect(UNCITABLE_SIGNAL_KINDS_SQL).toBe(
       "('first-capture','product-signed-up','product-activated','product-integration-connected','product-usage-threshold','customer-paid','customer-upgraded','customer-cancelled')"
     );
+  });
+
+  it('keeps Trevra-observed repository kinds citable', () => {
+    for (const kind of TREVRA_OBSERVED_SIGNAL_KINDS) {
+      expect(UNCITABLE_SIGNAL_KINDS as readonly string[]).not.toContain(kind);
+    }
   });
 
   it('is the exclusion every evidence query uses', () => {

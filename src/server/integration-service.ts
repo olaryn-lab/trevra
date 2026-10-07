@@ -186,6 +186,22 @@ const catalog = [
     mode: 'apiKey',
     env: 'NANGO_BUFFER_INTEGRATION',
     fallback: 'trevra-buffer'
+  },
+  // Read-only and public: stars, forks and issues on repositories the owner
+  // names in Setup, plus the public profiles of the people behind them. No
+  // OAuth scopes are requested -- the token exists so polls spend the
+  // connection's own rate limit instead of the 60/hour anonymous one. Trevra
+  // never writes to GitHub. See src/server/github/poll.ts.
+  {
+    key: 'github',
+    provider: 'github',
+    name: 'GitHub',
+    category: 'data',
+    description:
+      'Watch stars, forks and issues on your public repositories and match them to companies. Read-only — Trevra never writes to GitHub.',
+    mode: 'oauth',
+    env: 'NANGO_GITHUB_INTEGRATION',
+    fallback: 'trevra-github'
   }
 ] as const;
 
@@ -199,6 +215,13 @@ function providerConfigKeyFor(item: CatalogEntry): string {
 /** Integration ids the Connect UI may offer. Only GTM-relevant integrations are catalogued. */
 export function defaultConnectSessionIntegrations(): string[] {
   return catalog.map(providerConfigKeyFor);
+}
+
+/** The Nango integration id GitHub connections are stored under. */
+export function githubProviderConfigKey(): string {
+  const entry = catalog.find((item) => item.key === 'github');
+  if (!entry) throw new Error('GitHub is missing from the integration catalog');
+  return providerConfigKeyFor(entry);
 }
 
 export async function listAvailableIntegrations(
