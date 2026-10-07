@@ -631,6 +631,15 @@ export async function executeConnectedAction(
         .prepare("SELECT * FROM connections WHERE id=? AND workspace_id=? AND status='connected'")
         .get(String(action.connection_id), workspaceId)) as Record<string, unknown> | undefined)
     : undefined;
+  if (!connection && action.require_connection_id === true) {
+    // An approval bound to one mailbox never falls back to another one.
+    throw Object.assign(
+      new Error(
+        'The mailbox this email was approved to send from is not connected; nothing was sent.'
+      ),
+      { status: 409 }
+    );
+  }
   if (!connection) {
     connection = (await db
       .prepare(

@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import type { Db } from '../db.js';
 import { executeConnectedAction } from '../integration-service.js';
+import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-address.js';
+import { emailComplianceProvider } from '../email/compliance.js';
 import { projectPreparedConversationEmail } from '../conversations.js';
 import { communityReplyPayloadSchema, publishCommunityReply } from '../outreach/publish.js';
 import { crmActivityPayloadSchema, logCrmActivity } from '../crm/activity.js';
@@ -42,8 +44,15 @@ export async function executePreparedPlaybookAction(
   if (actionType === 'email.send') {
     const payload = emailPayloadSchema.parse(input.payload);
     const metadata = payload.metadata ?? {};
+    const approvedConnectionId = await approvedMailboxConnection(db, input.workspaceId, metadata);
+    if (metadata.intent === 'email-outreach') {
+      await assertOutreachFooter(db, input.workspaceId, payload.body);
+    }
     const delivery = await executeConnectedAction(db, input.workspaceId, {
       type: 'email_draft',
+      ...(approvedConnectionId
+        ? { connection_id: approvedConnectionId, require_connection_id: true }
+        : {}),
       recipient: payload.recipient,
       subject: payload.subject,
       body: payload.body,
@@ -169,5 +178,73 @@ async function recordOutreachInCrm(
     );
   } catch {
     // Swallowed on purpose. The external reply has already happened.
+  }
+}
+
+function mailboxBindingError(message: string): Error {
+  return Object.assign(new Error(message), { status: 409 });
+}
+
+function absent(value: unknown): boolean {
+  return value === undefined || value === null;
+}
+
+/**
+ * The local connection an approved email must leave from, or null when the
+ * approval named no sender (conversation replies and the older email playbooks
+ * keep their existing mailbox resolution). The approval bound both the
+ * connection and the address it sends as. If either no longer holds, nothing is
+ * sent: a re-authorized connection may now be a different account.
+ */
+async function approvedMailboxConnection(
+  db: Db,
+  workspaceId: string,
+  metadata: Record<string, unknown>
+): Promise<string | null> {
+  if (absent(metadata.connectionId) && absent(metadata.senderAddress)) return null;
+  const connectionId =
+    typeof metadata.connectionId === 'string' ? metadata.connectionId.trim() : '';
+  const senderAddress =
+    typeof metadata.senderAddress === 'string' ? metadata.senderAddress.trim().toLowerCase() : '';
+  if (!connectionId || !senderAddress) {
+    throw mailboxBindingError(
+      'This email was approved without a complete sending mailbox; nothing was sent.'
+    );
+  }
+  const mailbox = (await listSendingMailboxes(db, workspaceId)).find(
+    (candidate) => candidate.connectionId === connectionId
+  );
+  if (!mailbox) {
+    throw mailboxBindingError(
+      `The mailbox this email was approved to send from (${senderAddress}) is no longer connected; nothing was sent.`
+    );
+  }
+  const address = await resolveMailboxAddress(db, workspaceId, mailbox);
+  if (address !== senderAddress) {
+    throw mailboxBindingError(
+      `The connected mailbox no longer matches the approved sender ${senderAddress}; nothing was sent.`
+    );
+  }
+  return mailbox.connectionId;
+}
+
+/**
+ * Outreach email leaves only with the sender's compliance footer (legal name,
+ * postal address, opt-out line) as its last text. The footer is re-read at send
+ * time, not trusted from drafting: the approval flow can edit the body, and this
+ * is the check that makes the footer non-removable. Runs before any delivery
+ * row or provider call.
+ */
+async function assertOutreachFooter(db: Db, workspaceId: string, body: string): Promise<void> {
+  const footer = (await emailComplianceProvider().footer(db, workspaceId))?.trim() ?? '';
+  if (!footer) {
+    throw mailboxBindingError(
+      'No compliance footer (legal name, postal address, opt-out line) is available for this workspace; nothing was sent.'
+    );
+  }
+  if (!body.trimEnd().endsWith(footer)) {
+    throw mailboxBindingError(
+      'This email does not end with the workspace compliance footer; nothing was sent.'
+    );
   }
 }

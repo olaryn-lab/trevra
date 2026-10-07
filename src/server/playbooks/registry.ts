@@ -492,6 +492,70 @@ export const conversationEmailReplyPlaybook: PlaybookDefinition = {
   source: { type: 'builtin' }
 };
 
+export const emailOutreachPlaybook: PlaybookDefinition = {
+  id: 'gtm.email-outreach',
+  version: '1.0.0',
+  name: 'Outreach email',
+  description:
+    'Prepare one first-touch outreach email to a known Person from the approved mailbox, with RFC 8058 one-click unsubscribe, and require approval of the exact bytes before provider execution.',
+  inputSchema: z
+    .object({
+      idempotencyKey: z.string().trim().min(8).max(200),
+      conversationId: z.string().trim().min(1).max(160),
+      personId: z.string().trim().min(1).max(160),
+      contactId: z.string().trim().min(1).max(160),
+      leadListId: z.string().trim().min(1).max(160),
+      connectionId: z.string().trim().min(1).max(160),
+      senderAddress: z.string().email(),
+      recipient: z.string().email(),
+      subject: z.string().trim().min(1).max(200),
+      body: z.string().trim().min(1).max(20_000)
+    })
+    .strict(),
+  steps: [
+    {
+      id: 'approve-outreach',
+      type: 'approval',
+      title: 'Approve outreach email',
+      payload: {
+        recipient: { $ref: '$.input.recipient' },
+        subject: { $ref: '$.input.subject' },
+        body: { $ref: '$.input.body' },
+        metadata: {
+          conversationId: { $ref: '$.input.conversationId' },
+          personId: { $ref: '$.input.personId' },
+          contactId: { $ref: '$.input.contactId' },
+          leadListId: { $ref: '$.input.leadListId' },
+          connectionId: { $ref: '$.input.connectionId' },
+          senderAddress: { $ref: '$.input.senderAddress' },
+          requireListUnsubscribe: true,
+          deliveryPurpose: 'outreach',
+          deliverySourceType: 'email_outreach',
+          deliverySourceId: { $ref: '$.input.idempotencyKey' },
+          conversationSourceType: 'email_outreach',
+          conversationSourceId: { $ref: '$.input.idempotencyKey' },
+          intent: 'email-outreach'
+        }
+      }
+    },
+    {
+      id: 'send-outreach',
+      type: 'action',
+      actionType: 'email.send',
+      approvalStepId: 'approve-outreach',
+      needs: ['approve-outreach'],
+      payload: { $ref: '$.steps.approve-outreach.input' },
+      retry: { maxAttempts: 1, delaySeconds: 0 }
+    }
+  ],
+  output: {
+    approved: { $ref: '$.steps.approve-outreach.output.approved' },
+    delivery: { $ref: '$.steps.send-outreach.output' },
+    personId: { $ref: '$.input.personId' }
+  },
+  source: { type: 'builtin' }
+};
+
 export const bufferDraftPlaybook: PlaybookDefinition = {
   id: 'gtm.buffer-draft',
   version: '1.0.0',
@@ -548,6 +612,7 @@ registerPlaybook(communityOutreachPlaybook);
 registerPlaybook(threadReplyPlaybook);
 registerPlaybook(qualifiedDemandEmailPlaybook);
 registerPlaybook(conversationEmailReplyPlaybook);
+registerPlaybook(emailOutreachPlaybook);
 registerPlaybook(bufferDraftPlaybook);
 
 export function registerPlaybook(playbook: PlaybookDefinition): PlaybookDefinition {
