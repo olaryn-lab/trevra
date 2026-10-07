@@ -81,6 +81,7 @@ import { LinkedInExclusions, relativeTime } from './LinkedInScreen';
 import { TeamSettingsView } from './TeamScreen';
 import { LeadCaptureSetup } from './LeadCaptureSetup';
 import { BillingSettings } from './BillingSettings';
+import { GitHubReposPanel } from './GitHubReposPanel';
 import { ResearchView } from './views/ResearchView';
 import { trackEvent, trackPageView } from './analytics';
 import { ConfirmDrawer, useDialog } from './ui/dialog';
@@ -596,6 +597,7 @@ function SetupView({
             busyId={busyId}
             setBusyId={setBusyId}
           />
+          <GitHubReposPanel setToast={setToast} />
           <LimitsView setToast={setToast} />
           <LinkedInExclusions setToast={setToast} />
           <TeamSettingsView

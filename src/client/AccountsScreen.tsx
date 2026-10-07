@@ -127,7 +127,10 @@ const KIND_LABELS: Record<string, string> = {
   'product-usage-threshold': 'Crossed a usage threshold in your product',
   'customer-paid': 'Became a paying customer',
   'customer-upgraded': 'Upgraded their plan',
-  'customer-cancelled': 'Cancelled their subscription'
+  'customer-cancelled': 'Cancelled their subscription',
+  'repo-starred': 'Starred your GitHub repo',
+  'repo-forked': 'Forked your GitHub repo',
+  'repo-issue-opened': 'Opened an issue on your GitHub repo'
 };
 
 const kindLabel = (kind: string) => KIND_LABELS[kind] ?? kind;
@@ -193,12 +196,14 @@ export function AccountsScreen({
   // vanish behind the toggle the moment the first import promotes this
   // screen out of its empty state.
   const [showAddMore, setShowAddMore] = useState(false);
+  /** '' shows every account; 'github' only the ones GitHub activity created. */
+  const [originFilter, setOriginFilter] = useState<'' | 'github'>('');
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       const [ranked, providerHealth] = await Promise.all([
-        getRankedAccounts({ limit: 200 }),
+        getRankedAccounts({ limit: 200, source: originFilter || undefined }),
         getObservationProviderHealth().catch(() => [] as ObservationProviderHealth[])
       ]);
       setAccounts(ranked);
@@ -209,7 +214,7 @@ export function AccountsScreen({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [originFilter]);
 
   useEffect(() => {
     void load();
@@ -423,7 +428,7 @@ export function AccountsScreen({
     <div className="page-stack">
       {error && <div className="error-banner">{error}</div>}
 
-      {accounts.length > 0 && (
+      {(accounts.length > 0 || originFilter !== '') && (
         <section className="page-panel">
           <div className="section-heading">
             <div>
@@ -431,6 +436,16 @@ export function AccountsScreen({
               <p>Scores use the signals shown under each account. Evidence links to the source.</p>
             </div>
             <div className="acc-heading-actions">
+              <Select
+                aria-label="Which accounts to show"
+                value={originFilter}
+                onChange={(event) =>
+                  setOriginFilter(event.target.value === 'github' ? 'github' : '')
+                }
+              >
+                <option value="">All accounts</option>
+                <option value="github">Created from GitHub activity</option>
+              </Select>
               <button
                 className="secondary-button"
                 type="button"
@@ -467,6 +482,11 @@ export function AccountsScreen({
               />
             ))}
           </div>
+          {accounts.length === 0 && (
+            <p className="acc-filter-empty">
+              No accounts have been created from GitHub activity yet.
+            </p>
+          )}
         </section>
       )}
 
@@ -523,7 +543,7 @@ export function AccountsScreen({
         </details>
       )}
 
-      {accounts.length > 0 ? (
+      {accounts.length > 0 || originFilter !== '' ? (
         <details
           className="mgr-inputs"
           open={showAddMore}

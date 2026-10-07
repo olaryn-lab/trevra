@@ -3409,16 +3409,71 @@ export async function sourceAccounts(input: {
 
 /** Hot first, then by score. The server owns the order; the screen renders it. */
 export async function getRankedAccounts(
-  filters: { tier?: AccountTier; limit?: number } = {}
+  filters: { tier?: AccountTier; limit?: number; source?: AccountSource } = {}
 ): Promise<RankedAccount[]> {
   const query = new URLSearchParams();
   if (filters.tier) query.set('tier', filters.tier);
   if (filters.limit) query.set('limit', String(filters.limit));
+  if (filters.source) query.set('source', filters.source);
   const suffix = query.toString();
   const result = await request<{ accounts?: RankedAccount[] }>(
     `/api/accounts${suffix ? `?${suffix}` : ''}`
   );
   return Array.isArray(result.accounts) ? result.accounts : [];
+}
+
+export type GitHubConnectionState = 'connected' | 'needs_reauth' | 'not_connected';
+export type GitHubRepoStatus =
+  'pending' | 'ok' | 'not_found' | 'rate_limited' | 'needs_reauth' | 'not_connected' | 'error';
+
+export interface GitHubPollSummary {
+  stars: number;
+  forks: number;
+  issues: number;
+  attached: number;
+  created: number;
+  unresolved: number;
+  ignoredRejected: number;
+  deferred: number;
+  burstTruncated: boolean;
+}
+
+export interface GitHubRepoWatch {
+  id: string;
+  fullName: string;
+  url: string;
+  status: GitHubRepoStatus;
+  lastError: string | null;
+  rateLimitedUntil: string | null;
+  nextPollAt: string;
+  lastPolledAt: string | null;
+  lastSummary: GitHubPollSummary | null;
+  unresolvedTotal: number;
+  createdAt: string;
+}
+
+export interface GitHubReposState {
+  connection: { state: GitHubConnectionState; lastError: string | null };
+  repos: GitHubRepoWatch[];
+  limit: number;
+}
+
+export async function getGitHubRepos(): Promise<GitHubReposState> {
+  return request<GitHubReposState>('/api/github/repos');
+}
+
+export async function watchGitHubRepo(fullName: string): Promise<GitHubRepoWatch> {
+  const result = await request<{ repo: GitHubRepoWatch }>('/api/github/repos', {
+    method: 'POST',
+    body: JSON.stringify({ fullName })
+  });
+  return result.repo;
+}
+
+export async function unwatchGitHubRepo(repoId: string): Promise<void> {
+  await request<{ removed: boolean }>(`/api/github/repos/${encodeURIComponent(repoId)}`, {
+    method: 'DELETE'
+  });
 }
 
 /**

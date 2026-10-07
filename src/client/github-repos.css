@@ -1,0 +1,67 @@
+/* Setup -> Workspace -> GitHub repositories. Composition only: controls come
+   from ui/primitives and the status pill is the shared .connection-status. */
+.gh-repos-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.gh-repos-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--t-line-soft);
+}
+
+.gh-repos-row:last-child {
+  border-bottom: 0;
+}
+
+.gh-repos-main {
+  display: grid;
+  justify-items: start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.gh-repos-main a {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: var(--t-w-strong);
+  overflow-wrap: anywhere;
+}
+
+.gh-repos-main p,
+.gh-repos-quiet {
+  margin: 0;
+  color: var(--t-muted);
+  font-size: var(--t-text-sm);
+}
+
+.gh-repos-notice {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--t-amber-line);
+  border-radius: var(--t-r-md);
+  background: var(--t-amber-bg);
+  color: var(--t-amber-ink);
+  font-size: var(--t-text-sm);
+}
+
+.gh-repos-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+  margin-top: 16px;
+}
+
+@media (max-width: 640px) {
+  .gh-repos-add {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

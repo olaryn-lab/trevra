@@ -8888,6 +8888,11 @@ button:disabled {
 .acc-heading-actions button {
   height: var(--t-tap);
 }
+.acc-filter-empty {
+  margin: 0;
+  padding: 16px 0;
+  color: var(--t-muted);
+}
 
 .acc-list {
   display: grid;
