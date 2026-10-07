@@ -1,6 +1,12 @@
 import type { Db } from './db.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
 import type { LinkedInCheckName } from './linkedin/guard.js';
+import {
+  MILESTONE_KINDS_SQL,
+  MILESTONE_LABELS,
+  isMilestoneKind,
+  milestoneEvidencePath
+} from './lead-capture/milestones.js';
 
 export type TodayItemKind =
   | 'safety_block'
@@ -17,7 +23,9 @@ export type TodayItemKind =
   | 'campaign_working'
   | 'delivery_sent'
   | 'verified_reply_result'
-  | 'opportunity_closed';
+  | 'opportunity_closed'
+  | 'milestone_reached'
+  | 'customer_cancelled';
 
 export interface TodayItem {
   id: string;
@@ -189,6 +197,7 @@ export async function getToday(
         `SELECT i.id,i.contact_id,i.account_id,i.kind,i.person_name,i.person_email,i.person_phone,i.message,i.received_at
          FROM inbound_submissions i
          WHERE i.workspace_id=? AND i.received_at>=?::timestamptz
+           AND i.kind NOT IN ${MILESTONE_KINDS_SQL}
            AND NOT EXISTS (
              SELECT 1
              FROM recommendation_evidence re
@@ -741,6 +750,64 @@ export async function getToday(
         accountId: row.account_id ? String(row.account_id) : null
       }
     });
+  }
+
+  // Product milestones are first-party outcomes, not inbound to qualify: the
+  // NOT IN above keeps them out of the inbound class. A cancellation needs a
+  // human before any outreach; everything else is a result.
+  const milestoneRows = await db
+    .prepare(
+      `SELECT m.id,m.kind,m.contact_id,m.account_id,m.source_type,m.occurred_at,m.created_at,
+              p.name AS person_name,p.email AS person_email,a.name AS account_name
+       FROM product_milestones m
+       JOIN contacts p ON p.workspace_id=m.workspace_id AND p.id=m.contact_id
+       LEFT JOIN accounts a ON a.workspace_id=m.workspace_id AND a.id=m.account_id
+       WHERE m.workspace_id=? AND m.created_at>=?::timestamptz
+       ORDER BY m.created_at DESC,m.id DESC LIMIT 50`
+    )
+    .all<Record<string, unknown>>(workspaceId, recentSince);
+
+  for (const row of milestoneRows) {
+    const kind = String(row.kind);
+    if (!isMilestoneKind(kind)) continue;
+    const who =
+      String(row.account_name ?? '').trim() ||
+      String(row.person_name ?? '').trim() ||
+      String(row.person_email ?? '').trim() ||
+      'A customer';
+    const fromStripe = String(row.source_type) === 'stripe_event';
+    const shared = {
+      href: milestoneEvidencePath(String(row.id)),
+      observedAt: iso(row.occurred_at ?? row.created_at, now),
+      reference: { type: 'product_milestone', id: String(row.id) },
+      metadata: {
+        milestoneKind: kind,
+        sourceType: String(row.source_type ?? ''),
+        personId: String(row.contact_id ?? ''),
+        accountId: row.account_id ? String(row.account_id) : null
+      }
+    };
+    if (kind === 'cancelled') {
+      items.push({
+        id: `customer-cancelled:${String(row.id)}`,
+        kind: 'customer_cancelled',
+        priority: 55,
+        title: `${who} cancelled`,
+        detail: fromStripe
+          ? 'Stripe reported the subscription ended. Review the account before any outreach.'
+          : 'Your product reported a cancellation. Review the account before any outreach.',
+        ...shared
+      });
+    } else {
+      recentResults.push({
+        id: `milestone:${String(row.id)}`,
+        kind: 'milestone_reached',
+        priority: 25,
+        title: `${who} ${MILESTONE_LABELS[kind]}`,
+        detail: fromStripe ? 'Observed from Stripe.' : 'Reported by your product.',
+        ...shared
+      });
+    }
   }
 
   return {

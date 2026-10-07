@@ -1,6 +1,7 @@
 import type { Db } from '../db.js';
 import { UNCITABLE_SIGNAL_KINDS_SQL } from '../accounts/types.js';
 import { isHighIntentInboundKind } from './opportunities.js';
+import { MILESTONE_KINDS_SQL } from '../lead-capture/milestones.js';
 
 export type DemandQualification = 'act_now' | 'watch' | 'ignore';
 export type DemandRecommendedAction =
@@ -476,6 +477,7 @@ export async function buildDemandCandidates(
       WHERE s.workspace_id=?
         AND s.account_id IS NOT NULL
         AND s.received_at>=?::timestamptz
+        AND s.kind NOT IN ${MILESTONE_KINDS_SQL}
       ORDER BY s.contact_id,s.account_id,
         CASE LOWER(BTRIM(s.kind))
           WHEN 'demo_request' THEN 0

@@ -748,6 +748,7 @@ function todayActionLabel(
   }
   if (item.kind === 'verified_reply') return 'Reply';
   if (item.kind === 'inbound_submission') return 'Review inbound';
+  if (item.kind === 'customer_cancelled') return 'Review customer';
   if (item.kind === 'high_priority_account') return 'Review account';
   return 'Open';
 }
