@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { updateLinkedInManagerSeat, updateLinkedInSeatCapabilities } from './api';
+import {
+  resolveLinkedInHandoff,
+  updateLinkedInManagerSeat,
+  updateLinkedInSeatCapabilities
+} from './api';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -53,5 +57,24 @@ describe('LinkedIn manager client API wiring', () => {
       inmailMonthlyBudget: null,
       inmailPaidCreditCap: null
     });
+  });
+
+  it('reports a handoff resolution to its own route', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ handoff: { actionId: 'lact_1', status: 'sent' } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await resolveLinkedInHandoff('lact_1', 'sent')).toEqual({
+      actionId: 'lact_1',
+      status: 'sent'
+    });
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/linkedin/handoffs/lact_1/resolve');
+    expect(init.method).toBe('POST');
+    expect(JSON.parse(String(init.body))).toEqual({ resolution: 'sent' });
   });
 });

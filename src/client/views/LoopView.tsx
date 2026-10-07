@@ -26,6 +26,7 @@ import { ConfidenceTag, WindowPicker } from '../LinkedInViz';
 import { Button, Select } from '../ui/primitives';
 import { emailSkipSummary, planIssues } from './gtmPlanFormat';
 import { ACTIVATION_STEPS, nextActivationStep, type ActivationSignals } from './activation';
+import { LinkedInHandoffCard } from './LinkedInHandoffCard';
 import { money, usd } from './format';
 
 type StageId = 'find' | 'reach' | 'answer';
@@ -859,6 +860,8 @@ function TodayAttention({
       ) : (
         <ol className="onboarding-steps">
           {items.map((item) => {
+            if (item.kind === 'linkedin_handoff_waiting')
+              return <LinkedInHandoffCard key={item.id} item={item} onResolved={onRefresh} />;
             const entry = prepared[item.id];
             const approval = entry?.run.steps.find(
               (step) => step.stepType === 'approval' && step.status === 'waiting_approval'

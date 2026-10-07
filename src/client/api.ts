@@ -1986,6 +1986,21 @@ export async function skipLinkedInAction(id: string): Promise<LinkedInActionView
 }
 
 /**
+ * The founder's answer to a human-send handoff in Today: they sent it on
+ * LinkedIn themselves, or they are skipping it. A report, never a send.
+ */
+export async function resolveLinkedInHandoff(
+  id: string,
+  resolution: 'sent' | 'skip'
+): Promise<{ actionId: string; status: 'sent' | 'skipped' }> {
+  const result = await request<{ handoff: { actionId: string; status: 'sent' | 'skipped' } }>(
+    `/api/linkedin/handoffs/${encodeURIComponent(id)}/resolve`,
+    { method: 'POST', body: JSON.stringify({ resolution }) }
+  );
+  return result.handoff;
+}
+
+/**
  * Rewrite the words of a message that has not been typed yet.
  *
  * Words only. The server refuses anything that is not this workspace's own

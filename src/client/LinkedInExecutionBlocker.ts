@@ -69,7 +69,8 @@ export type CampaignExecutionBlockerKind =
   | 'seat-cooldown'
   | 'safety-gate'
   | 'awaiting-outcome-resolution'
-  | 'unclaimed';
+  | 'unclaimed'
+  | 'human-send';
 
 /**
  * WHETHER A PERSON CAN DO ANYTHING ABOUT IT, which is a different question
@@ -216,6 +217,20 @@ function gateTitle(check: string | null, kind: string | null): string {
   }
 }
 
+function safetyGateBlocker(
+  gate: NonNullable<LinkedInCampaignExecution['gate']>,
+  due: number
+): CampaignExecutionBlocker {
+  return {
+    kind: 'safety-gate',
+    severity: CLOCK_GATE_CHECKS.has(gate.check ?? '') ? 'waiting' : 'attention',
+    title: gateTitle(gate.check, gate.kind),
+    detail: `${plural(due, 'planned action')} ${are(due)} due, but the safety gate refuses the next one${
+      gate.check ? ` (${gate.check})` : ''
+    }: ${gate.detail ?? 'the safety gate refused it.'} The queue resumes by itself once that stops binding.`
+  };
+}
+
 /**
  * The single true reason this campaign is not executing, or null when it is.
  *
@@ -243,6 +258,20 @@ export function campaignExecutionBlocker(
   const seatAttention = companionStatus?.attention.find((attention) =>
     input.senderKeys.includes(attention.seatKey)
   );
+
+  // (0) HUMAN-SEND. The next due row is an invite or message the founder sends
+  // by hand, so no browser, companion or worker is involved and none of the
+  // rungs below can be the reason. A refusing gate is still the honest
+  // headline: the handoff stays out of Today until the gate passes.
+  if (execution?.humanSendNext && due > 0) {
+    if (execution.gate && !execution.gate.allowed) return safetyGateBlocker(execution.gate, due);
+    return {
+      kind: 'human-send',
+      severity: 'attention',
+      title: 'Waiting for you to send on LinkedIn',
+      detail: `${plural(due, 'planned action')} ${are(due)} due. ${seatLabel} is set to send invites and messages by hand, so Trevra hands the next ${noun(execution.gate?.kind ?? null)} to you in Today instead of opening a browser.`
+    };
+  }
 
   // (1) No browser exists. Only claimed when the deployment actually executes
   // through a paired computer -- on a local install there is no companion to be
@@ -326,15 +355,7 @@ export function campaignExecutionBlocker(
   // (4) The browser would open and be refused. The gate's own sentence carries
   // the numbers; the check name is kept in the text because it is what a
   // support conversation and the worker's log line have in common.
-  if (execution?.gate && !execution.gate.allowed)
-    return {
-      kind: 'safety-gate',
-      severity: CLOCK_GATE_CHECKS.has(execution.gate.check ?? '') ? 'waiting' : 'attention',
-      title: gateTitle(execution.gate.check, execution.gate.kind),
-      detail: `${plural(due, 'planned action')} ${are(due)} due, but the safety gate refuses the next one${
-        execution.gate.check ? ` (${execution.gate.check})` : ''
-      }: ${execution.gate.detail ?? 'the safety gate refused it.'} The queue resumes by itself once that stops binding.`
-    };
+  if (execution?.gate && !execution.gate.allowed) return safetyGateBlocker(execution.gate, due);
 
   // (5) Waiting for a person, not for a browser -- and only ever the headline
   // when nothing else is due, because the rest of the queue is unaffected.

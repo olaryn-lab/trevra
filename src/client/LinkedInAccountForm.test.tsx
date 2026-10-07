@@ -6,6 +6,7 @@ import {
   capabilityDraftToPatch,
   capabilityPatchChanged,
   draftToPatch,
+  identityHint,
   type AccountDraft
 } from './LinkedInAccountForm';
 
@@ -21,6 +22,7 @@ const draft = (warmupOverride = false): AccountDraft => ({
   dailyFollowLimit: '10',
   safetyBandOverride: false,
   warmupOverride,
+  humanSend: false,
   proxyUrl: '',
   proxyRemove: false
 });
@@ -154,5 +156,42 @@ describe('LinkedIn capability save validation', () => {
     });
     expect(capabilityPatchChanged(account, patch)).toBe(false);
     expect(capabilityPatchChanged(account, { ...patch, premium: true })).toBe(true);
+  });
+});
+
+describe('LinkedIn human-send and identity controls', () => {
+  it('serializes the human-send switch into the account PATCH', () => {
+    expect(draftToPatch({ ...draft(), humanSend: true }, null)).toMatchObject({
+      sendMode: 'human'
+    });
+    expect(draftToPatch(draft(), null)).toMatchObject({ sendMode: 'automated' });
+  });
+
+  it('offers the switch and the identity hint on an existing account', () => {
+    const html = renderToStaticMarkup(
+      <ScheduleFields
+        draft={{ ...draft(), humanSend: true }}
+        onChange={() => undefined}
+        idPrefix="test"
+        safety={safety}
+        bandOverride
+        identity={{ identityConfirmedAt: '2026-08-20T09:00:00.000Z', linkedSeatCount: 1 }}
+      />
+    );
+    expect(html).toContain('I send invites and messages myself');
+    expect(html).toContain('hands each one to you in Today');
+    expect(html).toContain('also connected in 1 other workspace account');
+  });
+
+  it('says plainly when the member is unconfirmed, and when it is alone', () => {
+    expect(identityHint({ identityConfirmedAt: null, linkedSeatCount: 0 })).toContain(
+      'count this account alone'
+    );
+    expect(
+      identityHint({ identityConfirmedAt: '2026-08-20T09:00:00.000Z', linkedSeatCount: 0 })
+    ).toContain('No other workspace account signs in as this LinkedIn member');
+    expect(
+      identityHint({ identityConfirmedAt: '2026-08-20T09:00:00.000Z', linkedSeatCount: 2 })
+    ).toContain('also connected in 2 other workspace accounts');
   });
 });

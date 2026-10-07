@@ -351,4 +351,27 @@ describe('campaign execution blocker', () => {
         ?.detail
     ).toContain('Playwright is not installed');
   });
+
+  it('hands a human-send seat to the founder ahead of every browser rung', () => {
+    const result = blocker({
+      companionStatus: companion({ devices: [] }),
+      execution: execution({
+        humanSendNext: true,
+        restingUntil: null,
+        gate: { kind: 'invite', allowed: true, check: null, detail: null }
+      })
+    });
+    expect(result?.kind).toBe('human-send');
+    expect(result?.severity).toBe('attention');
+    expect(result?.title).toBe('Waiting for you to send on LinkedIn');
+    expect(result?.detail).toContain('next invite');
+  });
+
+  it('still names a refusing gate on a human-send seat', () => {
+    const result = blocker({
+      execution: execution({ humanSendNext: true, restingUntil: null })
+    });
+    expect(result?.kind).toBe('safety-gate');
+    expect(result?.title).toBe('Profile-view safety ceiling reached');
+  });
 });

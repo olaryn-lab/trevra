@@ -17,7 +17,8 @@ import {
 import { OWNER_ACCOUNT_KEY } from './LinkedInActiveAccount';
 import { Wall } from './LinkedInCompanion';
 import { errorMessage } from './LinkedInSafety';
-import { Select } from './ui/primitives';
+import { plural } from './ui/plural';
+import { Select, SwitchField } from './ui/primitives';
 /**
  * Adding a LinkedIn account and changing one: connection first, then the
  * schedule/safety/capability controls that belong to an account after Trevra
@@ -234,6 +235,8 @@ export interface AccountDraft {
   safetyBandOverride: boolean;
   /** Explicit operator opt-out from Trevra's account-level automation warm-up. */
   warmupOverride: boolean;
+  /** The founder sends this account's invites and messages by hand (`send_mode='human'`). */
+  humanSend: boolean;
   /**
    * A NEW proxy URL to store, or ''.
    *
@@ -271,6 +274,7 @@ const emptyDraft = (timezone: string, ranges: OperatorRanges | null): AccountDra
   // opt-out made before the account has sent anything is not an informed one.
   safetyBandOverride: false,
   warmupOverride: false,
+  humanSend: false,
   proxyUrl: '',
   proxyRemove: false
 });
@@ -287,6 +291,7 @@ const draftOf = (account: LinkedInSeat): AccountDraft => ({
   dailyFollowLimit: String(account.dailyFollowLimit),
   safetyBandOverride: account.safetyBandOverride,
   warmupOverride: account.warmupOverride,
+  humanSend: account.sendMode === 'human',
   // Never prefilled: the stored URL carries a password and the server has no
   // route that returns one.
   proxyUrl: '',
@@ -352,6 +357,7 @@ export function draftToPatch(draft: AccountDraft, ranges: OperatorRanges | null)
     workEndMinute,
     safetyBandOverride: draft.safetyBandOverride,
     warmupOverride: draft.warmupOverride,
+    sendMode: (draft.humanSend ? 'human' : 'automated') as LinkedInSeat['sendMode'],
     ...proxyPatch,
     ...limits
   };
@@ -500,6 +506,20 @@ function ProxyField({
   );
 }
 
+/**
+ * Which LinkedIn member this account is, as far as the safety limits go. A
+ * count only: the server never says which other workspaces or accounts.
+ */
+export function identityHint(
+  identity: Pick<LinkedInSeat, 'identityConfirmedAt' | 'linkedSeatCount'>
+): string {
+  if (!identity.identityConfirmedAt)
+    return 'Trevra has not confirmed which LinkedIn member this account signs in as yet, so its limits count this account alone. Connecting it through the Trevra companion confirms it.';
+  if (identity.linkedSeatCount <= 0)
+    return 'No other workspace account signs in as this LinkedIn member, so these limits cover all of its activity Trevra knows about.';
+  return `This LinkedIn member is also connected in ${plural(identity.linkedSeatCount, 'other workspace account')}. Sends from there count against these limits too, so one person stays inside one budget.`;
+}
+
 export function ScheduleFields({
   draft,
   onChange,
@@ -507,7 +527,8 @@ export function ScheduleFields({
   safety,
   bandOverride = false,
   proxy = null,
-  activatedAt = null
+  activatedAt = null,
+  identity = null
 }: {
   draft: AccountDraft;
   onChange: (patch: Partial<AccountDraft>) => void;
@@ -520,6 +541,8 @@ export function ScheduleFields({
   proxy?: LinkedInSeat['proxy'] | null;
   /** When Trevra first started automating this account; the durable warm-up clock. */
   activatedAt?: string | null;
+  /** Which LinkedIn member this account is. Null for an account that does not exist yet. */
+  identity?: Pick<LinkedInSeat, 'identityConfirmedAt' | 'linkedSeatCount'> | null;
 }) {
   const ranges = safety?.operatorRanges ?? null;
 
@@ -597,6 +620,17 @@ export function ScheduleFields({
                 ? `Current account multiplier: ${Math.round(safety.seat.warmupMultiplier * 100)}% for active outreach.`
                 : 'Account warm-up is currently enabled.'}
           </p>
+
+          <h4 className="li-subhead" aria-level={3}>
+            Sending
+          </h4>
+          <SwitchField
+            label="I send invites and messages myself"
+            description="Trevra still drafts, approves, paces and checks every invite and message on this account, then hands each one to you in Today instead of sending it. Profile views and follows keep running on their own."
+            checked={draft.humanSend}
+            onChange={(event) => onChange({ humanSend: event.target.checked })}
+          />
+          {identity && <p className="li-hint">{identityHint(identity)}</p>}
         </>
       )}
 
@@ -1251,6 +1285,7 @@ export function EditAccountForm({
                 bandOverride
                 proxy={account.proxy}
                 activatedAt={account.activatedAt}
+                identity={account}
               />
             )}
           </div>
