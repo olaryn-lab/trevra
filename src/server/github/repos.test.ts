@@ -217,6 +217,30 @@ describe('markConnectionNeedsReauth', () => {
   });
 });
 
+describe('markConnectionNeedsReauth guards', () => {
+  it('leaves a disconnected connection alone and silent', async () => {
+    const goneId = await addConnection(WS, 'disconnected', 0, 'gone');
+    await markConnectionNeedsReauth(db, WS, goneId, 'late poll failure', T0);
+    const row = await db
+      .prepare('SELECT status FROM connections WHERE id=?')
+      .get<{ status: string }>(goneId);
+    expect(row?.status).toBe('disconnected');
+    expect(notificationMock.notifyIntegrationNeedsReauth).not.toHaveBeenCalled();
+    expect((await readGitHubConnection(db, WS)).state).toBe('not_connected');
+  });
+
+  it('still flips the status when the notifier rejects', async () => {
+    notificationMock.notifyIntegrationNeedsReauth.mockRejectedValueOnce(new Error('smtp down'));
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const liveId = await addConnection(WS, 'connected', 0, 'live');
+    await expect(
+      markConnectionNeedsReauth(db, WS, liveId, 'GitHub rejected the token', T0)
+    ).resolves.toBeUndefined();
+    errors.mockRestore();
+    expect((await readGitHubConnection(db, WS)).state).toBe('needs_reauth');
+  });
+});
+
 describe('claiming due repositories', () => {
   it('claims a due repository once per lease and releases it on update', async () => {
     const { repo } = await watch('lemoncrow-lab/lemoncrow');
@@ -262,6 +286,22 @@ describe('claiming due repositories', () => {
       lastSummary: { stars: 3, unresolved: 1, forks: 0, burstTruncated: false }
     });
     expect(await claimDueRepositories(db, WS, next, 10)).toHaveLength(1);
+  });
+
+  it('never moves a cursor backwards', async () => {
+    const { repo } = await watch('lemoncrow-lab/lemoncrow');
+    const t1 = new Date('2026-10-05T10:00:00.000Z');
+    const t2 = new Date('2026-10-05T12:00:00.000Z');
+    await updateRepository(db, WS, repo.id, { starsCursor: t2, forksCursor: t2, issuesCursor: t2 });
+    await updateRepository(db, WS, repo.id, { starsCursor: t1, forksCursor: t1, issuesCursor: t1 });
+    expect((await listWatchedRepositories(db, WS))[0]).toMatchObject({
+      starsCursor: t2.toISOString(),
+      forksCursor: t2.toISOString(),
+      issuesCursor: t2.toISOString()
+    });
+    const t3 = new Date('2026-10-05T13:00:00.000Z');
+    await updateRepository(db, WS, repo.id, { starsCursor: t3 });
+    expect((await listWatchedRepositories(db, WS))[0].starsCursor).toBe(t3.toISOString());
   });
 
   it('never claims a repository from another workspace', async () => {

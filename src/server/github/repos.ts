@@ -271,6 +271,7 @@ export interface GitHubConnection {
  * The connection row decides the workspace; nothing GitHub returns ever does.
  * Demo rows and disconnected rows do not count as a connection.
  */
+// lc-debt: GitHub actor logins persist until workspace erasure; add a last-seen retention prune in the poller.
 export async function readGitHubConnection(db: Db, workspaceId: string): Promise<GitHubConnection> {
   const providerConfigKey = githubProviderConfigKey();
   const row = await db
@@ -308,7 +309,7 @@ export async function readGitHubConnection(db: Db, workspaceId: string): Promise
 
 /**
  * GitHub refused the stored authorization. The existing Reconnect button fixes
- * it. Owners are emailed once, when the status actually flips: the guarded
+ * it. Only a live ('connected') connection flips, so a poll that fails after a deliberate Disconnect changes nothing. Owners are emailed once, when the status actually flips: the guarded
  * UPDATE returns a row only on that transition, so a poll that keeps failing
  * does not keep mailing.
  */
@@ -322,7 +323,7 @@ export async function markConnectionNeedsReauth(
   const flipped = await db
     .prepare(
       `UPDATE connections SET status='needs_reauth', last_error=?, updated_at=?::timestamptz
-       WHERE id=? AND workspace_id=? AND status <> 'needs_reauth'
+       WHERE id=? AND workspace_id=? AND status = 'connected'
        RETURNING provider, display_name`
     )
     .get<{ provider: string; display_name: string | null }>(
@@ -425,11 +426,17 @@ export async function updateRepository(
     sets.push(`${column}=?${cast}`);
     params.push(value);
   };
+  // Cursors only move forward: a worker whose lease expired must not rewind one.
+  const later = (column: string, value: Date): void => {
+    const iso = value.toISOString();
+    sets.push(`${column}=GREATEST(COALESCE(${column}, ?::timestamptz), ?::timestamptz)`);
+    params.push(iso, iso);
+  };
   if (patch.status !== undefined) put('status', patch.status);
   if (patch.lastError !== undefined) put('last_error', patch.lastError);
-  if (patch.starsCursor) put('stars_cursor', patch.starsCursor.toISOString(), '::timestamptz');
-  if (patch.forksCursor) put('forks_cursor', patch.forksCursor.toISOString(), '::timestamptz');
-  if (patch.issuesCursor) put('issues_cursor', patch.issuesCursor.toISOString(), '::timestamptz');
+  if (patch.starsCursor) later('stars_cursor', patch.starsCursor);
+  if (patch.forksCursor) later('forks_cursor', patch.forksCursor);
+  if (patch.issuesCursor) later('issues_cursor', patch.issuesCursor);
   if (patch.repoEtag !== undefined) put('repo_etag', patch.repoEtag);
   if (patch.issuesEtag !== undefined) put('issues_etag', patch.issuesEtag);
   if (patch.rateLimitedUntil !== undefined) {

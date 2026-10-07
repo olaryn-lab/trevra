@@ -40,8 +40,10 @@ CREATE INDEX IF NOT EXISTS idx_watched_repositories_due
 
 -- github_repo_actors: only GitHub people Trevra RESOLVED to an account, so the
 -- next star from the same login skips the profile lookup. Minimal personal
--- data: the public login and profile URL. No email column, on purpose. Closed
--- by the account (cascade) and by the workspace (cascade).
+-- data: the public login and profile URL. No email column, on purpose. Removed
+-- when the workspace is erased (cascade). Accounts are never hard-deleted in
+-- production, so the account cascade is only a safety net; there is no
+-- last-seen prune yet (see the lc-debt note in repos.ts).
 CREATE TABLE IF NOT EXISTS github_repo_actors (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
