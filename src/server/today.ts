@@ -25,7 +25,9 @@ export type TodayItemKind =
   | 'verified_reply_result'
   | 'opportunity_closed'
   | 'milestone_reached'
-  | 'customer_cancelled';
+  | 'customer_cancelled'
+  | 'meeting_upcoming'
+  | 'meeting_held';
 
 export interface TodayItem {
   id: string;
@@ -48,6 +50,29 @@ export interface TodayPayload {
 function iso(value: unknown, fallback: Date): string {
   const parsed = value ? new Date(String(value)) : fallback;
   return Number.isNaN(parsed.getTime()) ? fallback.toISOString() : parsed.toISOString();
+}
+
+function validTimeZone(zone: unknown): string {
+  const candidate = typeof zone === 'string' ? zone.trim() : '';
+  if (!candidate) return 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-GB', { timeZone: candidate });
+    return candidate;
+  } catch {
+    return 'UTC';
+  }
+}
+
+function meetingTime(value: string, timeZone: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).format(new Date(value));
 }
 
 function sortAttention(items: TodayItem[]): TodayItem[] {
@@ -817,6 +842,78 @@ export async function getToday(
     }
   }
 
+  // Meetings (migration 131), read last and on their own so the queries above are
+  // untouched. Upcoming: the next 48 hours. Held: ended inside the same seven-day
+  // window every other result uses. In-progress meetings are neither.
+  // lc-debt: 50 meetings per projection; page it if a workspace books more than
+  // that in a 9-day window.
+  const meetingHorizon = new Date(now.getTime() + 48 * 3_600_000).toISOString();
+  const nowIso = now.toISOString();
+  const [meetingRows, meetingSettings] = await Promise.all([
+    db
+      .prepare(
+        `SELECT m.id,m.provider,m.person_id,m.account_id,
+                TO_CHAR(m.starts_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS starts_at,
+                TO_CHAR(m.ends_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ends_at,
+                p.name AS person_name,p.email AS person_email,a.name AS account_name
+         FROM meetings m
+         JOIN contacts p ON p.workspace_id=m.workspace_id AND p.id=m.person_id
+         LEFT JOIN accounts a ON a.workspace_id=m.workspace_id AND a.id=m.account_id
+         WHERE m.workspace_id=? AND m.status<>'cancelled'
+           AND ((m.starts_at>?::timestamptz AND m.starts_at<=?::timestamptz)
+             OR (m.ends_at>=?::timestamptz AND m.ends_at<=?::timestamptz))
+         ORDER BY m.starts_at ASC,m.id ASC
+         LIMIT 50`
+      )
+      .all<Record<string, unknown>>(workspaceId, nowIso, meetingHorizon, recentSince, nowIso),
+    db
+      .prepare('SELECT timezone FROM workspace_settings WHERE workspace_id=?')
+      .get<{ timezone: string | null }>(workspaceId)
+  ]);
+  const meetingZone = validTimeZone(meetingSettings?.timezone);
+  for (const row of meetingRows) {
+    const meetingId = String(row.id);
+    const startsAt = String(row.starts_at);
+    const endsAt = String(row.ends_at);
+    const who =
+      String(row.person_name ?? '').trim() || String(row.person_email ?? '').trim() || 'a contact';
+    const accountName = String(row.account_name ?? '').trim();
+    const label = accountName ? `${who} (${accountName})` : who;
+    const metadata = {
+      meetingId,
+      provider: String(row.provider ?? ''),
+      personId: String(row.person_id ?? ''),
+      accountId: row.account_id ? String(row.account_id) : null,
+      startsAt,
+      endsAt
+    };
+    if (startsAt > nowIso) {
+      items.push({
+        id: `meeting-upcoming:${meetingId}`,
+        kind: 'meeting_upcoming',
+        priority: 25,
+        title: `Meeting with ${label}`,
+        detail: `Starts ${meetingTime(startsAt, meetingZone)} (${meetingZone}).`,
+        // The account's research is the prep brief; without an account, the Opportunity.
+        href: row.account_id ? '/research' : '/outreach/opportunities',
+        observedAt: startsAt,
+        reference: { type: 'meeting', id: meetingId },
+        metadata
+      });
+    } else if (endsAt <= nowIso) {
+      recentResults.push({
+        id: `meeting-held:${meetingId}`,
+        kind: 'meeting_held',
+        priority: 25,
+        title: `Met ${label}`,
+        detail: `Ended ${meetingTime(endsAt, meetingZone)} (${meetingZone}).`,
+        href: '/outreach/opportunities',
+        observedAt: endsAt,
+        reference: { type: 'meeting', id: meetingId },
+        metadata
+      });
+    }
+  }
   return {
     needsAttention: sortAttention(items),
     working: sortAttention(working),

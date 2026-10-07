@@ -750,6 +750,7 @@ function todayActionLabel(
   if (item.kind === 'inbound_submission') return 'Review inbound';
   if (item.kind === 'customer_cancelled') return 'Review customer';
   if (item.kind === 'high_priority_account') return 'Review account';
+  if (item.kind === 'meeting_upcoming') return 'Prepare';
   return 'Open';
 }
 

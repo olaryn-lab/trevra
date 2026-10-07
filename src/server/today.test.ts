@@ -422,6 +422,113 @@ describe('getToday', () => {
     });
   });
 
+  it('projects upcoming and recently held meetings, never cancelled or distant ones', async () => {
+    const account = await createAccount(
+      db,
+      WORKSPACE,
+      { domain: 'meet.example', name: 'Meet AG', source: 'manual' },
+      new Date('2026-08-20T09:00:00.000Z')
+    );
+    await db
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`
+      )
+      .run(
+        'con_today_meet',
+        WORKSPACE,
+        'Nora Meier',
+        'nora@meet.example',
+        'nora@meet.example',
+        '2026-08-20T08:00:00.000Z',
+        '2026-08-20T08:00:00.000Z'
+      );
+    const meeting = (
+      id: string,
+      status: string,
+      startsAt: string,
+      endsAt: string,
+      accountId: string | null
+    ) =>
+      db
+        .prepare(
+          `INSERT INTO meetings
+           (id,workspace_id,provider,external_id,status,origin,starts_at,ends_at,person_id,account_id,cancelled_at,created_at,updated_at)
+           VALUES (?,?,'calcom',?,?,'booking',?,?,?,?,?,?,?)`
+        )
+        .run(
+          id,
+          WORKSPACE,
+          id,
+          status,
+          startsAt,
+          endsAt,
+          'con_today_meet',
+          accountId,
+          status === 'cancelled' ? '2026-08-21T07:00:00.000Z' : null,
+          '2026-08-20T08:00:00.000Z',
+          '2026-08-20T08:00:00.000Z'
+        );
+    await meeting(
+      'mtg_today_soon',
+      'scheduled',
+      '2026-08-21T11:00:00.000Z',
+      '2026-08-21T11:30:00.000Z',
+      account.id
+    );
+    await meeting(
+      'mtg_today_far',
+      'scheduled',
+      '2026-08-24T11:00:00.000Z',
+      '2026-08-24T11:30:00.000Z',
+      null
+    );
+    await meeting(
+      'mtg_today_cancelled',
+      'cancelled',
+      '2026-08-21T12:00:00.000Z',
+      '2026-08-21T12:30:00.000Z',
+      null
+    );
+    await meeting(
+      'mtg_today_held',
+      'rescheduled',
+      '2026-08-20T10:00:00.000Z',
+      '2026-08-20T10:30:00.000Z',
+      null
+    );
+    await meeting(
+      'mtg_today_old',
+      'scheduled',
+      '2026-08-01T10:00:00.000Z',
+      '2026-08-01T10:30:00.000Z',
+      null
+    );
+
+    const today = await getToday(db, WORKSPACE, NOW);
+
+    const upcoming = today.needsAttention.filter((item) => item.kind === 'meeting_upcoming');
+    expect(upcoming).toHaveLength(1);
+    expect(upcoming[0]).toMatchObject({
+      id: 'meeting-upcoming:mtg_today_soon',
+      priority: 25,
+      title: 'Meeting with Nora Meier (Meet AG)',
+      href: '/research',
+      observedAt: '2026-08-21T11:00:00.000Z',
+      reference: { type: 'meeting', id: 'mtg_today_soon' },
+      metadata: { meetingId: 'mtg_today_soon', provider: 'calcom', accountId: account.id }
+    });
+    expect(upcoming[0].detail).toMatch(/^Starts .+ \(UTC\)\.$/);
+
+    const held = today.recentResults.filter((item) => item.kind === 'meeting_held');
+    expect(held.map((item) => item.id)).toEqual(['meeting-held:mtg_today_held']);
+    expect(held[0]).toMatchObject({
+      priority: 25,
+      title: 'Met Nora Meier',
+      href: '/outreach/opportunities',
+      observedAt: '2026-08-20T10:30:00.000Z'
+    });
+  });
   it("surfaces only an Agent's latest failed run and deep-links to its ledger evidence", async () => {
     const agent = await ensureDefaultAgent(db, WORKSPACE);
     for (const [id, startedAt, finishedAt, error] of [
