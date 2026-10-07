@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ZodError } from 'zod';
 import { openDatabase, type Db } from '../db.js';
 import { ingestCanonicalRecord } from '../integration-service.js';
+import { getToday } from '../today.js';
+import { meetingFromCalendarEvent } from './google-calendar.js';
 
 const BOOKING = { meetingOrigin: 'booking' } as const;
 const WORKSPACE = 'ws_meetings_ingest_test';
@@ -135,15 +137,18 @@ describe('canonical meeting ingestion', () => {
   });
 
   it('a cancellation never advances the stage, even when the booking arrives after it', async () => {
+    // A cancellation never creates a Person, so the tombstone needs one that exists.
+    await seedPerson();
+    const known = { ...booking, personEmail: 'maya@acme.example' };
     await ingestCanonicalRecord(
       db,
       WORKSPACE,
       'calcom',
       null,
-      { ...booking, status: 'cancelled' },
+      { ...known, status: 'cancelled' },
       BOOKING
     );
-    await ingestCanonicalRecord(db, WORKSPACE, 'calcom', null, booking, BOOKING);
+    await ingestCanonicalRecord(db, WORKSPACE, 'calcom', null, known, BOOKING);
     const [meeting] = await db
       .prepare('SELECT status FROM meetings WHERE workspace_id=?')
       .all<{ status: string }>(WORKSPACE);
@@ -184,6 +189,104 @@ describe('canonical meeting ingestion', () => {
     await seedOpportunity('opp_ingest_later', 'new', '2026-08-23T00:00:00.000Z');
     await ingestCanonicalRecord(db, WORKSPACE, 'google-calendar', null, calendar);
     expect(await opportunities()).toEqual([{ id: 'opp_ingest_later', stage: 'new' }]);
+  });
+
+  it('a booking cancelled before its reschedule arrives stays cancelled and advances nothing', async () => {
+    const original = { ...booking, id: 'bk-a' };
+    const moved = {
+      ...booking,
+      id: 'bk-b',
+      startAt: '2026-08-22T11:00:00+02:00',
+      endAt: '2026-08-22T11:30:00+02:00'
+    };
+    // Cal.com: booked A, rescheduled A -> B, then cancelled B. Delivered: A, cancel B, reschedule.
+    await ingestCanonicalRecord(db, WORKSPACE, 'calcom', null, original, BOOKING);
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'calcom',
+      null,
+      { ...moved, status: 'cancelled' },
+      BOOKING
+    );
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'calcom',
+      null,
+      { ...moved, previousId: 'bk-a', status: 'rescheduled' },
+      BOOKING
+    );
+    const meetings = await db
+      .prepare(
+        'SELECT id,external_id,status FROM meetings WHERE workspace_id=? ORDER BY external_id'
+      )
+      .all<{ id: string; external_id: string; status: string }>(WORKSPACE);
+    expect(meetings.map((row) => [row.external_id, row.status])).toEqual([
+      ['bk-a', 'cancelled'],
+      ['bk-b', 'cancelled']
+    ]);
+    const advancedByB = await db
+      .prepare(
+        `SELECT COUNT(*)::int AS n FROM opportunity_stage_observations
+         WHERE workspace_id=? AND source_type='meeting' AND source_id=?`
+      )
+      .get<{ n: number }>(WORKSPACE, meetings[1].id);
+    expect(advancedByB?.n).toBe(0);
+    const today = await getToday(db, WORKSPACE, new Date(NOW));
+    expect(today.needsAttention.filter((item) => item.kind === 'meeting_upcoming')).toEqual([]);
+  });
+
+  it('a calendar meeting declined and then accepted again is back on Today', async () => {
+    await seedPerson();
+    const own = new Set<string>();
+    const observe = async (responseStatus: string) => {
+      const outcome = await meetingFromCalendarEvent(
+        db,
+        WORKSPACE,
+        {
+          kind: 'calendar#event',
+          id: 'evt-rsvp',
+          status: 'confirmed',
+          start: { dateTime: calendar.startAt },
+          end: { dateTime: calendar.endAt },
+          attendees: [{ email: 'maya@acme.example', responseStatus }]
+        },
+        own
+      );
+      if (!outcome.ok) throw new Error(outcome.reason);
+      await ingestCanonicalRecord(db, WORKSPACE, 'google-calendar', null, outcome.record);
+    };
+    await observe('needsAction');
+    await observe('declined');
+    await observe('accepted');
+    const [meeting] = await db
+      .prepare('SELECT status,cancelled_at FROM meetings WHERE workspace_id=?')
+      .all<{ status: string; cancelled_at: string | null }>(WORKSPACE);
+    expect(meeting).toEqual({ status: 'scheduled', cancelled_at: null });
+    const today = await getToday(db, WORKSPACE, new Date(NOW));
+    expect(today.needsAttention.filter((item) => item.kind === 'meeting_upcoming')).toHaveLength(1);
+  });
+
+  it('an unknown booking cancellation never creates a contact, even with times', async () => {
+    expect(
+      await ingestCanonicalRecord(
+        db,
+        WORKSPACE,
+        'calcom',
+        null,
+        {
+          ...booking,
+          id: 'bk-unknown',
+          personEmail: 'fresh@prospect.example',
+          status: 'cancelled'
+        },
+        BOOKING
+      )
+    ).toEqual({ stored: false });
+    expect(await count('contacts')).toBe(0);
+    expect(await count('meetings')).toBe(0);
+    expect(await count('source_records')).toBe(0);
   });
 
   it('an unknown booking cancellation without times creates no contact', async () => {

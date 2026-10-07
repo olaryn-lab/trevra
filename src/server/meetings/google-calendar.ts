@@ -82,7 +82,11 @@ export function readCalendarEvent(
   const parsed = googleEventSchema.safeParse(raw);
   if (!parsed.success) return { ok: false, reason: 'unrecognized' };
   const event = parsed.data;
-  const cancelled = nangoRecordDeleted(raw) || event.status === 'cancelled';
+  // The calendar owner declining is the founder saying they will not be there.
+  const ownerDeclined = (event.attendees ?? []).some(
+    (attendee) => attendee.self === true && attendee.responseStatus === 'declined'
+  );
+  const cancelled = nangoRecordDeleted(raw) || event.status === 'cancelled' || ownerDeclined;
   const startRaw = event.start?.dateTime;
   const endRaw = event.end?.dateTime;
   if (!startRaw && !endRaw && (event.start?.date || event.end?.date)) {

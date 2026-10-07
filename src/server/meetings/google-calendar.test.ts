@@ -95,6 +95,20 @@ describe('readCalendarEvent', () => {
       )
     ).toMatchObject({ ok: true, cancelled: true });
   });
+
+  it('reads an event the calendar owner declined as cancelled', () => {
+    expect(
+      readCalendarEvent(
+        event({
+          attendees: [
+            { email: 'founder@lemoncrow.example', self: true, responseStatus: 'declined' },
+            { email: 'maya@acme.example', responseStatus: 'accepted' }
+          ]
+        }),
+        OWN
+      )
+    ).toMatchObject({ ok: true, cancelled: true });
+  });
 });
 
 describe('meetingFromCalendarEvent', () => {

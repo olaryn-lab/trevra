@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Nango } from '@nangohq/node';
-import { z } from 'zod';
+import { z, ZodError } from 'zod';
 import { notifyIntegrationNeedsReauth } from './notifications.js';
 import type { AvailableIntegration } from '../shared/types.js';
 import { id, type Db } from './db.js';
@@ -1035,14 +1035,32 @@ export async function syncNangoRecords(
         limit: 100
       });
     for (const raw of result.records) {
-      const outcome = await normalizeSyncedRecord(
-        db,
-        input.workspaceId,
-        input.provider,
-        input.model,
-        raw as Record<string, unknown>,
-        ownEmails
-      );
+      let outcome: SyncedRecord;
+      let stored: IngestOutcome | null = null;
+      try {
+        outcome = await normalizeSyncedRecord(
+          db,
+          input.workspaceId,
+          input.provider,
+          input.model,
+          raw as Record<string, unknown>,
+          ownEmails
+        );
+        if (outcome.kind === 'record') {
+          stored = await ingestCanonicalRecord(
+            db,
+            input.workspaceId,
+            input.provider,
+            input.localConnectionId,
+            outcome.record
+          );
+        }
+      } catch (error) {
+        // Backstop: one record that fails validation is skipped, never the whole batch.
+        // Anything else (database, network) still fails the sync.
+        if (!(error instanceof ZodError)) throw error;
+        outcome = { kind: 'skipped' };
+      }
       if (outcome.kind === 'skipped') {
         // COUNTED, NOT SWALLOWED. A record no canonical kind can read -- a model
         // with no alias, or a calendar event in a shape this build does not
@@ -1057,14 +1075,7 @@ export async function syncNangoRecords(
         ignored += 1;
         continue;
       }
-      const stored = await ingestCanonicalRecord(
-        db,
-        input.workspaceId,
-        input.provider,
-        input.localConnectionId,
-        outcome.record
-      );
-      if (stored.stored) ingested += 1;
+      if (stored?.stored) ingested += 1;
       else ignored += 1;
     }
     cursor = result.next_cursor;
@@ -1252,9 +1263,12 @@ async function ingestMeeting(
   ) {
     return { stored: false };
   }
+  // Only a live booking may create the Person. A cancellation never does: for a
+  // known meeting the stored Person is kept, and for an unknown one there is
+  // nothing to cancel (`meetings.person_id` is NOT NULL, so no person-less tombstone).
   const identity = !record.personEmail
     ? { personId: null, accountId: null }
-    : record.origin === 'booking'
+    : record.origin === 'booking' && record.status !== 'cancelled'
       ? await resolveCanonicalRecordIdentity(
           db,
           workspaceId,
@@ -1351,8 +1365,13 @@ function normalizeNangoRecord(model: string, raw: Record<string, unknown>): Cano
   // Unparseable: counted as skipped by the caller, never allowed to abort the batch.
   if (!parsed.success) return null;
   const record = parsed.data;
+  if (record.kind !== 'meeting') return record;
   // A meeting Nango reports as deleted is a cancelled meeting, never a live one.
-  return record.kind === 'meeting' && deleted ? { ...record, status: 'cancelled' } : record;
+  if (deleted) return { ...record, status: 'cancelled' };
+  // A live meeting without a person and both times (a Microsoft Graph event on a
+  // meeting alias model, say) is unreadable here, not a reason to abort the batch.
+  if (record.status !== 'cancelled' && !activeMeetingSchema.safeParse(record).success) return null;
+  return record;
 }
 
 type SyncedRecord =
@@ -1383,7 +1402,17 @@ async function normalizeSyncedRecord(
   ) {
     const meeting = await meetingFromCalendarEvent(db, workspaceId, raw, ownEmails);
     if (meeting.ok) return { kind: 'record', record: meeting.record };
-    return meeting.reason === 'unrecognized' ? { kind: 'skipped' } : { kind: 'ignored' };
+    if (meeting.reason === 'unrecognized') return { kind: 'skipped' };
+    // Left out now (all-day, internal, or the matched Person is no longer on it), but
+    // stored earlier: it is no longer a meeting with a prospect, so cancel that row.
+    const externalId = typeof raw.id === 'string' ? raw.id : '';
+    if (externalId && (await meetingKnown(db, { workspaceId, provider, externalId }))) {
+      return {
+        kind: 'record',
+        record: { kind: 'meeting', id: externalId, status: 'cancelled', origin: 'calendar' }
+      };
+    }
+    return { kind: 'ignored' };
   }
   const normalized = normalizeNangoRecord(model, raw);
   return normalized ? { kind: 'record', record: normalized } : { kind: 'skipped' };

@@ -530,6 +530,40 @@ describe('getToday', () => {
     });
   });
 
+  it('shows a Cal.com booking that is also on the Google Calendar once, as the booking', async () => {
+    const stamp = '2026-08-20T08:00:00.000Z';
+    await db
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES (?,?,?,?,?,?,?)`
+      )
+      .run('con_dup', WORKSPACE, 'Dup Person', 'dup@dup.example', 'dup@dup.example', stamp, stamp);
+    const insert = db.prepare(
+      `INSERT INTO meetings
+         (id,workspace_id,provider,external_id,status,origin,starts_at,ends_at,person_id,created_at,updated_at)
+         VALUES (?,?,?,?,'scheduled',?,'2026-08-21T11:00:00.000Z','2026-08-21T11:30:00.000Z','con_dup',?,?)`
+    );
+    // The calendar row sorts first, so keeping the first row would keep the wrong one.
+    await insert.run(
+      'mtg_dup_a',
+      WORKSPACE,
+      'google-calendar',
+      'evt-dup',
+      'calendar',
+      stamp,
+      stamp
+    );
+    await insert.run('mtg_dup_b', WORKSPACE, 'calcom', 'bk-dup', 'booking', stamp, stamp);
+
+    const today = await getToday(db, WORKSPACE, NOW);
+    const upcoming = today.needsAttention.filter((item) => item.kind === 'meeting_upcoming');
+    expect(upcoming).toHaveLength(1);
+    expect(upcoming[0]).toMatchObject({
+      reference: { type: 'meeting', id: 'mtg_dup_b' },
+      metadata: { provider: 'calcom' }
+    });
+  });
+
   it('keeps upcoming meetings when many are held, and hides in-progress and foreign ones', async () => {
     const stamp = '2026-08-20T08:00:00.000Z';
     await db

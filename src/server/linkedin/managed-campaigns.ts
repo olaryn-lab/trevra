@@ -1544,9 +1544,11 @@ export async function startManagedCampaign(
     throw new Error(`A ${campaign.status} campaign cannot be started again.`);
   const workflow = await getWorkflow(db, workspaceId, campaign.workflowId);
   if (!workflow) throw new Error('Campaign workflow no longer exists.');
-  // Refuse before anything moves. The runner re-checks per member, because the
-  // link can be removed after this point.
-  if (workflowUsesBookingLink(workflow.steps) && !(await getBookingUrl(db, workspaceId))) {
+  // Refuse before anything moves. Check the steps the runner executes (this
+  // campaign's snapshot), and the library workflow only when there is none.
+  // The runner re-checks per member, because the link can be removed after this point.
+  const runSteps = campaign.steps.length > 0 ? campaign.steps : workflow.steps;
+  if (workflowUsesBookingLink(runSteps) && !(await getBookingUrl(db, workspaceId))) {
     throw new BookingLinkMissingError();
   }
   const timestamp = now.toISOString();

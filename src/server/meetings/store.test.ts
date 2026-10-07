@@ -133,6 +133,66 @@ describe('meeting store', () => {
     ]);
   });
 
+  it('keeps a cancelled booking cancelled whatever arrives after it', async () => {
+    await recordMeeting(db, input({ externalId: 'booking-b', status: 'cancelled' }), NOW);
+    const moved = await recordMeeting(
+      db,
+      input({
+        externalId: 'booking-b',
+        startsAt: '2026-08-25T09:00:00.000Z',
+        endsAt: '2026-08-25T09:30:00.000Z'
+      }),
+      NOW
+    );
+    expect(moved.status).toBe('cancelled');
+    const rescheduled = await recordMeeting(
+      db,
+      input({ externalId: 'booking-b', previousExternalId: 'booking-a', status: 'rescheduled' }),
+      NOW
+    );
+    expect(rescheduled.status).toBe('cancelled');
+    expect(
+      (await rows()).map((row) => [
+        row.external_id,
+        row.previous_external_id,
+        row.status,
+        row.has_cancelled_at
+      ])
+    ).toEqual([['booking-b', 'booking-a', 'cancelled', true]]);
+    // The link to the replaced booking is kept, so a late original is superseded.
+    expect((await recordMeeting(db, input(), NOW)).superseded).toBe(true);
+  });
+
+  it('lets the latest calendar observation win over an earlier cancellation', async () => {
+    const calendar = {
+      provider: 'google-calendar',
+      origin: 'calendar' as const,
+      externalId: 'evt-1'
+    };
+    await recordMeeting(db, input(calendar), NOW);
+    await recordMeeting(db, input({ ...calendar, status: 'cancelled' }), NOW);
+    const accepted = await recordMeeting(db, input(calendar), NOW);
+    expect(accepted).toMatchObject({ changed: true, status: 'scheduled' });
+    expect((await rows()).map((row) => [row.status, row.has_cancelled_at])).toEqual([
+      ['scheduled', false]
+    ]);
+
+    await recordMeeting(db, input({ ...calendar, status: 'cancelled' }), NOW);
+    const moved = await recordMeeting(
+      db,
+      input({
+        ...calendar,
+        startsAt: '2026-08-25T09:00:00.000Z',
+        endsAt: '2026-08-25T09:30:00.000Z'
+      }),
+      NOW
+    );
+    expect(moved.status).toBe('rescheduled');
+    expect((await rows()).map((row) => [row.status, row.has_cancelled_at])).toEqual([
+      ['rescheduled', false]
+    ]);
+  });
+
   it('cancels the old booking and ignores it afterwards when a reschedule mints a new uid', async () => {
     await recordMeeting(db, input(), NOW);
     const moved = await recordMeeting(

@@ -1809,6 +1809,70 @@ describe('managed campaign runner', () => {
     expect(blocked).toEqual([{ status: 'waiting', reason: BOOKING_LINK_MISSING_MESSAGE }]);
   });
 
+  it('checks the booking link against the steps the campaign runs, not the library workflow', async () => {
+    await setBookingUrl(db, WORKSPACE, null, NOW);
+    const step = (template: string) => ({
+      id: 'invite-call',
+      action: 'manual_message' as const,
+      delayBefore: { amount: 0, unit: 'hours' as const },
+      config: { suggestedTemplate: template }
+    });
+    const plain = 'Hi {{first_name}}';
+    const withLink = 'Hi {{first_name}}, grab a slot: {{booking_link}}';
+
+    // (a) The campaign's own steps use the link; the library workflow does not.
+    const listA = await seededList('Snapshot uses link', [
+      { first: 'Ada', last: 'Snap', company: 'Acme', slug: 'ada-snap' }
+    ]);
+    const plainWorkflow = (
+      await saveWorkflow(
+        db,
+        { workspaceId: WORKSPACE, name: 'Plain library', steps: [step(plain)] },
+        NOW
+      )
+    ).id;
+    const customised = await createManagedCampaign(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        name: 'Snapshot uses link',
+        leadListId: listA,
+        workflowId: plainWorkflow
+      },
+      NOW
+    );
+    await updateCampaignSequence(db, WORKSPACE, customised.campaign.id, [step(withLink)], NOW);
+    await expect(
+      startManagedCampaign(db, WORKSPACE, customised.campaign.id, NOW)
+    ).rejects.toMatchObject({ status: 409, message: BOOKING_LINK_MISSING_MESSAGE });
+    expect(await campaignStatus(customised.campaign.id)).not.toBe('running');
+
+    // (b) The library workflow uses the link; the campaign's own steps do not.
+    const listB = await seededList('Snapshot drops link', [
+      { first: 'Ben', last: 'Snap', company: 'Acme', slug: 'ben-snap' }
+    ]);
+    const linkWorkflow = (
+      await saveWorkflow(
+        db,
+        { workspaceId: WORKSPACE, name: 'Link library', steps: [step(withLink)] },
+        NOW
+      )
+    ).id;
+    const dropped = await createManagedCampaign(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        name: 'Snapshot drops link',
+        leadListId: listB,
+        workflowId: linkWorkflow
+      },
+      NOW
+    );
+    await updateCampaignSequence(db, WORKSPACE, dropped.campaign.id, [step(plain)], NOW);
+    await startManagedCampaign(db, WORKSPACE, dropped.campaign.id, NOW);
+    expect(await campaignStatus(dropped.campaign.id)).toBe('running');
+  });
+
   it("applies the next step's delay when a manual task is completed", async () => {
     const listId = await seededList('Manual delay', [
       { first: 'Hand', last: 'Sent', company: 'Acme', slug: 'hand-sent' }

@@ -33,6 +33,8 @@ export interface RecordMeetingResult {
 interface MeetingRow {
   id: string;
   status: MeetingStatus;
+  origin: MeetingOrigin;
+  previous_external_id: string | null;
   person_id: string;
   account_id: string | null;
   ends_at: string;
@@ -87,7 +89,10 @@ export async function meetingKnown(
  * Order-independent by construction, because Cal.com and Nango deliver in any order:
  * - an event for an id that a later reschedule replaced is ignored (`superseded`);
  * - a reschedule cancels the row it replaces, if that row exists yet;
- * - a cancellation sticks against a late "scheduled" observation with the same time;
+ * - a cancelled BOOKING is terminal: Cal.com delivers out of order, so a later
+ *   non-cancelled event for the same uid is an older fact and leaves it cancelled;
+ * - a CALENDAR row follows the latest observation (Nango syncs full state in order),
+ *   so a cancelled event that comes back is scheduled again, or rescheduled if moved;
  * - a different time, or an explicit reschedule, makes the row `rescheduled`.
  */
 export async function recordMeeting(
@@ -129,6 +134,8 @@ export async function recordMeeting(
       };
     }
 
+    // Deliberately no check that the predecessor is cancelled: Cal.com may cancel the
+    // original as part of a reschedule, and refusing the successor would drop the real meeting.
     if (input.previousExternalId) {
       await tx
         .prepare(
@@ -140,7 +147,7 @@ export async function recordMeeting(
 
     const existing = await tx
       .prepare(
-        `SELECT id,status,person_id,account_id,
+        `SELECT id,status,origin,previous_external_id,person_id,account_id,
                 TO_CHAR(ends_at AT TIME ZONE 'UTC', ${UTC_ISO}) AS ends_at,
                 (starts_at = ?::timestamptz AND ends_at = ?::timestamptz) IS TRUE AS same_time
          FROM meetings WHERE workspace_id=? AND provider=? AND external_id=?
@@ -171,12 +178,38 @@ export async function recordMeeting(
       return result;
     }
 
+    if (existing && existing.status === 'cancelled' && existing.origin === 'booking') {
+      // Terminal. Only the link to the booking it replaced is learned, so a late
+      // delivery of that original is still recognised as superseded.
+      const linked =
+        input.previousExternalId !== null &&
+        existing.previous_external_id !== input.previousExternalId;
+      if (linked) {
+        await tx
+          .prepare(
+            `UPDATE meetings SET previous_external_id=?,updated_at=?
+             WHERE workspace_id=? AND id=?`
+          )
+          .run(input.previousExternalId, nowIso, input.workspaceId, existing.id);
+      }
+      return {
+        meetingId: existing.id,
+        status: 'cancelled',
+        personId: existing.person_id,
+        accountId: existing.account_id,
+        endsAt: existing.ends_at,
+        created: false,
+        changed: linked,
+        superseded: false
+      };
+    }
+
     if (existing) {
       let status: MeetingStatus;
-      if (existing.status === 'cancelled' && existing.same_time && input.status === 'scheduled')
-        status = 'cancelled';
-      else if (input.status === 'rescheduled' || input.previousExternalId || !existing.same_time)
+      if (input.status === 'rescheduled' || input.previousExternalId || !existing.same_time)
         status = 'rescheduled';
+      // A calendar row that was cancelled and is observed live again: the latest observation wins.
+      else if (existing.status === 'cancelled') status = 'scheduled';
       else status = existing.status;
       const changed =
         status !== existing.status ||

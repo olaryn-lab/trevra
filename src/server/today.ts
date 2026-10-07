@@ -849,7 +849,7 @@ export async function getToday(
   // them if a workspace books more than that in a 48-hour or 7-day window.
   const meetingHorizon = new Date(now.getTime() + 48 * 3_600_000).toISOString();
   const nowIso = now.toISOString();
-  const meetingSelect = `SELECT m.id,m.provider,m.person_id,m.account_id,
+  const meetingSelect = `SELECT m.id,m.provider,m.origin,m.person_id,m.account_id,
                 TO_CHAR(m.starts_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS starts_at,
                 TO_CHAR(m.ends_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS ends_at,
                 p.name AS person_name,p.email AS person_email,a.name AS account_name
@@ -878,7 +878,19 @@ export async function getToday(
       .prepare('SELECT timezone FROM workspace_settings WHERE workspace_id=?')
       .get<{ timezone: string | null }>(workspaceId)
   ]);
-  const meetingRows = [...upcomingRows, ...heldRows];
+  // A Cal.com booking also lands in the host's Google Calendar, so one meeting can
+  // arrive as two rows. Collapse on (person, start, end) and keep the booking row.
+  // lc-debt: projection-time dedupe only; link the providers at ingest (Google
+  // iCalUID to Cal.com uid) so the meetings table holds one row per meeting.
+  const meetingByKey = new Map<string, Record<string, unknown>>();
+  for (const row of [...upcomingRows, ...heldRows]) {
+    const key = `${String(row.person_id)}\u001f${String(row.starts_at)}\u001f${String(row.ends_at)}`;
+    const kept = meetingByKey.get(key);
+    if (!kept || (kept.origin !== 'booking' && row.origin === 'booking')) {
+      meetingByKey.set(key, row);
+    }
+  }
+  const meetingRows = [...meetingByKey.values()];
   const meetingZone = validTimeZone(meetingSettings?.timezone);
   for (const row of meetingRows) {
     const meetingId = String(row.id);

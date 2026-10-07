@@ -906,6 +906,86 @@ describe('Nango calendar sync', () => {
     expect(result).toEqual({ duplicate: false, processed: 'synced-2-skipped-1' });
   });
 
+  it('skips a meeting record it cannot read on a meeting alias model and keeps the batch going', async () => {
+    const database = await openLiveDatabase();
+    const seed = await seedSyncTenant(database, 'microsoft', 'trevra-microsoft');
+    nangoMock.listRecords.mockResolvedValueOnce({
+      records: [
+        {
+          id: 'graph-1',
+          start: { dateTime: '2026-11-03T10:00:00.0000000', timeZone: 'UTC' },
+          end: { dateTime: '2026-11-03T10:30:00.0000000', timeZone: 'UTC' },
+          attendees: [{ emailAddress: { address: 'maya@acme.example' } }]
+        },
+        {
+          kind: 'opportunity',
+          id: 'opp-after-graph',
+          accountName: 'Acme',
+          personName: 'Maya Patel',
+          personEmail: 'maya@acme.example',
+          title: 'After Graph',
+          status: 'qualified'
+        }
+      ],
+      next_cursor: null
+    });
+    const result = await handleNangoWebhook(database, syncWebhook(seed, 'TrevraMeeting'), {});
+    expect(result).toEqual({ duplicate: false, processed: 'synced-1-skipped-1' });
+    const opportunities = await database
+      .prepare('SELECT title FROM opportunities WHERE workspace_id=?')
+      .all<{ title: string }>(seed.workspaceId);
+    expect(opportunities.map((row) => row.title)).toContain('After Graph');
+    const meetings = await database
+      .prepare('SELECT COUNT(*)::int AS n FROM meetings WHERE workspace_id=?')
+      .get<{ n: number }>(seed.workspaceId);
+    expect(meetings?.n).toBe(0);
+  });
+
+  it('cancels a stored calendar meeting once the event stops being a prospect meeting', async () => {
+    const database = await openLiveDatabase();
+    const seed = await seedSyncTenant(database, 'google-calendar', 'trevra-google-calendar');
+    const self = { email: 'owner@lemoncrow.example', self: true, responseStatus: 'accepted' };
+    const times = {
+      kind: 'calendar#event',
+      start: { dateTime: '2026-11-03T10:00:00+01:00' },
+      end: { dateTime: '2026-11-03T10:30:00+01:00' }
+    };
+    const maya = { email: 'maya@acme.example', responseStatus: 'accepted' };
+    nangoMock.listRecords.mockResolvedValueOnce({
+      records: [
+        { id: 'evt-lost', ...times, attendees: [self, maya] },
+        { id: 'evt-all-day', ...times, attendees: [self, maya] }
+      ],
+      next_cursor: null
+    });
+    expect(
+      await handleNangoWebhook(database, syncWebhook(seed, 'GoogleCalendarEvent'), {})
+    ).toEqual({ duplicate: false, processed: 'synced-2' });
+
+    nangoMock.listRecords.mockResolvedValueOnce({
+      records: [
+        { id: 'evt-lost', ...times, attendees: [self, { email: 'stranger@else.example' }] },
+        {
+          id: 'evt-all-day',
+          kind: 'calendar#event',
+          start: { date: '2026-11-03' },
+          end: { date: '2026-11-04' },
+          attendees: [self, maya]
+        },
+        { id: 'evt-never-stored', ...times, attendees: [self] }
+      ],
+      next_cursor: null
+    });
+    await handleNangoWebhook(database, syncWebhook(seed, 'GoogleCalendarEvent'), {});
+    const meetings = await database
+      .prepare('SELECT external_id,status FROM meetings WHERE workspace_id=? ORDER BY external_id')
+      .all<{ external_id: string; status: string }>(seed.workspaceId);
+    expect(meetings).toEqual([
+      { external_id: 'evt-all-day', status: 'cancelled' },
+      { external_id: 'evt-lost', status: 'cancelled' }
+    ]);
+  });
+
   it("does not read another provider's events model as calendar meetings", async () => {
     const database = await openLiveDatabase();
     const seed = await seedSyncTenant(database, 'hubspot', 'trevra-hubspot');
