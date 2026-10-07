@@ -406,7 +406,7 @@ export async function prepareEmailOutreach(
   const footer = (await emailComplianceProvider().footer(db, input.workspaceId))?.trim() ?? '';
   if (!footer) {
     throw new EmailOutreachError(
-      'No compliance footer (legal name, postal address, opt-out line) is available for this workspace. Complete sender compliance in Workspace settings before preparing outreach email.'
+      'No compliance footer (postal address, privacy policy URL, opt-out line) is available for this workspace. Check the sender identity in Workspace settings before preparing outreach email.'
     );
   }
 

@@ -542,4 +542,20 @@ describe('bounded GTM intent compiler', () => {
       'recipient_lawful_basis_missing'
     );
   });
+
+  it('names the missing footer even when the provider reports only a lead-list issue', async () => {
+    registerEmailComplianceProvider({
+      footer: async () => null,
+      blockers: async () => [
+        { code: 'recipient_lawful_basis_missing', message: 'No basis for 1 person.' }
+      ]
+    });
+    const plan = await compileGtmIntent(db, WORKSPACE, {
+      objective: 'prepare_outreach',
+      channels: ['email']
+    });
+    const codes = plan.blockers.map((blocker) => blocker.code);
+    expect(codes).toContain('recipient_lawful_basis_missing');
+    expect(codes).toContain('email_compliance_footer_unavailable');
+  });
 });

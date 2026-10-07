@@ -498,6 +498,7 @@ describe('generic lead capture', () => {
     expect(serialized).not.toContain('fiona@consent.example');
     expect(serialized).not.toContain('Fiona');
   });
+
   it('derives the workspace only from the Capture Source and rejects body routing fields', async () => {
     const response = await intake(sourceSecret, 'idem-workspace-001', {
       kind: 'contact_message',

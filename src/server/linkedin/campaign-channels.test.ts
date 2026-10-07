@@ -618,10 +618,10 @@ describe('campaign channel executor', () => {
     const campaignId = await campaignFor(
       [
         {
-          id: 'wait',
-          action: 'wait',
+          id: 'email-live',
+          action: 'email',
           delayBefore: { amount: 0, unit: 'hours' },
-          config: { duration: { amount: 1, unit: 'days' } }
+          config: { variants: [{ id: 'a', body: 'Hi', weight: 100 }], subject: 'Hello' }
         },
         {
           id: 'end',
@@ -648,6 +648,9 @@ describe('campaign channel executor', () => {
            WHERE workspace_id=? AND id=?`
       )
       .run(NOW.toISOString(), WORKSPACE, member.id);
+    await db
+      .prepare(`DELETE FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND member_id=?`)
+      .run(WORKSPACE, member.id);
     await db
       .prepare(
         `INSERT INTO linkedin_campaign_channel_actions
@@ -691,6 +694,9 @@ describe('campaign channel executor', () => {
       )
       .all<{ token: string }>(WORKSPACE);
     expect(links).toEqual([]);
+    const after = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    expect(after.branchState['external:email_success']).toBe(false);
+    expect(after.currentStepId).toBe('end');
   });
 
   it('records native tracking opens/clicks and resolves click redirects only from opaque token pairs', async () => {

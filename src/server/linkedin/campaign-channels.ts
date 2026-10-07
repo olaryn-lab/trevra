@@ -482,8 +482,12 @@ async function executeFindEmail(
 
 function definiteFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|enrichment credit cap reached|lawful basis missing/i.test(
-    error.message
+  return (
+    /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|enrichment credit cap reached/i.test(
+      error.message
+    ) ||
+    // Anchored: only our own pre-send refusal, never text a provider error echoes.
+    /^Lawful basis missing for cold email:/.test(error.message)
   );
 }
 
