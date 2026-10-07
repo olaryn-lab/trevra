@@ -6,7 +6,12 @@ import {
   orgHandleFromCompany,
   resolveGitHubActor
 } from './resolve.js';
-import { GitHubClient, type GitHubTransport } from './transport.js';
+import {
+  GitHubClient,
+  GitHubRequestError,
+  type GitHubResponse,
+  type GitHubTransport
+} from './transport.js';
 
 const NOW = new Date('2026-10-06T12:00:00.000Z');
 
@@ -146,6 +151,54 @@ describe('resolveGitHubActor', () => {
       }
     });
     expect((await resolveGitHubActor(client(person), 'ann'))?.candidates).toEqual([]);
+  });
+
+  it('falls through an organization GitHub refuses to show, and propagates a GitHub outage', async () => {
+    const routes: Record<string, GitHubResponse> = {
+      '/users/maya': {
+        status: 200,
+        data: {
+          login: 'maya',
+          type: 'User',
+          html_url: 'https://github.com/maya',
+          company: '@samlco',
+          email: 'maya@buyer-mail.com',
+          blog: null
+        },
+        headers: {}
+      },
+      '/orgs/samlco': {
+        status: 403,
+        data: { message: 'Resource protected by organization SAML enforcement.' },
+        headers: {}
+      }
+    };
+    const answers = (overrides: Record<string, GitHubResponse>): GitHubTransport => ({
+      async get(endpoint: string) {
+        return (
+          { ...routes, ...overrides }[endpoint] ?? {
+            status: 404,
+            data: { message: 'Not Found' },
+            headers: {}
+          }
+        );
+      }
+    });
+    expect((await resolveGitHubActor(client(answers({})), 'maya'))?.candidates).toEqual([
+      { domain: 'buyer-mail.com', via: 'email_domain', name: null }
+    ]);
+    // An unreadable person is unresolved, not a failure.
+    const hidden = answers({
+      '/users/maya': { status: 451, data: { message: 'Unavailable' }, headers: {} }
+    });
+    expect(await resolveGitHubActor(client(hidden), 'maya')).toBeNull();
+    // A 5xx is transient: it is not turned into "no company".
+    const outage = answers({
+      '/orgs/samlco': { status: 502, data: { message: 'Bad Gateway' }, headers: {} }
+    });
+    await expect(resolveGitHubActor(client(outage), 'maya')).rejects.toBeInstanceOf(
+      GitHubRequestError
+    );
   });
 
   it('resolves an organization that forked the repository through its own website', async () => {

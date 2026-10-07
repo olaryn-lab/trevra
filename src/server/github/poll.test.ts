@@ -514,6 +514,40 @@ describe('pollWorkspaceRepositories', () => {
     expect(github.calls.some((call) => call.endpoint.endsWith('/forks'))).toBe(false);
   });
 
+  it('treats an organization GitHub refuses to show as no company and keeps reading the repository', async () => {
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        // A SAML-protected organization answers 403 to an outside token.
+        '/orgs/buyerco': () => ({
+          status: 403,
+          data: { message: 'Resource protected by organization SAML enforcement.' },
+          headers: { 'x-ratelimit-remaining': '4999' }
+        })
+      })
+    );
+    const result = await poll(github);
+    expect(result.polled).toBe(1);
+    const repo = await repoRow();
+    expect(repo).toMatchObject({
+      status: 'ok',
+      lastError: null,
+      starsCursor: '2026-10-05T11:00:00.000Z',
+      forksCursor: '2026-10-05T12:00:00.000Z',
+      issuesCursor: '2026-10-05T13:30:00.000Z',
+      // maya's star and issue, and lee: counted, never stored.
+      lastSummary: { stars: 3, forks: 1, issues: 1, created: 1, unresolved: 3, ignoredRejected: 1 }
+    });
+    expect(JSON.stringify(repo)).not.toContain('maya');
+    expect(JSON.stringify(repo)).not.toContain('buyerco');
+    // Later stars, forks and issues were still read and recorded.
+    const newco = await accountByDomain(WORKSPACE_ID, 'newco.dev');
+    expect((await signalRows(WORKSPACE_ID, newco!.id)).map((row) => row.kind)).toEqual([
+      'repo-starred'
+    ]);
+    expect(github.calls.some((call) => call.endpoint.endsWith('/forks'))).toBe(true);
+    expect(github.calls.some((call) => call.endpoint.endsWith('/issues'))).toBe(true);
+  });
+
   it('marks the connection for reconnecting when GitHub rejects the token', async () => {
     const github = fakeGitHub({
       [REPO_PATH]: () => ({ status: 401, data: { message: 'Bad credentials' }, headers: {} })

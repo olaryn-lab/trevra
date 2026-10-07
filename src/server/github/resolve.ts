@@ -1,6 +1,6 @@
 import { normalizeAccountDomain } from '../accounts/store.js';
 import { isFreemailDomain, isPersonalPlatformHost } from './public-domains.js';
-import { GitHubNotFoundError, type GitHubClient } from './transport.js';
+import { GitHubNotFoundError, GitHubRequestError, type GitHubClient } from './transport.js';
 
 /**
  * Who is behind a GitHub login, in company terms, from PUBLIC data only.
@@ -68,6 +68,13 @@ interface ProfileFields {
   email?: unknown;
 }
 
+/**
+ * A profile GitHub will not show (gone, or any other 4xx such as a
+ * SAML-protected organization's 403) is no profile: an unreadable org falls
+ * through to the email and blog, an unreadable person is unresolved. A 5xx is
+ * transient and propagates; rate limits and revoked tokens have their own
+ * error types and propagate too.
+ */
 async function readProfile(client: GitHubClient, endpoint: string): Promise<ProfileFields | null> {
   try {
     const response = await client.get(endpoint);
@@ -76,6 +83,9 @@ async function readProfile(client: GitHubClient, endpoint: string): Promise<Prof
       : null;
   } catch (error) {
     if (error instanceof GitHubNotFoundError) return null;
+    if (error instanceof GitHubRequestError && error.status >= 400 && error.status < 500) {
+      return null;
+    }
     throw error;
   }
 }
