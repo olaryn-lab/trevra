@@ -4,6 +4,8 @@ import { createSuppression } from '../suppressions.js';
 import type { VerifiedEmailOutcome } from '../email-outcomes.js';
 import { projectCampaignEmailDelivery, projectCampaignEmailReply } from '../conversations.js';
 import { executeConnectedAction, readConnectedEmailThreadEvents } from '../integration-service.js';
+import { evaluateEmailLawfulBasis } from '../compliance/lawful-basis.js';
+import { JURISDICTION_RULES_DISCLAIMER } from '../compliance/jurisdiction-rules.js';
 import { campaignSnapshotSteps } from './managed-campaigns.js';
 import { delayMilliseconds } from './workflows.js';
 import { publicEmailOrigin } from '../email/public-origin.js';
@@ -296,6 +298,22 @@ async function executeEmail(
   const body = String(payload.body ?? '').trim();
   if (!recipient || !subject || !body)
     throw new Error('Email action requires recipient, subject, and body.');
+  // Cold campaign email needs a recorded lawful basis wherever the recipient's
+  // country requires one. Checked BEFORE tracking tokens exist, so a refused
+  // send leaves nothing behind. Not legal advice; verify with counsel.
+  const lead = await db
+    .prepare('SELECT person_id, country FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
+    .get<{ person_id: string | null; country: string | null }>(row.workspace_id, row.contact_id);
+  const lawfulBasis = await evaluateEmailLawfulBasis(db, row.workspace_id, {
+    email: recipient,
+    personId: lead?.person_id ?? null,
+    leadCountry: lead?.country ?? null,
+    purpose: 'outreach'
+  });
+  if (lawfulBasis.status === 'missing')
+    throw new Error(
+      `Lawful basis missing for cold email: ${lawfulBasis.reason} ${JURISDICTION_RULES_DISCLAIMER}`
+    );
   const threaded = payload.threaded === true;
   const tracking =
     payload.tracking === 'opens' || payload.tracking === 'opens_clicks'
@@ -464,7 +482,7 @@ async function executeFindEmail(
 
 function definiteFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
-  return /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|enrichment credit cap reached/i.test(
+  return /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|enrichment credit cap reached|lawful basis missing/i.test(
     error.message
   );
 }

@@ -5,6 +5,8 @@ import {
   type EmailComplianceIssue,
   type EmailComplianceProvider
 } from '../email/compliance.js';
+import { JURISDICTION_RULES_DISCLAIMER } from './jurisdiction-rules.js';
+import { LEAD_LIST_BASIS_CHECK_LIMIT, countLeadListMissingEmailBasis } from './lawful-basis.js';
 import { getSenderIdentity, identityBlockers, type SenderIdentity } from './sender-identity.js';
 
 /* ---------------------------------------------------------------------------
@@ -22,15 +24,21 @@ import { getSenderIdentity, identityBlockers, type SenderIdentity } from './send
  * ------------------------------------------------------------------------ */
 
 export const SENDER_COMPLIANCE_READ_TIMEOUT_MS = 3_000;
+// The lead-list count walks up to LEAD_LIST_BASIS_CHECK_LIMIT people, so it gets its own bound.
+export const LEAD_LIST_BASIS_READ_TIMEOUT_MS = 10_000;
 
-async function bounded<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+async function bounded<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  what = 'The sender identity read'
+): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
       work,
       new Promise<never>((_resolve, reject) => {
         timer = setTimeout(
-          () => reject(new Error(`The sender identity read took longer than ${timeoutMs}ms`)),
+          () => reject(new Error(`${what} took longer than ${timeoutMs}ms`)),
           timeoutMs
         );
         timer.unref();
@@ -41,7 +49,7 @@ async function bounded<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
   }
 }
 
-function reportFailure(read: 'footer' | 'blockers', error: unknown): void {
+function reportFailure(read: 'footer' | 'blockers' | 'lead-list basis', error: unknown): void {
   // The message only: never the workspace's address or URL.
   console.error(
     `Sender compliance ${read} unavailable; failing closed`,
@@ -67,9 +75,45 @@ export function senderComplianceFooter(identity: SenderIdentity): string | null 
 }
 
 export function createSenderComplianceProvider(
-  options: { timeoutMs?: number } = {}
+  options: { timeoutMs?: number; leadListTimeoutMs?: number } = {}
 ): EmailComplianceProvider {
   const timeoutMs = options.timeoutMs ?? SENDER_COMPLIANCE_READ_TIMEOUT_MS;
+  const leadListTimeoutMs = options.leadListTimeoutMs ?? LEAD_LIST_BASIS_READ_TIMEOUT_MS;
+
+  // Counts only: how many, never who. Fails closed on error or timeout.
+  async function leadListBlockers(
+    db: Db,
+    workspaceId: string,
+    listId: string
+  ): Promise<EmailComplianceIssue[]> {
+    try {
+      const basis = await bounded(
+        countLeadListMissingEmailBasis(db, workspaceId, listId),
+        leadListTimeoutMs,
+        'The lead-list lawful basis check'
+      );
+      if (basis.missing === 0) return [];
+      return [
+        {
+          code: 'recipient_lawful_basis_missing',
+          message: `${basis.missing} of ${basis.checked} people with an email in this list have no recorded lawful basis for cold email in their country${
+            basis.truncated ? ` (only the first ${LEAD_LIST_BASIS_CHECK_LIMIT} were checked)` : ''
+          }. ${JURISDICTION_RULES_DISCLAIMER}`,
+          actionHref: '/outreach/new'
+        }
+      ];
+    } catch (error) {
+      reportFailure('lead-list basis', error);
+      return [
+        {
+          code: 'recipient_lawful_basis_missing',
+          message: `Trevra could not check this list for a lawful basis to email. Try again. ${JURISDICTION_RULES_DISCLAIMER}`,
+          actionHref: '/outreach/new'
+        }
+      ];
+    }
+  }
+
   return {
     async footer(db: Db, workspaceId: string): Promise<string | null> {
       try {
@@ -79,18 +123,21 @@ export function createSenderComplianceProvider(
         return null;
       }
     },
-    // listId is unused until the lead-list lawful-basis blocker (Phase E Task 11).
     async blockers(
       db: Db,
       workspaceId: string,
-      _listId: string | null
+      listId: string | null
     ): Promise<EmailComplianceIssue[]> {
+      let identity: EmailComplianceIssue[];
       try {
-        return identityBlockers(await bounded(getSenderIdentity(db, workspaceId), timeoutMs));
+        identity = identityBlockers(await bounded(getSenderIdentity(db, workspaceId), timeoutMs));
       } catch (error) {
         reportFailure('blockers', error);
-        return [emailComplianceFooterUnavailable()];
+        identity = [emailComplianceFooterUnavailable()];
       }
+      return listId
+        ? [...identity, ...(await leadListBlockers(db, workspaceId, listId))]
+        : identity;
     }
   };
 }

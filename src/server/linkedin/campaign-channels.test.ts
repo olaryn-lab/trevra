@@ -614,6 +614,85 @@ describe('campaign channel executor', () => {
     expect(link?.target_url).toBe('https://example.com/demo');
   });
 
+  it('refuses campaign cold email with no recorded lawful basis before any tracking exists', async () => {
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL,Country\nMaya,Huber,Acme GmbH,maya@acme-gmbh.de,https://linkedin.com/in/maya-lawful-basis,Germany\n'
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    await db
+      .prepare(
+        `INSERT INTO connections
+           (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,created_at,updated_at)
+           VALUES ('conn_demo_basis',?,'gmail','trevra-gmail','demo-basis','demo@example.com','connected',1,?::timestamptz,?::timestamptz)
+           ON CONFLICT (id) DO NOTHING`
+      )
+      .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+    await db
+      .prepare(
+        `UPDATE linkedin_campaign_members SET status='waiting',current_step_id='email-live',step_index=0,next_eligible_at=?::timestamptz
+           WHERE workspace_id=? AND id=?`
+      )
+      .run(NOW.toISOString(), WORKSPACE, member.id);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+           (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,created_at,updated_at)
+           VALUES ('licha_basis_send',?,?,?,?,?,'email','planned',?::timestamptz,?::jsonb,'basis-send-key',?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'email-live',
+        NOW.toISOString(),
+        JSON.stringify({
+          recipient: 'maya@acme-gmbh.de',
+          subject: 'Tracked email',
+          body: 'See https://example.com/demo for details',
+          tracking: 'opens_clicks',
+          threaded: false
+        }),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+
+    const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
+    expect(run).toMatchObject({ sent: 0, failed: 1, unknown: 0 });
+    const action = await db
+      .prepare(
+        `SELECT status,last_error,tracking_token FROM linkedin_campaign_channel_actions WHERE id='licha_basis_send'`
+      )
+      .get<{ status: string; last_error: string | null; tracking_token: string | null }>();
+    expect(action?.status).toBe('failed');
+    expect(action?.last_error).toContain('Lawful basis missing for cold email');
+    expect(action?.last_error).toContain('recipient in DE');
+    expect(action?.last_error).toContain('Not legal advice; verify with counsel.');
+    expect(action?.last_error).not.toContain('acme-gmbh');
+    expect(action?.tracking_token).toBeNull();
+    const links = await db
+      .prepare(
+        `SELECT token FROM linkedin_campaign_email_tracking_links WHERE workspace_id=? AND channel_action_id='licha_basis_send'`
+      )
+      .all<{ token: string }>(WORKSPACE);
+    expect(links).toEqual([]);
+  });
+
   it('records native tracking opens/clicks and resolves click redirects only from opaque token pairs', async () => {
     const campaignId = await campaignFor(
       [

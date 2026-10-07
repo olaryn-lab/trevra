@@ -469,4 +469,77 @@ describe('bounded GTM intent compiler', () => {
     // The footer is built from the same identity, so it is available too.
     expect(after).not.toContain('email_compliance_footer_unavailable');
   });
+
+  it('counts the people in an email plan who have no recorded lawful basis, without naming them', async () => {
+    await saveSenderIdentity(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        input: {
+          legalName: 'Intent Test GmbH',
+          postalAddress: 'Bahnhofstrasse 1, 8001 Zurich',
+          privacyPolicyUrl: 'https://intent.example/privacy'
+        }
+      },
+      NOW
+    );
+    const seat = await upsertSeat(
+      db,
+      WORKSPACE,
+      { label: 'Founder', timezone: 'Europe/Zurich' },
+      NOW
+    );
+    const list = await createLeadList(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        seatKey: seat.seatKey,
+        name: 'DACH founders',
+        sourceKind: 'csv',
+        sourceRef: 'intent-lawful-basis'
+      },
+      NOW
+    );
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        seatKey: seat.seatKey,
+        listId: list.id,
+        csv: [
+          'First Name,Last Name,Company,Email,LinkedIn URL,Country',
+          'Maya,Huber,Northwind,maya@northwind-gmbh.de,https://www.linkedin.com/in/maya-lawful-basis/,Germany',
+          'Jonas,Keller,Northstar,jonas-lawful-basis@example.com,https://www.linkedin.com/in/jonas-lawful-basis/,Germany'
+        ].join('\n')
+      },
+      NOW
+    );
+    const intent = {
+      objective: 'prepare_outreach',
+      people: { existingListId: list.id },
+      channels: ['email']
+    };
+
+    const plan = await compileGtmIntent(db, WORKSPACE, intent);
+    const codes = plan.blockers.map((candidate) => candidate.code);
+    // The identity is complete, so no sender blocker competes with the list one.
+    expect(codes).toContain('recipient_lawful_basis_missing');
+    expect(codes.filter((code) => code.startsWith('sender_'))).toEqual([]);
+    const blocker = plan.blockers.find(
+      (candidate) => candidate.code === 'recipient_lawful_basis_missing'
+    );
+    expect(blocker).toMatchObject({ actionHref: '/outreach/new' });
+    expect(blocker?.message).toContain(
+      '1 of 2 people with an email in this list have no recorded lawful basis'
+    );
+    expect(blocker?.message).toContain('Not legal advice; verify with counsel.');
+    expect(blocker?.message).not.toContain('northwind');
+    expect(blocker?.message).not.toContain('Maya');
+
+    const linkedin = await compileGtmIntent(db, WORKSPACE, { ...intent, channels: ['linkedin'] });
+    expect(linkedin.blockers.map((candidate) => candidate.code)).not.toContain(
+      'recipient_lawful_basis_missing'
+    );
+  });
 });

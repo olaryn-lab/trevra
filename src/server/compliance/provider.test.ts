@@ -5,9 +5,13 @@ import {
   emailComplianceFooterUnavailable,
   OUTREACH_OPT_OUT_SENTENCE
 } from '../email/compliance.js';
+import { createLeadList, importLeadCsv } from '../linkedin/lead-lists.js';
+import { upsertSeat } from '../linkedin/seats.js';
+import { JURISDICTION_RULES_DISCLAIMER } from './jurisdiction-rules.js';
 import { saveSenderIdentity } from './sender-identity.js';
 import {
   createSenderComplianceProvider,
+  LEAD_LIST_BASIS_READ_TIMEOUT_MS,
   SENDER_COMPLIANCE_READ_TIMEOUT_MS,
   senderComplianceProvider
 } from './provider.js';
@@ -100,6 +104,80 @@ describe('sender compliance provider', () => {
       ]);
     }
     expect(logged).toHaveBeenCalledTimes(4);
+  });
+
+  it('lists a lead list people without a lawful basis by count, beside the identity blockers', async () => {
+    const seat = await upsertSeat(
+      db,
+      WORKSPACE,
+      { label: 'Founder', timezone: 'Europe/Zurich' },
+      NOW
+    );
+    const list = await createLeadList(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        seatKey: seat.seatKey,
+        name: 'DACH',
+        sourceKind: 'csv',
+        sourceRef: 'provider-basis'
+      },
+      NOW
+    );
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        seatKey: seat.seatKey,
+        listId: list.id,
+        csv: [
+          'First Name,Last Name,Company,Email,LinkedIn URL,Country',
+          'Maya,Huber,Northwind,maya@northwind-gmbh.de,https://www.linkedin.com/in/maya-provider-basis/,Germany'
+        ].join('\n')
+      },
+      NOW
+    );
+    // Identity blockers and the count are independent: both appear.
+    const issues = await senderComplianceProvider.blockers(db, WORKSPACE, list.id);
+    expect(issues.map((issue) => issue.code)).toEqual([
+      'sender_postal_address_missing',
+      'sender_privacy_url_missing',
+      'recipient_lawful_basis_missing'
+    ]);
+    const last = issues[2]!;
+    expect(last.actionHref).toBe('/outreach/new');
+    expect(last.message).toContain('1 of 1 people with an email in this list');
+    expect(last.message).toContain(JURISDICTION_RULES_DISCLAIMER);
+    expect(last.message).not.toContain('northwind');
+    // No list: no count.
+    expect((await senderComplianceProvider.blockers(db, WORKSPACE, null)).length).toBe(2);
+  });
+
+  it('fails closed when the lead-list count fails or misses its own deadline', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(LEAD_LIST_BASIS_READ_TIMEOUT_MS).toBeGreaterThan(SENDER_COMPLIANCE_READ_TIMEOUT_MS);
+    await save({ legalName: 'Northwind GmbH', postalAddress: ADDRESS, privacyPolicyUrl: PRIVACY });
+    const real = db.prepare.bind(db);
+    const withListQuery = (list: () => Promise<unknown>) =>
+      ({
+        prepare: (sql: string) =>
+          sql.includes('linkedin_lead_list_members') ? { all: list } : real(sql)
+      }) as unknown as Db;
+    const hanging = withListQuery(() => new Promise(() => undefined));
+    const failing = withListQuery(async () => {
+      throw new Error('connection terminated');
+    });
+    const provider = createSenderComplianceProvider({ leadListTimeoutMs: 25 });
+    for (const broken of [hanging, failing]) {
+      expect(await provider.blockers(broken, WORKSPACE, 'list_any')).toEqual([
+        {
+          code: 'recipient_lawful_basis_missing',
+          message: `Trevra could not check this list for a lawful basis to email. Try again. ${JURISDICTION_RULES_DISCLAIMER}`,
+          actionHref: '/outreach/new'
+        }
+      ]);
+    }
+    expect(logged).toHaveBeenCalledTimes(2);
   });
 
   it('is registered at both process entry points and never inside createApp', async () => {
