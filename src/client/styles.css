@@ -12800,6 +12800,83 @@ button:disabled {
   padding-top: 12px;
   border-top: 1px solid var(--line);
 }
+.email-channel {
+  display: grid;
+  gap: 14px;
+}
+.email-channel-mailboxes {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.email-channel-mailboxes > li {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+  padding: 10px 12px;
+  border: 1px solid var(--t-line-soft);
+  border-radius: var(--t-r-md);
+  background: var(--panel);
+}
+.email-channel-mailbox-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
+}
+.email-channel-mailbox-head > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.email-channel-mailbox-head strong {
+  overflow-wrap: anywhere;
+}
+.email-channel-mailbox-head > div > span,
+.email-channel-issues,
+.email-channel-pending,
+.email-channel-facts dd {
+  color: var(--muted);
+  font-size: var(--t-text-xs);
+}
+.status-pill.email-channel-pill-fail {
+  background: var(--t-red-bg);
+  color: var(--t-red);
+}
+.status-pill.email-channel-pill-unknown {
+  background: var(--t-line-soft);
+  color: var(--muted);
+}
+.email-channel-pending {
+  margin: 0;
+}
+.email-channel-issues {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding-left: 18px;
+}
+.email-channel-facts {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+}
+.email-channel-facts dt {
+  font-size: var(--t-text-sm);
+  font-weight: var(--t-w-strong);
+}
+.email-channel-facts dd {
+  margin: 2px 0 0;
+}
+.email-channel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 /* Opportunity-lite: fixed GTM stages, not a configurable CRM pipeline. */
 .opportunity-create {
   display: grid;

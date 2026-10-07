@@ -79,6 +79,7 @@ import { LinkedInAccounts } from './LinkedInAccounts';
 import { CompanionPanel } from './LinkedInCompanion';
 import { LinkedInExclusions, relativeTime } from './LinkedInScreen';
 import { TeamSettingsView } from './TeamScreen';
+import { EmailChannelPanel } from './EmailChannelPanel';
 import { LeadCaptureSetup } from './LeadCaptureSetup';
 import { BillingSettings } from './BillingSettings';
 import { GitHubReposPanel } from './GitHubReposPanel';
@@ -598,6 +599,7 @@ function SetupView({
             setBusyId={setBusyId}
           />
           <GitHubReposPanel setToast={setToast} />
+          <EmailChannelPanel setToast={setToast} />
           <LimitsView setToast={setToast} />
           <LinkedInExclusions setToast={setToast} />
           <TeamSettingsView

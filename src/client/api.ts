@@ -68,6 +68,7 @@ import type {
 } from '../server/content/public-reports';
 import type { PreparedOutreachResult } from '../server/outreach/prepare';
 import type { GtmIntent, GtmPlan, PreparedGtmPlanResult } from '../server/gtm/intent';
+import type { EmailChannelStatus } from '../server/email/types';
 import type { ConversationMessage, ConversationSummary } from '../server/conversations';
 import type { LinkedInActionKind, LinkedInActionStatus } from '../server/linkedin/actions';
 import type { LinkedInPost, LinkedInPostStatus } from '../server/linkedin/posts';
@@ -560,6 +561,34 @@ export async function prepareCompiledGtmPlan(
     method: 'POST',
     body: JSON.stringify({ plan, planHash: plan.planHash, idempotencyKey })
   });
+}
+
+export async function getEmailChannel(): Promise<EmailChannelStatus> {
+  const result = await request<{ channel: EmailChannelStatus }>('/api/email/channel');
+  return result.channel;
+}
+
+export async function chooseInboundMailbox(connectionId: string): Promise<EmailChannelStatus> {
+  const result = await request<{ channel: EmailChannelStatus }>('/api/email/inbound-mailbox', {
+    method: 'PUT',
+    body: JSON.stringify({ connectionId })
+  });
+  return result.channel;
+}
+
+export async function stopInboundMailbox(): Promise<EmailChannelStatus> {
+  const result = await request<{ channel: EmailChannelStatus }>('/api/email/inbound-mailbox', {
+    method: 'DELETE'
+  });
+  return result.channel;
+}
+
+export async function recheckEmailDns(): Promise<EmailChannelStatus> {
+  const result = await request<{ channel: EmailChannelStatus }>(
+    '/api/email/deliverability/recheck',
+    { method: 'POST' }
+  );
+  return result.channel;
 }
 
 export async function getConversations(limit = 100): Promise<ConversationSummary[]> {
