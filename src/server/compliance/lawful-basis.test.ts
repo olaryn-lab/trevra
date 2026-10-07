@@ -364,6 +364,50 @@ describe('lead-list country and recipients', () => {
       },
       NOW
     );
+    // Prepare skips a Person already emailed (already_contacted), one with an
+    // open outreach run (already_pending), and a repeat of an earlier address.
+    for (const [personId, email] of [
+      ['con_lb_contacted', 'contacted@acme-gmbh.de'],
+      ['con_lb_pending', 'pending@acme-gmbh.de']
+    ])
+      await db
+        .prepare(
+          `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+           VALUES (?,?,'Dee',?,?,?,?)`
+        )
+        .run(personId, WORKSPACE, email, email, iso, iso);
+    await lead('llc_lb_contacted', {
+      personId: 'con_lb_contacted',
+      email: 'contacted@acme-gmbh.de',
+      country: 'DE'
+    });
+    await db
+      .prepare(
+        `INSERT INTO gtm_deliveries
+         (id,workspace_id,channel,connection_id,purpose,recipient,source_type,source_id,idempotency_key,status,started_at)
+         VALUES ('gdel_lb_contacted',?,'email',NULL,'outreach','Contacted@acme-gmbh.de','email_action','gdel_lb_contacted','key-gdel_lb_contacted','sent',?::timestamptz)`
+      )
+      .run(WORKSPACE, iso);
+    await lead('llc_lb_pending', {
+      personId: 'con_lb_pending',
+      email: 'pending@acme-gmbh.de',
+      country: 'DE'
+    });
+    await db
+      .prepare(
+        `INSERT INTO playbook_runs
+         (id,workspace_id,playbook_key,playbook_version,status,actor_type,actor_id,input_json,correlation_id)
+         VALUES ('pbr_lb_pending',?,'gtm.email-outreach','1.0.0','waiting_approval','user',NULL,?::jsonb,'corr_lb_pending')`
+      )
+      .run(
+        WORKSPACE,
+        JSON.stringify({ idempotencyKey: 'eo_lb_pending', personId: 'con_lb_pending' })
+      );
+    await lead('llc_lb_repeat', {
+      personId: 'con_lb_counted',
+      email: 'one@acme-gmbh.de',
+      country: 'DE'
+    });
     // The person email (a reserved domain) wins over the lead copy, so that row needs no basis.
     expect(RECIPIENT_SQL).toContain('p.email');
     expect(await countLeadListMissingEmailBasis(db, WORKSPACE, LIST)).toEqual({

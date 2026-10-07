@@ -487,9 +487,12 @@ export async function emailLawfulBasisAttributes(
 
 /**
  * How many of the people outreach would write to lack a basis for cold email.
- * It selects the same rows `prepareEmailOutreach` does (person email first,
- * no do-not-contact, no suppression), so the count equals the set that would
- * actually be sent.
+ * It selects the same rows `prepareEmailOutreach` (email/outreach.ts) would
+ * prepare: person email first, no do-not-contact, no suppression, and none it
+ * skips as `already_contacted` (an outreach delivery to that address is
+ * sending, sent or uncertain) or `already_pending` (an open gtm.email-outreach
+ * run for the Person, or an earlier member of this list with the same address
+ * or Person). So the count equals the set that would actually be sent.
  */
 export async function countLeadListMissingEmailBasis(
   db: Db,
@@ -504,25 +507,42 @@ export async function countLeadListMissingEmailBasis(
        LEFT JOIN contacts p ON p.workspace_id=lc.workspace_id AND p.id=lc.person_id
        WHERE m.workspace_id=? AND m.list_id=? AND lc.do_not_contact=FALSE
          AND lc.person_id IS NOT NULL AND ${RECIPIENT_SQL} IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM gtm_deliveries d
+           WHERE d.workspace_id=m.workspace_id AND d.channel='email' AND d.purpose='outreach'
+             AND d.status IN ('sending','sent','uncertain')
+             AND LOWER(d.recipient)=${RECIPIENT_SQL})
+         AND NOT EXISTS (
+           SELECT 1 FROM playbook_runs r
+           WHERE r.workspace_id=m.workspace_id AND r.playbook_key='gtm.email-outreach'
+             AND r.status IN ('queued','running','waiting_approval')
+             AND r.input_json->>'personId'=lc.person_id)
        ORDER BY m.created_at ASC, lc.id ASC
        LIMIT ?::int`
     )
-    .all<{ person_id: string | null; country: string | null; recipient: string }>(
+    .all<{ person_id: string; country: string | null; recipient: string }>(
       workspaceId,
       listId,
       LEAD_LIST_BASIS_CHECK_LIMIT + 1
     );
   const window = rows.slice(0, LEAD_LIST_BASIS_CHECK_LIMIT);
   const checked: typeof window = [];
+  const recipients = new Set<string>();
+  const people = new Set<string>();
   for (const row of window) {
     if (!recipientSchema.safeParse(row.recipient).success) continue;
+    // The same address or Person earlier in this list is prepared once.
+    if (recipients.has(row.recipient) || people.has(row.person_id)) continue;
     // lc-debt: N suppression lookups per check; upgrade path: set-based NOT EXISTS against suppressions
     const suppressed = await findSuppression(db, workspaceId, {
       channel: 'email',
       personId: row.person_id,
       email: row.recipient
     });
-    if (!suppressed) checked.push(row);
+    if (suppressed) continue;
+    checked.push(row);
+    recipients.add(row.recipient);
+    people.add(row.person_id);
   }
   const decisions = await evaluateEmailLawfulBases(
     db,
