@@ -25,3 +25,6 @@ terraform.tfstate.*
 dist.old/
 *.tfvars
 spike/
+nango-integrations/build/
+nango-integrations/.nango/*
+!nango-integrations/.nango/.gitkeep

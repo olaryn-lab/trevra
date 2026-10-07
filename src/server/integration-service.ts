@@ -35,7 +35,7 @@ import {
   decideInboundMailboxRecord
 } from './email/inbound-mailbox.js';
 
-const canonicalRecordSchema = z.discriminatedUnion('kind', [
+export const canonicalRecordSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('message'),
     id: z.string(),

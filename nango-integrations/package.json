@@ -1,0 +1,15 @@
+{
+  "name": "trevra-nango-integrations",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "nango compile",
+    "dev": "nango dev"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "nango": "0.71.2",
+    "zod": "4.3.6"
+  }
+}

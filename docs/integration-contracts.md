@@ -100,6 +100,12 @@ A Nango sync is resolved from the registered provider configuration and external
 
 Records that cannot be read (an unsupported model, or a calendar event in a shape this build does not parse) are counted as skipped and reported on the connection, rather than silently treated as a successful empty sync. Readable records that Trevra deliberately leaves out are counted as ignored. These are internal, personal and all-day calendar events, and meetings with nobody already in the workspace. Google Calendar events are read in the Calendar API `Event` shape (https://developers.google.com/calendar/api/v3/reference/events). Only the time, the link, and the one attendee who matches an existing Person are kept.
 
+## Inbound mailbox sync (`inbound-messages`)
+
+The read-only `inbound-messages` sync (model `InboundEmailMessage`) runs on the `trevra-gmail` and `trevra-microsoft` integrations from `nango-integrations/`. Trevra starts it when a workspace designates its inbound mailbox, and it emits canonical `message` records with `mailboxAddress` set. A record with that model but no `mailboxAddress` is skipped, never ingested. The sync drops list and bulk mail and mail sent from the mailbox itself; Trevra re-checks every record server-side and keeps only senders it already knows.
+
+Nango's self-hosted record store retains synced message records until the connection is deleted. Trevra's own tables never store strangers' mail.
+
 ## Inbound website lead capture
 
 Website/form ingestion is **not** the old generic `/api/events` route. It is a GTM-specific capture source contract described in `docs/superpowers/specs/2026-08-20-generic-lead-capture-design.md`; the operator/integrator runbook is `docs/lead-capture.md`.

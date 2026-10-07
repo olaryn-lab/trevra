@@ -3,3 +3,5 @@ dist-server
 node_modules
 package-lock.json
 *.min.js
+nango-integrations/build
+nango-integrations/.nango

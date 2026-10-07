@@ -20,6 +20,7 @@
     "test:unit": "vitest run",
     "test:watch": "vitest",
     "check": "npm test && npm run build",
+    "check:nango": "cd nango-integrations && NANGO_CLI_UPGRADE_MODE=ignore npx nango compile --no-interactive",
     "selfhost:init": "bash scripts/selfhost-init.sh",
     "selfhost:deploy": "bash scripts/selfhost-deploy.sh",
     "selfhost:backup": "bash scripts/selfhost-backup.sh",
