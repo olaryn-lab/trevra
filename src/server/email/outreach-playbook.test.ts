@@ -51,7 +51,7 @@ async function seedMailbox(id: string, address: string): Promise<void> {
     .run(id, WORKSPACE, `${id}-external`, address, NOW.toISOString(), NOW.toISOString());
 }
 
-async function prepareRun(overrides: { idempotencyKey?: string } = {}) {
+async function prepareRun(overrides: { idempotencyKey?: string; prepared?: boolean } = {}) {
   const person = await resolveContact(
     db,
     WORKSPACE,
@@ -75,7 +75,8 @@ async function prepareRun(overrides: { idempotencyKey?: string } = {}) {
       body: BODY
     },
     actorType: 'user',
-    actorId: USER
+    actorId: USER,
+    prepared: overrides.prepared ?? true
   });
   return { run, personId: person.contact.id, conversationId };
 }
@@ -230,6 +231,32 @@ describe('gtm.email-outreach', () => {
 
     expect(failed.status).toBe('failed');
     expect(failed.error).toMatch(/no longer matches the approved sender founder@acme\.test/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(await deliveries()).toBe(0);
+  });
+
+  it('starts only from a prepared outreach plan', async () => {
+    await expect(prepareRun({ prepared: false })).rejects.toMatchObject({
+      status: 409,
+      message: 'Email outreach starts only from a prepared outreach plan.'
+    });
+    expect(await outreachRuns()).toBe(0);
+  });
+
+  it('refuses, and says so, when the approved mailbox address cannot be confirmed', async () => {
+    const { run } = await prepareRun();
+    // Re-authorization cleared the cached address; the provider names no mailbox.
+    await db
+      .prepare('UPDATE connections SET mailbox_address=NULL WHERE workspace_id=? AND id=?')
+      .run(WORKSPACE, CONNECTION);
+
+    const failed = await approve(run.id);
+
+    expect(failed.status).toBe('failed');
+    expect(failed.error).toBe(
+      'Trevra could not confirm the address of the approved sending mailbox right now; nothing was sent. Prepare this email again.'
+    );
+    expect(nangoMock.get).toHaveBeenCalled();
     expect(nangoMock.post).not.toHaveBeenCalled();
     expect(await deliveries()).toBe(0);
   });

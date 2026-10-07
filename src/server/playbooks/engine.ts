@@ -45,10 +45,15 @@ export async function startPlaybookRun(
     payload: unknown;
     actorType: 'agent' | 'user' | 'system';
     actorId: string | null;
+    /** Set only by a playbook's dedicated prepare path; never from request input. */
+    prepared?: boolean;
   }
 ): Promise<PlaybookRun> {
   const playbook = getPlaybook(input.playbookId, input.version);
   if (!playbook) throw new PlaybookError(`Unknown playbook: ${input.playbookId}`, 404);
+  if (playbook.preparedOnly && input.prepared !== true) {
+    throw new PlaybookError('Email outreach starts only from a prepared outreach plan.', 409);
+  }
   await assertPlaybookEnabled(db, input.workspaceId, playbook);
 
   const parsedInput = playbook.inputSchema.parse(input.payload);

@@ -258,6 +258,22 @@ describe('callAgentTool', () => {
     expect(skills.some((skill) => skill.id === SCORE_SKILL_ID)).toBe(true);
   });
 
+  it('refuses to start prepared-only email outreach, whatever the arguments say', async () => {
+    await expect(
+      callAgentTool(ctx(), ['playbooks:run'], 'trevra_start_playbook', {
+        playbookId: 'gtm.email-outreach',
+        input: { idempotencyKey: 'eo_agent_tool_0001', prepared: true }
+      })
+    ).rejects.toMatchObject({
+      status: 409,
+      message: 'Email outreach starts only from a prepared outreach plan.'
+    });
+    const runs = await db
+      .prepare('SELECT COUNT(*)::int AS total FROM playbook_runs WHERE workspace_id=?')
+      .get<{ total: number }>(WORKSPACE_ID);
+    expect(runs?.total).toBe(0);
+  });
+
   it('throws on an unknown tool name', async () => {
     await expect(
       callAgentTool(ctx(), [...AGENT_SCOPES], 'trevra_take_over_the_world', {})

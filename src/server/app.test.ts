@@ -538,6 +538,49 @@ describe('Trevra API on PostgreSQL', () => {
       .expect(401);
   });
 
+  it('refuses to start prepared-only email outreach through the generic playbook routes', async () => {
+    db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
+    await resetDemoData(db);
+    const app = createApp(db);
+    const browser = request.agent(app);
+    await browser.post('/api/auth/demo').expect(200);
+    const input = {
+      idempotencyKey: 'eo_generic_route_0001',
+      conversationId: 'conv_generic_route',
+      personId: 'person_generic_route',
+      contactId: 'lilc_generic_route',
+      leadListId: 'lilst_generic_route',
+      connectionId: 'conn_generic_route',
+      senderAddress: 'founder@acme.test',
+      recipient: 'maya@northwind.test',
+      subject: 'Quick question',
+      body: 'Hi Maya'
+    };
+
+    const refused = await browser
+      .post('/api/playbooks/gtm.email-outreach/runs')
+      .send({ input, prepared: true })
+      .expect(409);
+    expect(refused.body.error).toBe('Email outreach starts only from a prepared outreach plan.');
+
+    const created = await browser
+      .post('/api/agent-tokens')
+      .send({ name: 'Outreach agent' })
+      .expect(201);
+    await request(app)
+      .post('/api/agent/playbooks/gtm.email-outreach/runs')
+      .set('Authorization', `Bearer ${created.body.token}`)
+      .send({ input, prepared: true })
+      .expect(409);
+
+    const runs = await db
+      .prepare(
+        "SELECT COUNT(*)::int AS total FROM playbook_runs WHERE workspace_id=? AND playbook_key='gtm.email-outreach'"
+      )
+      .get<{ total: number }>(DEMO_WORKSPACE_ID);
+    expect(runs?.total).toBe(0);
+  });
+
   it('reports BYOK availability and starts a workspace with no key, no endpoint, and the default budget', async () => {
     delete process.env.TREVRA_SECRETS_KEY;
     const agent = await agentWithSession();

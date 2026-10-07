@@ -47,10 +47,17 @@ export interface PlaybookDefinition {
   steps: PlaybookStep[];
   output?: JsonTemplate;
   source?: { type: 'builtin' | 'github' | 'community'; ref?: string };
+  /**
+   * Starts only from its dedicated prepare path (which passes `prepared: true`
+   * to `startPlaybookRun`), never from the generic playbook API or agent tools.
+   */
+  preparedOnly?: true;
 }
 
-export type PlaybookRunStatus = 'queued' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled';
-export type PlaybookStepStatus = 'pending' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'skipped' | 'cancelled';
+export type PlaybookRunStatus =
+  'queued' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled';
+export type PlaybookStepStatus =
+  'pending' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'skipped' | 'cancelled';
 
 export interface PlaybookStepRun {
   id: string;

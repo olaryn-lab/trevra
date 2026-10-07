@@ -220,6 +220,11 @@ async function approvedMailboxConnection(
     );
   }
   const address = await resolveMailboxAddress(db, workspaceId, mailbox);
+  if (address === null) {
+    throw mailboxBindingError(
+      'Trevra could not confirm the address of the approved sending mailbox right now; nothing was sent. Prepare this email again.'
+    );
+  }
   if (address !== senderAddress) {
     throw mailboxBindingError(
       `The connected mailbox no longer matches the approved sender ${senderAddress}; nothing was sent.`

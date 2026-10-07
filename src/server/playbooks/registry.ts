@@ -553,7 +553,8 @@ export const emailOutreachPlaybook: PlaybookDefinition = {
     delivery: { $ref: '$.steps.send-outreach.output' },
     personId: { $ref: '$.input.personId' }
   },
-  source: { type: 'builtin' }
+  source: { type: 'builtin' },
+  preparedOnly: true
 };
 
 export const bufferDraftPlaybook: PlaybookDefinition = {
