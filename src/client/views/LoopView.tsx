@@ -24,7 +24,7 @@ import { errorMessage, useOutreachRefresh, useSeatLimits } from '../LinkedInSafe
 import { DEFAULT_WINDOW_DAYS, LinkedInFunnel } from '../LinkedInAnalyticsScreen';
 import { ConfidenceTag, WindowPicker } from '../LinkedInViz';
 import { Button, Select } from '../ui/primitives';
-import { emailSkipSummary } from './gtmPlanFormat';
+import { emailSkipSummary, planIssues } from './gtmPlanFormat';
 import { ACTIVATION_STEPS, nextActivationStep, type ActivationSignals } from './activation';
 import { money, usd } from './format';
 
@@ -992,6 +992,7 @@ function PlanWork({
     Awaited<ReturnType<typeof getLinkedInManagerLeadLists>>
   >([]);
   const [leadListId, setLeadListId] = useState('');
+  const [outreachChannel, setOutreachChannel] = useState<'linkedin' | 'email'>('linkedin');
   const [plan, setPlan] = useState<Awaited<ReturnType<typeof planGtmIntent>> | null>(null);
   const [prepared, setPrepared] = useState<Awaited<
     ReturnType<typeof prepareCompiledGtmPlan>
@@ -1037,7 +1038,7 @@ function PlanWork({
           ? {
               objective,
               ...(leadListId ? { people: { existingListId: leadListId } } : {}),
-              channels: ['linkedin'] as Array<'linkedin' | 'email' | 'community'>,
+              channels: [outreachChannel] as Array<'linkedin' | 'email' | 'community'>,
               autonomy: 'approval_required' as const
             }
           : objective === 'capture_inbound'
@@ -1090,6 +1091,7 @@ function PlanWork({
   };
 
   const prepareSupported = plan?.defaults.prepareSupported === true && plan.blockers.length === 0;
+  const planWarnings = planIssues(plan?.defaults.warnings);
 
   return (
     <section className="page-panel gtm-plan-work">
@@ -1131,23 +1133,38 @@ function PlanWork({
             </label>
 
             {objective === 'prepare_outreach' ? (
-              <label>
-                People
-                <Select
-                  value={leadListId}
-                  onChange={(event) => {
-                    setLeadListId(event.target.value);
-                    resetPlan();
-                  }}
-                >
-                  <option value="">Choose a People list</option>
-                  {leadLists.map((list) => (
-                    <option key={list.id} value={list.id}>
-                      {list.name} · {list.leadCount} people
-                    </option>
-                  ))}
-                </Select>
-              </label>
+              <>
+                <label>
+                  People
+                  <Select
+                    value={leadListId}
+                    onChange={(event) => {
+                      setLeadListId(event.target.value);
+                      resetPlan();
+                    }}
+                  >
+                    <option value="">Choose a People list</option>
+                    {leadLists.map((list) => (
+                      <option key={list.id} value={list.id}>
+                        {list.name} · {list.leadCount} people
+                      </option>
+                    ))}
+                  </Select>
+                </label>
+                <label>
+                  Channel
+                  <Select
+                    value={outreachChannel}
+                    onChange={(event) => {
+                      setOutreachChannel(event.target.value === 'email' ? 'email' : 'linkedin');
+                      resetPlan();
+                    }}
+                  >
+                    <option value="linkedin">LinkedIn</option>
+                    <option value="email">Email</option>
+                  </Select>
+                </label>
+              </>
             ) : objective === 'capture_inbound' ? (
               <>
                 <label>
@@ -1288,6 +1305,22 @@ function PlanWork({
                         >
                           Resolve <ChevronRight size={15} />
                         </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {planWarnings.length > 0 && (
+                <div className="gtm-plan-warnings">
+                  <strong>Worth knowing</strong>
+                  {planWarnings.map((warning) => (
+                    <div key={warning.code}>
+                      <span>{warning.message}</span>
+                      {warning.actionHref && (
+                        <Button onClick={() => onNavigate(warning.actionHref!)}>
+                          Open <ChevronRight size={15} />
+                        </Button>
                       )}
                     </div>
                   ))}

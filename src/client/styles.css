@@ -12751,7 +12751,8 @@ button:disabled {
 .gtm-plan-preview-head,
 .gtm-plan-actions,
 .gtm-plan-result,
-.gtm-plan-blockers > div {
+.gtm-plan-blockers > div,
+.gtm-plan-warnings > div {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -12769,7 +12770,8 @@ button:disabled {
 .gtm-plan-actions > span,
 .gtm-plan-result > span,
 .gtm-plan-steps span,
-.gtm-plan-blockers span {
+.gtm-plan-blockers span,
+.gtm-plan-warnings span {
   color: var(--muted);
   font-size: var(--t-text-xs);
 }
@@ -12795,6 +12797,14 @@ button:disabled {
   border: 1px solid var(--t-amber-line);
   border-radius: var(--t-r-md);
   background: var(--t-amber-bg);
+}
+.gtm-plan-warnings {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-md);
+  background: var(--t-surface-2);
 }
 .gtm-plan-result {
   padding-top: 12px;
@@ -12975,7 +12985,8 @@ button:disabled {
   .gtm-plan-preview-head,
   .gtm-plan-actions,
   .gtm-plan-result,
-  .gtm-plan-blockers > div {
+  .gtm-plan-blockers > div,
+  .gtm-plan-warnings > div {
     align-items: flex-start;
     flex-direction: column;
   }
