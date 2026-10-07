@@ -8281,15 +8281,17 @@ export function createApp(db: Db) {
       try {
         const input = countryInputSchema.parse(req.body ?? {});
         res.json(
-          await setContactCountry(
-            db,
-            {
-              workspaceId: req.auth!.workspaceId,
-              personId: String(req.params.personId),
-              countryCode: input.countryCode,
-              actorUserId: req.auth!.userId
-            },
-            new Date()
+          await db.transaction((tx) =>
+            setContactCountry(
+              tx,
+              {
+                workspaceId: req.auth!.workspaceId,
+                personId: String(req.params.personId),
+                countryCode: input.countryCode,
+                actorUserId: req.auth!.userId
+              },
+              new Date()
+            )
           )
         );
       } catch (error) {
@@ -8305,15 +8307,17 @@ export function createApp(db: Db) {
       try {
         const input = countryInputSchema.parse(req.body ?? {});
         res.json(
-          await setAccountCountry(
-            db,
-            {
-              workspaceId: req.auth!.workspaceId,
-              accountId: String(req.params.accountId),
-              countryCode: input.countryCode,
-              actorUserId: req.auth!.userId
-            },
-            new Date()
+          await db.transaction((tx) =>
+            setAccountCountry(
+              tx,
+              {
+                workspaceId: req.auth!.workspaceId,
+                accountId: String(req.params.accountId),
+                countryCode: input.countryCode,
+                actorUserId: req.auth!.userId
+              },
+              new Date()
+            )
           )
         );
       } catch (error) {
@@ -8328,18 +8332,20 @@ export function createApp(db: Db) {
     async (req: AuthedRequest, res, next) => {
       try {
         const input = lawfulBasisInputSchema.parse(req.body ?? {});
-        const { record, created } = await recordLawfulBasis(
-          db,
-          {
-            workspaceId: req.auth!.workspaceId,
-            personId: String(req.params.personId),
-            channel: input.channel,
-            basis: input.basis,
-            source: 'operator',
-            sourceRef: input.sourceRef ?? null,
-            actorUserId: req.auth!.userId
-          },
-          new Date()
+        const { record, created } = await db.transaction((tx) =>
+          recordLawfulBasis(
+            tx,
+            {
+              workspaceId: req.auth!.workspaceId,
+              personId: String(req.params.personId),
+              channel: input.channel,
+              basis: input.basis,
+              source: 'operator',
+              sourceRef: input.sourceRef ?? null,
+              actorUserId: req.auth!.userId
+            },
+            new Date()
+          )
         );
         res.status(created ? 201 : 200).json({ lawfulBasis: record });
       } catch (error) {
@@ -8351,14 +8357,16 @@ export function createApp(db: Db) {
   app.post('/api/compliance/lawful-bases/:id/withdraw', async (req: AuthedRequest, res, next) => {
     try {
       res.json({
-        lawfulBasis: await withdrawLawfulBasis(
-          db,
-          {
-            workspaceId: req.auth!.workspaceId,
-            lawfulBasisId: String(req.params.id),
-            actorUserId: req.auth!.userId
-          },
-          new Date()
+        lawfulBasis: await db.transaction((tx) =>
+          withdrawLawfulBasis(
+            tx,
+            {
+              workspaceId: req.auth!.workspaceId,
+              lawfulBasisId: String(req.params.id),
+              actorUserId: req.auth!.userId
+            },
+            new Date()
+          )
         )
       });
     } catch (error) {
