@@ -369,6 +369,63 @@ describe('signed intake', () => {
     ).toBe(1);
   });
 
+  it('heals a half-recorded milestone on replay: the signal and the stage move come back', async () => {
+    const body = {
+      kind: 'activated',
+      person: { email: 'ada@acme-milestone.example' },
+      company: { domain: 'acme-milestone.example' }
+    };
+    await intake('milestone-heal-0001', body).expect(202);
+    const [recorded] = await listProductMilestones(db, WS, 10);
+    const observation = () =>
+      db
+        .prepare(
+          `SELECT x.opportunity_id,o.stage FROM opportunity_stage_observations x
+           JOIN opportunities o ON o.workspace_id=x.workspace_id AND o.id=x.opportunity_id
+           WHERE x.workspace_id=? AND x.source_type='product_milestone' AND x.source_id=?`
+        )
+        .get<{ opportunity_id: string; stage: string }>(WS, recorded.id);
+    const signals = () =>
+      count(
+        "SELECT COUNT(*)::int AS n FROM account_signals WHERE workspace_id=? AND account_id=? AND kind='product-activated' AND current=?",
+        WS,
+        accountId,
+        `milestone:${recorded.id}`
+      );
+    const original = await observation();
+    expect(original?.stage).toBe('qualified');
+    expect(await signals()).toBe(1);
+
+    // A crash after the milestone row committed: the derived rows never landed.
+    await db
+      .prepare('DELETE FROM account_signals WHERE workspace_id=? AND current=?')
+      .run(WS, `milestone:${recorded.id}`);
+    await db
+      .prepare(
+        "DELETE FROM opportunity_stage_observations WHERE workspace_id=? AND source_type='product_milestone' AND source_id=?"
+      )
+      .run(WS, recorded.id);
+    expect(await signals()).toBe(0);
+    expect(await observation()).toBeFalsy();
+
+    const replay = await intake('milestone-heal-0001', body).expect(200);
+    expect(replay.body.duplicate).toBe(true);
+    expect(await signals()).toBe(1);
+    expect(await observation()).toEqual(original);
+    expect(
+      await count('SELECT COUNT(*)::int AS n FROM product_milestones WHERE workspace_id=?', WS)
+    ).toBe(1);
+    expect(
+      await count(
+        "SELECT COUNT(*)::int AS n FROM opportunities WHERE workspace_id=? AND stage='qualified'",
+        WS
+      )
+    ).toBe(1);
+    expect(
+      await count('SELECT COUNT(*)::int AS n FROM opportunities WHERE workspace_id=?', WS)
+    ).toBe(1);
+  });
+
   it('leaves an ordinary inbound kind alone', async () => {
     await intake('milestone-demo-0001', {
       kind: 'demo_request',

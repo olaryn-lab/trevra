@@ -139,6 +139,35 @@ describe('/api/setup/webhooks', () => {
     expect((await owner().get('/api/setup/webhooks').expect(200)).body.endpoints).toEqual([]);
   });
 
+  it("never lets another workspace's owner pause or remove this workspace's endpoint", async () => {
+    const draft = await owner()
+      .post('/api/setup/webhooks/draft')
+      .send({ provider: 'stripe' })
+      .expect(200);
+    const endpointId = draft.body.endpointId as string;
+    await owner()
+      .post('/api/setup/webhooks')
+      .send({ provider: 'stripe', endpointId, signingSecret: SECRET })
+      .expect(201);
+
+    const outsider = await signUp('webhook-outsider');
+    // An owner of their own workspace, so a refusal below is scoping, not role.
+    expect((await outsider.agent.get('/api/setup/webhooks').expect(200)).body.endpoints).toEqual(
+      []
+    );
+    await outsider.agent
+      .patch(`/api/setup/webhooks/${endpointId}/status`)
+      .send({ status: 'disabled' })
+      .expect(404);
+    await outsider.agent.delete(`/api/setup/webhooks/${endpointId}`).expect(204);
+
+    const listed = await owner().get('/api/setup/webhooks').expect(200);
+    expect(listed.body.endpoints).toEqual([
+      expect.objectContaining({ id: endpointId, status: 'active' })
+    ]);
+    await owner().delete(`/api/setup/webhooks/${endpointId}`).expect(204);
+  });
+
   it('refuses every webhook management route to a non-owner member', async () => {
     const ownerUser = await signUp('webhook-owner');
     const member = await signUp('webhook-member');
