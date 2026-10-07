@@ -3535,6 +3535,66 @@ export async function rotateCaptureSourceSecret(
   return request(`/api/capture-sources/${encodeURIComponent(id)}/rotate`, { method: 'POST' });
 }
 
+export type WebhookProvider = 'stripe' | 'calcom';
+
+export interface ProviderWebhookEndpointSummary {
+  id: string;
+  workspaceId: string;
+  provider: WebhookProvider;
+  status: 'active' | 'disabled';
+  createdByUserId: string | null;
+  lastSeenAt: string | null;
+  acceptedCount: number;
+  rejectedCount: number;
+  createdAt: string;
+  updatedAt: string;
+  path: string;
+}
+
+export async function getProviderWebhooks(): Promise<{
+  endpoints: ProviderWebhookEndpointSummary[];
+  providers: WebhookProvider[];
+  secretsConfigured: boolean;
+}> {
+  return request('/api/setup/webhooks');
+}
+
+export async function draftProviderWebhook(
+  provider: WebhookProvider
+): Promise<{ endpointId: string; path: string }> {
+  return request('/api/setup/webhooks/draft', {
+    method: 'POST',
+    body: JSON.stringify({ provider })
+  });
+}
+
+export async function createProviderWebhook(input: {
+  provider: WebhookProvider;
+  endpointId: string;
+  signingSecret: string;
+}): Promise<ProviderWebhookEndpointSummary> {
+  const result = await request<{ endpoint: ProviderWebhookEndpointSummary }>(
+    '/api/setup/webhooks',
+    { method: 'POST', body: JSON.stringify(input) }
+  );
+  return result.endpoint;
+}
+
+export async function setProviderWebhookStatus(
+  id: string,
+  status: ProviderWebhookEndpointSummary['status']
+): Promise<ProviderWebhookEndpointSummary> {
+  const result = await request<{ endpoint: ProviderWebhookEndpointSummary }>(
+    `/api/setup/webhooks/${encodeURIComponent(id)}/status`,
+    { method: 'PATCH', body: JSON.stringify({ status }) }
+  );
+  return result.endpoint;
+}
+
+export async function removeProviderWebhook(id: string): Promise<void> {
+  await request<void>(`/api/setup/webhooks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
 export interface EmailDeliverySummary {
   id: string;
   workspaceId: string;

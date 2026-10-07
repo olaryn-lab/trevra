@@ -344,10 +344,45 @@
   color: var(--ink);
 }
 
+.capture-webhook-endpoint,
+.capture-webhook-connect {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.capture-webhook-endpoint header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.capture-webhook-steps {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding-left: 20px;
+}
+
+.capture-webhook-events {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.capture-webhook-form {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 12px;
+  align-items: end;
+}
+
 @media (max-width: 780px) {
   .capture-create-row,
   .capture-source-grid,
-  .capture-metrics {
+  .capture-metrics,
+  .capture-webhook-form {
     grid-template-columns: 1fr;
   }
 
