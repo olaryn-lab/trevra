@@ -28,6 +28,8 @@ export interface AdvanceOpportunityInput {
   /** e.g. 'product_milestone' | 'meeting'. The pair is the idempotency key. */
   sourceType: string;
   sourceId: string;
+  /** Default true. False is a pure observation; see `AdvanceOpportunityObservation`. */
+  createIfMissing?: boolean;
   /** ISO instant. When set, only open Opportunities created at or before it match. */
   openedAtOrBefore?: string;
 }
@@ -98,17 +100,22 @@ async function latestOpportunity(
  */
 export async function advanceOpportunityStage(
   db: Db,
-  input: AdvanceOpportunityInput,
-  now?: Date
-): Promise<AdvanceOpportunityResult>;
-export async function advanceOpportunityStage(
-  db: Db,
   input: AdvanceOpportunityObservation,
   now?: Date
 ): Promise<AdvanceOpportunityResult | null>;
 export async function advanceOpportunityStage(
   db: Db,
-  input: AdvanceOpportunityInput & { createIfMissing?: boolean },
+  input: AdvanceOpportunityInput & { createIfMissing?: true },
+  now?: Date
+): Promise<AdvanceOpportunityResult>;
+export async function advanceOpportunityStage(
+  db: Db,
+  input: AdvanceOpportunityInput,
+  now?: Date
+): Promise<AdvanceOpportunityResult | null>;
+export async function advanceOpportunityStage(
+  db: Db,
+  input: AdvanceOpportunityInput,
   now: Date = new Date()
 ): Promise<AdvanceOpportunityResult | null> {
   const createIfMissing = input.createIfMissing !== false;

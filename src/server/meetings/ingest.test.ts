@@ -178,4 +178,32 @@ describe('canonical meeting ingestion', () => {
     expect(await count('meetings')).toBe(0);
     expect(await opportunities()).toEqual([]);
   });
+
+  it('a calendar meeting does not raise an Opportunity created after it ended', async () => {
+    await seedPerson();
+    await seedOpportunity('opp_ingest_later', 'new', '2026-08-23T00:00:00.000Z');
+    await ingestCanonicalRecord(db, WORKSPACE, 'google-calendar', null, calendar);
+    expect(await opportunities()).toEqual([{ id: 'opp_ingest_later', stage: 'new' }]);
+  });
+
+  it('an unknown booking cancellation without times creates no contact', async () => {
+    expect(
+      await ingestCanonicalRecord(
+        db,
+        WORKSPACE,
+        'calcom',
+        null,
+        {
+          kind: 'meeting',
+          id: 'bk-ghost',
+          personEmail: 'ghost@prospect.example',
+          status: 'cancelled',
+          origin: 'booking'
+        },
+        BOOKING
+      )
+    ).toEqual({ stored: false });
+    expect(await count('contacts')).toBe(0);
+    expect(await count('source_records')).toBe(0);
+  });
 });

@@ -4,7 +4,9 @@ import {
   OpportunityAdvanceError,
   STAGE_RANK,
   advanceOpportunityStage,
-  type AdvanceOpportunityInput
+  type AdvanceOpportunityInput,
+  type AdvanceOpportunityObservation,
+  type AdvanceOpportunityResult
 } from './opportunity-advance.js';
 
 const WS = 'ws_opportunity_advance';
@@ -43,7 +45,9 @@ async function eventCount(eventType: string): Promise<number> {
   return Number(row?.n ?? 0);
 }
 
-function input(overrides: Partial<AdvanceOpportunityInput> = {}): AdvanceOpportunityInput {
+function input(
+  overrides: Partial<Omit<AdvanceOpportunityInput, 'createIfMissing'>> = {}
+): AdvanceOpportunityInput & { createIfMissing?: true } {
   return {
     workspaceId: WS,
     personId,
@@ -292,5 +296,21 @@ describe('advanceOpportunityStage', () => {
       NOW
     );
     expect(after).toMatchObject({ opportunityId: later, stage: 'meeting', changed: true });
+  });
+
+  it('types an observation call as nullable', async () => {
+    const observation: AdvanceOpportunityObservation = {
+      ...input({ sourceId: 'pm_types' }),
+      createIfMissing: false
+    };
+    // @ts-expect-error an observation may return null, so it is not an AdvanceOpportunityResult
+    const strict: AdvanceOpportunityResult = await advanceOpportunityStage(db, observation, NOW);
+    expect(strict).toBeNull();
+    const created: AdvanceOpportunityResult = await advanceOpportunityStage(
+      db,
+      input({ sourceId: 'pm_types_default' }),
+      NOW
+    );
+    expect(created.created).toBe(true);
   });
 });

@@ -1033,9 +1033,8 @@ export async function syncNangoRecords(
       const normalized = normalizeNangoRecord(input.model, raw as Record<string, unknown>);
       if (!normalized) {
         // COUNTED, NOT SWALLOWED. `normalizeNangoRecord` returns null for any
-        // model it has no canonical kind for -- `trevra-meetings` is the live
-        // example, since there is no `meeting` kind and Calendar therefore
-        // ingests nothing. Dropping those silently made a connection that
+        // model it has no canonical kind for, for example a sync model Trevra
+        // does not recognise. Dropping those silently made a connection that
         // stores nothing look identical to one with no new records, which is
         // the failure mode that makes a quiet account untrustworthy.
         skipped += 1;
@@ -1225,6 +1224,15 @@ async function ingestMeeting(
   now: string
 ): Promise<IngestOutcome> {
   if (record.status !== 'cancelled') activeMeetingSchema.parse(record);
+  // Decide "will this be kept" before anything is written, so a tombstone that
+  // cannot be stored never creates a Person.
+  if (
+    record.status === 'cancelled' &&
+    (!record.personEmail || !record.startAt || !record.endAt) &&
+    !(await meetingKnown(db, { workspaceId, provider, externalId: record.id }))
+  ) {
+    return { stored: false };
+  }
   const identity = !record.personEmail
     ? { personId: null, accountId: null }
     : record.origin === 'booking'
