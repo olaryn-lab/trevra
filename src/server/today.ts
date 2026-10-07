@@ -376,7 +376,7 @@ export async function getToday(
          AND m.verification_status='verified'
          AND (
            m.outcome_kind='reply'
-           -- An unsubscribe that did not thread to Trevra's own mail suppressed
+           -- An unsubscribe that did not thread to mail Trevra sent suppressed
            -- nobody (only a threaded one is verified intent). A founder decides.
            OR (
              m.outcome_kind='unsubscribe' AND m.source_type='inbound_mailbox_message'
