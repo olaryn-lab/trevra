@@ -35,6 +35,7 @@ const {
   handleNangoWebhook,
   buildMimeMessage,
   executeConnectedAction,
+  GMAIL_MESSAGE_ID_READ_TIMEOUT_MS,
   githubProviderConfigKey,
   ingestCanonicalRecord,
   listAvailableIntegrations,
@@ -780,6 +781,40 @@ describe('connected mailbox threading', () => {
         .get(workspaceId, 'gmail-readback-fail-key')
     ).toEqual({ status: 'sent', internet_message_id: '<gmail-readback-fail-key@trevra.app>' });
   });
+
+  it('gives up on a Gmail read-back that never answers and keeps the generated Message-ID', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    nangoMock.post.mockResolvedValueOnce({ data: { id: 'gmail-readback-hang' }, headers: {} });
+    // The read-back's bound is armed before nango.get is called, so the mock can
+    // run the clock past it while the read itself never settles.
+    nangoMock.get.mockImplementationOnce(() => {
+      vi.advanceTimersByTime(GMAIL_MESSAGE_ID_READ_TIMEOUT_MS);
+      return new Promise<never>(() => undefined);
+    });
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const result = await executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test',
+        subject: 'Hello',
+        body: 'Hi there',
+        structured_payload_json: '{}',
+        payload_hash: 'gmail-readback-hang-key'
+      });
+      expect(result).toEqual({ provider: 'gmail', externalRef: 'gmail-readback-hang' });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(nangoMock.get).toHaveBeenCalledTimes(1);
+    expect(
+      await database
+        .prepare(
+          'SELECT status,internet_message_id FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?'
+        )
+        .get(workspaceId, 'gmail-readback-hang-key')
+    ).toEqual({ status: 'sent', internet_message_id: '<gmail-readback-hang-key@trevra.app>' });
+  }, 10_000);
 
   it('keeps the pre-Phase-D path for outreach not approved with one-click unsubscribe', async () => {
     vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
