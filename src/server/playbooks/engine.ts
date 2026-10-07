@@ -8,6 +8,7 @@ import {
   type PolicyDecision
 } from '../control-plane/policy.js';
 import { canonicalPayloadHash } from '../control-plane/payload.js';
+import { emailLawfulBasisAttributes } from '../compliance/lawful-basis.js';
 import { executePreparedPlaybookAction } from '../control-plane/execution.js';
 import { executeWorkspaceSkill, getWorkspaceSkillManifest } from '../skill-api.js';
 import { notifyTemporalPlaybook, orchestrationMode } from '../orchestration/client.js';
@@ -541,8 +542,15 @@ async function runActionStep(
     playbookId: run.playbookId,
     environment: process.env.NODE_ENV ?? 'development',
     // Without these, every amount/confidence/recipient condition a founder set
-    // is unevaluable and the rule is resolved by its effect alone.
-    attributes: policyAttributesFrom(payload)
+    // is unevaluable and the rule is resolved by its effect alone. Lawful-basis
+    // attributes are read from the database for email only, and spread LAST,
+    // so a payload can never claim its own basis.
+    attributes: {
+      ...policyAttributesFrom(payload),
+      ...(step.actionType === 'email.send'
+        ? await emailLawfulBasisAttributes(db, run.workspaceId, payload)
+        : {})
+    }
   });
   const now = new Date().toISOString();
   await db

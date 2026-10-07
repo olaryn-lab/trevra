@@ -9,6 +9,8 @@ import {
   type Db
 } from '../db.js';
 import { listDomainEvents } from '../control-plane/events.js';
+import { LAWFUL_BASIS_POLICY_NAME } from '../control-plane/policy.js';
+import { recordLawfulBasis, setContactCountry } from '../compliance/lawful-basis.js';
 import { registerSkill } from '../skills/registry.js';
 import {
   decidePlaybookApproval,
@@ -164,6 +166,38 @@ registerPlaybook({
     approved: { $ref: '$.steps.approve-score.output.approved' },
     score: { $ref: '$.steps.score.output' }
   },
+  source: { type: 'builtin' }
+});
+
+registerPlaybook({
+  id: 'test.email-claim-playbook',
+  version: '1.0.0',
+  name: 'Email action that claims its own lawful basis',
+  description: 'The payload asserts lawfulBasisStatus covered; the engine must ignore it.',
+  inputSchema: z.object({ recipient: z.string().email(), subject: z.string(), body: z.string() }),
+  steps: [
+    {
+      id: 'approve-email',
+      type: 'approval',
+      title: 'Approve email',
+      payload: {
+        recipient: { $ref: '$.input.recipient' },
+        subject: { $ref: '$.input.subject' },
+        body: { $ref: '$.input.body' },
+        lawfulBasisStatus: 'covered',
+        metadata: {}
+      }
+    },
+    {
+      id: 'send-email',
+      type: 'action',
+      actionType: 'email.send',
+      approvalStepId: 'approve-email',
+      needs: ['approve-email'],
+      payload: { $ref: '$.steps.approve-email.input' },
+      retry: { maxAttempts: 1 }
+    }
+  ],
   source: { type: 'builtin' }
 });
 
@@ -489,12 +523,16 @@ describe('GTM-only prepared action boundary', () => {
     });
   });
 
-  async function runEmail(database: Db) {
+  async function emailSendStep(
+    database: Db,
+    recipient = 'buyer@example.com',
+    playbookId = 'test.email-action-playbook'
+  ) {
     const run = await startPlaybookRun(database, {
       workspaceId: DEMO_WORKSPACE_ID,
-      playbookId: 'test.email-action-playbook',
+      playbookId,
       payload: {
-        recipient: 'buyer@example.com',
+        recipient,
         subject: 'Audit result',
         body: 'The audit is ready.'
       },
@@ -508,7 +546,11 @@ describe('GTM-only prepared action boundary', () => {
       userId: DEMO_USER_ID,
       decision: 'approve'
     });
-    return completed.steps.find((step) => step.stepId === 'send-email')?.policyDecision;
+    return completed.steps.find((step) => step.stepId === 'send-email');
+  }
+
+  async function runEmail(database: Db, recipient = 'buyer@example.com') {
+    return (await emailSendStep(database, recipient))?.policyDecision;
   }
 
   it('applies GTM recipient policy to an email action', async () => {
@@ -527,6 +569,72 @@ describe('GTM-only prepared action boundary', () => {
       effect: 'require_approval',
       policyId: null,
       policyName: 'Built-in external-write boundary'
+    });
+  });
+
+  it('denies cold email with no recorded lawful basis despite an allow policy', async () => {
+    const database = await openTestDb();
+    await insertPolicy(database, 'Small sends only', 'allow', { maxRecipients: 3 });
+    const step = await emailSendStep(database, 'buyer@acme-gmbh.de');
+    expect(step?.status).toBe('failed');
+    expect(step?.policyDecision).toMatchObject({
+      effect: 'deny',
+      policyId: null,
+      policyName: LAWFUL_BASIS_POLICY_NAME
+    });
+    const decision = JSON.stringify(step?.policyDecision);
+    expect(decision).toContain('recipient in an unknown country');
+    expect(decision).toContain('Not legal advice; verify with counsel.');
+    expect(decision).not.toContain('acme-gmbh');
+  });
+
+  it('still denies when the payload claims lawfulBasisStatus covered', async () => {
+    const database = await openTestDb();
+    await insertPolicy(database, 'Small sends only', 'allow', { maxRecipients: 3 });
+    const step = await emailSendStep(database, 'buyer@acme-gmbh.de', 'test.email-claim-playbook');
+    expect(step?.input).toMatchObject({ lawfulBasisStatus: 'covered' });
+    expect(step?.status).toBe('failed');
+    expect(step?.policyDecision).toMatchObject({
+      effect: 'deny',
+      policyName: LAWFUL_BASIS_POLICY_NAME
+    });
+  });
+
+  it('lets the workspace policy decide once consent is recorded for the person', async () => {
+    const database = await openTestDb();
+    await insertPolicy(database, 'Small sends only', 'allow', { maxRecipients: 3 });
+    const now = new Date();
+    await database
+      .prepare(
+        `INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES ('con_engine_consented',?,'Consented buyer','consented@acme-gmbh.de','consented@acme-gmbh.de',?,?)`
+      )
+      .run(DEMO_WORKSPACE_ID, now.toISOString(), now.toISOString());
+    await setContactCountry(
+      database,
+      {
+        workspaceId: DEMO_WORKSPACE_ID,
+        personId: 'con_engine_consented',
+        countryCode: 'DE',
+        actorUserId: null
+      },
+      now
+    );
+    await recordLawfulBasis(
+      database,
+      {
+        workspaceId: DEMO_WORKSPACE_ID,
+        personId: 'con_engine_consented',
+        channel: 'email',
+        basis: 'consent',
+        source: 'operator',
+        actorUserId: null
+      },
+      now
+    );
+    expect(await runEmail(database, 'consented@acme-gmbh.de')).toMatchObject({
+      effect: 'allow',
+      policyName: 'Small sends only'
     });
   });
 });

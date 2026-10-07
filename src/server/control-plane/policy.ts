@@ -1,4 +1,5 @@
 import type { Db } from '../db.js';
+import { JURISDICTION_RULES_DISCLAIMER } from '../compliance/jurisdiction-rules.js';
 
 export type PolicyEffect = 'allow' | 'deny' | 'require_approval';
 
@@ -31,7 +32,34 @@ interface PolicyRow {
   conditions_json: unknown;
 }
 
+export const LAWFUL_BASIS_POLICY_NAME = 'Built-in recipient lawful-basis rule';
+
+/**
+ * Evaluated BEFORE every workspace policy: no allow rule can buy its way past a
+ * recipient with no lawful basis for cold email. `lawfulBasisStatus` is set by
+ * the engine from the database (compliance/lawful-basis.ts) and never from the
+ * payload or a model. Not legal advice; verify with counsel.
+ */
+function lawfulBasisDenial(context: PolicyContext): PolicyDecision | null {
+  const attributes = context.attributes ?? {};
+  if (attributes.lawfulBasisStatus !== 'missing') return null;
+  const reason =
+    typeof attributes.lawfulBasisReason === 'string' && attributes.lawfulBasisReason.trim()
+      ? attributes.lawfulBasisReason.trim()
+      : 'No lawful basis is recorded for cold email to this recipient.';
+  return {
+    effect: 'deny',
+    policyId: null,
+    policyName: LAWFUL_BASIS_POLICY_NAME,
+    reason: `${reason} ${JURISDICTION_RULES_DISCLAIMER}`,
+    evaluatedAt: new Date().toISOString()
+  };
+}
+
 export async function evaluatePolicy(db: Db, context: PolicyContext): Promise<PolicyDecision> {
+  const lawfulBasis = lawfulBasisDenial(context);
+  if (lawfulBasis) return lawfulBasis;
+
   const rows = await db
     .prepare(
       `

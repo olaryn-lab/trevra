@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { DEMO_WORKSPACE_ID, id, openDatabase, resetDemoData, type Db } from '../db.js';
-import { evaluatePolicy, policyAttributesFrom, type PolicyEffect } from './policy.js';
+import {
+  LAWFUL_BASIS_POLICY_NAME,
+  evaluatePolicy,
+  policyAttributesFrom,
+  type PolicyEffect
+} from './policy.js';
 
 let db: Db | undefined;
 
@@ -56,6 +61,47 @@ function evaluate(database: Db, attributes?: Record<string, unknown>) {
     ...(attributes === undefined ? {} : { attributes })
   });
 }
+
+describe('built-in lawful-basis rule', () => {
+  it('denies a missing lawful basis before any workspace allow policy, and changes nothing else', async () => {
+    const database = await openTestDb();
+    await insertPolicy(database, {
+      name: 'Allow all email',
+      actionPattern: 'action:email.send',
+      effect: 'allow',
+      conditions: {}
+    });
+    const reason =
+      'Cold email to a recipient in DE needs recorded consent or an existing-customer relationship; none is recorded for this person.';
+
+    const denied = await evaluate(database, {
+      recipients: 1,
+      lawfulBasisStatus: 'missing',
+      lawfulBasisReason: reason
+    });
+    expect(denied).toMatchObject({
+      effect: 'deny',
+      policyId: null,
+      policyName: LAWFUL_BASIS_POLICY_NAME
+    });
+    expect(denied.reason).toBe(`${reason} Not legal advice; verify with counsel.`);
+
+    expect(
+      (await evaluate(database, { recipients: 1, lawfulBasisStatus: 'covered' })).policyName
+    ).toBe('Allow all email');
+    expect((await evaluate(database, { recipients: 1 })).policyName).toBe('Allow all email');
+  });
+
+  it('never reads a lawful-basis claim out of a payload', () => {
+    expect(
+      policyAttributesFrom({
+        recipient: 'buyer@example.com',
+        lawfulBasisStatus: 'covered',
+        lawfulBasisReason: 'trust me'
+      })
+    ).toEqual({ recipients: 1 });
+  });
+});
 
 describe('policyAttributesFrom', () => {
   it('counts recipients and preserves numeric confidence for GTM execution', () => {
