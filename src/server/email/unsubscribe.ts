@@ -39,8 +39,9 @@ function unsubscribeKeys(env: NodeJS.ProcessEnv): Buffer[] {
 }
 
 function tokenMac(key: Buffer, workspaceId: string, deliveryId: string, recipient: string): string {
+  // A JSON array keeps field boundaries unambiguous whatever the fields contain.
   return createHmac('sha256', key)
-    .update(`v1:${workspaceId}:${deliveryId}:${recipient.trim().toLowerCase()}`)
+    .update(JSON.stringify(['v1', workspaceId, deliveryId, recipient.trim().toLowerCase()]))
     .digest('base64url');
 }
 
@@ -185,6 +186,8 @@ export async function applyUnsubscribeToken(
     now
   );
   if (delivery.sourceType === 'campaign_email') {
+    // recordCampaignEmailEvent may add a second suppression, of the contact's
+    // current email. That is intended and fail-safe: it only ever suppresses more.
     // Dynamic: campaign-channels imports integration-service, which imports this module.
     const { recordCampaignEmailEvent } = await import('../linkedin/campaign-channels.js');
     await recordCampaignEmailEvent(
@@ -223,11 +226,6 @@ const PAGE_COPY: Record<UnsubscribePageState, { title: string; body: string }> =
   }
 };
 
-/**
- * A page with no script, so a link scanner that fetches it can do nothing. Only
- * the explicit POST (the button, or a mail client's RFC 8058 one-click POST)
- * unsubscribes.
- */
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -237,6 +235,11 @@ function escapeHtml(value: string): string {
     .replaceAll("'", '&#39;');
 }
 
+/**
+ * A page with no script, so a link scanner that fetches it can do nothing. Only
+ * the explicit POST (the button, or a mail client's RFC 8058 one-click POST)
+ * unsubscribes.
+ */
 export function renderUnsubscribePage(state: UnsubscribePageState, token?: string): string {
   const copy = PAGE_COPY[state];
   const title = escapeHtml(copy.title);

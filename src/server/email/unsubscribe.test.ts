@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
 import { findSuppression } from '../suppressions.js';
@@ -108,6 +109,29 @@ describe('unsubscribe tokens', () => {
 
     expect(await findUnsubscribeDelivery(db, 'nope', ENV)).toBeNull();
     expect(await findUnsubscribeDelivery(db, DELIVERY, ENV)).toBeNull();
+    expect(await findUnsubscribeDelivery(db, value.slice(0, -1), ENV)).toBeNull();
+    expect(await findUnsubscribeDelivery(db, `${value}A`, ENV)).toBeNull();
+  });
+
+  it('binds the recipient', async () => {
+    const other = unsubscribeToken(
+      { workspaceId: WORKSPACE, deliveryId: DELIVERY, recipient: 'other@example.test' },
+      ENV
+    );
+    expect(other).not.toBeNull();
+    expect(await findUnsubscribeDelivery(db, other!, ENV)).toBeNull();
+  });
+
+  it('signs with a key derived from the secret, never the raw secret', () => {
+    const input = JSON.stringify(['v1', WORKSPACE, DELIVERY, 'lead@example.test']);
+    const derived = createHmac('sha256', 'unsubscribe-test-key-a')
+      .update('trevra-email-unsubscribe-v1')
+      .digest();
+    const expected = createHmac('sha256', derived).update(input).digest('base64url');
+    const raw = createHmac('sha256', 'unsubscribe-test-key-a').update(input).digest('base64url');
+    const mac = token().slice(DELIVERY.length + 1);
+    expect(mac).toBe(expected);
+    expect(mac).not.toBe(raw);
   });
 
   it('verifies links minted before a key rotation', async () => {
@@ -120,6 +144,19 @@ describe('unsubscribe tokens', () => {
     expect((await findUnsubscribeDelivery(db, value, rotated))?.id).toBe(DELIVERY);
     const retired = { ...ENV, TREVRA_SECRETS_KEY: 'unsubscribe-test-key-b' } as NodeJS.ProcessEnv;
     expect(await findUnsubscribeDelivery(db, value, retired)).toBeNull();
+  });
+
+  it('never signs with the previous key', async () => {
+    const rotated = {
+      ...ENV,
+      TREVRA_SECRETS_KEY: 'unsubscribe-test-key-b',
+      TREVRA_SECRETS_KEY_PREVIOUS: 'unsubscribe-test-key-a'
+    } as NodeJS.ProcessEnv;
+    const value = token(WORKSPACE, DELIVERY, rotated);
+    const onlyB = { ...ENV, TREVRA_SECRETS_KEY: 'unsubscribe-test-key-b' } as NodeJS.ProcessEnv;
+    const onlyA = { ...ENV, TREVRA_SECRETS_KEY: 'unsubscribe-test-key-a' } as NodeJS.ProcessEnv;
+    expect((await findUnsubscribeDelivery(db, value, onlyB))?.id).toBe(DELIVERY);
+    expect(await findUnsubscribeDelivery(db, value, onlyA)).toBeNull();
   });
 });
 
