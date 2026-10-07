@@ -896,6 +896,8 @@ export async function prepareGtmPlan(
   db: Db,
   input: {
     workspaceId: string;
+    /** The caller's real actor type, recorded on the email approval runs it prepares. */
+    actorType: 'user' | 'agent';
     actorUserId: string;
     actorRole: 'owner' | 'member';
     plan: unknown;
@@ -974,7 +976,8 @@ export async function prepareGtmPlan(
     try {
       const result = await prepareEmailOutreach(db, {
         workspaceId: input.workspaceId,
-        actorUserId: input.actorUserId,
+        actorType: input.actorType,
+        actorId: input.actorUserId,
         idempotencyKey: input.idempotencyKey,
         planHash: current.planHash,
         leadListId,

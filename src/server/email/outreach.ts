@@ -226,7 +226,10 @@ interface ReceiptRow {
 
 interface PrepareInput {
   workspaceId: string;
-  actorUserId: string;
+  /** Who asked for the preparation; recorded on every run it starts. */
+  actorType: 'user' | 'agent';
+  /** The user id, or the agent id when actorType is 'agent'. */
+  actorId: string;
   idempotencyKey: string;
   planHash: string;
   leadListId: string;
@@ -353,8 +356,8 @@ async function startOutreachRun(
         subject: run.subject,
         body: run.body
       },
-      actorType: 'user',
-      actorId: input.actorUserId,
+      actorType: input.actorType,
+      actorId: input.actorId,
       prepared: true
     });
     return { runId: started.id };
@@ -543,7 +546,8 @@ export async function prepareEmailOutreach(
       input.workspaceId,
       input.idempotencyKey,
       input.planHash,
-      input.actorUserId,
+      // actor_user_id references users; an agent's preparation names no user.
+      input.actorType === 'user' ? input.actorId : null,
       input.leadListId,
       input.connectionId,
       JSON.stringify(prepared.map((item) => item.runId)),

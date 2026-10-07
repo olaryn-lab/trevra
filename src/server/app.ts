@@ -3938,6 +3938,8 @@ export function createApp(db: Db) {
       if (input.plan === undefined) return res.status(400).json({ error: 'Plan is required' });
       const result = await prepareGtmPlan(db, {
         workspaceId: req.auth!.workspaceId,
+        // A browser session is always a person; agents never reach this route.
+        actorType: 'user',
         actorUserId: req.auth!.userId,
         actorRole: req.auth!.role,
         plan: input.plan,

@@ -110,6 +110,7 @@ describe('bounded GTM intent compiler', () => {
       await expect(
         prepareGtmPlan(db, {
           workspaceId: WORKSPACE,
+          actorType: 'user',
           actorUserId: USER,
           actorRole: 'member',
           plan: memberPlan,
@@ -122,6 +123,7 @@ describe('bounded GTM intent compiler', () => {
       });
       const prepared = await prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
+        actorType: 'user',
         actorUserId: USER,
         actorRole: 'owner',
         plan,
@@ -138,6 +140,7 @@ describe('bounded GTM intent compiler', () => {
 
       const replay = await prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
+        actorType: 'user',
         actorUserId: USER,
         actorRole: 'owner',
         plan,
@@ -157,6 +160,7 @@ describe('bounded GTM intent compiler', () => {
       await expect(
         prepareGtmPlan(db, {
           workspaceId: WORKSPACE,
+          actorType: 'user',
           actorUserId: USER,
           actorRole: 'owner',
           plan: differentCapturePlan,
@@ -200,6 +204,7 @@ describe('bounded GTM intent compiler', () => {
 
     const prepared = await prepareGtmPlan(db, {
       workspaceId: WORKSPACE,
+      actorType: 'user',
       actorUserId: USER,
       actorRole: 'owner',
       plan,
@@ -217,6 +222,7 @@ describe('bounded GTM intent compiler', () => {
 
     const replay = await prepareGtmPlan(db, {
       workspaceId: WORKSPACE,
+      actorType: 'user',
       actorUserId: USER,
       actorRole: 'owner',
       plan,
@@ -234,6 +240,7 @@ describe('bounded GTM intent compiler', () => {
     await expect(
       prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
+        actorType: 'user',
         actorUserId: USER,
         actorRole: 'owner',
         plan: differentWatchPlan,
@@ -283,6 +290,7 @@ describe('bounded GTM intent compiler', () => {
     await expect(
       prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
+        actorType: 'user',
         actorUserId: USER,
         actorRole: 'owner',
         plan,
@@ -324,6 +332,7 @@ describe('bounded GTM intent compiler', () => {
 
     const prepared = await prepareGtmPlan(db, {
       workspaceId: WORKSPACE,
+      actorType: 'user',
       actorUserId: USER,
       actorRole: 'owner',
       plan: firstPlan,
@@ -348,6 +357,7 @@ describe('bounded GTM intent compiler', () => {
 
     const replay = await prepareGtmPlan(db, {
       workspaceId: WORKSPACE,
+      actorType: 'user',
       actorUserId: USER,
       actorRole: 'owner',
       plan: firstPlan,
@@ -377,6 +387,7 @@ describe('bounded GTM intent compiler', () => {
     await expect(
       prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
+        actorType: 'user',
         actorUserId: USER,
         actorRole: 'owner',
         plan,

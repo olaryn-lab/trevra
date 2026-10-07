@@ -67,6 +67,7 @@ async function prepare(idempotencyKey: string): Promise<PreparedGtmPlanResult> {
   expect(plan.blockers).toEqual([]);
   return prepareGtmPlan(db, {
     workspaceId: WORKSPACE,
+    actorType: 'user',
     actorUserId: USER,
     actorRole: 'owner',
     plan,
@@ -79,7 +80,8 @@ async function prepare(idempotencyKey: string): Promise<PreparedGtmPlanResult> {
 function preparationInput(plan: GtmPlan, idempotencyKey: string) {
   return {
     workspaceId: WORKSPACE,
-    actorUserId: USER,
+    actorType: 'user' as const,
+    actorId: USER,
     idempotencyKey,
     planHash: plan.planHash,
     leadListId: listId,
@@ -288,6 +290,7 @@ describe('prepareEmailOutreach', () => {
     await expect(
       prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
+        actorType: 'user',
         actorUserId: USER,
         actorRole: 'owner',
         plan: blocked,
@@ -320,6 +323,7 @@ describe('prepareEmailOutreach', () => {
     const first = emailResult(
       await prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
+        actorType: 'user',
         actorUserId: USER,
         actorRole: 'owner',
         plan,
@@ -398,6 +402,7 @@ describe('prepareEmailOutreach', () => {
     await expect(
       prepareGtmPlan(db, {
         workspaceId: WORKSPACE,
+        actorType: 'user',
         actorUserId: USER,
         actorRole: 'owner',
         plan: changed,
@@ -429,6 +434,48 @@ describe('prepareEmailOutreach', () => {
       )
       .get<{ total: number }>(WORKSPACE);
     expect(runs?.total).toBe(2);
+  });
+
+  it('records the real actor on every run and receipt it prepares', async () => {
+    async function actors(key: string) {
+      const receipt = await db
+        .prepare(
+          'SELECT actor_user_id,run_ids_json FROM email_outreach_preparations WHERE workspace_id=? AND idempotency_key=?'
+        )
+        .get<{ actor_user_id: string | null; run_ids_json: string[] }>(WORKSPACE, key);
+      const runs = await db
+        .prepare(
+          `SELECT DISTINCT actor_type,actor_id FROM playbook_runs
+           WHERE workspace_id=? AND id = ANY(?::text[])`
+        )
+        .all<{ actor_type: string; actor_id: string | null }>(WORKSPACE, receipt!.run_ids_json);
+      return { receiptUser: receipt!.actor_user_id, runs };
+    }
+
+    const plan = await compileGtmIntent(db, WORKSPACE, emailIntent());
+    await prepareGtmPlan(db, {
+      workspaceId: WORKSPACE,
+      actorType: 'agent',
+      actorUserId: 'agt_outreach',
+      actorRole: 'owner',
+      plan,
+      planHash: plan.planHash,
+      idempotencyKey: 'email-prepare-agent'
+    });
+    expect(await actors('email-prepare-agent')).toEqual({
+      receiptUser: null,
+      runs: [{ actor_type: 'agent', actor_id: 'agt_outreach' }]
+    });
+
+    // Free the People again, then prepare through the user route's entry point.
+    await db
+      .prepare("UPDATE playbook_runs SET status='cancelled' WHERE workspace_id=?")
+      .run(WORKSPACE);
+    await prepare('email-prepare-user');
+    expect(await actors('email-prepare-user')).toEqual({
+      receiptUser: USER,
+      runs: [{ actor_type: 'user', actor_id: USER }]
+    });
   });
 
   it('sends nothing to a lead marked do-not-contact after the email was prepared', async () => {
