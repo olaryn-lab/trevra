@@ -1,0 +1,858 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { id, openDatabase, type Db } from '../db.js';
+import { getToday } from '../today.js';
+import {
+  ERROR_RETRY_MINUTES,
+  GITHUB_POLL_BUDGET_MS,
+  MAX_NEW_ACCOUNTS_PER_RUN,
+  MAX_STAR_PAGES,
+  NOT_FOUND_RETRY_HOURS,
+  POLL_INTERVAL_MINUTES,
+  pollWorkspaceRepositories
+} from './poll.js';
+import {
+  hasDueRepositories,
+  listWatchedRepositories,
+  watchRepository,
+  type WatchedRepository
+} from './repos.js';
+import type { GitHubRequest, GitHubResponse, GitHubTransport } from './transport.js';
+
+/**
+ * NO NETWORK, NO CLOCK. GitHub is a table of hand-written answers keyed by
+ * endpoint, and every `now` is injected. What is proved here is the phase's
+ * promise: real companies from public data only, one signal per real event,
+ * rejected companies stay rejected, and a revoked token or an exhausted rate
+ * limit is a recorded state rather than a quiet zero.
+ */
+
+let db: Db;
+
+const WORKSPACE_ID = 'ws_github_poll_test';
+const OTHER_WORKSPACE_ID = 'ws_github_poll_other';
+const REPO = 'lemoncrow-lab/lemoncrow';
+const REPO_PATH = '/repos/lemoncrow-lab/lemoncrow';
+const T0 = new Date('2026-10-06T12:00:00.000Z');
+const HOUR = 3_600_000;
+const RESET_EPOCH = Math.floor(Date.parse('2026-10-06T13:00:00.000Z') / 1000);
+
+interface Call {
+  endpoint: string;
+  params: Record<string, string | number>;
+  headers: Record<string, string>;
+}
+type Handler = (call: Call) => GitHubResponse;
+
+function ok(data: unknown, headers: Record<string, string> = {}): GitHubResponse {
+  return {
+    status: 200,
+    data,
+    headers: {
+      'x-ratelimit-remaining': '4999',
+      'x-ratelimit-reset': String(RESET_EPOCH),
+      ...headers
+    }
+  };
+}
+
+function fakeGitHub(routes: Record<string, Handler>): GitHubTransport & { calls: Call[] } {
+  const calls: Call[] = [];
+  return {
+    calls,
+    async get(endpoint: string, request: GitHubRequest = {}) {
+      const call = { endpoint, params: request.params ?? {}, headers: request.headers ?? {} };
+      calls.push(call);
+      const handler = routes[endpoint];
+      return handler ? handler(call) : { status: 404, data: { message: 'Not Found' }, headers: {} };
+    }
+  };
+}
+
+const user = (login: string, type = 'User') => ({
+  login,
+  type,
+  html_url: `https://github.com/${login}`
+});
+const star = (login: string, at: string, type = 'User') => ({
+  starred_at: at,
+  user: user(login, type)
+});
+
+/**
+ * The LemonCrow repository and the people around it:
+ * - maya works at @buyerco, whose org site is buyer.io (an existing account);
+ * - sam has a public company email at newco.dev (no account yet);
+ * - lee has only a gmail address, a github.io blog and a plain-text company;
+ * - rejectco is an organization the founder already marked not a fit;
+ * - old-timer starred long before the backfill window.
+ */
+function lemoncrowRoutes(overrides: Record<string, Handler> = {}): Record<string, Handler> {
+  return {
+    [REPO_PATH]: () =>
+      ok({ full_name: REPO, stargazers_count: 4, forks_count: 1 }, { etag: '"repo-v1"' }),
+    [`${REPO_PATH}/stargazers`]: () =>
+      ok([
+        star('old-timer', '2026-07-01T00:00:00Z'),
+        star('maya', '2026-10-05T09:00:00Z'),
+        star('sam', '2026-10-05T10:00:00Z'),
+        star('lee', '2026-10-05T11:00:00Z')
+      ]),
+    [`${REPO_PATH}/forks`]: () =>
+      ok([{ created_at: '2026-10-05T12:00:00Z', owner: user('rejectco', 'Organization') }]),
+    [`${REPO_PATH}/issues`]: () =>
+      ok(
+        [
+          {
+            number: 10,
+            html_url: `https://github.com/${REPO}/issues/10`,
+            created_at: '2026-10-05T13:30:00Z',
+            author_association: 'NONE',
+            user: user('dependabot[bot]', 'Bot')
+          },
+          {
+            number: 9,
+            html_url: `https://github.com/${REPO}/pull/9`,
+            created_at: '2026-10-05T13:20:00Z',
+            author_association: 'NONE',
+            user: user('sam'),
+            pull_request: { url: `https://api.github.com/repos/${REPO}/pulls/9` }
+          },
+          {
+            number: 8,
+            html_url: `https://github.com/${REPO}/issues/8`,
+            created_at: '2026-10-05T13:10:00Z',
+            author_association: 'MEMBER',
+            user: user('teammate')
+          },
+          {
+            number: 7,
+            html_url: `https://github.com/${REPO}/issues/7`,
+            created_at: '2026-10-05T13:00:00Z',
+            author_association: 'NONE',
+            user: user('maya')
+          }
+        ],
+        { etag: '"issues-v1"' }
+      ),
+    '/users/maya': () =>
+      ok({ ...user('maya'), name: 'Maya', company: '@buyerco', blog: '', email: null }),
+    '/orgs/buyerco': () =>
+      ok({
+        login: 'buyerco',
+        name: 'Buyer Co',
+        blog: 'https://www.buyer.io',
+        html_url: 'https://github.com/buyerco'
+      }),
+    '/users/sam': () =>
+      ok({ ...user('sam'), name: 'Sam', company: 'NewCo', blog: '', email: 'sam@newco.dev' }),
+    '/users/lee': () =>
+      ok({
+        ...user('lee'),
+        name: 'Lee',
+        company: 'Freelance',
+        blog: 'https://lee.github.io',
+        email: 'lee@gmail.com'
+      }),
+    '/users/rejectco': () =>
+      ok({ ...user('rejectco', 'Organization'), name: 'Reject Co', blog: 'https://rejectco.com' }),
+    ...overrides
+  };
+}
+
+async function resetWorkspace(workspaceId: string): Promise<void> {
+  await db.prepare('DELETE FROM workspaces WHERE id=?').run(workspaceId);
+  await db
+    .prepare('INSERT INTO workspaces (id,name,created_at) VALUES (?,?,?)')
+    .run(workspaceId, workspaceId, T0.toISOString());
+}
+
+async function connectGitHub(workspaceId: string): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO connections
+       (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,created_at,updated_at)
+       VALUES (?,?,'github','trevra-github',?,'GitHub','connected',0,?,?)`
+    )
+    .run(id('conn'), workspaceId, `gh-${workspaceId}`, T0.toISOString(), T0.toISOString());
+}
+
+async function makeAccount(workspaceId: string, domain: string, status: string): Promise<string> {
+  const accountId = id('acc');
+  await db
+    .prepare(
+      `INSERT INTO accounts (id, workspace_id, name, domain, source, tags, status, created_at, updated_at)
+       VALUES (?,?,?,?,'csv',?::text[],?,?,?)`
+    )
+    .run(accountId, workspaceId, domain, domain, [], status, T0.toISOString(), T0.toISOString());
+  return accountId;
+}
+
+async function accountByDomain(workspaceId: string, domain: string) {
+  return db
+    .prepare(
+      'SELECT id, name, status, source, tags FROM accounts WHERE workspace_id=? AND LOWER(domain)=?'
+    )
+    .get<{ id: string; name: string; status: string; source: string; tags: string[] }>(
+      workspaceId,
+      domain
+    );
+}
+
+async function signalRows(workspaceId: string, accountId: string) {
+  return db
+    .prepare(
+      `SELECT kind, detail, evidence_url FROM account_signals
+       WHERE workspace_id=? AND account_id=? ORDER BY observed_at ASC, id ASC`
+    )
+    .all<{ kind: string; detail: string; evidence_url: string }>(workspaceId, accountId);
+}
+
+async function repoRow(workspaceId = WORKSPACE_ID): Promise<WatchedRepository> {
+  const [repo] = await listWatchedRepositories(db, workspaceId);
+  return repo;
+}
+
+function poll(transport: GitHubTransport, now = T0, workspaceId = WORKSPACE_ID) {
+  return pollWorkspaceRepositories(db, workspaceId, { transport, now });
+}
+
+beforeEach(async () => {
+  delete process.env.NANGO_GITHUB_INTEGRATION;
+  db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
+  await resetWorkspace(WORKSPACE_ID);
+  await resetWorkspace(OTHER_WORKSPACE_ID);
+  await connectGitHub(WORKSPACE_ID);
+  await makeAccount(WORKSPACE_ID, 'buyer.io', 'active');
+  await makeAccount(WORKSPACE_ID, 'rejectco.com', 'not_a_fit');
+  await watchRepository(
+    db,
+    { workspaceId: WORKSPACE_ID, actorUserId: null, fullName: REPO },
+    new Date(T0.getTime() - 60_000)
+  );
+});
+
+afterEach(async () => {
+  await db
+    .prepare('DELETE FROM workspaces WHERE id = ANY(?::text[])')
+    .run([WORKSPACE_ID, OTHER_WORKSPACE_ID]);
+  await db.close();
+});
+
+describe('pollWorkspaceRepositories', () => {
+  it('attaches a star to an existing company, creates an account for a new one, and only counts a person it cannot trace', async () => {
+    const github = fakeGitHub(lemoncrowRoutes());
+    const result = await poll(github);
+    expect(result).toMatchObject({ connection: 'connected', polled: 1, rateLimitedUntil: null });
+
+    const buyer = await accountByDomain(WORKSPACE_ID, 'buyer.io');
+    expect(await signalRows(WORKSPACE_ID, buyer!.id)).toEqual([
+      {
+        kind: 'repo-starred',
+        detail: 'starred lemoncrow-lab/lemoncrow',
+        evidence_url: 'https://github.com/maya'
+      },
+      {
+        kind: 'repo-issue-opened',
+        detail: 'opened an issue on lemoncrow-lab/lemoncrow',
+        evidence_url: 'https://github.com/lemoncrow-lab/lemoncrow/issues/7'
+      }
+    ]);
+
+    const newco = await accountByDomain(WORKSPACE_ID, 'newco.dev');
+    expect(newco).toMatchObject({
+      status: 'active',
+      source: 'github',
+      name: 'newco.dev',
+      tags: ['github-traction']
+    });
+    expect((await signalRows(WORKSPACE_ID, newco!.id)).map((row) => row.kind)).toEqual([
+      'repo-starred'
+    ]);
+    expect(result.accountIds.sort()).toEqual([buyer!.id, newco!.id].sort());
+
+    // lee: freemail, a github.io blog and a plain-text company. Counted, never stored.
+    expect(await accountByDomain(WORKSPACE_ID, 'gmail.com')).toBeUndefined();
+    expect(await accountByDomain(WORKSPACE_ID, 'lee.github.io')).toBeUndefined();
+    const actors = await db
+      .prepare(
+        'SELECT login, profile_url, resolved_domain, resolved_via FROM github_repo_actors WHERE workspace_id=? ORDER BY login'
+      )
+      .all(WORKSPACE_ID);
+    expect(actors).toEqual([
+      {
+        login: 'maya',
+        profile_url: 'https://github.com/maya',
+        resolved_domain: 'buyer.io',
+        resolved_via: 'org_website'
+      },
+      {
+        login: 'sam',
+        profile_url: 'https://github.com/sam',
+        resolved_domain: 'newco.dev',
+        resolved_via: 'email_domain'
+      }
+    ]);
+
+    // Outside the backfill window, inside the team, a pull request or a bot:
+    // none of them is a buying signal, so none costs a profile lookup.
+    const looked = github.calls
+      .map((call) => call.endpoint)
+      .filter((endpoint) => endpoint.startsWith('/users/'));
+    expect(looked.sort()).toEqual(['/users/lee', '/users/maya', '/users/rejectco', '/users/sam']);
+
+    // The stargazer request asked for starred_at.
+    const starCall = github.calls.find((call) => call.endpoint.endsWith('/stargazers'));
+    expect(starCall?.headers.Accept).toBe('application/vnd.github.star+json');
+
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      lastError: null,
+      starsCursor: '2026-10-05T11:00:00.000Z',
+      forksCursor: '2026-10-05T12:00:00.000Z',
+      issuesCursor: '2026-10-05T13:30:00.000Z',
+      repoEtag: '"repo-v1"',
+      issuesEtag: '"issues-v1"',
+      unresolvedTotal: 1,
+      lastPolledAt: T0.toISOString(),
+      nextPollAt: new Date(T0.getTime() + POLL_INTERVAL_MINUTES * 60_000).toISOString(),
+      lastSummary: {
+        stars: 3,
+        forks: 1,
+        issues: 1,
+        attached: 2,
+        created: 1,
+        unresolved: 1,
+        ignoredRejected: 1,
+        deferred: 0,
+        burstTruncated: false
+      }
+    });
+
+    // Two kinds from one company, fresh: warm, and scored in the same run.
+    const score = await db
+      .prepare('SELECT tier FROM account_scores WHERE workspace_id=? AND account_id=?')
+      .get<{ tier: string }>(WORKSPACE_ID, buyer!.id);
+    expect(score?.tier).toBe('warm');
+  });
+
+  it('never reactivates or feeds a company the founder rejected', async () => {
+    await poll(fakeGitHub(lemoncrowRoutes()));
+    const rejected = await accountByDomain(WORKSPACE_ID, 'rejectco.com');
+    expect(rejected?.status).toBe('not_a_fit');
+    expect(await signalRows(WORKSPACE_ID, rejected!.id)).toEqual([]);
+    expect(
+      await db.prepare('SELECT 1 AS one FROM account_scores WHERE account_id=?').get(rejected!.id)
+    ).toBeUndefined();
+
+    // Archived after the first run: a remembered login must not bring it back.
+    const buyer = await accountByDomain(WORKSPACE_ID, 'buyer.io');
+    await db.prepare("UPDATE accounts SET status='archived' WHERE id=?").run(buyer!.id);
+    const later = new Date(T0.getTime() + 2 * HOUR);
+    await poll(
+      fakeGitHub(
+        lemoncrowRoutes({
+          [`${REPO_PATH}/issues`]: () =>
+            ok([
+              {
+                number: 11,
+                html_url: `https://github.com/${REPO}/issues/11`,
+                created_at: '2026-10-06T13:00:00Z',
+                author_association: 'NONE',
+                user: user('maya')
+              }
+            ])
+        })
+      ),
+      later
+    );
+    expect((await accountByDomain(WORKSPACE_ID, 'buyer.io'))?.status).toBe('archived');
+    expect(await signalRows(WORKSPACE_ID, buyer!.id)).toHaveLength(2);
+    expect((await repoRow()).lastSummary).toMatchObject({
+      issues: 1,
+      ignoredRejected: 1,
+      attached: 0
+    });
+  });
+
+  it('records the same star once however often it is seen', async () => {
+    await poll(fakeGitHub(lemoncrowRoutes()));
+    // Maya unstars and stars again: the next poll sees her with a newer starred_at.
+    const restar = fakeGitHub(
+      lemoncrowRoutes({
+        [REPO_PATH]: () => ok({ stargazers_count: 4, forks_count: 1 }, { etag: '"repo-v2"' }),
+        [`${REPO_PATH}/stargazers`]: () =>
+          ok([
+            star('sam', '2026-10-05T10:00:00Z'),
+            star('lee', '2026-10-05T11:00:00Z'),
+            star('maya', '2026-10-06T13:30:00Z')
+          ])
+      })
+    );
+    await poll(restar, new Date(T0.getTime() + 2 * HOUR));
+
+    const buyer = await accountByDomain(WORKSPACE_ID, 'buyer.io');
+    const stars = (await signalRows(WORKSPACE_ID, buyer!.id)).filter(
+      (row) => row.kind === 'repo-starred'
+    );
+    expect(stars).toHaveLength(1);
+    // A remembered person costs no second profile lookup.
+    expect(restar.calls.some((call) => call.endpoint === '/users/maya')).toBe(false);
+  });
+
+  it('sends ETags back and skips stars and forks when the repository has not changed', async () => {
+    await poll(fakeGitHub(lemoncrowRoutes()));
+    const unchanged = fakeGitHub(
+      lemoncrowRoutes({
+        [REPO_PATH]: (call) =>
+          call.headers['If-None-Match'] === '"repo-v1"'
+            ? { status: 304, data: '', headers: {} }
+            : ok({ stargazers_count: 4, forks_count: 1 }),
+        [`${REPO_PATH}/issues`]: (call) =>
+          call.headers['If-None-Match'] === '"issues-v1"'
+            ? { status: 304, data: '', headers: {} }
+            : ok([])
+      })
+    );
+    await poll(unchanged, new Date(T0.getTime() + 2 * HOUR));
+    expect(unchanged.calls.map((call) => call.endpoint)).toEqual([
+      REPO_PATH,
+      `${REPO_PATH}/issues`
+    ]);
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      repoEtag: '"repo-v1"',
+      issuesEtag: '"issues-v1"',
+      lastSummary: { stars: 0, forks: 0, issues: 0 }
+    });
+  });
+
+  it('creates at most MAX_NEW_ACCOUNTS_PER_RUN accounts per run and picks up the rest next run', async () => {
+    const people = Array.from(
+      { length: MAX_NEW_ACCOUNTS_PER_RUN + 2 },
+      (_, index) => `person${index + 1}`
+    );
+    const routes = lemoncrowRoutes({
+      [REPO_PATH]: () =>
+        ok({ stargazers_count: people.length, forks_count: 0 }, { etag: '"repo-burst"' }),
+      [`${REPO_PATH}/stargazers`]: () =>
+        ok(people.map((login, index) => star(login, `2026-10-05T0${index + 1}:00:00Z`))),
+      [`${REPO_PATH}/forks`]: () => ok([]),
+      [`${REPO_PATH}/issues`]: () => ok([])
+    });
+    people.forEach((login, index) => {
+      routes[`/users/${login}`] = () =>
+        ok({
+          ...user(login),
+          email: `${login}@company${index + 1}.dev`,
+          company: null,
+          blog: null
+        });
+    });
+    const createdDomains = async () =>
+      (
+        await db
+          .prepare(
+            "SELECT domain FROM accounts WHERE workspace_id=? AND source='github' ORDER BY domain"
+          )
+          .all<{ domain: string }>(WORKSPACE_ID)
+      ).map((row) => row.domain);
+
+    await poll(fakeGitHub(routes));
+    expect(await createdDomains()).toEqual([
+      'company1.dev',
+      'company2.dev',
+      'company3.dev',
+      'company4.dev',
+      'company5.dev'
+    ]);
+    const repo = await repoRow();
+    expect(repo.lastSummary).toMatchObject({ created: 5, deferred: 2 });
+    expect(repo.starsCursor).toBe('2026-10-05T05:00:00.000Z');
+    // Cleared so the next run reads the stars again instead of getting a 304.
+    expect(repo.repoEtag).toBeNull();
+
+    await poll(fakeGitHub(routes), new Date(T0.getTime() + 2 * HOUR));
+    expect(await createdDomains()).toHaveLength(7);
+  });
+
+  it('stops at the rate limit, keeps what it processed, and resumes at the reset time', async () => {
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        '/users/sam': () => ({
+          status: 403,
+          data: { message: 'API rate limit exceeded' },
+          headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(RESET_EPOCH) }
+        })
+      })
+    );
+    const result = await poll(github);
+    const resetAt = new Date(RESET_EPOCH * 1000).toISOString();
+    expect(result.rateLimitedUntil).toBe(resetAt);
+    expect(await repoRow()).toMatchObject({
+      status: 'rate_limited',
+      rateLimitedUntil: resetAt,
+      nextPollAt: resetAt,
+      starsCursor: '2026-10-05T09:00:00.000Z',
+      repoEtag: null
+    });
+    // Maya was processed before the limit and keeps her signal.
+    const buyer = await accountByDomain(WORKSPACE_ID, 'buyer.io');
+    expect((await signalRows(WORKSPACE_ID, buyer!.id)).map((row) => row.kind)).toEqual([
+      'repo-starred'
+    ]);
+    // Nothing after the limit was requested.
+    expect(github.calls.some((call) => call.endpoint.endsWith('/forks'))).toBe(false);
+  });
+
+  it('marks the connection for reconnecting when GitHub rejects the token', async () => {
+    const github = fakeGitHub({
+      [REPO_PATH]: () => ({ status: 401, data: { message: 'Bad credentials' }, headers: {} })
+    });
+    const result = await poll(github);
+    expect(result.connection).toBe('needs_reauth');
+    const connection = await db
+      .prepare('SELECT status, last_error FROM connections WHERE workspace_id=?')
+      .get<{ status: string; last_error: string | null }>(WORKSPACE_ID);
+    expect(connection?.status).toBe('needs_reauth');
+    expect(connection?.last_error).toContain('Reconnect GitHub');
+    expect(await repoRow()).toMatchObject({ status: 'needs_reauth', lastSummary: null });
+    const signals = await db
+      .prepare('SELECT COUNT(*)::int AS count FROM account_signals WHERE workspace_id=?')
+      .get<{ count: number }>(WORKSPACE_ID);
+    expect(signals?.count).toBe(0);
+  });
+
+  it('does not touch GitHub when the workspace has no GitHub connection', async () => {
+    await db.prepare('DELETE FROM connections WHERE workspace_id=?').run(WORKSPACE_ID);
+    const github = fakeGitHub(lemoncrowRoutes());
+    const result = await poll(github);
+    expect(result.connection).toBe('not_connected');
+    expect(github.calls).toEqual([]);
+    expect(await repoRow()).toMatchObject({ status: 'not_connected', lastSummary: null });
+  });
+
+  it('reports a repository GitHub cannot find as not found', async () => {
+    await poll(fakeGitHub({}));
+    expect(await repoRow()).toMatchObject({
+      status: 'not_found',
+      nextPollAt: new Date(T0.getTime() + NOT_FOUND_RETRY_HOURS * HOUR).toISOString()
+    });
+  });
+
+  it('keeps each workspace to its own accounts when two workspaces watch the same repository', async () => {
+    await connectGitHub(OTHER_WORKSPACE_ID);
+    await watchRepository(
+      db,
+      { workspaceId: OTHER_WORKSPACE_ID, actorUserId: null, fullName: REPO },
+      new Date(T0.getTime() - 60_000)
+    );
+    await poll(fakeGitHub(lemoncrowRoutes()));
+    await poll(fakeGitHub(lemoncrowRoutes()), T0, OTHER_WORKSPACE_ID);
+
+    const mine = await accountByDomain(WORKSPACE_ID, 'buyer.io');
+    const theirs = await accountByDomain(OTHER_WORKSPACE_ID, 'buyer.io');
+    expect(mine).toMatchObject({ source: 'csv' });
+    expect(theirs).toMatchObject({ source: 'github', name: 'Buyer Co' });
+    expect(theirs!.id).not.toBe(mine!.id);
+    expect(await signalRows(WORKSPACE_ID, mine!.id)).toHaveLength(2);
+    const theirActors = await db
+      .prepare('SELECT account_id FROM github_repo_actors WHERE workspace_id=?')
+      .all<{ account_id: string }>(OTHER_WORKSPACE_ID);
+    expect(theirActors.length).toBeGreaterThan(0);
+    expect(theirActors.every((row) => row.account_id !== mine!.id)).toBe(true);
+  });
+
+  it('reads at most MAX_STAR_PAGES pages of new stars and says so when a burst is larger', async () => {
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        [REPO_PATH]: () => ok({ stargazers_count: (MAX_STAR_PAGES + 2) * 100, forks_count: 0 }),
+        [`${REPO_PATH}/stargazers`]: (call) => {
+          const page = Number(call.params.page);
+          return ok(
+            Array.from({ length: 100 }, (_, index) =>
+              star(
+                `bot-${page}-${index}`,
+                new Date(
+                  Date.parse('2026-10-01T00:00:00Z') + (page * 100 + index) * 60_000
+                ).toISOString(),
+                'Bot'
+              )
+            )
+          );
+        }
+      })
+    );
+    await poll(github);
+    const pages = github.calls
+      .filter((call) => call.endpoint.endsWith('/stargazers'))
+      .map((call) => call.params.page);
+    expect(pages).toEqual([5, 4, 3]);
+    expect((await repoRow()).lastSummary).toMatchObject({ burstTruncated: true, stars: 0 });
+  });
+
+  it('surfaces a company that starred, forked and opened an issue as a high-priority account in Today', async () => {
+    await poll(
+      fakeGitHub(
+        lemoncrowRoutes({
+          [`${REPO_PATH}/forks`]: () =>
+            ok([{ created_at: '2026-10-05T12:00:00Z', owner: user('buyerco', 'Organization') }]),
+          '/users/buyerco': () =>
+            ok({
+              ...user('buyerco', 'Organization'),
+              name: 'Buyer Co',
+              blog: 'https://www.buyer.io'
+            })
+        })
+      )
+    );
+    const buyer = await accountByDomain(WORKSPACE_ID, 'buyer.io');
+    const score = await db
+      .prepare(
+        'SELECT tier, distinct_kinds FROM account_scores WHERE workspace_id=? AND account_id=?'
+      )
+      .get<{ tier: string; distinct_kinds: number }>(WORKSPACE_ID, buyer!.id);
+    expect(score).toEqual({ tier: 'hot', distinct_kinds: 3 });
+
+    const today = await getToday(db, WORKSPACE_ID, T0);
+    expect(today.needsAttention).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'high_priority_account',
+          reference: { type: 'account', id: buyer!.id }
+        })
+      ])
+    );
+  });
+
+  it('keeps walking back when the computed last stargazer page is empty', async () => {
+    // stargazers_count can overstate the list: page 2 is empty, the stars are on page 1.
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        [REPO_PATH]: () => ok({ stargazers_count: 200, forks_count: 1 }, { etag: '"repo-v1"' }),
+        [`${REPO_PATH}/stargazers`]: (call) =>
+          Number(call.params.page) === 2
+            ? ok([])
+            : ok([star('maya', '2026-10-05T09:00:00Z'), star('sam', '2026-10-05T10:00:00Z')])
+      })
+    );
+    await poll(github);
+    const pages = github.calls
+      .filter((call) => call.endpoint.endsWith('/stargazers'))
+      .map((call) => call.params.page);
+    expect(pages).toEqual([2, 1]);
+    expect(await repoRow()).toMatchObject({
+      starsCursor: '2026-10-05T10:00:00.000Z',
+      lastSummary: { stars: 2, burstTruncated: false }
+    });
+  });
+
+  it('says a fork burst was truncated when a full raw page of forks is all newer than the cursor, bots included', async () => {
+    await poll(
+      fakeGitHub(
+        lemoncrowRoutes({
+          [`${REPO_PATH}/forks`]: () =>
+            ok(
+              Array.from({ length: 100 }, (_, index) => ({
+                created_at: new Date(
+                  Date.parse('2026-10-05T00:00:00Z') - index * 60_000
+                ).toISOString(),
+                owner: user(`fork-bot-${index}`, 'Bot')
+              }))
+            )
+        })
+      )
+    );
+    expect((await repoRow()).lastSummary).toMatchObject({ forks: 0, burstTruncated: true });
+  });
+
+  it('says an issue burst was truncated when a full raw page of issues is all newer than the cursor, bots included', async () => {
+    await poll(
+      fakeGitHub(
+        lemoncrowRoutes({
+          [`${REPO_PATH}/issues`]: () => ok(botIssues(100, null))
+        })
+      )
+    );
+    expect((await repoRow()).lastSummary).toMatchObject({ issues: 0, burstTruncated: true });
+  });
+
+  it('does not call a full issue page truncated when its oldest row already reaches the cursor', async () => {
+    await poll(
+      fakeGitHub(
+        lemoncrowRoutes({
+          [`${REPO_PATH}/issues`]: () => ok(botIssues(100, '2026-07-01T00:00:00Z'))
+        })
+      )
+    );
+    expect((await repoRow()).lastSummary).toMatchObject({ issues: 0, burstTruncated: false });
+  });
+
+  it('does not count an account another writer inserted first as created', async () => {
+    const routes = lemoncrowRoutes({
+      [REPO_PATH]: () => ok({ stargazers_count: 1, forks_count: 0 }),
+      [`${REPO_PATH}/stargazers`]: () => ok([star('sam', '2026-10-05T10:00:00Z')]),
+      [`${REPO_PATH}/forks`]: () => ok([]),
+      [`${REPO_PATH}/issues`]: () => ok([])
+    });
+    const base = fakeGitHub(routes);
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let competitor: Promise<void> | null = null;
+    let sawBlockedInsert = false;
+
+    // Waits until the poller's own INSERT is blocked on the competitor's
+    // uncommitted row, then lets the competitor commit: a real race, not a guess.
+    const releaseWhenPollerBlocks = async (): Promise<void> => {
+      for (let attempt = 0; attempt < 250 && !sawBlockedInsert; attempt += 1) {
+        const waiting = await db
+          .prepare(
+            `SELECT COUNT(*)::int AS count FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'
+               AND query ILIKE '%INSERT INTO accounts%ON CONFLICT (workspace_id, LOWER(domain)) DO NOTHING%'`
+          )
+          .get<{ count: number }>();
+        if ((waiting?.count ?? 0) > 0) sawBlockedInsert = true;
+        else await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      release();
+    };
+
+    const racing: GitHubTransport = {
+      async get(endpoint, request) {
+        if (endpoint === '/users/sam' && !competitor) {
+          let inserted!: () => void;
+          const insertedRow = new Promise<void>((resolve) => {
+            inserted = resolve;
+          });
+          competitor = db.transaction(async (tx) => {
+            await tx
+              .prepare(
+                `INSERT INTO accounts (id, workspace_id, name, domain, source, tags, status, created_at, updated_at)
+                 VALUES (?,?,?,?,'manual',?::text[],'active',?,?)`
+              )
+              .run(
+                id('acc'),
+                WORKSPACE_ID,
+                'NewCo',
+                'newco.dev',
+                [],
+                new Date(T0.getTime() - 60_000).toISOString(),
+                T0.toISOString()
+              );
+            inserted();
+            await released;
+          });
+          await insertedRow;
+          void releaseWhenPollerBlocks();
+        }
+        return base.get(endpoint, request);
+      }
+    };
+
+    await poll(racing);
+    await competitor;
+    expect(sawBlockedInsert).toBe(true);
+    expect((await repoRow()).lastSummary).toMatchObject({ stars: 1, created: 0, attached: 1 });
+    const newco = await accountByDomain(WORKSPACE_ID, 'newco.dev');
+    expect(newco).toMatchObject({ source: 'manual', name: 'NewCo' });
+    expect((await signalRows(WORKSPACE_ID, newco!.id)).map((row) => row.kind)).toEqual([
+      'repo-starred'
+    ]);
+  });
+
+  it('stops calling GitHub once the run is over its time budget and leaves the other repositories due', async () => {
+    const OTHER_PATH = '/repos/lemoncrow-lab/other';
+    await watchRepository(
+      db,
+      { workspaceId: WORKSPACE_ID, actorUserId: null, fullName: 'lemoncrow-lab/other' },
+      new Date(T0.getTime() - 30_000)
+    );
+    let elapsed = 0;
+    const base = lemoncrowRoutes();
+    const github = fakeGitHub({
+      ...base,
+      [`${REPO_PATH}/issues`]: (call) => {
+        // The first repository's last read: from here on the run is over budget.
+        elapsed = GITHUB_POLL_BUDGET_MS + 1;
+        return base[`${REPO_PATH}/issues`](call);
+      }
+    });
+    const result = await pollWorkspaceRepositories(db, WORKSPACE_ID, {
+      transport: github,
+      now: T0,
+      clock: () => elapsed
+    });
+
+    expect(result.polled).toBe(1);
+    expect(github.calls.some((call) => call.endpoint.startsWith(OTHER_PATH))).toBe(false);
+    const [first, other] = await listWatchedRepositories(db, WORKSPACE_ID);
+    expect(first).toMatchObject({ fullName: REPO, status: 'ok' });
+    expect(other).toMatchObject({ fullName: 'lemoncrow-lab/other', status: 'pending' });
+    // Lease released and still due: the next automation tick picks it up.
+    expect(await hasDueRepositories(db, WORKSPACE_ID, T0)).toBe(true);
+  });
+
+  it('defers the rest of a repository when the time budget runs out mid-run', async () => {
+    let elapsed = 0;
+    const base = lemoncrowRoutes();
+    const github = fakeGitHub({
+      ...base,
+      [`${REPO_PATH}/stargazers`]: (call) => {
+        elapsed = GITHUB_POLL_BUDGET_MS + 1;
+        return base[`${REPO_PATH}/stargazers`](call);
+      }
+    });
+    await pollWorkspaceRepositories(db, WORKSPACE_ID, {
+      transport: github,
+      now: T0,
+      clock: () => elapsed
+    });
+    expect(github.calls.map((call) => call.endpoint)).toEqual([
+      REPO_PATH,
+      `${REPO_PATH}/stargazers`
+    ]);
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      lastError: null,
+      starsCursor: null,
+      repoEtag: null,
+      nextPollAt: T0.toISOString(),
+      lastSummary: { stars: 0, deferred: 3 }
+    });
+    expect(await hasDueRepositories(db, WORKSPACE_ID, T0)).toBe(true);
+  });
+
+  it('records an unexpected failure on the repository and releases its lease', async () => {
+    const github: GitHubTransport = {
+      async get() {
+        throw new Error('socket hang up');
+      }
+    };
+    const result = await poll(github);
+    expect(result.polled).toBe(0);
+    expect(await repoRow()).toMatchObject({
+      status: 'error',
+      lastError: 'socket hang up',
+      nextPollAt: new Date(T0.getTime() + ERROR_RETRY_MINUTES * 60_000).toISOString()
+    });
+    const lease = await db
+      .prepare('SELECT lease_until FROM watched_repositories WHERE workspace_id=?')
+      .get<{ lease_until: string | null }>(WORKSPACE_ID);
+    expect(lease?.lease_until).toBeNull();
+  });
+});
+
+function botIssues(count: number, oldestAt: string | null) {
+  return Array.from({ length: count }, (_, index) => ({
+    number: 1000 - index,
+    html_url: `https://github.com/${REPO}/issues/${1000 - index}`,
+    created_at:
+      oldestAt && index === count - 1
+        ? oldestAt
+        : new Date(Date.parse('2026-10-05T20:00:00Z') - index * 60_000).toISOString(),
+    author_association: 'NONE',
+    user: user(`issue-bot-${index}`, 'Bot')
+  }));
+}

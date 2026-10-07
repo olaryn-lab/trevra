@@ -44,9 +44,9 @@ export interface PollSummary {
   unresolved: number;
   /** Events from a company the founder marked not a fit or archived. */
   ignoredRejected: number;
-  /** Events left for the next run because a per-run cap was reached. */
+  /** Events left for the next run because a per-run cap or the run's time budget was reached. */
   deferred: number;
-  /** More new stars arrived than one run reads; the oldest of them were skipped. */
+  /** More new stars, forks or issues arrived than one run reads; the oldest were skipped. */
   burstTruncated: boolean;
 }
 
@@ -271,7 +271,6 @@ export interface GitHubConnection {
  * The connection row decides the workspace; nothing GitHub returns ever does.
  * Demo rows and disconnected rows do not count as a connection.
  */
-// lc-debt: GitHub actor logins persist until workspace erasure; add a last-seen retention prune in the poller.
 export async function readGitHubConnection(db: Db, workspaceId: string): Promise<GitHubConnection> {
   const providerConfigKey = githubProviderConfigKey();
   const row = await db
