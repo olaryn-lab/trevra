@@ -7,6 +7,7 @@ const WORKSPACE = 'ws_meetings_gcal_test';
 
 function event(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    kind: 'calendar#event',
     id: 'evt-1',
     status: 'confirmed',
     htmlLink: 'https://www.google.com/calendar/event?eid=abc',

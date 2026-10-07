@@ -1038,6 +1038,7 @@ export async function syncNangoRecords(
       const outcome = await normalizeSyncedRecord(
         db,
         input.workspaceId,
+        input.provider,
         input.model,
         raw as Record<string, unknown>,
         ownEmails
@@ -1344,9 +1345,12 @@ function normalizeNangoRecord(model: string, raw: Record<string, unknown>): Cano
   delete payload._nango_metadata;
   const resolved = payload.kind ? null : canonicalKindForModel(model);
   if (!payload.kind && !resolved) return null;
-  const record = canonicalRecordSchema.parse(
+  const parsed = canonicalRecordSchema.safeParse(
     payload.kind ? payload : { ...payload, kind: resolved }
   );
+  // Unparseable: counted as skipped by the caller, never allowed to abort the batch.
+  if (!parsed.success) return null;
+  const record = parsed.data;
   // A meeting Nango reports as deleted is a cancelled meeting, never a live one.
   return record.kind === 'meeting' && deleted ? { ...record, status: 'cancelled' } : record;
 }
@@ -1357,17 +1361,26 @@ type SyncedRecord =
 /**
  * A synced record, read for this workspace.
  *
- * Meeting models that are not already canonical are read as Google Calendar
- * events; everything else takes the canonical alias path unchanged.
+ * On the Google Calendar provider, meeting models whose records are not already
+ * canonical are read as Calendar events. Real events carry `kind: "calendar#event"`,
+ * so only a canonical kind literal opts a record out. Everything else takes the
+ * canonical alias path.
  */
+const CANONICAL_KINDS = new Set<unknown>(['message', 'opportunity', 'meeting']);
+
 async function normalizeSyncedRecord(
   db: Db,
   workspaceId: string,
+  provider: string,
   model: string,
   raw: Record<string, unknown>,
   ownEmails: ReadonlySet<string>
 ): Promise<SyncedRecord> {
-  if (!raw.kind && canonicalKindForModel(model) === 'meeting') {
+  if (
+    provider === 'google-calendar' &&
+    !CANONICAL_KINDS.has(raw.kind) &&
+    canonicalKindForModel(model) === 'meeting'
+  ) {
     const meeting = await meetingFromCalendarEvent(db, workspaceId, raw, ownEmails);
     if (meeting.ok) return { kind: 'record', record: meeting.record };
     return meeting.reason === 'unrecognized' ? { kind: 'skipped' } : { kind: 'ignored' };

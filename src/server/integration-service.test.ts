@@ -748,6 +748,7 @@ describe('Nango calendar sync', () => {
       );
 
     const times = {
+      kind: 'calendar#event',
       start: { dateTime: '2026-11-03T10:00:00+01:00' },
       end: { dateTime: '2026-11-03T10:30:00+01:00' }
     };
@@ -766,6 +767,7 @@ describe('Nango calendar sync', () => {
         { id: 'evt-internal', ...times, attendees: [self, { email: teammate }] },
         {
           id: 'evt-all-day',
+          kind: 'calendar#event',
           start: { date: '2026-11-04' },
           end: { date: '2026-11-05' },
           attendees: [self]
@@ -816,5 +818,114 @@ describe('Nango calendar sync', () => {
     expect(connection?.last_error).toBe(
       "1 record from 'GoogleCalendarEvent' could not be read and was not stored."
     );
+  });
+
+  async function seedSyncTenant(
+    database: LiveDb,
+    provider: string,
+    providerConfigKey: string
+  ): Promise<{ workspaceId: string; externalConnectionId: string; providerConfigKey: string }> {
+    process.env.NANGO_API_KEY = 'test-nango-key';
+    const tenant = await seedTenant(database);
+    const now = new Date().toISOString();
+    const externalConnectionId = `sync-${id('conn')}`;
+    await database
+      .prepare(
+        'INSERT INTO connections (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
+      )
+      .run(
+        id('conn'),
+        tenant.workspaceId,
+        provider,
+        providerConfigKey,
+        externalConnectionId,
+        null,
+        'connected',
+        0,
+        now,
+        now
+      );
+    await database
+      .prepare(
+        'INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at) VALUES (?,?,?,?,?,?,?)'
+      )
+      .run(
+        id('con'),
+        tenant.workspaceId,
+        'Maya Patel',
+        'maya@acme.example',
+        'maya@acme.example',
+        now,
+        now
+      );
+    return { workspaceId: tenant.workspaceId, externalConnectionId, providerConfigKey };
+  }
+
+  function syncWebhook(
+    seed: { externalConnectionId: string; providerConfigKey: string },
+    model: string
+  ): string {
+    return JSON.stringify({
+      id: `nango_${id('evt')}`,
+      type: 'sync',
+      success: true,
+      providerConfigKey: seed.providerConfigKey,
+      connectionId: seed.externalConnectionId,
+      model
+    });
+  }
+
+  it('skips one malformed canonical record and still ingests the good ones', async () => {
+    const database = await openLiveDatabase();
+    const seed = await seedSyncTenant(database, 'gmail', 'trevra-gmail');
+    nangoMock.listRecords.mockResolvedValueOnce({
+      records: [
+        {
+          kind: 'opportunity',
+          id: 'opp-good',
+          accountName: 'Acme',
+          personName: 'Maya Patel',
+          personEmail: 'maya@acme.example',
+          title: 'Good',
+          status: 'qualified'
+        },
+        { kind: 'opportunity', id: 12 },
+        {
+          kind: 'opportunity',
+          id: 'opp-good-2',
+          accountName: 'Acme',
+          personName: 'Maya Patel',
+          personEmail: 'maya@acme.example',
+          title: 'Good two',
+          status: 'qualified'
+        }
+      ],
+      next_cursor: null
+    });
+    const result = await handleNangoWebhook(database, syncWebhook(seed, 'TrevraOpportunity'), {});
+    expect(result).toEqual({ duplicate: false, processed: 'synced-2-skipped-1' });
+  });
+
+  it("does not read another provider's events model as calendar meetings", async () => {
+    const database = await openLiveDatabase();
+    const seed = await seedSyncTenant(database, 'hubspot', 'trevra-hubspot');
+    nangoMock.listRecords.mockResolvedValueOnce({
+      records: [
+        {
+          id: 'evt-other',
+          kind: 'calendar#event',
+          start: { dateTime: '2026-11-03T10:00:00+01:00' },
+          end: { dateTime: '2026-11-03T10:30:00+01:00' },
+          attendees: [{ email: 'maya@acme.example' }]
+        }
+      ],
+      next_cursor: null
+    });
+    const result = await handleNangoWebhook(database, syncWebhook(seed, 'events'), {});
+    expect(result).toEqual({ duplicate: false, processed: 'synced-0-skipped-1' });
+    const meetings = await database
+      .prepare('SELECT COUNT(*)::int AS n FROM meetings WHERE workspace_id=?')
+      .get<{ n: number }>(seed.workspaceId);
+    expect(meetings?.n).toBe(0);
   });
 });
