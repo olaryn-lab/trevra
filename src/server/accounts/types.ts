@@ -48,10 +48,33 @@ export const ACCOUNT_SIGNAL_KINDS = [
   'social-cadence-up',
   'tech-added',
   'tech-removed',
-  'thread-mention'
+  'thread-mention',
+  // First-party product and billing milestones (lead-capture/milestones.ts).
+  'product-signed-up',
+  'product-activated',
+  'product-integration-connected',
+  'product-usage-threshold',
+  'customer-paid',
+  'customer-upgraded',
+  'customer-cancelled'
 ] as const;
 
 export type AccountSignalKind = (typeof ACCOUNT_SIGNAL_KINDS)[number];
+
+/**
+ * Kinds observed in the founder's own product or billing system. Private
+ * evidence: they score an account, but they are never cited outside the
+ * workspace and never accepted from an external observation provider.
+ */
+export const FIRST_PARTY_SIGNAL_KINDS = [
+  'product-signed-up',
+  'product-activated',
+  'product-integration-connected',
+  'product-usage-threshold',
+  'customer-paid',
+  'customer-upgraded',
+  'customer-cancelled'
+] as const satisfies readonly AccountSignalKind[];
 
 export interface Account {
   id: string;

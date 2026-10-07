@@ -120,7 +120,14 @@ const KIND_LABELS: Record<string, string> = {
   'social-cadence-up': 'Social posting accelerated',
   'tech-added': 'A technology appeared on the site',
   'tech-removed': 'A technology went off the site',
-  'thread-mention': 'Mentioned in a public thread'
+  'thread-mention': 'Mentioned in a public thread',
+  'product-signed-up': 'Someone signed up for your product',
+  'product-activated': 'Activated in your product',
+  'product-integration-connected': 'Connected an integration in your product',
+  'product-usage-threshold': 'Crossed a usage threshold in your product',
+  'customer-paid': 'Became a paying customer',
+  'customer-upgraded': 'Upgraded their plan',
+  'customer-cancelled': 'Cancelled their subscription'
 };
 
 const kindLabel = (kind: string) => KIND_LABELS[kind] ?? kind;

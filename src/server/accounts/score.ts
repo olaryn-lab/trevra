@@ -188,7 +188,20 @@ export const SIGNAL_WEIGHTS: Record<AccountSignalKind, number> = {
 
   // A shrinking team is weak negative evidence. A closed role can also mean it
   // was filled, so contraction never outweighs corroborating positive movement.
-  'hiring-down': -4
+  'hiring-down': -4,
+
+  // First-party product and billing milestones (lead-capture/milestones.ts).
+  // Observed in the founder's own product, so adoption is strong evidence, but
+  // none alone reaches HOT_SCORE. A payment is deliberately weak here: it is
+  // already a won Opportunity, and it must not push a customer toward new
+  // outreach. A cancellation is strong negative evidence about the account now.
+  'product-activated': 30,
+  'product-usage-threshold': 28,
+  'customer-upgraded': 26,
+  'product-integration-connected': 24,
+  'product-signed-up': 20,
+  'customer-paid': 12,
+  'customer-cancelled': -20
 };
 
 /**
@@ -227,7 +240,14 @@ const KIND_LABELS: Record<AccountSignalKind, string> = {
   'social-cadence-up': 'social posting cadence rising',
   'tech-added': 'a new tool on their site',
   'tech-removed': 'a tool disappearing from their site',
-  'thread-mention': 'a public thread'
+  'thread-mention': 'a public thread',
+  'product-signed-up': 'a product signup',
+  'product-activated': 'product activation',
+  'product-integration-connected': 'a connected integration',
+  'product-usage-threshold': 'usage crossing a threshold',
+  'customer-paid': 'a payment',
+  'customer-upgraded': 'a plan upgrade',
+  'customer-cancelled': 'a cancellation'
 };
 
 /**
