@@ -482,8 +482,19 @@ import {
 } from './research/types.js';
 import { registerLeadCaptureIntake } from './lead-capture/http.js';
 import {
+  ProviderWebhookError,
+  WEBHOOK_PROVIDERS,
+  createProviderWebhookEndpoint,
+  deleteProviderWebhookEndpoint,
+  draftProviderWebhookEndpointId,
+  getProviderVerifier,
+  listProviderWebhookEndpoints,
+  providerWebhookPath,
   registerProviderVerifier,
-  registerProviderWebhookRoutes
+  registerProviderWebhookRoutes,
+  registeredWebhookProviders,
+  setProviderWebhookEndpointStatus,
+  withProviderWebhookPath
 } from './provider-webhooks/index.js';
 import { stripeVerifier } from './provider-webhooks/stripe.js';
 import {
@@ -1381,6 +1392,127 @@ export function createApp(db: Db) {
         });
         res.setHeader('Cache-Control', 'no-store');
         res.json(rotated);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  // ---------------------------------------------------------------------
+  // Observed provider webhooks (Stripe now; Cal.com in Phase B). Every route
+  // here exposes or changes an endpoint that receives a signing secret, so all
+  // of them -- reads included -- are owner-only. Secrets are never returned.
+  // ---------------------------------------------------------------------
+  const webhookEndpointIdSchema = z
+    .string()
+    .trim()
+    .regex(/^pwh_[a-f0-9]{24}$/);
+
+  app.get(
+    '/api/setup/webhooks',
+    ownerOnly('manage provider webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const endpoints = await listProviderWebhookEndpoints(db, req.auth!.workspaceId);
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+          endpoints: endpoints.map(withProviderWebhookPath),
+          providers: registeredWebhookProviders(),
+          secretsConfigured: secretsConfigured()
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.post(
+    '/api/setup/webhooks/draft',
+    ownerOnly('manage provider webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({ provider: z.enum(WEBHOOK_PROVIDERS) })
+          .strict()
+          .parse(req.body ?? {});
+        if (!getProviderVerifier(input.provider))
+          throw new ProviderWebhookError(
+            `${input.provider} webhooks are not available on this deployment.`,
+            400
+          );
+        const endpointId = draftProviderWebhookEndpointId();
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ endpointId, path: providerWebhookPath(input.provider, endpointId) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.post(
+    '/api/setup/webhooks',
+    ownerOnly('manage provider webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            provider: z.enum(WEBHOOK_PROVIDERS),
+            endpointId: webhookEndpointIdSchema,
+            signingSecret: z.string().trim().min(1).max(500)
+          })
+          .strict()
+          .parse(req.body ?? {});
+        const endpoint = await createProviderWebhookEndpoint(db, {
+          workspaceId: req.auth!.workspaceId,
+          actorUserId: req.auth!.userId,
+          provider: input.provider,
+          signingSecret: input.signingSecret,
+          endpointId: input.endpointId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(201).json({ endpoint: withProviderWebhookPath(endpoint) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.patch(
+    '/api/setup/webhooks/:id/status',
+    ownerOnly('manage provider webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const endpointId = webhookEndpointIdSchema.parse(String(req.params.id));
+        const input = z
+          .object({ status: z.enum(['active', 'disabled']) })
+          .strict()
+          .parse(req.body ?? {});
+        const endpoint = await setProviderWebhookEndpointStatus(db, {
+          workspaceId: req.auth!.workspaceId,
+          endpointId,
+          status: input.status,
+          actorUserId: req.auth!.userId
+        });
+        if (!endpoint) return res.status(404).json({ error: 'Webhook endpoint not found' });
+        res.json({ endpoint: withProviderWebhookPath(endpoint) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.delete(
+    '/api/setup/webhooks/:id',
+    ownerOnly('manage provider webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const endpointId = webhookEndpointIdSchema.parse(String(req.params.id));
+        await deleteProviderWebhookEndpoint(db, {
+          workspaceId: req.auth!.workspaceId,
+          endpointId,
+          actorUserId: req.auth!.userId
+        });
+        res.status(204).end();
       } catch (error) {
         next(error);
       }
@@ -7723,7 +7855,8 @@ export function createApp(db: Db) {
     if (
       error instanceof SkillApiError ||
       error instanceof PlaybookError ||
-      error instanceof LeadCaptureError
+      error instanceof LeadCaptureError ||
+      error instanceof ProviderWebhookError
     )
       return res.status(error.status).json({ error: error.message });
     if (error instanceof z.ZodError)
