@@ -4,7 +4,8 @@ import type { ProviderWebhookEndpointSummary } from './api';
 import {
   STRIPE_WEBHOOK_EVENTS,
   WebhookEndpointRow,
-  providerWebhookUrl
+  providerWebhookUrl,
+  showStripePanel
 } from './provider-webhook-view';
 
 const endpoint: ProviderWebhookEndpointSummary = {
@@ -53,5 +54,12 @@ describe('Stripe webhook setup view', () => {
     expect(html).toContain('Pause');
     expect(html).toContain('Remove');
     expect(html).not.toContain('whsec_');
+  });
+
+  it('keeps the panel visible when loading failed, never a silent blank', () => {
+    expect(showStripePanel('error', false)).toBe(true);
+    expect(showStripePanel('ok', false)).toBe(false);
+    expect(showStripePanel('ok', true)).toBe(true);
+    expect(showStripePanel('pending', false)).toBe(false);
   });
 });

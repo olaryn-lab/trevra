@@ -16,7 +16,9 @@ import { relativeTime } from './LinkedInScreen';
 import {
   STRIPE_WEBHOOK_EVENTS,
   WebhookEndpointRow,
-  providerWebhookUrl
+  providerWebhookUrl,
+  showStripePanel,
+  type WebhookLoadState
 } from './provider-webhook-view';
 
 const WHSEC_RE = /^whsec_\S{16,200}$/;
@@ -29,6 +31,7 @@ const WHSEC_RE = /^whsec_\S{16,200}$/;
 export function ProviderWebhookSetup({ setToast }: { setToast: (message: string) => void }) {
   const [endpoints, setEndpoints] = useState<ProviderWebhookEndpointSummary[]>([]);
   const [available, setAvailable] = useState(false);
+  const [load, setLoad] = useState<WebhookLoadState>('pending');
   const [custody, setCustody] = useState(true);
   const [apiBaseUrl, setApiBaseUrl] = useState('');
   const [draft, setDraft] = useState<{ endpointId: string; path: string } | null>(null);
@@ -37,16 +40,27 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
 
-  useEffect(() => {
-    void Promise.all([getProviderWebhooks(), getPublicConfig()])
-      .then(([result, config]) => {
+  const reload = () => {
+    setLoad('pending');
+    setProblem('');
+    // A public-config failure only costs the URL base, which falls back to the
+    // current origin; it must not hide an otherwise working panel.
+    const config = getPublicConfig().catch(() => null);
+    void Promise.all([getProviderWebhooks(), config])
+      .then(([result, publicConfig]) => {
         setEndpoints(result.endpoints.filter((endpoint) => endpoint.provider === 'stripe'));
         setAvailable(result.providers.includes('stripe'));
         setCustody(result.secretsConfigured);
-        setApiBaseUrl(config.apiBaseUrl || window.location.origin);
+        setApiBaseUrl(publicConfig?.apiBaseUrl || window.location.origin);
+        setLoad('ok');
       })
-      .catch((error) => setProblem(errorMessage(error, 'Unable to load Stripe payments.')));
-  }, []);
+      .catch((error) => {
+        setProblem(errorMessage(error, 'Unable to load Stripe payments.'));
+        setLoad('error');
+      });
+  };
+
+  useEffect(reload, []);
 
   const base = apiBaseUrl || window.location.origin;
 
@@ -118,7 +132,7 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
   const copyUrl = (url: string) =>
     void navigator.clipboard.writeText(url).then(() => setToast('Endpoint URL copied.'));
 
-  if (!available) return null;
+  if (!showStripePanel(load, available)) return null;
 
   return (
     <section className="page-panel" id="stripe-payments">
@@ -139,6 +153,12 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
         </div>
       )}
 
+      {load === 'error' && (
+        <div className="capture-actions">
+          <Button onClick={reload}>Try again</Button>
+        </div>
+      )}
+
       {endpoints.map((endpoint) => (
         <WebhookEndpointRow
           key={endpoint.id}
@@ -151,7 +171,7 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
         />
       ))}
 
-      {endpoints.length === 0 && !draft && (
+      {load === 'ok' && endpoints.length === 0 && !draft && (
         <div className="capture-actions">
           <Button
             variant="primary"

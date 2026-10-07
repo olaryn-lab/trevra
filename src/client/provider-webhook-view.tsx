@@ -10,6 +10,14 @@ export const STRIPE_WEBHOOK_EVENTS = [
   'customer.subscription.deleted'
 ] as const;
 
+export type WebhookLoadState = 'pending' | 'ok' | 'error';
+
+/** Hidden only while loading or when the server does not offer Stripe; a failed load stays visible. */
+export function showStripePanel(load: WebhookLoadState, available: boolean): boolean {
+  if (load === 'error') return true;
+  return load === 'ok' && available;
+}
+
 export function providerWebhookUrl(apiBaseUrl: string, path: string): string {
   return `${apiBaseUrl.replace(/\/$/, '')}${path}`;
 }
