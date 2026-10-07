@@ -159,6 +159,9 @@ describe('email deliverability evaluation', () => {
           const answer = a[name];
           if (!answer) throw Object.assign(new Error(`ENOTFOUND ${name}`), { code: 'ENOTFOUND' });
           return answer;
+        },
+        async resolveAaaa(name: string): Promise<string[]> {
+          throw Object.assign(new Error(`ENODATA ${name}`), { code: 'ENODATA' });
         }
       };
     }
@@ -194,6 +197,114 @@ describe('email deliverability evaluation', () => {
         resolver
       );
       expect(result.spf.status).toBe('unknown');
+    });
+  });
+
+  describe('a and mx targets', () => {
+    function dns(
+      records: Record<string, string[] | Error>,
+      a: Record<string, string[]>,
+      aaaa?: Record<string, string[]>,
+      mx: Record<string, string[]> = {}
+    ) {
+      const probed: string[] = [];
+      const missing = (name: string) =>
+        Object.assign(new Error(`ENOTFOUND ${name}`), { code: 'ENOTFOUND' });
+      const resolver: DnsResolver = {
+        ...fakeResolver(records),
+        async resolveA(name: string) {
+          probed.push(name);
+          const answer = a[name];
+          if (!answer) throw missing(name);
+          return answer;
+        },
+        async resolveMx(name: string) {
+          probed.push(name);
+          const answer = mx[name];
+          if (!answer) throw missing(name);
+          return answer.map((exchange) => ({ exchange, priority: 10 }));
+        }
+      };
+      if (aaaa) {
+        resolver.resolveAaaa = async (name: string) => {
+          probed.push(name);
+          const answer = aaaa[name];
+          if (!answer) throw missing(name);
+          return answer;
+        };
+      }
+      return { resolver, probed };
+    }
+    const spf = (terms: string) =>
+      googleDomain({ 'acme.test': [`v=spf1 ${terms} include:_spf.google.com ~all`] });
+
+    it('accepts dual-cidr a and mx terms without probing the cidr as a name', async () => {
+      const { resolver, probed } = dns(
+        spf('mx:mail.example.com/24//64 a:h.example.com//64 a//64'),
+        { 'h.example.com': ['203.0.113.1'], 'acme.test': ['203.0.113.2'] },
+        undefined,
+        { 'mail.example.com': ['mx1.example.com'] }
+      );
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        resolver
+      );
+      expect(result.status).toBe('pass');
+      expect(probed.sort()).toEqual(['acme.test', 'h.example.com', 'mail.example.com']);
+      expect(probed.some((name) => name.includes('/'))).toBe(false);
+    });
+
+    it('does not count an IPv6-only a target as void', async () => {
+      const aaaa = {
+        'v6a.test': ['2001:db8::1'],
+        'v6b.test': ['2001:db8::2'],
+        'v6c.test': ['2001:db8::3']
+      };
+      const { resolver } = dns(spf('a:v6a.test a:v6b.test a:v6c.test'), {}, aaaa);
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        resolver
+      );
+      expect(result.status).toBe('pass');
+    });
+
+    it('counts a targets void on both A and AAAA', async () => {
+      const { resolver } = dns(spf('a:g1.test a:g2.test a:g3.test'), {}, {});
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        resolver
+      );
+      expect(result.blockers.map((blocker) => blocker.code)).toEqual(['email_spf_invalid']);
+      expect(result.spf.detail).toContain('more than 2 void lookups');
+    });
+
+    it('does not call an A-void a target void when AAAA cannot be resolved', async () => {
+      const { resolver } = dns(spf('a:g1.test a:g2.test a:g3.test'), {});
+      const result = await evaluateDeliverability(
+        { domain: 'acme.test', provider: 'google' },
+        resolver
+      );
+      expect(result.status).toBe('pass');
+    });
+
+    it('rejects cidr on include and redirect and an empty a or mx domain-spec', async () => {
+      for (const terms of [
+        'include:_spf.google.com/24',
+        'a: ',
+        'a:',
+        'mx:',
+        'redirect=_spf.google.com/24'
+      ]) {
+        const result = await evaluateDeliverability(
+          { domain: 'acme.test', provider: 'google' },
+          fakeResolver(googleDomain({ 'acme.test': [`v=spf1 ${terms} include:_spf.google.com`] }))
+        );
+        expect(
+          result.blockers.map((blocker) => blocker.code),
+          terms
+        ).toEqual(['email_spf_invalid']);
+        expect(result.spf.detail).toContain('Unrecognised SPF term');
+      }
     });
   });
 

@@ -12,6 +12,8 @@ export interface DnsResolver {
   resolveTxt(name: string): Promise<string[][]>;
   /** Optional: lets SPF a and exists mechanisms count void lookups. */
   resolveA?(name: string): Promise<string[]>;
+  /** Optional: lets the SPF a mechanism tell an IPv6-only host from a void one. */
+  resolveAaaa?(name: string): Promise<string[]>;
   /** Optional: lets SPF mx mechanisms count void lookups. */
   resolveMx?(name: string): Promise<{ exchange: string; priority: number }[]>;
 }
@@ -35,6 +37,7 @@ export function defaultDnsResolver(env: NodeJS.ProcessEnv = process.env): DnsRes
   return {
     resolveTxt: (name) => resolver.resolveTxt(name),
     resolveA: (name) => resolver.resolve4(name),
+    resolveAaaa: (name) => resolver.resolve6(name),
     resolveMx: (name) => resolver.resolveMx(name)
   };
 }
@@ -162,18 +165,33 @@ async function walkSpf(
     const modifier = /^([a-z][a-z0-9_.-]*)=(.*)$/i.exec(term);
     const mechanismMatch = modifier
       ? null
-      : /^([+?~-]?)(all|include|a|mx|ptr|ip4|ip6|exists)(?::(.*?))?(\/\d+(?:\/\d+)?)?$/i.exec(term);
+      : /^([+?~-]?)(all|include|a|mx|ptr|ip4|ip6|exists)(?::([^/]*))?(\/\d+)?(\/\/\d+)?$/i.exec(
+          term
+        );
     if (!modifier && !mechanismMatch)
       return invalid(`Unrecognised SPF term "${term}" at ${domain}.`);
     const qualifier = mechanismMatch ? mechanismMatch[1] || '+' : '+';
     const mechanism = (modifier ? modifier[1]! : mechanismMatch![2]!).toLowerCase();
     const raw = (modifier ? modifier[2]! : (mechanismMatch![3] ?? '')).trim();
     // Mechanisms after the first "all" are never evaluated (RFC 7208 section 5.1).
+    const cidr = mechanismMatch ? `${mechanismMatch[4] ?? ''}${mechanismMatch[5] ?? ''}` : '';
     if (!modifier && mechanism === 'all') {
-      if (raw) return invalid(`Unrecognised SPF term "${term}" at ${domain}.`);
+      if (raw || cidr || mechanismMatch![3] !== undefined)
+        return invalid(`Unrecognised SPF term "${term}" at ${domain}.`);
       break;
     }
     if (modifier && mechanism !== 'redirect') continue; // exp and unknown modifiers never authorize
+    // A cidr suffix is only meaningful on a, mx, ip4 and ip6; a colon with no domain-spec is empty.
+    if (
+      !modifier &&
+      ((cidr && ['include', 'exists'].includes(mechanism)) ||
+        (['a', 'mx'].includes(mechanism) && mechanismMatch![3] !== undefined && !raw))
+    ) {
+      return invalid(`Unrecognised SPF term "${term}" at ${domain}.`);
+    }
+    if (modifier && mechanism === 'redirect' && raw.includes('/')) {
+      return invalid(`Unrecognised SPF term "${term}" at ${domain}.`);
+    }
     const value = raw.toLowerCase().replace(/\.$/, '');
     if (!modifier && ['ip4', 'ip6', 'exists', 'include'].includes(mechanism) && !value) {
       return invalid(`SPF ${mechanism} at ${domain} names no value.`);
@@ -232,19 +250,32 @@ async function probeSpfTarget(
   mechanism: 'a' | 'mx' | 'exists',
   name: string
 ): Promise<SpfProbe> {
-  try {
-    const answers =
-      mechanism === 'mx' ? await resolver.resolveMx?.(name) : await resolver.resolveA?.(name);
-    if (answers === undefined) return { kind: 'ok' }; // resolver cannot answer: counted, not resolved
-    return answers.length === 0 ? { kind: 'void' } : { kind: 'ok' };
-  } catch (error) {
-    const code =
-      error && typeof error === 'object' && 'code' in error
-        ? String((error as { code?: unknown }).code)
-        : '';
-    if (code === 'ENODATA' || code === 'ENOTFOUND') return { kind: 'void' };
-    return { kind: 'unknown', detail: code || 'DNS lookup failed' };
+  const query = async (
+    run: (() => Promise<unknown[]>) | undefined
+  ): Promise<SpfProbe | 'unavailable'> => {
+    if (!run) return 'unavailable';
+    try {
+      return (await run()).length === 0 ? { kind: 'void' } : { kind: 'ok' };
+    } catch (error) {
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? String((error as { code?: unknown }).code)
+          : '';
+      if (code === 'ENODATA' || code === 'ENOTFOUND') return { kind: 'void' };
+      return { kind: 'unknown', detail: code || 'DNS lookup failed' };
+    }
+  };
+  // A resolver that cannot answer: counted toward the lookup limit, not resolved.
+  if (mechanism === 'mx') {
+    const mx = await query(resolver.resolveMx && (() => resolver.resolveMx!(name)));
+    return mx === 'unavailable' ? { kind: 'ok' } : mx;
   }
+  const a = await query(resolver.resolveA && (() => resolver.resolveA!(name)));
+  if (a === 'unavailable') return { kind: 'ok' };
+  if (a.kind !== 'void' || mechanism === 'exists') return a;
+  // The a mechanism also matches AAAA, so a void A alone does not prove a void target.
+  const aaaa = await query(resolver.resolveAaaa && (() => resolver.resolveAaaa!(name)));
+  return aaaa === 'unavailable' ? { kind: 'ok' } : aaaa;
 }
 
 type Evaluated = {
