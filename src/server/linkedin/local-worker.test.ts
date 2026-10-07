@@ -2937,6 +2937,28 @@ describe.skipIf(!databaseUrl)('multi-seat draining', () => {
     expect(['lact_human_dm', 'lact_human_invite']).toContain(claimed?.id);
   });
 
+  it('DEFERS A CLAIMED MESSAGE WHEN ITS SEAT SWITCHES TO HUMAN-SEND BEFORE THE DRIVER ACTS', async () => {
+    await db
+      .prepare(
+        `INSERT INTO linkedin_actions (id,workspace_id,seat_key,kind,target_ref,status,planned_for,source,body,created_at)
+         VALUES ('lact_midflight_dm',?,'sales','dm','https://www.linkedin.com/in/midflight/','planned',?,'manual','Hello',?)`
+      )
+      .run(WORKSPACE_ID, NOW.toISOString(), NOW.toISOString());
+    const store = postgresLocalWorkerStore(db, WORKSPACE_ID, 'sales');
+    const batchId = await store.openBatch(NOW);
+    const claimed = await store.claimNextDueAction(batchId, NOW);
+    expect(claimed?.id).toBe('lact_midflight_dm');
+    expect(await store.actionExecutionState(claimed!)).toBe('execute');
+
+    await upsertSeat(db, WORKSPACE_ID, { sendMode: 'human' }, NOW, 'sales');
+    expect(await store.actionExecutionState(claimed!)).toBe('defer');
+
+    // The runner releases a deferred claim; the row is then plain planned work
+    // that no worker takes, which is what the handoff reads.
+    await store.releaseClaim('lact_midflight_dm', null);
+    expect(await store.claimNextDueAction(batchId, NOW)).toBeNull();
+  });
+
   it("claims only its own seat's rows, never the neighbouring account's", async () => {
     await plan('owner', 'lact_owner_1', 'https://www.linkedin.com/in/owner-target/');
     await plan('sales', 'lact_sales_1', 'https://www.linkedin.com/in/sales-target/');

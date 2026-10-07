@@ -1880,6 +1880,8 @@ const HUMAN_SEND_KIND_LIST = HUMAN_SEND_KINDS.map((kind) => `'${kind}'`).join(',
  * human-send mode. No browser may claim it, wake for it, or list its seat as
  * having work -- `handoff.ts` puts it in Today instead. `table` is the alias
  * (or bare table name) the surrounding statement uses for linkedin_actions.
+ * Switching the seat back to automated simply stops excluding the rows; the
+ * safety gate then paces the backlog like any other queue.
  */
 function humanSendHandoffPredicate(table: string): string {
   return `(${table}.kind IN (${HUMAN_SEND_KIND_LIST}) AND EXISTS (
@@ -2263,7 +2265,8 @@ export function postgresLocalWorkerStore(
                     SELECT 1 FROM linkedin_actions r
                     WHERE r.workspace_id=a.workspace_id AND r.campaign_member_id=a.campaign_member_id
                       AND r.status='replied'
-                  ) AS has_reply
+                  ) AS has_reply,
+                  ${humanSendHandoffPredicate('a')} AS human_send
            FROM linkedin_actions a
            LEFT JOIN linkedin_campaign_members m
              ON m.workspace_id=a.workspace_id AND m.id=a.campaign_member_id
@@ -2278,8 +2281,12 @@ export function postgresLocalWorkerStore(
           member_status: string | null;
           current_step_id: string | null;
           has_reply: boolean;
+          human_send: boolean;
         }>(workspaceId, action.id, seatKey);
       if (!row) return 'retire';
+      // The founder switched this seat to human-send after the row was claimed:
+      // release it (the caller does) so it lands in the handoff, never sent here.
+      if (row.human_send) return 'defer';
       if (!row.campaign_member_id) return 'execute';
       if (row.campaign_status !== 'running' || row.member_status === 'paused') return 'defer';
       if (row.has_reply) return 'retire';

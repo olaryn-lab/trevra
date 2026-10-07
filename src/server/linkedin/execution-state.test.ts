@@ -96,6 +96,12 @@ describe('campaign execution state', () => {
     expect((await campaignExecutionState(db, WORKSPACE, CAMPAIGN, NOW)).humanSendNext).toBe(true);
   });
 
+  it('does not say a person is next when the due row is a passive kind on a human seat', async () => {
+    await insertAction({ id: 'lact_exec_view', kind: 'profile_view', handle: 'human-view' });
+    await upsertSeat(db, WORKSPACE, { sendMode: 'human' }, NOW, SEAT);
+    expect((await campaignExecutionState(db, WORKSPACE, CAMPAIGN, NOW)).humanSendNext).toBe(false);
+  });
+
   it('counts only the rows a browser could actually claim', async () => {
     for (const handle of ['a', 'b', 'c'])
       await insertAction({ id: `lact_due_${handle}`, kind: 'profile_view', handle });

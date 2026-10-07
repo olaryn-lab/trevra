@@ -163,7 +163,8 @@ export async function campaignExecutionState(
     /*
      * THE ROW THE WORKER WOULD TAKE NEXT, selected by the claim's own
      * predicate and the claim's own ordering (`claimNextDueAction`), minus the
-     * UPDATE. Asking the gate about any other row would answer a question
+     * UPDATE and minus the human-send exclusion: that is left out on purpose,
+     * and `humanSendNext` reports it instead. Asking the gate about any other row would answer a question
      * nobody is about to ask: an unclaimable row -- a message with no approved
      * body, a reply that lost its thread -- is not what the queue is stuck on,
      * and a row further down the order is not what it reaches first.
