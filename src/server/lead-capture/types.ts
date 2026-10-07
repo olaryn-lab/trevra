@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { normalizeHeardAbout } from '../../shared/attribution.js';
 
 export const CAPTURE_SOURCE_KINDS = [
   'website',
@@ -48,7 +49,9 @@ export const attributionSchema = z
     utm_medium: boundedString(200).optional(),
     utm_campaign: boundedString(300).optional(),
     utm_term: boundedString(300).optional(),
-    utm_content: boundedString(300).optional()
+    utm_content: boundedString(300).optional(),
+    // Self-reported channel; stored only as one of HEARD_ABOUT_CHOICES.
+    heard_about: z.string().trim().min(1).max(120).transform(normalizeHeardAbout).optional()
   })
   .strict()
   .default({});

@@ -11,6 +11,7 @@ import {
 } from './api';
 import type { OpportunityRecord, OpportunityStage } from '../shared/types';
 import { errorMessage } from './LinkedInSafety';
+import { opportunitySourceLine } from './inbound-attribution';
 import { Select } from './ui/primitives';
 
 const STAGES: ReadonlyArray<{ id: OpportunityStage; label: string }> = [
@@ -255,69 +256,75 @@ export function Opportunities({ setToast }: { setToast: (message: string) => voi
                   <strong>{stageDef.label}</strong>
                   <span className="status-pill">{rows.length}</span>
                 </header>
-                {rows.map((opportunity) => (
-                  <article key={opportunity.id} className="opportunity-row">
-                    <div className="opportunity-main">
-                      <strong>{opportunity.title}</strong>
-                      <span>
-                        {[
-                          opportunity.personName || opportunity.personEmail,
-                          opportunity.accountName
-                        ]
-                          .filter(Boolean)
-                          .join(' · ') || 'GTM opportunity'}
+                {rows.map((opportunity) => {
+                  const sourceLine = opportunitySourceLine(opportunity);
+                  return (
+                    <article key={opportunity.id} className="opportunity-row">
+                      <div className="opportunity-main">
+                        <strong>{opportunity.title}</strong>
+                        <span>
+                          {[
+                            opportunity.personName || opportunity.personEmail,
+                            opportunity.accountName
+                          ]
+                            .filter(Boolean)
+                            .join(' · ') || 'GTM opportunity'}
+                        </span>
+                        {opportunity.originRecommendationId && (
+                          <small>Created from qualified first-party demand</small>
+                        )}
+                        {sourceLine && <small>{sourceLine}</small>}
+                      </div>
+                      <label>
+                        Stage
+                        <Select
+                          disabled={busy === opportunity.id}
+                          value={opportunity.stage}
+                          onChange={(event) =>
+                            void patch(opportunity, {
+                              stage: event.target.value as OpportunityStage
+                            })
+                          }
+                        >
+                          {STAGES.map((item) => (
+                            <option key={item.id} value={item.id}>
+                              {item.label}
+                            </option>
+                          ))}
+                        </Select>
+                      </label>
+                      <label>
+                        Next action
+                        <input
+                          disabled={busy === opportunity.id}
+                          defaultValue={opportunity.nextAction ?? ''}
+                          onBlur={(event) => {
+                            const value = event.currentTarget.value.trim();
+                            if (value !== (opportunity.nextAction ?? ''))
+                              void patch(opportunity, { nextAction: value || null });
+                          }}
+                          placeholder="What happens next?"
+                        />
+                      </label>
+                      <label>
+                        Due
+                        <input
+                          disabled={busy === opportunity.id}
+                          type="datetime-local"
+                          defaultValue={localDateTime(opportunity.nextActionAt)}
+                          onBlur={(event) => {
+                            const value = isoOrNull(event.currentTarget.value);
+                            if (value !== opportunity.nextActionAt)
+                              void patch(opportunity, { nextActionAt: value });
+                          }}
+                        />
+                      </label>
+                      <span className="opportunity-owner">
+                        {opportunity.ownerName ? `Owner: ${opportunity.ownerName}` : 'Unassigned'}
                       </span>
-                      {opportunity.originRecommendationId && (
-                        <small>Created from qualified first-party demand</small>
-                      )}
-                    </div>
-                    <label>
-                      Stage
-                      <Select
-                        disabled={busy === opportunity.id}
-                        value={opportunity.stage}
-                        onChange={(event) =>
-                          void patch(opportunity, { stage: event.target.value as OpportunityStage })
-                        }
-                      >
-                        {STAGES.map((item) => (
-                          <option key={item.id} value={item.id}>
-                            {item.label}
-                          </option>
-                        ))}
-                      </Select>
-                    </label>
-                    <label>
-                      Next action
-                      <input
-                        disabled={busy === opportunity.id}
-                        defaultValue={opportunity.nextAction ?? ''}
-                        onBlur={(event) => {
-                          const value = event.currentTarget.value.trim();
-                          if (value !== (opportunity.nextAction ?? ''))
-                            void patch(opportunity, { nextAction: value || null });
-                        }}
-                        placeholder="What happens next?"
-                      />
-                    </label>
-                    <label>
-                      Due
-                      <input
-                        disabled={busy === opportunity.id}
-                        type="datetime-local"
-                        defaultValue={localDateTime(opportunity.nextActionAt)}
-                        onBlur={(event) => {
-                          const value = isoOrNull(event.currentTarget.value);
-                          if (value !== opportunity.nextActionAt)
-                            void patch(opportunity, { nextActionAt: value });
-                        }}
-                      />
-                    </label>
-                    <span className="opportunity-owner">
-                      {opportunity.ownerName ? `Owner: ${opportunity.ownerName}` : 'Unassigned'}
-                    </span>
-                  </article>
-                ))}
+                    </article>
+                  );
+                })}
               </section>
             );
           })}

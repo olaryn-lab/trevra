@@ -1,4 +1,5 @@
 import { id, type Db } from './db.js';
+import { MILESTONE_KINDS_SQL } from './lead-capture/milestones.js';
 
 export const OPPORTUNITY_STAGES = [
   'new',
@@ -32,6 +33,10 @@ export interface OpportunityRecord {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  /** First-touch `utm_source` from the Person's earliest attributed inbound submission. */
+  sourceUtmSource: string | null;
+  /** First-touch self-reported channel (one of HEARD_ABOUT_CHOICES). */
+  sourceHeardAbout: string | null;
 }
 
 export class OpportunityError extends Error {
@@ -53,8 +58,24 @@ const SELECT = `
     ELSE NULL
   END AS owner_name,
   o.next_action,o.next_action_at,o.proposal_sent_at,o.expected_response_at,
-  o.created_at,o.updated_at,o.closed_at
+  o.created_at,o.updated_at,o.closed_at,
+  src.utm_source AS source_utm_source,src.heard_about AS source_heard_about
 `;
+
+// First touch: the Person's earliest non-milestone inbound submission that
+// carried a UTM source or a self-reported channel.
+const SOURCE_JOIN = `
+    LEFT JOIN LATERAL (
+      SELECT NULLIF(BTRIM(s.attribution_json->>'utm_source'),'') AS utm_source,
+             NULLIF(BTRIM(s.attribution_json->>'heard_about'),'') AS heard_about
+      FROM inbound_submissions s
+      WHERE s.workspace_id=o.workspace_id AND s.contact_id=o.person_id
+        AND s.kind NOT IN ${MILESTONE_KINDS_SQL}
+        AND (NULLIF(BTRIM(s.attribution_json->>'utm_source'),'') IS NOT NULL
+          OR NULLIF(BTRIM(s.attribution_json->>'heard_about'),'') IS NOT NULL)
+      ORDER BY s.received_at ASC,s.id ASC
+      LIMIT 1
+    ) src ON TRUE`;
 
 function iso(value: unknown): string | null {
   if (value === null || value === undefined) return null;
@@ -85,7 +106,9 @@ function serialize(row: Record<string, unknown>): OpportunityRecord {
     expectedResponseAt: iso(row.expected_response_at),
     createdAt: iso(row.created_at)!,
     updatedAt: iso(row.updated_at)!,
-    closedAt: iso(row.closed_at)
+    closedAt: iso(row.closed_at),
+    sourceUtmSource: row.source_utm_source ? String(row.source_utm_source) : null,
+    sourceHeardAbout: row.source_heard_about ? String(row.source_heard_about) : null
   };
 }
 
@@ -152,6 +175,7 @@ export async function listOpportunities(
     LEFT JOIN accounts a ON a.workspace_id=o.workspace_id AND a.id=o.account_id
     LEFT JOIN users u ON o.owner_type='user' AND u.workspace_id=o.workspace_id AND u.id=o.owner_id
     LEFT JOIN agents ag ON o.owner_type='agent' AND ag.workspace_id=o.workspace_id AND ag.id=o.owner_id
+    ${SOURCE_JOIN}
     WHERE ${clauses.join(' AND ')}
     ORDER BY CASE o.stage
       WHEN 'new' THEN 1 WHEN 'qualified' THEN 2 WHEN 'meeting' THEN 3
@@ -178,6 +202,7 @@ export async function getOpportunity(
     LEFT JOIN accounts a ON a.workspace_id=o.workspace_id AND a.id=o.account_id
     LEFT JOIN users u ON o.owner_type='user' AND u.workspace_id=o.workspace_id AND u.id=o.owner_id
     LEFT JOIN agents ag ON o.owner_type='agent' AND ag.workspace_id=o.workspace_id AND ag.id=o.owner_id
+    ${SOURCE_JOIN}
     WHERE o.workspace_id=? AND o.id=?
   `
     )

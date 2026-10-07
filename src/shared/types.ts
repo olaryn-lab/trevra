@@ -287,6 +287,8 @@ export interface OpportunityRecord {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+  sourceUtmSource: string | null;
+  sourceHeardAbout: string | null;
 }
 
 export interface PreparedAction {
