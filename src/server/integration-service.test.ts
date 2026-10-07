@@ -698,3 +698,123 @@ describe('Nango authorization notifications', () => {
     expect(notificationMock.notifyIntegrationNeedsReauth).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('Nango calendar sync', () => {
+  it('stores meetings with known people, ignores internal and personal events, and counts unreadable ones', async () => {
+    const database = await openLiveDatabase();
+    process.env.NANGO_API_KEY = 'test-nango-key';
+    const tenant = await seedTenant(database);
+    const now = new Date().toISOString();
+    const founder = `founder-${tenant.workspaceId}@lemoncrow.example`;
+    const teammate = `teammate-${tenant.workspaceId}@lemoncrow.example`;
+    for (const [userId, email] of [
+      [id('usr'), founder],
+      [id('usr'), teammate]
+    ]) {
+      await database
+        .prepare('INSERT INTO users (id,workspace_id,email,name,created_at) VALUES (?,?,?,?,?)')
+        .run(userId, tenant.workspaceId, email, 'Team', now);
+    }
+    await database
+      .prepare(
+        'INSERT INTO contacts (id,workspace_id,name,email,email_normalized,created_at,updated_at) VALUES (?,?,?,?,?,?,?)'
+      )
+      .run(
+        id('con'),
+        tenant.workspaceId,
+        'Maya Patel',
+        'maya@acme.example',
+        'maya@acme.example',
+        now,
+        now
+      );
+    const providerConfigKey = 'trevra-google-calendar';
+    const externalConnectionId = `gcal-${id('conn')}`;
+    await database
+      .prepare(
+        'INSERT INTO connections (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)'
+      )
+      .run(
+        id('conn'),
+        tenant.workspaceId,
+        'google-calendar',
+        providerConfigKey,
+        externalConnectionId,
+        null,
+        'connected',
+        0,
+        now,
+        now
+      );
+
+    const times = {
+      start: { dateTime: '2026-11-03T10:00:00+01:00' },
+      end: { dateTime: '2026-11-03T10:30:00+01:00' }
+    };
+    const self = { email: founder, self: true, responseStatus: 'accepted' };
+    nangoMock.listRecords.mockResolvedValueOnce({
+      records: [
+        {
+          id: 'evt-known',
+          status: 'confirmed',
+          summary: 'Acme intro',
+          description: 'Agenda nobody should store',
+          ...times,
+          attendees: [self, { email: 'maya@acme.example', displayName: 'Maya Patel' }],
+          _nango_metadata: { last_action: 'ADDED', deleted_at: null }
+        },
+        { id: 'evt-internal', ...times, attendees: [self, { email: teammate }] },
+        {
+          id: 'evt-all-day',
+          start: { date: '2026-11-04' },
+          end: { date: '2026-11-05' },
+          attendees: [self]
+        },
+        { id: 'evt-stranger', ...times, attendees: [self, { email: 'stranger@else.example' }] },
+        {
+          id: 'graph-1',
+          start: { dateTime: '2026-11-03T10:00:00.0000000', timeZone: 'UTC' },
+          end: { dateTime: '2026-11-03T10:30:00.0000000', timeZone: 'UTC' },
+          attendees: [{ emailAddress: { address: 'maya@acme.example' } }]
+        }
+      ],
+      next_cursor: null
+    });
+
+    const result = await handleNangoWebhook(
+      database,
+      JSON.stringify({
+        id: `nango_${id('evt')}`,
+        type: 'sync',
+        success: true,
+        providerConfigKey,
+        connectionId: externalConnectionId,
+        model: 'GoogleCalendarEvent'
+      }),
+      {}
+    );
+    expect(result).toEqual({ duplicate: false, processed: 'synced-1-skipped-1-ignored-3' });
+
+    const meetings = await database
+      .prepare('SELECT external_id,status,origin FROM meetings WHERE workspace_id=?')
+      .all(tenant.workspaceId);
+    expect(meetings).toEqual([
+      { external_id: 'evt-known', status: 'scheduled', origin: 'calendar' }
+    ]);
+    const contacts = await database
+      .prepare('SELECT COUNT(*)::int AS n FROM contacts WHERE workspace_id=?')
+      .get<{ n: number }>(tenant.workspaceId);
+    expect(contacts?.n).toBe(1);
+    const sources = await database
+      .prepare('SELECT payload_json::text AS payload FROM source_records WHERE workspace_id=?')
+      .all<{ payload: string }>(tenant.workspaceId);
+    expect(sources).toHaveLength(1);
+    expect(sources[0].payload).not.toMatch(/Acme intro|Agenda|stranger|teammate/);
+    const connection = await database
+      .prepare('SELECT last_error FROM connections WHERE workspace_id=?')
+      .get<{ last_error: string | null }>(tenant.workspaceId);
+    expect(connection?.last_error).toBe(
+      "1 record from 'GoogleCalendarEvent' could not be read and was not stored."
+    );
+  });
+});

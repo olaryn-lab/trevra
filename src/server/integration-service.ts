@@ -7,7 +7,8 @@ import { id, type Db } from './db.js';
 import { resolveContact } from './lead-capture/people.js';
 import { accountForPerson, upsertPersonIdentity } from './person-identities.js';
 import { projectCanonicalMessage } from './conversations.js';
-import { applyMeetingRecord, findMeetingPerson } from './meetings/ingest.js';
+import { meetingFromCalendarEvent, nangoRecordDeleted } from './meetings/google-calendar.js';
+import { applyMeetingRecord, findMeetingPerson, workspaceUserEmails } from './meetings/ingest.js';
 import { meetingKnown } from './meetings/store.js';
 import {
   activeMeetingSchema,
@@ -102,16 +103,16 @@ const catalog = [
     env: 'NANGO_GMAIL_INTEGRATION',
     fallback: 'trevra-gmail'
   },
-  // Meetings have no canonical record kind, so everything this sync returns is
-  // counted and dropped rather than stored (see `syncNangoRecords`). The
-  // description says so instead of promising what the connection cannot do.
+  // Events become canonical meetings (src/server/meetings/google-calendar.ts).
+  // Only events with someone already in the workspace are kept; internal,
+  // personal and all-day events are counted as ignored, unreadable ones as skipped.
   {
     key: 'google-calendar',
     provider: 'google-calendar',
     name: 'Google Calendar',
     category: 'calendar',
     description:
-      'Not ready yet — Trevra has nowhere to put meetings, so connecting this brings nothing in.',
+      'Brings in meetings with people already in Trevra and moves their open Opportunity to Meeting. Internal, personal and all-day events are left out.',
     mode: 'oauth',
     env: 'NANGO_GOOGLE_CALENDAR_INTEGRATION',
     fallback: 'trevra-google-calendar'
@@ -390,7 +391,7 @@ export async function handleNangoWebhook(
       // is how a connection that stores nothing goes unnoticed for months.
       const dropped =
         synced.skipped > 0
-          ? `${synced.skipped} record${synced.skipped === 1 ? '' : 's'} from '${String(payload.model)}' could not be stored: Trevra has no place to put this kind of record yet.`
+          ? `${synced.skipped} record${synced.skipped === 1 ? '' : 's'} from '${String(payload.model)}' could not be read and ${synced.skipped === 1 ? 'was' : 'were'} not stored.`
           : null;
       await db
         .prepare(
@@ -407,7 +408,7 @@ export async function handleNangoWebhook(
       );
       return {
         duplicate: false,
-        processed: `synced-${synced.ingested}${synced.skipped > 0 ? `-skipped-${synced.skipped}` : ''}`
+        processed: `synced-${synced.ingested}${synced.skipped > 0 ? `-skipped-${synced.skipped}` : ''}${synced.ignored > 0 ? `-ignored-${synced.ignored}` : ''}`
       };
     }
 
@@ -1016,9 +1017,13 @@ export async function syncNangoRecords(
   }
 ): Promise<NangoSyncResult> {
   const nango = getNango();
+  // Who "we" are in this workspace, so a meeting between colleagues is never
+  // read as a meeting with a prospect.
+  const ownEmails = await workspaceUserEmails(db, input.workspaceId);
   let cursor: string | null = null;
   let ingested = 0;
   let skipped = 0;
+  let ignored = 0;
   do {
     const result: { records: Array<Record<string, unknown>>; next_cursor: string | null } =
       await nango.listRecords<Record<string, unknown>>({
@@ -1030,40 +1035,53 @@ export async function syncNangoRecords(
         limit: 100
       });
     for (const raw of result.records) {
-      const normalized = normalizeNangoRecord(input.model, raw as Record<string, unknown>);
-      if (!normalized) {
-        // COUNTED, NOT SWALLOWED. `normalizeNangoRecord` returns null for any
-        // model it has no canonical kind for, for example a sync model Trevra
-        // does not recognise. Dropping those silently made a connection that
-        // stores nothing look identical to one with no new records, which is
-        // the failure mode that makes a quiet account untrustworthy.
+      const outcome = await normalizeSyncedRecord(
+        db,
+        input.workspaceId,
+        input.model,
+        raw as Record<string, unknown>,
+        ownEmails
+      );
+      if (outcome.kind === 'skipped') {
+        // COUNTED, NOT SWALLOWED. A record no canonical kind can read -- a model
+        // with no alias, or a calendar event in a shape this build does not
+        // parse -- is reported on the connection. Dropping it silently made a
+        // connection that stores nothing look identical to one with nothing new.
         skipped += 1;
         continue;
       }
-      await ingestCanonicalRecord(
+      if (outcome.kind === 'ignored') {
+        // Read and deliberately left out: internal, personal or all-day events,
+        // and meetings with nobody already in the workspace.
+        ignored += 1;
+        continue;
+      }
+      const stored = await ingestCanonicalRecord(
         db,
         input.workspaceId,
         input.provider,
         input.localConnectionId,
-        normalized
+        outcome.record
       );
-      ingested += 1;
+      if (stored.stored) ingested += 1;
+      else ignored += 1;
     }
     cursor = result.next_cursor;
   } while (cursor);
-  return { ingested, skipped };
+  return { ingested, skipped, ignored };
 }
 
 /**
  * What one sync actually did.
  *
- * Two numbers rather than one, because "nothing arrived" and "everything that
- * arrived was thrown away" are different facts and only the second is a bug
- * the operator can act on.
+ * Three numbers rather than one, because "nothing arrived", "what arrived was
+ * deliberately left out" and "what arrived could not be read" are different
+ * facts, and only the last is a problem the operator can act on.
  */
 export interface NangoSyncResult {
   ingested: number;
   skipped: number;
+  ignored: number;
 }
 
 /** Whether a canonical record was kept. A calendar meeting with nobody Trevra knows is not. */
@@ -1299,22 +1317,63 @@ function syncNamesForProvider(provider: string): string[] {
     : [];
 }
 
+const MODEL_ALIASES: Record<string, CanonicalRecord['kind']> = {
+  trevramessage: 'message',
+  trevra_message: 'message',
+  messages: 'message',
+  trevraopportunity: 'opportunity',
+  trevra_opportunity: 'opportunity',
+  opportunities: 'opportunity',
+  trevrameeting: 'meeting',
+  trevrameetings: 'meeting',
+  meeting: 'meeting',
+  meetings: 'meeting',
+  googlecalendarevent: 'meeting',
+  calendarevent: 'meeting',
+  events: 'meeting'
+};
+
+function canonicalKindForModel(model: string): CanonicalRecord['kind'] | null {
+  const kind = model.toLowerCase().replaceAll('-', '_');
+  return MODEL_ALIASES[kind.replaceAll('_', '')] ?? MODEL_ALIASES[kind] ?? null;
+}
+
 function normalizeNangoRecord(model: string, raw: Record<string, unknown>): CanonicalRecord | null {
+  const deleted = nangoRecordDeleted(raw);
   const payload = { ...raw } as Record<string, unknown>;
   delete payload._nango_metadata;
-  if (payload.kind) return canonicalRecordSchema.parse(payload);
-  const kind = model.toLowerCase().replaceAll('-', '_');
-  const aliases: Record<string, CanonicalRecord['kind']> = {
-    trevramessage: 'message',
-    trevra_message: 'message',
-    messages: 'message',
-    trevraopportunity: 'opportunity',
-    trevra_opportunity: 'opportunity',
-    opportunities: 'opportunity'
-  };
-  const resolved = aliases[kind.replaceAll('_', '')] ?? aliases[kind];
-  if (!resolved) return null;
-  return canonicalRecordSchema.parse({ ...payload, kind: resolved });
+  const resolved = payload.kind ? null : canonicalKindForModel(model);
+  if (!payload.kind && !resolved) return null;
+  const record = canonicalRecordSchema.parse(
+    payload.kind ? payload : { ...payload, kind: resolved }
+  );
+  // A meeting Nango reports as deleted is a cancelled meeting, never a live one.
+  return record.kind === 'meeting' && deleted ? { ...record, status: 'cancelled' } : record;
+}
+
+type SyncedRecord =
+  { kind: 'record'; record: CanonicalRecord } | { kind: 'skipped' } | { kind: 'ignored' };
+
+/**
+ * A synced record, read for this workspace.
+ *
+ * Meeting models that are not already canonical are read as Google Calendar
+ * events; everything else takes the canonical alias path unchanged.
+ */
+async function normalizeSyncedRecord(
+  db: Db,
+  workspaceId: string,
+  model: string,
+  raw: Record<string, unknown>,
+  ownEmails: ReadonlySet<string>
+): Promise<SyncedRecord> {
+  if (!raw.kind && canonicalKindForModel(model) === 'meeting') {
+    const meeting = await meetingFromCalendarEvent(db, workspaceId, raw, ownEmails);
+    if (meeting.ok) return { kind: 'record', record: meeting.record };
+    return meeting.reason === 'unrecognized' ? { kind: 'skipped' } : { kind: 'ignored' };
+  }
+  const normalized = normalizeNangoRecord(model, raw);
+  return normalized ? { kind: 'record', record: normalized } : { kind: 'skipped' };
 }
 
 type OpportunityStage = 'new' | 'qualified' | 'meeting' | 'proposal' | 'won' | 'lost';

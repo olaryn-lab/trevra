@@ -91,14 +91,14 @@ There is no generic remote-action adapter and no arbitrary webhook action. A new
 
 A Nango sync is resolved from the registered provider configuration and external connection identity to exactly one Trevra workspace. Ambiguous connection ownership is refused.
 
-1. removes Nango transport metadata;
+1. reads Nango's deletion marker (`_nango_metadata.last_action`/`deleted_at`), then removes Nango transport metadata;
 2. maps only a supported GTM model alias;
 3. validates the bounded canonical schema;
 4. stores source evidence with workspace/provider identity;
 5. deterministically resolves a canonical Person and optional Account identity;
-6. records provider identity evidence and upserts the GTM message or Opportunity-lite state.
+6. records provider identity evidence and upserts the GTM message, Opportunity-lite or meeting state.
 
-Unsupported models are counted as skipped rather than silently treated as a successful empty sync.
+Records that cannot be read (an unsupported model, or a calendar event in a shape this build does not parse) are counted as skipped and reported on the connection, rather than silently treated as a successful empty sync. Readable records that Trevra deliberately leaves out are counted as ignored. These are internal, personal and all-day calendar events, and meetings with nobody already in the workspace. Google Calendar events are read in the Calendar API `Event` shape (https://developers.google.com/calendar/api/v3/reference/events). Only the time, the link, and the one attendee who matches an existing Person are kept.
 
 ## Inbound website lead capture
 
