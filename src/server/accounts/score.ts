@@ -157,6 +157,15 @@ export const SIGNAL_WEIGHTS: Record<AccountSignalKind, number> = {
   // Direct public intent remains the strongest single observation Trevra sees.
   'thread-mention': 34,
 
+  // First-party developer traction on the founder's own repositories
+  // (src/server/github/poll.ts). An outside issue is someone using the product
+  // hard enough to hit an edge; a fork is someone building on it; a star is a
+  // bookmark, and most stargazers are not buyers. None makes an account hot
+  // alone, and a star stays below every measured site movement.
+  'repo-issue-opened': 26,
+  'repo-forked': 18,
+  'repo-starred': 10,
+
   // Ecommerce-specific evidence. None can make an account hot alone; the value
   // comes from independent surfaces moving together.
   'meta-ads-rising': 32,
@@ -247,7 +256,10 @@ const KIND_LABELS: Record<AccountSignalKind, string> = {
   'product-usage-threshold': 'usage crossing a threshold',
   'customer-paid': 'a payment',
   'customer-upgraded': 'a plan upgrade',
-  'customer-cancelled': 'a cancellation'
+  'customer-cancelled': 'a cancellation',
+  'repo-starred': 'a star on your GitHub repo',
+  'repo-forked': 'a fork of your GitHub repo',
+  'repo-issue-opened': 'an issue opened on your GitHub repo'
 };
 
 /**

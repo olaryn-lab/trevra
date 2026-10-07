@@ -87,6 +87,32 @@ describe('HTTP ecommerce observation provider', () => {
     );
   });
 
+  it('treats a provider claiming a Trevra-observed repo kind as unknown', async () => {
+    const provider = httpObservationProvider(SPEC);
+    const result = await provider.observe('shop.example', {
+      credentials: credentials({ COMMERCE_OBSERVER_TOKEN: 'secret' }),
+      now: new Date('2026-09-12T08:00:00.000Z'),
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            observations: [
+              {
+                kind: 'repo-starred',
+                detail: 'starred lemoncrow-lab/lemoncrow',
+                evidenceUrl: 'https://github.com/someone',
+                observedAt: '2026-09-12T07:00:00.000Z'
+              }
+            ]
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+    });
+    expect(result.observations).toEqual([]);
+    expect(
+      result.warnings.some((warning) => warning.includes("unknown signal kind 'repo-starred'"))
+    ).toBe(true);
+  });
+
   it('accepts raw measurements so the collector can stay stateless', async () => {
     const provider = httpObservationProvider({ ...SPEC, tokenEnv: null });
     const result = await provider.observe('shop.example', {

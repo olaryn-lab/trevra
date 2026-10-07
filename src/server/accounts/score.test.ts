@@ -148,6 +148,39 @@ describe('the weight table', () => {
   });
 });
 
+describe('repository traction from GitHub', () => {
+  const REPO_KINDS = ['repo-starred', 'repo-forked', 'repo-issue-opened'] as const;
+
+  it('weighs an outside issue above a fork above a star, and none of them is worth a meeting alone', () => {
+    for (const kind of REPO_KINDS) {
+      expect(ACCOUNT_SIGNAL_KINDS).toContain(kind);
+      expect(SIGNAL_WEIGHTS[kind]).toBeLessThan(SINGLE_KIND_CAP);
+    }
+    expect(SIGNAL_WEIGHTS['repo-issue-opened']).toBe(26);
+    expect(SIGNAL_WEIGHTS['repo-forked']).toBe(18);
+    expect(SIGNAL_WEIGHTS['repo-starred']).toBe(10);
+    expect(weightFor('repo-starred')).toBe(10);
+  });
+
+  it('keeps a lone star cold, makes a star and a fork warm, and needs all three to be hot', () => {
+    expect(score([sig('repo-starred', 1, 'starred lemoncrow-lab/lemoncrow')]).tier).toBe('cold');
+    expect(score([sig('repo-starred', 1), sig('repo-forked', 1)]).tier).toBe('warm');
+    const layered = score([
+      sig('repo-starred', 1),
+      sig('repo-forked', 1),
+      sig('repo-issue-opened', 1)
+    ]);
+    expect(layered.tier).toBe('hot');
+    expect(layered.distinctKinds).toBe(3);
+  });
+
+  it('cannot be bought with stars: forty colleagues starring is still one kind', () => {
+    const result = score(Array.from({ length: 40 }, () => sig('repo-starred', 1)));
+    expect(result.tier).not.toBe('hot');
+    expect(result.score).toBeLessThanOrEqual(SINGLE_KIND_CAP);
+  });
+});
+
 describe('decay', () => {
   it('is 1 at the moment the signal pops and halves at the half-life', () => {
     expect(decayFor(0)).toBe(1);

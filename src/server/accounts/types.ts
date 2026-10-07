@@ -8,7 +8,7 @@
  * live there, next to the columns, and are not repeated.
  */
 
-export type AccountSource = 'csv' | 'sourced' | 'linkedin' | 'manual';
+export type AccountSource = 'csv' | 'sourced' | 'linkedin' | 'manual' | 'github';
 export type AccountStatus = 'active' | 'not_a_fit' | 'archived';
 export type AccountTier = 'hot' | 'warm' | 'cold';
 
@@ -17,7 +17,9 @@ export type AccountTier = 'hot' | 'warm' | 'cold';
  *
  * Site diffs are `gtm.watch-signal`'s own `SignalKind` values, carried across
  * unchanged so there is no translation table to drift. `thread-mention` is the
- * public-commentary signal from `gtm.scout-threads`. Anything not in this union
+ * public-commentary signal from `gtm.scout-threads`. The `repo-*` kinds are
+ * first-party developer traction on the workspace's own GitHub repositories
+ * (`src/server/github/poll.ts`). Anything not in this union
  * is stored but scored at zero -- an unknown signal must never silently vanish
  * and must never silently count.
  */
@@ -56,7 +58,10 @@ export const ACCOUNT_SIGNAL_KINDS = [
   'product-usage-threshold',
   'customer-paid',
   'customer-upgraded',
-  'customer-cancelled'
+  'customer-cancelled',
+  'repo-starred',
+  'repo-forked',
+  'repo-issue-opened'
 ] as const;
 
 export type AccountSignalKind = (typeof ACCOUNT_SIGNAL_KINDS)[number];
@@ -74,6 +79,16 @@ export const FIRST_PARTY_SIGNAL_KINDS = [
   'customer-paid',
   'customer-upgraded',
   'customer-cancelled'
+] as const satisfies readonly AccountSignalKind[];
+
+/**
+ * Kinds Trevra itself observes on the founder's GitHub repositories. Public
+ * evidence (so still citable), but never accepted from an external provider.
+ */
+export const TREVRA_OBSERVED_SIGNAL_KINDS = [
+  'repo-starred',
+  'repo-forked',
+  'repo-issue-opened'
 ] as const satisfies readonly AccountSignalKind[];
 
 /**
