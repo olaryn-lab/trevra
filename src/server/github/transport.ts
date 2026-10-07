@@ -168,6 +168,30 @@ function nangoErrorCode(data: unknown): string | null {
 }
 
 /**
+ * Nango error codes meaning THIS connection cannot be used until the founder
+ * reconnects. Taken from the installed Nango types:
+ * - `unknown_connection`: @nangohq/types connection/api/get.d.ts (proxy/get connection errors)
+ * - `failed_to_refresh`: @nangohq/types connection/api/get.d.ts (token refresh failed)
+ * - `connection_not_found`: @nangohq/types gettingStarted/api.d.ts, functions/api.d.ts
+ * Deliberately excluded: `unknown_provider_config` and auth/key errors, which
+ * are platform faults a reconnect cannot fix.
+ */
+const REVOKED_NANGO_CODES: ReadonlySet<string> = new Set([
+  'unknown_connection',
+  'failed_to_refresh',
+  'connection_not_found'
+]);
+
+/** GitHub's secondary / abuse limit answers 403 without a retry-after header. */
+const RATE_LIMIT_MESSAGE = /rate limit|abuse|secondary/i;
+
+function messageOf(data: unknown): string {
+  if (!data || typeof data !== 'object') return '';
+  const message = (data as { message?: unknown }).message;
+  return typeof message === 'string' ? message : '';
+}
+
+/**
  * One poll run's view of GitHub. Tracks the rate-limit budget across calls and
  * turns every non-answer into a typed error the poller can act on.
  */
@@ -194,17 +218,32 @@ export class GitHubClient {
     const nangoCode =
       response.status >= 400 && response.status < 500 ? nangoErrorCode(response.data) : null;
     if (nangoCode) {
-      throw new GitHubConnectionRevokedError(
-        `Nango could not use the GitHub connection (${nangoCode}). Reconnect GitHub.`
-      );
+      // Only a connection-level fault is fixed by reconnecting. Every other
+      // Nango code (bad secret key, unknown provider config, ...) is ours to
+      // fix: reporting it as revoked would flip a healthy connection to
+      // needs-reauth and email the founder for nothing.
+      if (REVOKED_NANGO_CODES.has(nangoCode)) {
+        throw new GitHubConnectionRevokedError(
+          `Nango could not use the GitHub connection (${nangoCode}). Reconnect GitHub.`
+        );
+      }
+      throw new GitHubRequestError(response.status, endpoint);
     }
     if (response.status === 401) throw new GitHubConnectionRevokedError();
     if (
       response.status === 429 ||
       (response.status === 403 &&
-        (limit.remaining === 0 || response.headers['retry-after'] !== undefined))
+        (limit.remaining === 0 ||
+          response.headers['retry-after'] !== undefined ||
+          RATE_LIMIT_MESSAGE.test(messageOf(response.data))))
     ) {
-      throw new GitHubRateLimitedError(limit.resetAt ?? this.fallbackReset());
+      // Latch: once limited, this client refuses before touching the wire.
+      // If Nango strips the x-ratelimit-* headers the budget gate above can
+      // never engage, and only this latch protects the founder's quota.
+      const resetAt = limit.resetAt ?? this.fallbackReset();
+      this.remaining = 0;
+      this.resetAt = resetAt;
+      throw new GitHubRateLimitedError(resetAt);
     }
     if (response.status === 404) throw new GitHubNotFoundError(endpoint);
     if (response.status === 304 || (response.status >= 200 && response.status < 300)) {

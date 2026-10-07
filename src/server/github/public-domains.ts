@@ -7,6 +7,7 @@
  * both lists are refusals, matched exactly (freemail) or by suffix (platforms).
  */
 
+// lc-debt: both lists are finite, so a missed host merges unrelated people into one account; upgrade to the Public Suffix List plus a maintained freemail list.
 const FREEMAIL_DOMAINS: ReadonlySet<string> = new Set([
   'gmail.com',
   'googlemail.com',
@@ -67,6 +68,12 @@ const FREEMAIL_DOMAINS: ReadonlySet<string> = new Set([
   'wp.pl',
   'o2.pl',
   'inbox.com',
+  'yahoo.de',
+  'protonmail.ch',
+  'foxmail.com',
+  'outlook.fr',
+  'hotmail.it',
+  'live.fr',
   'users.noreply.github.com'
 ]);
 
@@ -134,7 +141,13 @@ const PERSONAL_PLATFORM_SUFFIXES: readonly string[] = [
   'reddit.com',
   'ko-fi.com',
   'buymeacoffee.com',
-  'patreon.com'
+  'patreon.com',
+  'webflow.io',
+  'streamlit.app',
+  'railway.app',
+  'myshopify.com',
+  'tumblr.com',
+  'codeberg.org'
 ];
 
 export function isFreemailDomain(domain: string): boolean {

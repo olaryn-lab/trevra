@@ -88,8 +88,13 @@ export async function resolveGitHubActor(
   if (!profile) return null;
   const actualLogin = text(profile.login) ?? login;
   const profileUrl = text(profile.html_url) ?? `https://github.com/${actualLogin}`;
+  // GitHub App accounts end in [bot] even when `type` says User.
   const type =
-    profile.type === 'Organization' ? 'Organization' : profile.type === 'Bot' ? 'Bot' : 'User';
+    profile.type === 'Organization'
+      ? 'Organization'
+      : profile.type === 'Bot' || actualLogin.endsWith('[bot]')
+        ? 'Bot'
+        : 'User';
   const candidates: DomainCandidate[] = [];
 
   if (type === 'Organization') {

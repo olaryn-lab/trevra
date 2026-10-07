@@ -211,4 +211,63 @@ describe('GitHubClient', () => {
       new GitHubClient(scripted({ status: 304, data: '', headers: {} }), NOW).get('/repos/a/b')
     ).resolves.toMatchObject({ status: 304 });
   });
+
+  it('only a connection-level Nango code means revoked; other Nango faults are plain request errors', async () => {
+    for (const code of ['unknown_connection', 'failed_to_refresh', 'connection_not_found']) {
+      const client = new GitHubClient(
+        scripted({ status: 400, data: { error: { code, message: 'x' } }, headers: {} }),
+        NOW
+      );
+      expect(await failureOf(client.get('/repos/a/b'))).toBeInstanceOf(
+        GitHubConnectionRevokedError
+      );
+    }
+    for (const status of [401, 400, 404]) {
+      const client = new GitHubClient(
+        scripted({
+          status,
+          data: { error: { code: 'unknown_provider_config', message: 'x' } },
+          headers: {}
+        }),
+        NOW
+      );
+      const error = await failureOf(client.get('/repos/a/b'));
+      expect(error).toBeInstanceOf(GitHubRequestError);
+      expect(error).not.toBeInstanceOf(GitHubConnectionRevokedError);
+    }
+  });
+
+  it('reads a secondary-limit 403 by its message, but a plain 403 stays a request error', async () => {
+    const secondary = new GitHubClient(
+      scripted({
+        status: 403,
+        data: { message: 'You have exceeded a secondary rate limit.' },
+        headers: { 'x-ratelimit-remaining': '4000' }
+      }),
+      NOW
+    );
+    const limited = (await failureOf(secondary.get('/users/maya'))) as GitHubRateLimitedError;
+    expect(limited).toBeInstanceOf(GitHubRateLimitedError);
+    expect(limited.resetAt.toISOString()).toBe(new Date(NOW.getTime() + 3_600_000).toISOString());
+
+    for (const message of ['Forbidden', 'Resource protected by organization SAML enforcement']) {
+      const plain = new GitHubClient(
+        scripted({ status: 403, data: { message }, headers: { 'x-ratelimit-remaining': '4000' } }),
+        NOW
+      );
+      expect(await failureOf(plain.get('/users/maya'))).toBeInstanceOf(GitHubRequestError);
+    }
+  });
+
+  it('latches a rate limit: the next call on the same client never reaches the wire', async () => {
+    const transport = scripted(
+      { status: 429, data: {}, headers: { 'retry-after': '90' } },
+      { status: 200, data: {}, headers: {} }
+    );
+    const client = new GitHubClient(transport, NOW);
+    expect(await failureOf(client.get('/a'))).toBeInstanceOf(GitHubRateLimitedError);
+    const second = (await failureOf(client.get('/b'))) as GitHubRateLimitedError;
+    expect(second.resetAt.toISOString()).toBe(new Date(NOW.getTime() + 90_000).toISOString());
+    expect(transport.calls).toEqual(['/a']);
+  });
 });

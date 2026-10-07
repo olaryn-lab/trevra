@@ -57,6 +57,9 @@ describe('public domain rules', () => {
     expect(companyDomainFromUrl('buyer.io')).toBe('buyer.io');
     expect(companyDomainFromUrl('https://medium.com/@maya')).toBeNull();
     expect(companyDomainFromUrl('http://localhost:3000')).toBeNull();
+    expect(companyDomainFromUrl('http://127.0.0.1')).toBeNull();
+    expect(companyDomainFromUrl('localhost.')).toBeNull();
+    expect(companyDomainFromEmail('Lee@Gmail.com')).toBeNull();
     expect(companyDomainFromUrl('')).toBeNull();
     expect(companyDomainFromUrl(null)).toBeNull();
     expect(companyDomainFromEmail('sam@newco.dev')).toBe('newco.dev');
@@ -171,5 +174,19 @@ describe('resolveGitHubActor', () => {
       }
     });
     expect((await resolveGitHubActor(client(bot), 'renovate'))?.candidates).toEqual([]);
+  });
+
+  it('treats a [bot] login as a bot even when the type says User', async () => {
+    const transport = github({
+      '/users/dependabot%5Bbot%5D': {
+        login: 'dependabot[bot]',
+        type: 'User',
+        html_url: 'https://github.com/apps/dependabot',
+        email: 'bot@dependabot.com',
+        blog: 'https://dependabot.com'
+      }
+    });
+    const actor = await resolveGitHubActor(client(transport), 'dependabot[bot]');
+    expect(actor).toMatchObject({ type: 'Bot', candidates: [] });
   });
 });
