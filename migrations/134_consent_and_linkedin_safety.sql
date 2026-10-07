@@ -117,7 +117,7 @@ BEGIN
   RETURN EXISTS (
     SELECT 1
     FROM users tu
-    JOIN "user" au ON lower(au.email) = lower(tu.email)
+    JOIN "user" au ON au.email = lower(tu.email)
     JOIN member m ON m."userId" = au.id
     WHERE tu.id = p_user_id AND m."organizationId" = p_workspace_id
   );
