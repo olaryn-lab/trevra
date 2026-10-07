@@ -738,6 +738,7 @@ describe('getToday', () => {
         reference: { type: 'conversation_message', id: 'cmsg_today_email_attention' },
         metadata: expect.objectContaining({
           channel: 'email',
+          inboundMailbox: false,
           personId: 'con_today_email_attention'
         })
       })
@@ -745,18 +746,21 @@ describe('getToday', () => {
     expect(today.recentResults).toEqual([]);
   });
 
-  async function seedMailbox(options: { status?: string; workspaceId?: string } = {}) {
+  async function seedMailbox(
+    options: { status?: string; workspaceId?: string; provider?: string } = {}
+  ) {
     const workspaceId = options.workspaceId ?? WORKSPACE;
     await db
       .prepare(
         `INSERT INTO connections
          (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,
           mailbox_address,created_at,updated_at)
-         VALUES (?,?,'gmail','trevra-gmail',?,NULL,?,0,'founder@acme.test',?,?)`
+         VALUES (?,?,?,'trevra-gmail',?,NULL,?,0,'founder@acme.test',?,?)`
       )
       .run(
         `conn_today_mail_${workspaceId}`,
         workspaceId,
+        options.provider ?? 'gmail',
         `gmail-today-${workspaceId}`,
         options.status ?? 'connected',
         '2026-08-20T08:00:00.000Z',
@@ -767,18 +771,20 @@ describe('getToday', () => {
   async function seedCheck(
     status: 'pass' | 'fail',
     outreachRequestedAt: string | null,
-    workspaceId = WORKSPACE
+    workspaceId = WORKSPACE,
+    provider = 'google'
   ) {
     await db
       .prepare(
         `INSERT INTO email_deliverability_checks
          (workspace_id,domain,provider,status,spf_json,dkim_json,dmarc_json,blockers_json,warnings_json,
           checked_at,expires_at,outreach_requested_at)
-         VALUES (?,'acme.test','google',?,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,?::jsonb,'[]'::jsonb,
+         VALUES (?,'acme.test',?,?,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,?::jsonb,'[]'::jsonb,
                  ?::timestamptz,?::timestamptz,?::timestamptz)`
       )
       .run(
         workspaceId,
+        provider,
         status,
         JSON.stringify(
           status === 'fail'
@@ -816,6 +822,24 @@ describe('getToday', () => {
         metadata: { provider: 'google', blockerCodes: ['email_dkim_missing'] }
       }
     ]);
+  });
+
+  it('matches the mailbox provider to the failing check provider', async () => {
+    await seedMailbox({ provider: 'microsoft' });
+    await seedCheck('fail', '2026-08-21T07:30:00.000Z', WORKSPACE, 'google');
+    expect(
+      (await getToday(db, WORKSPACE, NOW)).needsAttention.filter(
+        (item) => item.kind === 'deliverability_blocked'
+      )
+    ).toEqual([]);
+
+    await db.prepare('DELETE FROM email_deliverability_checks WHERE workspace_id=?').run(WORKSPACE);
+    await seedCheck('fail', '2026-08-21T07:30:00.000Z', WORKSPACE, 'microsoft');
+    const items = (await getToday(db, WORKSPACE, NOW)).needsAttention.filter(
+      (item) => item.kind === 'deliverability_blocked'
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]?.metadata).toEqual(expect.objectContaining({ provider: 'microsoft' }));
   });
 
   it('stays quiet about domains nobody is about to send from', async () => {
