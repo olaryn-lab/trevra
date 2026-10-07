@@ -32,6 +32,7 @@ import {
 import { hostedExecutionMode, hostedSeatFilter } from '../server/linkedin/hosted-execution.js';
 import { runDueResearchSources } from '../server/research/service.js';
 import { runDueBrandWatches } from '../server/watch/service.js';
+import { refreshDueEmailDeliverability } from '../server/email/sender-deliverability.js';
 
 const runtime = validateEnvironment();
 // READ AND VALIDATED AT STARTUP, NEVER PER TICK. A shard that is not a
@@ -281,6 +282,30 @@ const companionPresenceTimer = setInterval(
   COMPANION_PRESENCE_SCAN_MS
 );
 companionPresenceTimer.unref();
+// Sending-domain DNS re-checks get their OWN loop and in-flight flag, like the
+// LinkedIn loop above: a sweep walks SPF/DKIM/DMARC for up to 25 domains
+// against real resolvers, and inside `cycle()`'s Promise.all a slow resolver
+// would hold `running` and delay the playbook engine for as long as DNS took.
+// The sweep bounds itself (DELIVERABILITY_REFRESH_DEADLINE_MS); domains it does
+// not reach stay due for the next tick. Not awaited at boot for the same reason.
+let emailDeliverabilityRunning = false;
+async function emailDeliverabilityCycle(): Promise<void> {
+  if (emailDeliverabilityRunning || draining) return;
+  emailDeliverabilityRunning = true;
+  try {
+    await refreshDueEmailDeliverability(db);
+  } catch (error) {
+    console.error('Worker email deliverability cycle failed', error);
+  } finally {
+    emailDeliverabilityRunning = false;
+  }
+}
+void emailDeliverabilityCycle();
+const emailDeliverabilityTimer = setInterval(
+  () => void emailDeliverabilityCycle(),
+  runtime.automationIntervalMs
+);
+emailDeliverabilityTimer.unref();
 
 async function shutdown(signal: string) {
   if (draining) return;
@@ -289,8 +314,12 @@ async function shutdown(signal: string) {
   clearInterval(timer);
   clearInterval(linkedinTimer);
   clearInterval(companionPresenceTimer);
+  clearInterval(emailDeliverabilityTimer);
   const deadline = Date.now() + DRAIN_TIMEOUT_MS;
-  while ((running || linkedinRunning || companionPresenceRunning) && Date.now() < deadline)
+  while (
+    (running || linkedinRunning || companionPresenceRunning || emailDeliverabilityRunning) &&
+    Date.now() < deadline
+  )
     await new Promise((resolve) => setTimeout(resolve, 200));
   if (running)
     console.error(

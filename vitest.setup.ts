@@ -17,3 +17,11 @@
 process.env.PLAYWRIGHT_BROWSERS_PATH = '/nonexistent/trevra-tests-never-launch-a-browser';
 delete process.env.DISPLAY;
 delete process.env.WAYLAND_DISPLAY;
+
+/**
+ * NO TEST MAY RESOLVE REAL DNS. Email deliverability checks read SPF, DKIM and
+ * DMARC TXT records; `defaultDnsResolver` refuses every query while this is set,
+ * so a test that forgets to inject a fake resolver sees `unknown`, never the
+ * network. Tests that exercise evaluation pass an explicit fake `DnsResolver`.
+ */
+process.env.TREVRA_DNS_DISABLED = 'true';

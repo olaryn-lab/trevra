@@ -1029,3 +1029,37 @@ describe('Nango calendar sync', () => {
     expect(meetings?.n).toBe(0);
   });
 });
+
+describe('mailbox identity on re-authorization', () => {
+  it('clears the cached mailbox address whenever Nango re-authorizes the connection', async () => {
+    const database = await openLiveDatabase();
+    process.env.NANGO_API_KEY = 'test-nango-key';
+    const tenant = await seedTenant(database);
+    const connectionId = `gmail-${id('conn')}`;
+    const authEvent = (eventId: string) =>
+      JSON.stringify({
+        id: eventId,
+        type: 'auth',
+        success: true,
+        provider: 'gmail',
+        providerConfigKey: 'trevra-gmail',
+        connectionId,
+        tags: { organization_id: tenant.workspaceId, end_user_email: 'owner@example.test' }
+      });
+
+    await handleNangoWebhook(database, authEvent(`evt-${id('auth')}`), {});
+    await database
+      .prepare(
+        "UPDATE connections SET mailbox_address='old-owner@acme.test' WHERE workspace_id=? AND external_connection_id=?"
+      )
+      .run(tenant.workspaceId, connectionId);
+    await handleNangoWebhook(database, authEvent(`evt-${id('auth')}`), {});
+
+    const row = await database
+      .prepare(
+        'SELECT mailbox_address FROM connections WHERE workspace_id=? AND external_connection_id=?'
+      )
+      .get<{ mailbox_address: string | null }>(tenant.workspaceId, connectionId);
+    expect(row?.mailbox_address).toBeNull();
+  });
+});
