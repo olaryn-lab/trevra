@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes } from 'node:crypto';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
 import { createApp } from '../app.js';
@@ -465,6 +465,43 @@ describe('LinkedIn manager HTTP surface', () => {
       .send({ resolution: 'sent' })
       .expect(200);
     expect(done.body.handoff).toEqual({ actionId: 'lact_manager_handoff', status: 'sent' });
+  });
+
+  it('refuses to switch a seat back to automatic while a handoff waits, and allows it otherwise', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+    try {
+      await upsertSeat(db, A, { sendMode: 'human' }, NOW);
+      // Nothing waiting: the switch is fine, and a patch without sendMode never checks.
+      await as(tokenA)
+        .patch('/api/linkedin/manager/seats/owner')
+        .send({ label: 'Renamed' })
+        .expect(200);
+      await db
+        .prepare(
+          `INSERT INTO linkedin_actions (id,workspace_id,seat_key,kind,target_ref,status,planned_for,source,body,created_at)
+           VALUES ('lact_manager_switch',?,'owner','dm','https://www.linkedin.com/in/switch-api/','planned',?,'export','Hello',?)`
+        )
+        .run(A, new Date(NOW.getTime() - 60_000).toISOString(), NOW.toISOString());
+      await as(tokenA)
+        .patch('/api/linkedin/manager/seats/owner')
+        .send({ label: 'Renamed again' })
+        .expect(200);
+      const refused = await as(tokenA)
+        .patch('/api/linkedin/manager/seats/owner')
+        .send({ sendMode: 'automated' })
+        .expect(409);
+      expect(refused.body.error).toContain('A LinkedIn handoff is waiting in Today');
+      await as(tokenA)
+        .post('/api/linkedin/handoffs/lact_manager_switch/resolve')
+        .send({ resolution: 'skip' })
+        .expect(200);
+      await as(tokenA)
+        .patch('/api/linkedin/manager/seats/owner')
+        .send({ sendMode: 'automated' })
+        .expect(200);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('round-trips the account warm-up override through the manager seat PATCH API', async () => {

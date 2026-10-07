@@ -213,13 +213,17 @@ export async function resolveLinkedInHandoff(
       }>(now.toISOString(), input.workspaceId, input.actionId);
     if (!row) throw new LinkedInApiError('LinkedIn action not found', 404);
     if (row.status === target) return { actionId: row.id, status: target };
-    if (row.send_mode !== 'human' || !isHumanSendKind(row.kind))
+    // A 'sent' report is an outcome report: the founder already sent it, so it
+    // must be recordable whatever the seat's send mode is now (otherwise a
+    // switch back to automatic would let the worker send it a second time).
+    // 'skip' is an instruction to Trevra and stays human-send only.
+    if (!isHumanSendKind(row.kind) || (target === 'skipped' && row.send_mode !== 'human'))
       throw new LinkedInApiError(
         'Only an invite or message waiting on a human-send LinkedIn account can be resolved here.',
         409
       );
     if (
-      row.status !== 'planned' ||
+      (row.status !== 'planned' && !(target === 'sent' && row.status === 'held')) ||
       row.claimed_at !== null ||
       row.settlement_hold_at !== null ||
       row.due !== true
@@ -251,4 +255,26 @@ export async function resolveLinkedInHandoff(
     });
     return { actionId: row.id, status: target };
   });
+}
+
+/**
+ * Switching a seat back to automatic while a handoff waits would let the
+ * worker send the row the founder may already have sent by hand.
+ */
+// lc-debt: check-then-upsert is not atomic, so a handoff that appears between
+// the check and the seat write is not guarded; upgrade path is taking the seat
+// row lock in one transaction.
+export async function assertNoWaitingHandoff(
+  db: Db,
+  workspaceId: string,
+  seatKey: string,
+  now: Date,
+  options: Pick<LinkedInSafetyOptions, 'dayShape'> = {}
+): Promise<void> {
+  const handoffs = await listLinkedInHandoffs(db, workspaceId, now, options);
+  if (handoffs.some((handoff) => handoff.seatKey === seatKey))
+    throw new LinkedInApiError(
+      'A LinkedIn handoff is waiting in Today for this account. Mark it sent or skip it before switching back to automatic sending.',
+      409
+    );
 }

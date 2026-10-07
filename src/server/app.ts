@@ -444,7 +444,11 @@ import {
   upsertCampaignMailboxSettings
 } from './linkedin/campaign-channels.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
-import { handoffResolutionSchema, resolveLinkedInHandoff } from './linkedin/handoff.js';
+import {
+  assertNoWaitingHandoff,
+  handoffResolutionSchema,
+  resolveLinkedInHandoff
+} from './linkedin/handoff.js';
 import {
   applyLatestWorkflowToPendingMembers,
   campaignAdmissionSummary,
@@ -4792,6 +4796,21 @@ export function createApp(db: Db) {
   // owns -- paused and cooldown -- have their own routes below, because a kill
   // switch buried in a settings PUT is a kill switch nobody finds.
   //
+  // Switching a human-send seat back to automatic is refused while a handoff is
+  // waiting for the founder (see assertNoWaitingHandoff). Only a request that
+  // sets sendMode 'automated' on a seat that is currently 'human' is checked.
+  async function guardSwitchToAutomatic(
+    workspaceId: string,
+    seatKey: string,
+    sendMode: string | undefined,
+    now: Date
+  ): Promise<void> {
+    if (sendMode !== 'automated') return;
+    const existing = await getSeat(db, workspaceId, seatKey);
+    if (existing?.sendMode !== 'human') return;
+    await assertNoWaitingHandoff(db, workspaceId, seatKey, now);
+  }
+
   // Owner-only. The fields this PUT writes are the seat's four daily ceilings
   // and its working hours -- the numbers the pacing engine schedules against --
   // so a member could raise the invite ceiling to 75 a day and the plan would
@@ -4806,6 +4825,7 @@ export function createApp(db: Db) {
       const { seatKey = OWNER_SEAT_KEY, ...input } = linkedinSeatSchema.parse(req.body ?? {});
       assertSeatProxyUsable(req.auth!.workspaceId, seatKey, input.proxyUrl);
       const now = new Date();
+      await guardSwitchToAutomatic(req.auth!.workspaceId, seatKey, input.sendMode, now);
       let seat;
       try {
         seat = await upsertSeat(db, req.auth!.workspaceId, input as SeatPatch, now, seatKey);
@@ -5679,6 +5699,12 @@ export function createApp(db: Db) {
           ? req.auth!.userId
           : ((await resolveWorkspaceMemberUserId(db, req, input.ownerUserId)) ?? req.auth!.userId);
       assertSeatProxyUsable(req.auth!.workspaceId, input.seatKey, input.proxyUrl);
+      await guardSwitchToAutomatic(
+        req.auth!.workspaceId,
+        input.seatKey,
+        input.sendMode,
+        new Date()
+      );
       try {
         const seat = await upsertSeat(
           db,
@@ -5707,6 +5733,7 @@ export function createApp(db: Db) {
       assertSeatProxyUsable(req.auth!.workspaceId, seatKey, input.proxyUrl);
       if (!(await getSeat(db, req.auth!.workspaceId, seatKey)))
         throw new LinkedInApiError('LinkedIn account not found', 404);
+      await guardSwitchToAutomatic(req.auth!.workspaceId, seatKey, input.sendMode, new Date());
       try {
         res.json({
           seat: await upsertSeat(

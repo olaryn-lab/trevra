@@ -725,7 +725,10 @@ export async function getToday(
 
   // HUMAN-SEND: the next gated invite or message per human-send seat. A read
   // that cannot list them must not take Today down with it.
-  const handoffs = await listLinkedInHandoffs(db, workspaceId, now).catch(() => []);
+  const handoffs = await listLinkedInHandoffs(db, workspaceId, now).catch((error: unknown) => {
+    console.error(`Failed to list LinkedIn handoffs for workspace ${workspaceId}`, error);
+    return [];
+  });
   for (const handoff of handoffs) {
     items.push({
       id: `linkedin_handoff:${handoff.actionId}`,
@@ -745,6 +748,7 @@ export async function getToday(
         copyText: handoff.copyText,
         subject: handoff.subject,
         targetUrl: handoff.targetUrl,
+        targetRef: handoff.targetRef,
         campaignName: handoff.campaignName,
         channel: 'linkedin'
       }

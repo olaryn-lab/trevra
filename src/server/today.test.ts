@@ -995,6 +995,7 @@ describe('getToday', () => {
         seatKey: 'owner',
         copyText: 'Hi, glad to connect.',
         targetUrl: 'https://www.linkedin.com/in/today-handoff/',
+        targetRef: 'https://www.linkedin.com/in/today-handoff/',
         channel: 'linkedin'
       }
     });

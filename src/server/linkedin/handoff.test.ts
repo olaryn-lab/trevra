@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
 import { listDomainEvents } from '../control-plane/events.js';
 import { evaluateLinkedInSafety } from './guard.js';
-import { handoffTitle, listLinkedInHandoffs, resolveLinkedInHandoff } from './handoff.js';
+import {
+  assertNoWaitingHandoff,
+  handoffTitle,
+  listLinkedInHandoffs,
+  resolveLinkedInHandoff
+} from './handoff.js';
 import { FLAT_DAY_SHAPE } from './pacing.js';
 import { upsertSeat } from './seats.js';
 
@@ -123,7 +128,9 @@ describe('LinkedIn human-send handoffs', () => {
       )
       .run(
         WORKSPACE,
-        JSON.stringify({ steps: [{ id: 'step-1', action: 'connection_request' }] }),
+        JSON.stringify({
+          steps: [{ id: 'step-1', action: 'connection_request', config: { message: null } }]
+        }),
         NOW.toISOString(),
         NOW.toISOString(),
         NOW.toISOString()
@@ -146,6 +153,68 @@ describe('LinkedIn human-send handoffs', () => {
       []
     );
   });
+
+  for (const resolution of ['sent', 'skip'] as const) {
+    it(`advances the managed campaign member after '${resolution}'`, async () => {
+      await db
+        .prepare(
+          `INSERT INTO linkedin_lead_contacts
+           (id,workspace_id,list_id,first_name,last_name,company,profile_url,dedupe_key,created_at,updated_at)
+           VALUES ('licon_handoff_adv',?,NULL,'Ad','Vance','Acme','https://www.linkedin.com/in/advance-handoff/','advance-handoff',?,?)`
+        )
+        .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+      await db
+        .prepare(
+          `INSERT INTO linkedin_campaigns (id,workspace_id,name,status,sequence_json,seat_key,started_at,created_at,updated_at)
+           VALUES ('licmp_handoff_adv',?,'Advance campaign','running',?::jsonb,'owner',?,?,?)`
+        )
+        .run(
+          WORKSPACE,
+          JSON.stringify({
+            steps: [
+              { id: 'step-1', action: 'connection_request', config: { message: null } },
+              { id: 'step-2', action: 'profile_view', config: {} }
+            ]
+          }),
+          NOW.toISOString(),
+          NOW.toISOString(),
+          NOW.toISOString()
+        );
+      await db
+        .prepare(
+          `INSERT INTO linkedin_campaign_members
+           (id,workspace_id,campaign_id,contact_id,status,step_index,current_step_id,completed_step_ids,created_at,updated_at)
+           VALUES ('limem_handoff_adv',?,'licmp_handoff_adv','licon_handoff_adv','waiting',0,'step-1','[]'::jsonb,?,?)`
+        )
+        .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+      await db
+        .prepare(
+          `INSERT INTO linkedin_actions
+           (id,workspace_id,seat_key,kind,target_ref,campaign_id,campaign_member_id,workflow_step_id,status,planned_for,source,replay_scope,created_at)
+           VALUES ('lact_handoff_adv',?,'owner','invite','https://www.linkedin.com/in/advance-handoff/','licmp_handoff_adv','limem_handoff_adv','step-1','planned',?,'campaign','limem_handoff_adv:step-1',?)`
+        )
+        .run(WORKSPACE, new Date(NOW.getTime() - 60_000).toISOString(), NOW.toISOString());
+
+      await resolve('lact_handoff_adv', resolution);
+
+      const member = await db
+        .prepare(
+          `SELECT status, step_index, current_step_id, completed_step_ids FROM linkedin_campaign_members WHERE id=?`
+        )
+        .get<{
+          status: string;
+          step_index: number;
+          current_step_id: string | null;
+          completed_step_ids: string[];
+        }>('limem_handoff_adv');
+      expect(member).toMatchObject({
+        status: 'waiting',
+        step_index: 1,
+        current_step_id: 'step-2',
+        completed_step_ids: ['step-1']
+      });
+    });
+  }
 
   it('marks a handoff sent exactly once, and the guard counts it', async () => {
     await plan('lact_handoff_invite', 'invite', 'https://www.linkedin.com/in/jonas-handoff/', null);
@@ -210,6 +279,41 @@ describe('LinkedIn human-send handoffs', () => {
 
     await upsertSeat(db, WORKSPACE, { sendMode: 'automated' }, NOW);
     await plan('lact_handoff_robot', 'dm', 'https://www.linkedin.com/in/robot-handoff/', 'Hello');
-    await expect(resolve('lact_handoff_robot', 'sent')).rejects.toMatchObject({ status: 409 });
+    await expect(resolve('lact_handoff_robot', 'skip')).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('still records a hand send after the seat was switched back to automatic', async () => {
+    await plan('lact_handoff_flipped', 'dm', 'https://www.linkedin.com/in/flipped/', 'Hello');
+    await upsertSeat(db, WORKSPACE, { sendMode: 'automated' }, NOW);
+    expect(await resolve('lact_handoff_flipped', 'sent')).toEqual({
+      actionId: 'lact_handoff_flipped',
+      status: 'sent'
+    });
+    const row = await db
+      .prepare('SELECT status, recorded_at FROM linkedin_actions WHERE id=?')
+      .get<{ status: string; recorded_at: unknown }>('lact_handoff_flipped');
+    expect(row?.status).toBe('sent');
+    expect(row?.recorded_at).not.toBeNull();
+  });
+
+  it('records a hand send on a held row', async () => {
+    await plan('lact_handoff_held', 'dm', 'https://www.linkedin.com/in/held/', 'Hello');
+    await db
+      .prepare(`UPDATE linkedin_actions SET status='held' WHERE id=?`)
+      .run('lact_handoff_held');
+    expect(await resolve('lact_handoff_held', 'sent')).toEqual({
+      actionId: 'lact_handoff_held',
+      status: 'sent'
+    });
+  });
+
+  it('refuses to switch a seat back to automatic while a handoff is waiting', async () => {
+    await expect(
+      assertNoWaitingHandoff(db, WORKSPACE, 'owner', NOW, { dayShape: FLAT_DAY_SHAPE })
+    ).resolves.toBeUndefined();
+    await plan('lact_handoff_guard', 'dm', 'https://www.linkedin.com/in/guard/', 'Hello');
+    await expect(
+      assertNoWaitingHandoff(db, WORKSPACE, 'owner', NOW, { dayShape: FLAT_DAY_SHAPE })
+    ).rejects.toMatchObject({ status: 409 });
   });
 });
