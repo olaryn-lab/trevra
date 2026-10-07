@@ -443,6 +443,30 @@ describe('LinkedIn manager HTTP surface', () => {
     expect(listed.map((seat) => seat.sendMode)).toEqual(['automated']);
   });
 
+  it('lets the workspace resolve its own handoff and nobody else', async () => {
+    await upsertSeat(db, A, { sendMode: 'human' }, NOW);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_actions (id,workspace_id,seat_key,kind,target_ref,status,planned_for,source,body,created_at)
+           VALUES ('lact_manager_handoff',?,'owner','dm','https://www.linkedin.com/in/handoff-api/','planned',?,'export','Hello',?)`
+      )
+      .run(A, NOW.toISOString(), NOW.toISOString());
+
+    await as(tokenB)
+      .post('/api/linkedin/handoffs/lact_manager_handoff/resolve')
+      .send({ resolution: 'sent' })
+      .expect(404);
+    await as(tokenA)
+      .post('/api/linkedin/handoffs/lact_manager_handoff/resolve')
+      .send({ resolution: 'later' })
+      .expect(400);
+    const done = await as(tokenA)
+      .post('/api/linkedin/handoffs/lact_manager_handoff/resolve')
+      .send({ resolution: 'sent' })
+      .expect(200);
+    expect(done.body.handoff).toEqual({ actionId: 'lact_manager_handoff', status: 'sent' });
+  });
+
   it('round-trips the account warm-up override through the manager seat PATCH API', async () => {
     const updated = (
       await as(tokenA)

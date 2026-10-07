@@ -19,9 +19,11 @@ import { LinkedInApiError } from './errors.js';
  *
  * That is enforced here rather than remembered by each route.
  * `writeActionStatus` refuses a worker-only status unless the caller names
- * itself 'outcome-ingest', and exactly one route in `app.ts` passes that
- * value. A future route that wants to mark something sent has to either go
- * through the outcome endpoint or edit this line -- and editing this line is a
+ * itself 'outcome-ingest', and only `ingestOutcome` passes that value, reached
+ * from exactly two routes in `app.ts`: POST /api/linkedin/actions/outcome and
+ * the human-send report POST /api/linkedin/handoffs/:id/resolve (handoff.ts).
+ * A future route that wants to mark something sent has to either go through
+ * `ingestOutcome` or edit this line -- and editing this line is a
  * diff a reviewer sees, which is the whole point of putting the rule in code
  * instead of in a comment.
  *
@@ -52,7 +54,8 @@ export function isWorkerOnlyStatus(status: string): boolean {
 /**
  * Who is asking.
  *
- * 'outcome-ingest' is POST /api/linkedin/actions/outcome, and nothing else.
+ * 'outcome-ingest' is POST /api/linkedin/actions/outcome and the human-send
+ * report in handoff.ts, both through `ingestOutcome`, and nothing else.
  *
  * 'acceptance-detector' IS THE THIRD, AND IT IS DELIBERATELY NARROWER THAN THE
  * OTHER TWO. It is `detectAcceptedInvites` in `withdraw.ts` -- the pass that

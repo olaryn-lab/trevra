@@ -1,5 +1,6 @@
 import type { Db } from './db.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
+import { handoffTitle, listLinkedInHandoffs } from './linkedin/handoff.js';
 import type { LinkedInCheckName } from './linkedin/guard.js';
 import {
   MILESTONE_KINDS_SQL,
@@ -28,7 +29,8 @@ export type TodayItemKind =
   | 'customer_cancelled'
   | 'meeting_upcoming'
   | 'meeting_held'
-  | 'deliverability_blocked';
+  | 'deliverability_blocked'
+  | 'linkedin_handoff_waiting';
 
 export interface TodayItem {
   id: string;
@@ -717,6 +719,34 @@ export async function getToday(
         actionKind: state.gate.kind,
         dueNow: state.dueNow,
         seatKey: state.seatKey
+      }
+    });
+  }
+
+  // HUMAN-SEND: the next gated invite or message per human-send seat. A read
+  // that cannot list them must not take Today down with it.
+  const handoffs = await listLinkedInHandoffs(db, workspaceId, now).catch(() => []);
+  for (const handoff of handoffs) {
+    items.push({
+      id: `linkedin_handoff:${handoff.actionId}`,
+      kind: 'linkedin_handoff_waiting',
+      priority: 42,
+      title: handoffTitle(handoff.kind, handoff.seatLabel),
+      detail:
+        `${handoff.campaignName ? `${handoff.campaignName}: ` : ''}` +
+        'Trevra checked this against the account limits. Send it on LinkedIn yourself, then mark it sent so the limits count it.',
+      href: '/outreach',
+      observedAt: handoff.plannedFor,
+      reference: { type: 'linkedin_action', id: handoff.actionId },
+      metadata: {
+        actionId: handoff.actionId,
+        actionKind: handoff.kind,
+        seatKey: handoff.seatKey,
+        copyText: handoff.copyText,
+        subject: handoff.subject,
+        targetUrl: handoff.targetUrl,
+        campaignName: handoff.campaignName,
+        channel: 'linkedin'
       }
     });
   }

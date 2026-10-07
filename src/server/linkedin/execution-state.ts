@@ -1,5 +1,9 @@
 import type { Db } from '../db.js';
-import { evaluateLinkedInSafety, type LinkedInCheckName } from './guard.js';
+import {
+  evaluateLinkedInSafety,
+  type LinkedInCheckName,
+  type LinkedInSafetyOptions
+} from './guard.js';
 import type { PacedKind } from './limits.js';
 import { EXECUTABLE_KINDS, KINDS_REQUIRING_BODY } from './local-worker.js';
 import { seatRestingUntil } from './seat-events.js';
@@ -105,7 +109,7 @@ export interface LinkedInCampaignExecution {
   humanSendNext: boolean;
 }
 
-interface NextDueRow {
+export interface NextDueRow {
   id: string;
   seat_key: string;
   kind: string;
@@ -239,11 +243,12 @@ export async function campaignExecutionState(
  * not be able to reach a verdict the worker will not reach, in either
  * direction.
  */
-async function gateVerdict(
+export async function gateVerdict(
   db: Db,
   workspaceId: string,
   row: NextDueRow,
-  now: Date
+  now: Date,
+  options: Pick<LinkedInSafetyOptions, 'dayShape'> = {}
 ): Promise<LinkedInCampaignExecutionGate | null> {
   try {
     const verdict = await evaluateLinkedInSafety(
@@ -261,7 +266,7 @@ async function gateVerdict(
         ...(row.source === 'manual' ? { manual: true } : {})
       },
       now,
-      { excludeActionId: row.id }
+      { ...options, excludeActionId: row.id }
     );
     const failed = verdict.checks.find((check) => !check.passed) ?? null;
     return {

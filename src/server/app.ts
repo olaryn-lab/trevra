@@ -444,6 +444,7 @@ import {
   upsertCampaignMailboxSettings
 } from './linkedin/campaign-channels.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
+import { handoffResolutionSchema, resolveLinkedInHandoff } from './linkedin/handoff.js';
 import {
   applyLatestWorkflowToPendingMembers,
   campaignAdmissionSummary,
@@ -5440,8 +5441,9 @@ export function createApp(db: Db) {
     })
   );
 
-  // The ONLY route that may move an action to sent/accepted/replied, and it is
-  // a REPORT rather than an instruction: the operator is telling Trevra what
+  // One of the TWO routes that may move an action to sent (the other is the
+  // human-send handoff below), and both are REPORTS rather than instructions
+  // through `ingestOutcome`: the operator is telling Trevra what
   // already happened in their own tool, so the acceptance-rate throttle and the
   // day-over-day arithmetic have a real denominator (plan 7.2).
   app.post(
@@ -5454,6 +5456,27 @@ export function createApp(db: Db) {
         new Date()
       );
       res.json({ action });
+    })
+  );
+
+  // HUMAN-SEND REPORT. The founder sent (or skipped) the invite or message
+  // Trevra handed them in Today. Any workspace member may report it: it is the
+  // same kind of report as the outcome route above, never an instruction.
+  app.post(
+    '/api/linkedin/handoffs/:id/resolve',
+    linkedinRoute(async (req, res) => {
+      const input = handoffResolutionSchema.parse(req.body ?? {});
+      const handoff = await resolveLinkedInHandoff(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          actionId: String(req.params.id),
+          resolution: input.resolution,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.json({ handoff });
     })
   );
 

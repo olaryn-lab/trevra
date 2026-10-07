@@ -533,7 +533,14 @@ export interface LocalWorkerStore {
    * member replied/ended or moved to another workflow node, so this queued row
    * must never execute later.
    */
-  actionExecutionState(action: DueLinkedInAction): Promise<'execute' | 'defer' | 'retire'>;
+  /**
+   * `handoff: true` is the founder-handoff read: it skips ONLY the human-send
+   * defer (the row is meant to wait for a human), every other check applies.
+   */
+  actionExecutionState(
+    action: DueLinkedInAction,
+    options?: { handoff?: boolean }
+  ): Promise<'execute' | 'defer' | 'retire'>;
   /** Nothing was sent: put the action back in the queue, recording why. */
   releaseClaim(actionId: string, failureKind: LinkedInFailureKind | null): Promise<void>;
   /**
@@ -1725,7 +1732,7 @@ function postureRefusal(posture: SeatPosture | null): string | null {
   return null;
 }
 
-async function advanceManagedMemberAfterSettledLinkedInAction(
+export async function advanceManagedMemberAfterSettledLinkedInAction(
   db: Db,
   workspaceId: string,
   actionId: string,
@@ -2256,7 +2263,7 @@ export function postgresLocalWorkerStore(
       };
     },
 
-    async actionExecutionState(action) {
+    async actionExecutionState(action, options) {
       const row = await db
         .prepare(
           `SELECT a.campaign_member_id,a.workflow_step_id,c.status AS campaign_status,
@@ -2286,7 +2293,7 @@ export function postgresLocalWorkerStore(
       if (!row) return 'retire';
       // The founder switched this seat to human-send after the row was claimed:
       // release it (the caller does) so it lands in the handoff, never sent here.
-      if (row.human_send) return 'defer';
+      if (row.human_send && !options?.handoff) return 'defer';
       if (!row.campaign_member_id) return 'execute';
       if (row.campaign_status !== 'running' || row.member_status === 'paused') return 'defer';
       if (row.has_reply) return 'retire';

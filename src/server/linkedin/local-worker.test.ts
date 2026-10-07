@@ -2959,6 +2959,20 @@ describe.skipIf(!databaseUrl)('multi-seat draining', () => {
     expect(await store.claimNextDueAction(batchId, NOW)).toBeNull();
   });
 
+  it('LETS A HUMAN-SEND ROW PASS THE HANDOFF READ, and still defers it for the worker', async () => {
+    await upsertSeat(db, WORKSPACE_ID, { sendMode: 'human' }, LONG_AGO, 'sales');
+    await db
+      .prepare(
+        `INSERT INTO linkedin_actions (id,workspace_id,seat_key,kind,target_ref,status,planned_for,source,body,created_at)
+         VALUES ('lact_handoff_state',?,'sales','dm','https://www.linkedin.com/in/handoff-state/','planned',?,'manual','Hello',?)`
+      )
+      .run(WORKSPACE_ID, NOW.toISOString(), NOW.toISOString());
+    const store = postgresLocalWorkerStore(db, WORKSPACE_ID, 'sales');
+    const action = { id: 'lact_handoff_state' } as DueLinkedInAction;
+    expect(await store.actionExecutionState(action)).toBe('defer');
+    expect(await store.actionExecutionState(action, { handoff: true })).toBe('execute');
+  });
+
   it("claims only its own seat's rows, never the neighbouring account's", async () => {
     await plan('owner', 'lact_owner_1', 'https://www.linkedin.com/in/owner-target/');
     await plan('sales', 'lact_sales_1', 'https://www.linkedin.com/in/sales-target/');

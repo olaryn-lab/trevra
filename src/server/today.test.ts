@@ -3,6 +3,7 @@ import { openDatabase, type Db } from './db.js';
 import { createAccount } from './accounts/store.js';
 import { ensureDefaultAgent } from './agents.js';
 import { pauseSeat, upsertSeat } from './linkedin/seats.js';
+import { resolveLinkedInHandoff } from './linkedin/handoff.js';
 import { getToday } from './today.js';
 import { createSuppression } from './suppressions.js';
 import { runRecommendationEngine } from './recommendation-engine.js';
@@ -964,6 +965,54 @@ describe('getToday', () => {
       source: 'test'
     });
     expect((await getToday(db, WORKSPACE, NOW)).needsAttention).toEqual([]);
+  });
+
+  it('hands a gated invite on a human-send seat to the founder, and drops it once marked sent', async () => {
+    await upsertSeat(
+      db,
+      WORKSPACE,
+      { label: 'Founder LinkedIn', timezone: 'Europe/Zurich', sendMode: 'human' },
+      new Date('2026-01-05T09:00:00.000Z')
+    );
+    await db
+      .prepare(
+        `INSERT INTO linkedin_actions (id,workspace_id,seat_key,kind,target_ref,status,planned_for,source,body,created_at)
+           VALUES ('lact_today_handoff',?,'owner','invite','https://www.linkedin.com/in/today-handoff/','planned',?,'export','Hi, glad to connect.',?)`
+      )
+      .run(WORKSPACE, '2026-08-21T07:30:00.000Z', '2026-08-21T07:00:00.000Z');
+
+    const today = await getToday(db, WORKSPACE, NOW);
+    const handoff = today.needsAttention.find((item) => item.kind === 'linkedin_handoff_waiting');
+    expect(handoff).toMatchObject({
+      id: 'linkedin_handoff:lact_today_handoff',
+      priority: 42,
+      title: 'Send a LinkedIn invite from Founder LinkedIn',
+      href: '/outreach',
+      reference: { type: 'linkedin_action', id: 'lact_today_handoff' },
+      metadata: {
+        actionId: 'lact_today_handoff',
+        actionKind: 'invite',
+        seatKey: 'owner',
+        copyText: 'Hi, glad to connect.',
+        targetUrl: 'https://www.linkedin.com/in/today-handoff/',
+        channel: 'linkedin'
+      }
+    });
+
+    await resolveLinkedInHandoff(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        actionId: 'lact_today_handoff',
+        resolution: 'sent',
+        actorUserId: null
+      },
+      NOW
+    );
+    const after = await getToday(db, WORKSPACE, NOW);
+    expect(after.needsAttention.filter((item) => item.kind === 'linkedin_handoff_waiting')).toEqual(
+      []
+    );
   });
 
   it('never leaks another workspace into the projection', async () => {
