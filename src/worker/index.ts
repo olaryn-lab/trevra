@@ -33,6 +33,8 @@ import { hostedExecutionMode, hostedSeatFilter } from '../server/linkedin/hosted
 import { runDueResearchSources } from '../server/research/service.js';
 import { runDueBrandWatches } from '../server/watch/service.js';
 import { refreshDueEmailDeliverability } from '../server/email/sender-deliverability.js';
+import { registerEmailComplianceProvider } from '../server/email/compliance.js';
+import { senderComplianceProvider } from '../server/compliance/provider.js';
 
 const runtime = validateEnvironment();
 // READ AND VALIDATED AT STARTUP, NEVER PER TICK. A shard that is not a
@@ -42,6 +44,10 @@ const runtime = validateEnvironment();
 // operator is watching.
 const linkedinShard = workerShard();
 const linkedinWorkerId = workerIdentity();
+// The worker runs approved outreach sends (playbooks, Temporal) without
+// createApp, so it registers the real footer provider itself; without it every
+// approved outreach email is refused at send time.
+registerEmailComplianceProvider(senderComplianceProvider);
 const db = await openDatabase();
 await assertHostedDataReady(db);
 const temporalWorker =

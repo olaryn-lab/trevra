@@ -14,7 +14,12 @@ describe('email compliance provider', () => {
   it('defaults to no footer and a blocker', async () => {
     expect(await emailComplianceProvider().footer(db, 'ws')).toBeNull();
     expect(await emailComplianceProvider().blockers(db, 'ws', null)).toEqual([
-      'email_compliance_footer_unavailable'
+      {
+        code: 'email_compliance_footer_unavailable',
+        message:
+          'Outreach email needs a compliance footer (legal name, postal address, opt-out). Complete sender compliance in Workspace settings.',
+        actionHref: '/setup/workspace'
+      }
     ]);
   });
 

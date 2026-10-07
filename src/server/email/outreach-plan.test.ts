@@ -163,11 +163,13 @@ describe('email-only prepare_outreach plans', () => {
     expect(plan.defaults.prepareSupported).toBe(false);
   });
 
-  it('names an unknown compliance code in its blocker', async () => {
-    registerEmailComplianceProvider({
-      footer: async () => FOOTER,
-      blockers: async () => ['sender_privacy_url_missing']
-    });
+  it('passes the provider issues through unchanged', async () => {
+    const issue = {
+      code: 'sender_privacy_url_missing',
+      message: 'Add the privacy policy URL first.',
+      actionHref: '/setup/workspace'
+    };
+    registerEmailComplianceProvider({ footer: async () => FOOTER, blockers: async () => [issue] });
     await seedMailbox();
     await seedInbound();
     await seedCheck('pass');
@@ -176,8 +178,9 @@ describe('email-only prepare_outreach plans', () => {
     const plan = await compileGtmIntent(db, WORKSPACE, emailIntent(listId));
     expect(plan.blockers).toHaveLength(1);
     expect(plan.blockers[0]?.code).toBe('sender_privacy_url_missing');
-    expect(plan.blockers[0]?.message).toContain('sender_privacy_url_missing');
+    expect(plan.blockers[0]?.message).toBe('Add the privacy policy URL first.');
     expect(plan.blockers[0]?.actionHref).toBe('/setup/workspace');
+    expect(plan.defaults.prepareSupported).toBe(false);
   });
 
   it('blocks on a missing footer even when the provider reports no blockers', async () => {
@@ -203,7 +206,9 @@ describe('email-only prepare_outreach plans', () => {
   it('adds the footer blocker only once when the provider already reports it', async () => {
     registerEmailComplianceProvider({
       footer: async () => null,
-      blockers: async () => ['email_compliance_footer_unavailable']
+      blockers: async () => [
+        { code: 'email_compliance_footer_unavailable', message: 'The footer is unavailable.' }
+      ]
     });
     await seedMailbox();
     await seedInbound();
@@ -211,6 +216,10 @@ describe('email-only prepare_outreach plans', () => {
     const listId = await peopleList();
 
     expect(await codes(emailIntent(listId))).toEqual(['email_compliance_footer_unavailable']);
+    // The provider's own message wins; the fallback is not added beside it.
+    expect((await compileGtmIntent(db, WORKSPACE, emailIntent(listId))).blockers).toEqual([
+      { code: 'email_compliance_footer_unavailable', message: 'The footer is unavailable.' }
+    ]);
   });
 
   it('fails closed when a failing DNS check stored no blockers', async () => {

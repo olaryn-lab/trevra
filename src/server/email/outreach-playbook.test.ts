@@ -487,6 +487,24 @@ describe('gtm.email-outreach', () => {
       expect(await deliveries()).toBe(0);
     });
 
+    it('refuses, naming the change, once the sender details changed after preparing', async () => {
+      const { run } = await prepareRun();
+      registerEmailComplianceProvider({
+        footer: async () =>
+          `Acme Labs Ltd, 2 New Street, London EC1A 2BB\n${OUTREACH_OPT_OUT_SENTENCE}`,
+        blockers: async () => []
+      });
+
+      const failed = await approve(run.id);
+
+      expect(failed.status).toBe('failed');
+      expect(failed.error).toMatch(
+        /The sender details changed after this email was prepared; nothing was sent\. Prepare it again\./
+      );
+      expect(nangoMock.post).not.toHaveBeenCalled();
+      expect(await deliveries()).toBe(0);
+    });
+
     it('refuses an approved body that was edited to drop the footer', async () => {
       const { run } = await prepareRun();
       await updatePlaybookApprovalBody(db, {

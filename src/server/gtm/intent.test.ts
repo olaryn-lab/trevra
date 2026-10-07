@@ -2,6 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
 import { createLeadList, importLeadCsv } from '../linkedin/lead-lists.js';
 import { upsertSeat } from '../linkedin/seats.js';
+import { saveSenderIdentity } from '../compliance/sender-identity.js';
+import { senderComplianceProvider } from '../compliance/provider.js';
+import {
+  registerEmailComplianceProvider,
+  resetEmailComplianceProvider
+} from '../email/compliance.js';
 import { compileGtmIntent, prepareGtmPlan } from './intent.js';
 
 const WORKSPACE = 'ws_gtm_intent_test';
@@ -52,11 +58,13 @@ async function peopleList(): Promise<{ id: string; seatKey: string }> {
 }
 
 beforeEach(async () => {
+  registerEmailComplianceProvider(senderComplianceProvider);
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   await reset();
 });
 
 afterEach(async () => {
+  resetEmailComplianceProvider();
   await db?.prepare('DELETE FROM workspaces WHERE id=?').run(WORKSPACE);
   await db?.close();
 });
@@ -419,5 +427,42 @@ describe('bounded GTM intent compiler', () => {
       ])
     );
     expect(plan.defaults.prepareSupported).toBe(false);
+  });
+
+  it('blocks email outreach until the workspace has a postal address and a privacy policy URL', async () => {
+    const list = await peopleList();
+    const intent = {
+      objective: 'prepare_outreach',
+      people: { existingListId: list.id },
+      channels: ['email']
+    };
+    const codes = async (raw: unknown) =>
+      (await compileGtmIntent(db, WORKSPACE, raw)).blockers.map((blocker) => blocker.code);
+
+    expect(await codes(intent)).toEqual(
+      expect.arrayContaining(['sender_postal_address_missing', 'sender_privacy_url_missing'])
+    );
+    expect(await codes({ ...intent, channels: ['linkedin'] })).not.toContain(
+      'sender_postal_address_missing'
+    );
+
+    await saveSenderIdentity(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        input: {
+          legalName: 'Intent Test GmbH',
+          postalAddress: 'Bahnhofstrasse 1, 8001 Zurich',
+          privacyPolicyUrl: 'https://intent.example/privacy'
+        }
+      },
+      NOW
+    );
+    const after = await codes(intent);
+    expect(after).not.toContain('sender_postal_address_missing');
+    expect(after).not.toContain('sender_privacy_url_missing');
+    // The footer is built from the same identity, so it is available too.
+    expect(after).not.toContain('email_compliance_footer_unavailable');
   });
 });

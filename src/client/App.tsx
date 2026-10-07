@@ -78,6 +78,7 @@ import { reloadOutreach } from './LinkedInSafety';
 import { LinkedInAccounts } from './LinkedInAccounts';
 import { CompanionPanel } from './LinkedInCompanion';
 import { LinkedInExclusions, relativeTime } from './LinkedInScreen';
+import { SenderIdentityPanel } from './SenderIdentityPanel';
 import { TeamSettingsView } from './TeamScreen';
 import { EmailChannelPanel } from './EmailChannelPanel';
 import { LeadCaptureSetup } from './LeadCaptureSetup';
@@ -600,6 +601,7 @@ function SetupView({
           />
           <GitHubReposPanel setToast={setToast} />
           <EmailChannelPanel setToast={setToast} />
+          <SenderIdentityPanel setToast={setToast} isOwner={isOwner} />
           <LimitsView setToast={setToast} />
           <LinkedInExclusions setToast={setToast} />
           <TeamSettingsView

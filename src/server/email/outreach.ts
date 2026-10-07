@@ -5,7 +5,7 @@ import type { Db } from '../db.js';
 import { LEAD_CONTACT_READ_LIMIT } from '../linkedin/lead-lists.js';
 import { startPlaybookRun } from '../playbooks/engine.js';
 import { findSuppression } from '../suppressions.js';
-import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from './compliance.js';
+import { emailComplianceProvider } from './compliance.js';
 import { emailDomainOf, type DnsResolver } from './deliverability.js';
 import { listSendingMailboxes, resolveMailboxAddress } from './mailbox-address.js';
 import { getSenderDeliverability } from './sender-deliverability.js';
@@ -257,7 +257,8 @@ function oneLine(value: string | null | undefined, max: number): string {
  * The first-touch email Trevra prepares. It is short and plain on purpose: the
  * founder approves its exact text before anything is sent, and the
  * List-Unsubscribe header carries the one-click opt-out. The sender's
- * compliance footer is appended by prepareEmailOutreach.
+ * compliance footer, appended by prepareEmailOutreach, owns the visible
+ * opt-out line (OUTREACH_OPT_OUT_SENTENCE), so the body does not repeat it.
  */
 export function firstTouchEmail(input: { firstName: string | null; company: string | null }): {
   subject: string;
@@ -272,9 +273,7 @@ export function firstTouchEmail(input: { firstName: string | null; company: stri
       '',
       company
         ? `I am reaching out because of the work you do at ${company}. Would you be open to a short conversation about it?`
-        : 'Would you be open to a short conversation?',
-      '',
-      OUTREACH_OPT_OUT_SENTENCE
+        : 'Would you be open to a short conversation?'
     ].join('\n')
   };
 }

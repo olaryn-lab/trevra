@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { Db } from '../db.js';
 import { executeConnectedAction } from '../integration-service.js';
 import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-address.js';
-import { emailComplianceProvider } from '../email/compliance.js';
+import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from '../email/compliance.js';
 import { assertNotSuppressed, SuppressionError } from '../suppressions.js';
 import { projectPreparedConversationEmail } from '../conversations.js';
 import { communityReplyPayloadSchema, publishCommunityReply } from '../outreach/publish.js';
@@ -259,7 +259,16 @@ async function assertOutreachFooter(db: Db, workspaceId: string, body: string): 
       'No compliance footer (legal name, postal address, opt-out line) is available for this workspace; nothing was sent.'
     );
   }
-  if (!body.trimEnd().endsWith(footer)) {
+  const tail = body.trimEnd();
+  if (!tail.endsWith(footer)) {
+    // Every footer ends with the opt-out sentence. A body that still ends with
+    // it was prepared with a footer that has since changed: the sender identity
+    // was edited after preparation. Otherwise the footer was edited out.
+    if (tail.endsWith(OUTREACH_OPT_OUT_SENTENCE)) {
+      throw mailboxBindingError(
+        'The sender details changed after this email was prepared; nothing was sent. Prepare it again.'
+      );
+    }
     throw mailboxBindingError(
       'This email does not end with the workspace compliance footer; nothing was sent.'
     );

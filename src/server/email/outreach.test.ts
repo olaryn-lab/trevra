@@ -267,7 +267,7 @@ describe('prepareEmailOutreach', () => {
     expect(replay.prepared).toEqual(result.prepared);
   });
 
-  it('drafts every body with the opt-out sentence and ends it with the compliance footer', async () => {
+  it('ends every body with the compliance footer, which carries the only opt-out sentence', async () => {
     emailResult(await prepare('email-prepare-0001'));
 
     const bodies = await db
@@ -278,8 +278,9 @@ describe('prepareEmailOutreach', () => {
       .all<{ body: string }>(WORKSPACE);
     expect(bodies).toHaveLength(2);
     for (const { body } of bodies) {
-      expect(body).toContain(`${OUTREACH_OPT_OUT_SENTENCE}\n\n${FOOTER}`);
+      expect(body).toContain(`?\n\n${FOOTER}`);
       expect(body.endsWith(`\n\n${FOOTER}`)).toBe(true);
+      expect(body.split(OUTREACH_OPT_OUT_SENTENCE)).toHaveLength(2);
     }
   });
 

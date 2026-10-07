@@ -12,6 +12,8 @@ import { validateEnvironment } from './config.js';
 import { assertHostedDataReady } from './hosted-readiness.js';
 import { getSiteConfig, renderAppIndex, renderNotFoundPage } from './public-site.js';
 import { installLinkedInCompanionRelay } from './linkedin/companion-relay.js';
+import { registerEmailComplianceProvider } from './email/compliance.js';
+import { senderComplianceProvider } from './compliance/provider.js';
 
 const runtime = validateEnvironment();
 const port = runtime.port;
@@ -26,6 +28,9 @@ if (hosted) {
   // Hosted runs this in the release migration job to avoid replica boot races.
   await backfillWorkspaceOrganizations(db);
 }
+// Before createApp, and never inside it, so a test's own provider is never
+// replaced by building an app. The worker registers the same provider.
+registerEmailComplianceProvider(senderComplianceProvider);
 const app = createApp(db);
 
 if (process.env.NODE_ENV === 'production') {

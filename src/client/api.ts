@@ -51,6 +51,7 @@ import type {
 } from '../server/loop-cost';
 import type { PublicSkillManifest } from '../server/skill-api';
 import type { TodayPayload } from '../server/today';
+import type { SenderIdentity } from '../server/compliance/sender-identity';
 import type { ContentAngle, ContentOpportunity } from '../server/content/types';
 import type { StoryDraftVariantPreview } from '../server/content/story-draft';
 import type { ContentDraftStrategy } from '../server/content/strategy';
@@ -280,6 +281,24 @@ export async function getDashboard(): Promise<DashboardPayload> {
 
 export async function getToday(): Promise<TodayPayload> {
   return request('/api/today');
+}
+
+export async function getSenderIdentity(): Promise<SenderIdentity> {
+  return (await request<{ senderIdentity: SenderIdentity }>('/api/workspace/sender-identity'))
+    .senderIdentity;
+}
+
+export async function saveSenderIdentity(input: {
+  legalName: string | null;
+  postalAddress: string | null;
+  privacyPolicyUrl: string | null;
+}): Promise<SenderIdentity> {
+  return (
+    await request<{ senderIdentity: SenderIdentity }>('/api/workspace/sender-identity', {
+      method: 'PUT',
+      body: JSON.stringify(input)
+    })
+  ).senderIdentity;
 }
 
 export async function getContentOpportunities(

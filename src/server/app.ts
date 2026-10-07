@@ -449,6 +449,7 @@ import {
   handoffResolutionSchema,
   resolveLinkedInHandoff
 } from './linkedin/handoff.js';
+import { getSenderIdentity, saveSenderIdentity } from './compliance/sender-identity.js';
 import {
   applyLatestWorkflowToPendingMembers,
   campaignAdmissionSummary,
@@ -8203,6 +8204,37 @@ export function createApp(db: Db) {
       next(error);
     }
   });
+
+  // SENDER IDENTITY. Every member can read it, because every member plans
+  // outreach; only the owner changes what the workspace's email says it is.
+  app.get('/api/workspace/sender-identity', async (req: AuthedRequest, res, next) => {
+    try {
+      res.json({ senderIdentity: await getSenderIdentity(db, req.auth!.workspaceId) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put(
+    '/api/workspace/sender-identity',
+    ownerOnly('change the sender identity'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const senderIdentity = await saveSenderIdentity(
+          db,
+          {
+            workspaceId: req.auth!.workspaceId,
+            actorUserId: req.auth!.userId,
+            input: req.body ?? {}
+          },
+          new Date()
+        );
+        res.json({ senderIdentity });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found' }));
 

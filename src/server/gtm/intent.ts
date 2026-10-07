@@ -11,7 +11,7 @@ import {
   type CaptureSourceRecord
 } from '../lead-capture/types.js';
 import { secretsConfigured } from '../secrets/crypto.js';
-import { emailComplianceProvider } from '../email/compliance.js';
+import { emailComplianceFooterUnavailable, emailComplianceProvider } from '../email/compliance.js';
 import {
   EmailOutreachError,
   emailOutreachReadiness,
@@ -570,33 +570,21 @@ async function prepareOutreachPlan(
   });
 }
 
-const COMPLIANCE_BLOCKER_MESSAGES: Record<string, string> = {
-  email_compliance_footer_unavailable:
-    'Outreach email needs a compliance footer (legal name, postal address, opt-out). Complete sender compliance in Workspace settings.'
-};
-
 async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent): Promise<GtmPlan> {
   const blockers = peopleBlockers(intent);
   const existingListId = intent.people?.existingListId ?? null;
   const readiness = await emailOutreachReadiness(db, workspaceId, { leadListId: existingListId });
   blockers.push(...readiness.blockers);
   const provider = emailComplianceProvider();
-  const compliance = await provider.blockers(db, workspaceId, existingListId ?? null);
+  const compliance = [...(await provider.blockers(db, workspaceId, existingListId ?? null))];
   // Preparing refuses without a footer, so a plan that promises it can prepare
   // must not pass while the footer is missing, whatever the provider's blockers say.
   const footer = (await provider.footer(db, workspaceId))?.trim() ?? '';
-  if (!footer && !compliance.includes('email_compliance_footer_unavailable')) {
-    compliance.push('email_compliance_footer_unavailable');
+  const unavailable = emailComplianceFooterUnavailable();
+  if (!footer && !compliance.some((issue) => issue.code === unavailable.code)) {
+    compliance.push(unavailable);
   }
-  blockers.push(
-    ...compliance.map((code) => ({
-      code,
-      message:
-        COMPLIANCE_BLOCKER_MESSAGES[code] ??
-        `Sender compliance is incomplete (${code}). Complete it in Workspace settings.`,
-      actionHref: '/setup/workspace'
-    }))
-  );
+  blockers.push(...compliance);
   const sender = readiness.sender;
   const listLabel = readiness.listName ?? 'the selected People list';
   return finalizePlan({
