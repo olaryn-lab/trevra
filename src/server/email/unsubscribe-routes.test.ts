@@ -61,6 +61,7 @@ describe('/u/:token', () => {
     expect(response.headers['content-type']).toContain('text/html');
     expect(response.headers['cache-control']).toBe('no-store');
     expect(response.headers['x-robots-tag']).toBe('noindex, nofollow, noarchive');
+    expect(response.headers['referrer-policy']).toBe('no-referrer');
     expect(response.text).toContain(`<form method="post" action="/u/${token()}">`);
     await request(app).get(`/u/${token()}`).expect(200);
     expect(await suppressionCount()).toBe(0);
@@ -73,6 +74,7 @@ describe('/u/:token', () => {
       .send('List-Unsubscribe=One-Click')
       .expect(200);
     expect(response.text).toContain('You are unsubscribed');
+    expect(response.headers['referrer-policy']).toBe('no-referrer');
     expect(await suppressionCount()).toBe(1);
     await request(app).post(`/u/${token()}`).send('List-Unsubscribe=One-Click').expect(200);
     expect(await suppressionCount()).toBe(1);
@@ -84,6 +86,31 @@ describe('/u/:token', () => {
     await request(app).post(`/u/${forged}`).send('List-Unsubscribe=One-Click').expect(404);
     await request(app).get('/u/not-a-token').expect(404);
     expect(await suppressionCount()).toBe(0);
+  });
+});
+
+describe('/u/:token bodies and limits', () => {
+  it('unsubscribes on a POST with no body or a JSON body', async () => {
+    await request(app).post(`/u/${token()}`).expect(200);
+    expect(await suppressionCount()).toBe(1);
+    await db.prepare('DELETE FROM suppressions WHERE workspace_id=?').run(WORKSPACE);
+    await request(app).post(`/u/${token()}`).send({ anything: true }).expect(200);
+    expect(await suppressionCount()).toBe(1);
+  });
+
+  it('answers a rate-limited POST with the no-store error page, not plain text', async () => {
+    const limited = createApp(db);
+    const forged = `${DELIVERY}.${'A'.repeat(43)}`;
+    let last = await request(limited).post(`/u/${forged}`);
+    for (let sent = 1; sent < 600 && last.status !== 429; sent += 1) {
+      last = await request(limited).post(`/u/${forged}`);
+    }
+    expect(last.status).toBe(404);
+    last = await request(limited).post(`/u/${forged}`);
+    expect(last.status).toBe(429);
+    expect(last.headers['content-type']).toContain('text/html');
+    expect(last.headers['cache-control']).toBe('no-store');
+    expect(last.text).toContain('Your request was not recorded');
   });
 });
 

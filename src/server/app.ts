@@ -697,19 +697,27 @@ export function createApp(db: Db) {
   // security scanners fetch every link in a message, and a GET that
   // unsubscribed would let a scanner opt the recipient out. Only POST -- the
   // page's button or a mail client's one-click POST -- suppresses.
-  const unsubscribeLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    limit: 120,
-    standardHeaders: true,
-    legacyHeaders: false
-  });
+  // Separate buckets: a link scanner's GET burst must not 429 a real one-click POST.
+  const UNSUBSCRIBE_PAGE_LIMIT_PER_MINUTE = 120;
+  const UNSUBSCRIBE_POST_LIMIT_PER_MINUTE = 600;
   const unsubscribePageHeaders = (res: Response) => {
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.type('html');
   };
-  app.get('/u/:token', unsubscribeLimiter, async (req, res) => {
+  const unsubscribeLimiter = (limit: number) =>
+    rateLimit({
+      windowMs: 60 * 1000,
+      limit,
+      standardHeaders: true,
+      legacyHeaders: false,
+      handler: (_req, res) => {
+        unsubscribePageHeaders(res);
+        res.status(429).send(renderUnsubscribePage('error'));
+      }
+    });
+  app.get('/u/:token', unsubscribeLimiter(UNSUBSCRIBE_PAGE_LIMIT_PER_MINUTE), async (req, res) => {
     unsubscribePageHeaders(res);
     const token = String(req.params.token);
     try {
@@ -718,35 +726,31 @@ export function createApp(db: Db) {
         .status(delivery ? 200 : 404)
         .send(renderUnsubscribePage(delivery ? 'confirm' : 'invalid', token));
     } catch (error) {
-      console.error(
-        'Unsubscribe page failed',
-        error instanceof Error ? error.message : String(error)
+      req.log.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'Unsubscribe page failed'
       );
       res.status(500).send(renderUnsubscribePage('error'));
     }
   });
-  app.post(
-    '/u/:token',
-    unsubscribeLimiter,
-    express.raw({ type: () => true, limit: '8kb' }),
-    async (req, res) => {
-      unsubscribePageHeaders(res);
-      try {
-        const result = await applyUnsubscribeToken(db, String(req.params.token), {
-          source: 'email_one_click_unsubscribe'
-        });
-        res
-          .status(result.applied ? 200 : 404)
-          .send(renderUnsubscribePage(result.applied ? 'done' : 'invalid'));
-      } catch (error) {
-        console.error(
-          'One-click unsubscribe failed',
-          error instanceof Error ? error.message : String(error)
-        );
-        res.status(500).send(renderUnsubscribePage('error'));
-      }
+  // The RFC 8058 body (List-Unsubscribe=One-Click) is accepted but not needed, so it is never parsed.
+  app.post('/u/:token', unsubscribeLimiter(UNSUBSCRIBE_POST_LIMIT_PER_MINUTE), async (req, res) => {
+    unsubscribePageHeaders(res);
+    try {
+      const result = await applyUnsubscribeToken(db, String(req.params.token), {
+        source: 'email_one_click_unsubscribe'
+      });
+      res
+        .status(result.applied ? 200 : 404)
+        .send(renderUnsubscribePage(result.applied ? 'done' : 'invalid'));
+    } catch (error) {
+      req.log.error(
+        { err: error instanceof Error ? error.message : String(error) },
+        'One-click unsubscribe failed'
+      );
+      res.status(500).send(renderUnsubscribePage('error'));
     }
-  );
+  });
 
   app.post(
     '/api/webhooks/nango',
