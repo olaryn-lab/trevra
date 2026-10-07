@@ -580,11 +580,14 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
   const existingListId = intent.people?.existingListId ?? null;
   const readiness = await emailOutreachReadiness(db, workspaceId, { leadListId: existingListId });
   blockers.push(...readiness.blockers);
-  const compliance = await emailComplianceProvider().blockers(
-    db,
-    workspaceId,
-    existingListId ?? null
-  );
+  const provider = emailComplianceProvider();
+  const compliance = await provider.blockers(db, workspaceId, existingListId ?? null);
+  // Preparing refuses without a footer, so a plan that promises it can prepare
+  // must not pass while the footer is missing, whatever the provider's blockers say.
+  const footer = (await provider.footer(db, workspaceId))?.trim() ?? '';
+  if (!footer && !compliance.includes('email_compliance_footer_unavailable')) {
+    compliance.push('email_compliance_footer_unavailable');
+  }
   blockers.push(
     ...compliance.map((code) => ({
       code,

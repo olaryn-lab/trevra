@@ -72,8 +72,10 @@ async function codes(intent: unknown): Promise<string[]> {
   return (await compileGtmIntent(db, WORKSPACE, intent)).blockers.map((blocker) => blocker.code);
 }
 
+const FOOTER = 'Acme Labs Ltd, 1 Market Street, London EC1A 1AA';
+
 beforeEach(async () => {
-  registerEmailComplianceProvider({ footer: async () => null, blockers: async () => [] });
+  registerEmailComplianceProvider({ footer: async () => FOOTER, blockers: async () => [] });
   vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   await db.prepare('DELETE FROM workspaces WHERE id=?').run(WORKSPACE);
@@ -163,7 +165,7 @@ describe('email-only prepare_outreach plans', () => {
 
   it('names an unknown compliance code in its blocker', async () => {
     registerEmailComplianceProvider({
-      footer: async () => null,
+      footer: async () => FOOTER,
       blockers: async () => ['sender_privacy_url_missing']
     });
     await seedMailbox();
@@ -176,6 +178,39 @@ describe('email-only prepare_outreach plans', () => {
     expect(plan.blockers[0]?.code).toBe('sender_privacy_url_missing');
     expect(plan.blockers[0]?.message).toContain('sender_privacy_url_missing');
     expect(plan.blockers[0]?.actionHref).toBe('/setup/workspace');
+  });
+
+  it('blocks on a missing footer even when the provider reports no blockers', async () => {
+    for (const footer of [null, '  \n ']) {
+      registerEmailComplianceProvider({ footer: async () => footer, blockers: async () => [] });
+      await seedMailbox();
+      await seedInbound();
+      await seedCheck('pass');
+      const listId = await peopleList();
+
+      const plan = await compileGtmIntent(db, WORKSPACE, emailIntent(listId));
+      expect(plan.blockers.map((blocker) => blocker.code)).toEqual([
+        'email_compliance_footer_unavailable'
+      ]);
+      expect(plan.defaults.prepareSupported).toBe(false);
+      await db.prepare('DELETE FROM workspaces WHERE id=?').run(WORKSPACE);
+      await db
+        .prepare('INSERT INTO workspaces (id,name,created_at) VALUES (?,?,?)')
+        .run(WORKSPACE, 'Email outreach plan', NOW.toISOString());
+    }
+  });
+
+  it('adds the footer blocker only once when the provider already reports it', async () => {
+    registerEmailComplianceProvider({
+      footer: async () => null,
+      blockers: async () => ['email_compliance_footer_unavailable']
+    });
+    await seedMailbox();
+    await seedInbound();
+    await seedCheck('pass');
+    const listId = await peopleList();
+
+    expect(await codes(emailIntent(listId))).toEqual(['email_compliance_footer_unavailable']);
   });
 
   it('fails closed when a failing DNS check stored no blockers', async () => {

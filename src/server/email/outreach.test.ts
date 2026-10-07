@@ -16,7 +16,12 @@ vi.mock('@nangohq/node', () => ({
 }));
 
 import { openDatabase, type Db } from '../db.js';
-import { compileGtmIntent, prepareGtmPlan, type PreparedGtmPlanResult } from '../gtm/intent.js';
+import {
+  compileGtmIntent,
+  prepareGtmPlan,
+  type GtmPlan,
+  type PreparedGtmPlanResult
+} from '../gtm/intent.js';
 import { createLeadList, importLeadCsv, updateLeadContact } from '../linkedin/lead-lists.js';
 import { decidePlaybookApproval } from '../playbooks/engine.js';
 import { createSuppression } from '../suppressions.js';
@@ -25,7 +30,7 @@ import {
   registerEmailComplianceProvider,
   resetEmailComplianceProvider
 } from './compliance.js';
-import { isOutreachRunConflict } from './outreach.js';
+import { isOutreachRunConflict, prepareEmailOutreach } from './outreach.js';
 import type { PreparedEmailOutreachResult } from './types.js';
 
 const WORKSPACE = 'ws_email_outreach_prepare';
@@ -68,6 +73,19 @@ async function prepare(idempotencyKey: string): Promise<PreparedGtmPlanResult> {
     planHash: plan.planHash,
     idempotencyKey
   });
+}
+
+/** prepareEmailOutreach's input for a compiled email plan, bypassing the plan re-check. */
+function preparationInput(plan: GtmPlan, idempotencyKey: string) {
+  return {
+    workspaceId: WORKSPACE,
+    actorUserId: USER,
+    idempotencyKey,
+    planHash: plan.planHash,
+    leadListId: listId,
+    connectionId: String(plan.defaults.connectionId),
+    senderAddress: String(plan.defaults.senderAddress)
+  };
 }
 
 function emailResult(prepared: PreparedGtmPlanResult): PreparedEmailOutreachResult {
@@ -264,20 +282,28 @@ describe('prepareEmailOutreach', () => {
   });
 
   it('refuses to prepare, writing nothing, while no compliance footer is available', async () => {
+    // The plan itself blocks without a footer.
+    registerEmailComplianceProvider({ footer: async () => null, blockers: async () => [] });
+    const blocked = await compileGtmIntent(db, WORKSPACE, emailIntent());
+    await expect(
+      prepareGtmPlan(db, {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        actorRole: 'owner',
+        plan: blocked,
+        planHash: blocked.planHash,
+        idempotencyKey: 'email-prepare-no-footer'
+      })
+    ).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/compliance footer/) });
+
+    // A footer that disappears between planning and preparing still refuses.
+    registerEmailComplianceProvider({ footer: async () => FOOTER, blockers: async () => [] });
+    const plan = await compileGtmIntent(db, WORKSPACE, emailIntent());
+    expect(plan.blockers).toEqual([]);
     for (const footer of [null, '  \n ']) {
       registerEmailComplianceProvider({ footer: async () => footer, blockers: async () => [] });
-      const plan = await compileGtmIntent(db, WORKSPACE, emailIntent());
-      expect(plan.blockers).toEqual([]);
-
       await expect(
-        prepareGtmPlan(db, {
-          workspaceId: WORKSPACE,
-          actorUserId: USER,
-          actorRole: 'owner',
-          plan,
-          planHash: plan.planHash,
-          idempotencyKey: 'email-prepare-no-footer'
-        })
+        prepareEmailOutreach(db, preparationInput(plan, 'email-prepare-no-footer'))
       ).rejects.toMatchObject({
         status: 409,
         message: expect.stringMatching(/compliance footer/)
@@ -290,10 +316,20 @@ describe('prepareEmailOutreach', () => {
   });
 
   it('replays an existing receipt even after the footer becomes unavailable', async () => {
-    const first = emailResult(await prepare('email-prepare-0001'));
+    const plan = await compileGtmIntent(db, WORKSPACE, emailIntent());
+    const first = emailResult(
+      await prepareGtmPlan(db, {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        actorRole: 'owner',
+        plan,
+        planHash: plan.planHash,
+        idempotencyKey: 'email-prepare-0001'
+      })
+    );
     registerEmailComplianceProvider({ footer: async () => null, blockers: async () => [] });
 
-    const replay = emailResult(await prepare('email-prepare-0001'));
+    const replay = await prepareEmailOutreach(db, preparationInput(plan, 'email-prepare-0001'));
 
     expect(replay.duplicate).toBe(true);
     expect(replay.prepared).toEqual(first.prepared);
