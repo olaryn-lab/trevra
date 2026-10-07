@@ -83,6 +83,11 @@ async function readProviderAddress(mailbox: SendingMailbox): Promise<string> {
  * end_user_email tag is the Trevra user, not the mailbox, so it is never used.
  * Returns null when the provider cannot be asked, answers with no address, or
  * does not answer within `deadlineMs`.
+ *
+ * The cache is read from the row, never from the caller's snapshot, and written
+ * only if the row is unchanged since that read: a re-authorization in between
+ * (which clears mailbox_address and bumps updated_at) means the answer may
+ * belong to the previous account, so it is discarded.
  */
 export async function resolveMailboxAddress(
   db: Db,
@@ -90,7 +95,13 @@ export async function resolveMailboxAddress(
   mailbox: SendingMailbox,
   options: { deadlineMs?: number } = {}
 ): Promise<string | null> {
-  if (mailbox.address) return mailbox.address;
+  const current = await db
+    .prepare(
+      'SELECT mailbox_address,updated_at::text AS version FROM connections WHERE id=? AND workspace_id=?'
+    )
+    .get<{ mailbox_address: string | null; version: string }>(mailbox.connectionId, workspaceId);
+  if (!current) return null;
+  if (current.mailbox_address) return current.mailbox_address;
   const deadlineMs = options.deadlineMs ?? MAILBOX_ADDRESS_DEADLINE_MS;
   let timer: NodeJS.Timeout | undefined;
   let raw: string | null;
@@ -119,8 +130,18 @@ export async function resolveMailboxAddress(
   if (!parsed.success) return null;
   // An identity cache, not a user-visible change: updated_at stays put so the
   // connection's place in "newest mailbox first" ordering does not move.
-  await db
-    .prepare('UPDATE connections SET mailbox_address=? WHERE id=? AND workspace_id=?')
-    .run(parsed.data, mailbox.connectionId, workspaceId);
-  return parsed.data;
+  const cached = await db
+    .prepare(
+      `UPDATE connections SET mailbox_address=?
+       WHERE id=? AND workspace_id=? AND mailbox_address IS NULL AND updated_at=?::timestamptz`
+    )
+    .run(parsed.data, mailbox.connectionId, workspaceId, current.version);
+  if (cached.changes === 1) return parsed.data;
+  // Lost to a concurrent resolve of the same, unchanged connection: use its answer.
+  const winner = await db
+    .prepare(
+      'SELECT mailbox_address FROM connections WHERE id=? AND workspace_id=? AND updated_at=?::timestamptz'
+    )
+    .get<{ mailbox_address: string | null }>(mailbox.connectionId, workspaceId, current.version);
+  return winner?.mailbox_address ?? null;
 }

@@ -14,8 +14,12 @@ vi.mock('@nangohq/node', () => ({
 }));
 
 const { openDatabase } = await import('../db.js');
-const { getSenderDeliverability, readSenderDeliverability, refreshDueEmailDeliverability } =
-  await import('./sender-deliverability.js');
+const {
+  DELIVERABILITY_SWEEP_LOCK,
+  getSenderDeliverability,
+  readSenderDeliverability,
+  refreshDueEmailDeliverability
+} = await import('./sender-deliverability.js');
 const { listSendingMailboxes, resolveMailboxAddress } = await import('./mailbox-address.js');
 
 type Db = Awaited<ReturnType<typeof openDatabase>>;
@@ -252,12 +256,11 @@ describe('deliverability deadlines', () => {
     expect(result.checkedAt).toBe(NOW.toISOString());
   });
 
-  it('stops the worker sweep at its deadline and leaves the rest for the next tick', async () => {
+  it('does not start a domain the sweep budget cannot finish; it stays due', async () => {
     const failing = resolverFor({});
     for (const [domain, minutesAgo] of [
       ['a.acme.test', 60],
-      ['b.acme.test', 50],
-      ['c.acme.test', 40]
+      ['b.acme.test', 50]
     ] as const) {
       await getSenderDeliverability(
         db,
@@ -268,26 +271,247 @@ describe('deliverability deadlines', () => {
     }
     const started = Date.now();
     const result = await refreshDueEmailDeliverability(db, {
-      resolver: slowResolverFor(
-        { ...passingRecords('a.acme.test'), ...passingRecords('c.acme.test') },
-        ['b.acme.test']
-      ),
+      resolver: slowResolverFor(passingRecords('b.acme.test'), ['a.acme.test']),
       now: NOW,
-      deadlineMs: 100,
-      domainDeadlineMs: 10_000
+      deadlineMs: 150,
+      domainDeadlineMs: 100
     });
     expect(Date.now() - started).toBeLessThan(2_000);
-    expect(result.refreshed).toBe(2);
+    expect(result.refreshed).toBe(1);
+    // a's OWN deadline fired: honestly unknown.
+    expect((await readSenderDeliverability(db, WORKSPACE, 'a.acme.test', 'google'))?.status).toBe(
+      'unknown'
+    );
+    // b was never started: untouched and still due.
+    const waiting = await readSenderDeliverability(db, WORKSPACE, 'b.acme.test', 'google');
+    expect(waiting?.status).toBe('fail');
+    expect(waiting?.checkedAt).toBe(new Date(NOW.getTime() - 50 * MINUTE).toISOString());
+    expect(Date.parse(waiting!.expiresAt)).toBeLessThanOrEqual(NOW.getTime());
+  });
+
+  it('never lets a timed-out sweep result replace a newer answer', async () => {
+    await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'acme.test', provider: 'google', markOutreach: true },
+      { resolver: resolverFor({}), now: new Date(NOW.getTime() - 60 * MINUTE) }
+    );
+    const later = new Date(NOW.getTime() + 20_000);
+    let request: Promise<unknown> | null = null;
+    const resolver: DnsResolver = {
+      resolveTxt() {
+        // A request re-checks the same domain while the sweep's lookup hangs.
+        request ??= getSenderDeliverability(
+          db,
+          WORKSPACE,
+          { domain: 'acme.test', provider: 'google', force: true },
+          { resolver: resolverFor(passingRecords('acme.test')), now: later }
+        );
+        return new Promise<string[][]>(() => undefined);
+      }
+    };
+    await refreshDueEmailDeliverability(db, {
+      resolver,
+      now: NOW,
+      deadlineMs: 10_000,
+      domainDeadlineMs: 300
+    });
+    await request;
+    const row = await readSenderDeliverability(db, WORKSPACE, 'acme.test', 'google');
+    expect(row?.status).toBe('pass');
+    expect(row?.checkedAt).toBe(later.toISOString());
+  });
+
+  it('never moves checked_at backwards', async () => {
+    const later = new Date(NOW.getTime() + 10 * MINUTE);
+    await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'acme.test', provider: 'google' },
+      { resolver: resolverFor(passingRecords('acme.test')), now: later }
+    );
+    const older = await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'acme.test', provider: 'google', force: true },
+      { resolver: resolverFor({}), now: NOW }
+    );
+    expect(older.status).toBe('pass');
+    expect(older.checkedAt).toBe(later.toISOString());
+  });
+
+  it('leaves the sweep to the replica holding its lock', async () => {
+    await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'acme.test', provider: 'google', markOutreach: true },
+      { resolver: resolverFor({}), now: new Date(NOW.getTime() - 60 * MINUTE) }
+    );
+    const [namespace, key] = DELIVERABILITY_SWEEP_LOCK;
+    await db.withConnection('test-sweep-lock', async (holder) => {
+      await holder.query('SELECT pg_advisory_lock(hashtext($1), hashtext($2))', [namespace, key]);
+      try {
+        const result = await refreshDueEmailDeliverability(db, {
+          resolver: resolverFor(passingRecords('acme.test')),
+          now: NOW
+        });
+        expect(result.refreshed).toBe(0);
+      } finally {
+        await holder.query('SELECT pg_advisory_unlock(hashtext($1), hashtext($2))', [
+          namespace,
+          key
+        ]);
+      }
+    });
+    expect((await readSenderDeliverability(db, WORKSPACE, 'acme.test', 'google'))?.status).toBe(
+      'fail'
+    );
+  });
+
+  it('stops writing once the worker starts draining', async () => {
+    for (const [domain, minutesAgo] of [
+      ['a.acme.test', 60],
+      ['b.acme.test', 50],
+      ['c.acme.test', 40]
+    ] as const) {
+      await getSenderDeliverability(
+        db,
+        WORKSPACE,
+        { domain, provider: 'google', markOutreach: true },
+        { resolver: resolverFor({}), now: new Date(NOW.getTime() - minutesAgo * MINUTE) }
+      );
+    }
+    const answers = resolverFor({
+      ...passingRecords('a.acme.test'),
+      ...passingRecords('b.acme.test'),
+      ...passingRecords('c.acme.test')
+    });
+    let draining = false;
+    const resolver: DnsResolver = {
+      resolveTxt(name: string) {
+        // The drain begins while b is being checked.
+        if (name.endsWith('b.acme.test')) draining = true;
+        return answers.resolveTxt(name);
+      }
+    };
+    const result = await refreshDueEmailDeliverability(db, {
+      resolver,
+      now: NOW,
+      shouldStop: () => draining
+    });
+    expect(result.refreshed).toBe(1);
     expect((await readSenderDeliverability(db, WORKSPACE, 'a.acme.test', 'google'))?.status).toBe(
       'pass'
     );
-    // Cut off mid-check: honestly unknown, and re-queued behind fresher work.
     expect((await readSenderDeliverability(db, WORKSPACE, 'b.acme.test', 'google'))?.status).toBe(
-      'unknown'
+      'fail'
     );
-    const waiting = await readSenderDeliverability(db, WORKSPACE, 'c.acme.test', 'google');
-    expect(waiting?.status).toBe('fail');
-    expect(waiting?.checkedAt).toBe(new Date(NOW.getTime() - 40 * MINUTE).toISOString());
+    expect((await readSenderDeliverability(db, WORKSPACE, 'c.acme.test', 'google'))?.status).toBe(
+      'fail'
+    );
+    expect(answers.calls.some((name) => name.endsWith('c.acme.test'))).toBe(false);
+  });
+
+  it('reports unknown, never a stale pass, when a re-check times out', async () => {
+    const dayAgo = new Date(NOW.getTime() - 25 * 60 * MINUTE);
+    for (const domain of ['req.acme.test', 'sweep.acme.test']) {
+      await getSenderDeliverability(
+        db,
+        WORKSPACE,
+        { domain, provider: 'google', markOutreach: true },
+        { resolver: resolverFor(passingRecords(domain)), now: dayAgo }
+      );
+    }
+    const viaRequest = await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'req.acme.test', provider: 'google' },
+      {
+        resolver: slowResolverFor({}, ['req.acme.test']),
+        now: NOW,
+        deadlineMs: 20,
+        domainDeadlineMs: 50
+      }
+    );
+    expect(viaRequest.status).toBe('unknown');
+    await refreshDueEmailDeliverability(db, {
+      resolver: slowResolverFor({}, ['sweep.acme.test']),
+      now: NOW,
+      domainDeadlineMs: 50
+    });
+    for (const domain of ['req.acme.test', 'sweep.acme.test']) {
+      expect((await readSenderDeliverability(db, WORKSPACE, domain, 'google'))?.status).toBe(
+        'unknown'
+      );
+    }
+  });
+
+  it('finishes a slow check in the background after the request stops waiting', async () => {
+    const fast = resolverFor(passingRecords('acme.test'));
+    const slow: DnsResolver = {
+      async resolveTxt(name: string) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return fast.resolveTxt(name);
+      }
+    };
+    const started = Date.now();
+    const answer = await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'acme.test', provider: 'google' },
+      { resolver: slow, now: NOW, deadlineMs: 20, domainDeadlineMs: 5_000 }
+    );
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(answer.status).toBe('unknown');
+    await vi.waitFor(
+      async () => {
+        const row = await readSenderDeliverability(db, WORKSPACE, 'acme.test', 'google');
+        expect(row?.status).toBe('pass');
+      },
+      { timeout: 3_000, interval: 25 }
+    );
+  });
+
+  it('stores nothing from a background check whose own deadline fired', async () => {
+    await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'acme.test', provider: 'google' },
+      {
+        resolver: slowResolverFor({}, ['acme.test']),
+        now: NOW,
+        deadlineMs: 20,
+        domainDeadlineMs: 80
+      }
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const row = await readSenderDeliverability(db, WORKSPACE, 'acme.test', 'google');
+    expect(row?.spf.detail).toMatch(/rechecking/);
+  });
+
+  it('normalises the domain the same way for reads and writes', async () => {
+    const resolver = resolverFor(passingRecords('acme.test'));
+    await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'acme.test', provider: 'google' },
+      { resolver, now: NOW }
+    );
+    const lookups = resolver.calls.length;
+    const again = await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: ' Acme.Test. ', provider: 'google' },
+      { resolver, now: NOW }
+    );
+    expect(again.domain).toBe('acme.test');
+    expect(resolver.calls.length).toBe(lookups);
+    expect((await readSenderDeliverability(db, WORKSPACE, 'acme.test.', 'google'))?.status).toBe(
+      'pass'
+    );
+    await expect(
+      getSenderDeliverability(db, WORKSPACE, { domain: ' . ', provider: 'google' }, { resolver })
+    ).rejects.toThrow(/domain/i);
   });
 
   it('gives up on one hanging domain without starving the domains behind it', async () => {
@@ -329,6 +553,33 @@ describe('deliverability deadlines', () => {
       .prepare('SELECT mailbox_address FROM connections WHERE id=?')
       .get<{ mailbox_address: string | null }>('conn_gmail_slow');
     expect(row?.mailbox_address).toBeNull();
+  });
+});
+
+describe('mailbox identity races', () => {
+  it('does not restore the old address when the mailbox is re-authorized mid-read', async () => {
+    await insertConnection({ id: 'conn_gmail_reauth', provider: 'gmail' });
+    const [mailbox] = await listSendingMailboxes(db, WORKSPACE);
+    nangoMock.get.mockImplementationOnce(async () => {
+      await db
+        .prepare('UPDATE connections SET mailbox_address=NULL, updated_at=? WHERE id=?')
+        .run(new Date(NOW.getTime() + MINUTE).toISOString(), 'conn_gmail_reauth');
+      return { data: { emailAddress: 'old-owner@acme.test' }, headers: {} };
+    });
+    expect(await resolveMailboxAddress(db, WORKSPACE, mailbox!)).toBeNull();
+    const row = await db
+      .prepare('SELECT mailbox_address FROM connections WHERE id=?')
+      .get<{ mailbox_address: string | null }>('conn_gmail_reauth');
+    expect(row?.mailbox_address).toBeNull();
+  });
+
+  it('asks the provider again when a cached snapshot was cleared since', async () => {
+    await insertConnection({ id: 'conn_gmail_snapshot', provider: 'gmail' });
+    const [mailbox] = await listSendingMailboxes(db, WORKSPACE);
+    nangoMock.get.mockResolvedValueOnce({ data: { emailAddress: 'new@acme.test' }, headers: {} });
+    expect(
+      await resolveMailboxAddress(db, WORKSPACE, { ...mailbox!, address: 'old-owner@acme.test' })
+    ).toBe('new@acme.test');
   });
 });
 

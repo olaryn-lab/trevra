@@ -49,6 +49,11 @@ export function mailProviderFor(provider: string): MailProvider | null {
   return null;
 }
 
+/** The one spelling of a sending domain: trimmed, lowercase, no trailing dot. */
+export function normalizeSenderDomain(domain: string): string {
+  return domain.trim().toLowerCase().replace(/\.$/, '');
+}
+
 export function emailDomainOf(address: string): string | null {
   const at = address.lastIndexOf('@');
   if (at < 1) return null;
@@ -519,7 +524,7 @@ export async function evaluateDeliverability(
   input: { domain: string; provider: MailProvider },
   resolver: DnsResolver = defaultDnsResolver()
 ): Promise<DeliverabilityEvaluation> {
-  const domain = input.domain.trim().toLowerCase().replace(/\.$/, '');
+  const domain = normalizeSenderDomain(input.domain);
   if (CONSUMER_MAILBOX_DOMAINS.has(domain)) {
     const managed: DeliverabilityCheck = {
       status: 'provider_managed',

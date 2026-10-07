@@ -293,7 +293,7 @@ async function emailDeliverabilityCycle(): Promise<void> {
   if (emailDeliverabilityRunning || draining) return;
   emailDeliverabilityRunning = true;
   try {
-    await refreshDueEmailDeliverability(db);
+    await refreshDueEmailDeliverability(db, { shouldStop: () => draining });
   } catch (error) {
     console.error('Worker email deliverability cycle failed', error);
   } finally {
@@ -324,6 +324,10 @@ async function shutdown(signal: string) {
   if (running)
     console.error(
       `Worker still mid-cycle after ${DRAIN_TIMEOUT_MS}ms; exiting anyway. Any agent run left in flight is written off by the next worker's reap.`
+    );
+  if (emailDeliverabilityRunning)
+    console.error(
+      `Email deliverability sweep still mid-domain after ${DRAIN_TIMEOUT_MS}ms; exiting anyway. Its unfinished domains stay due for the next worker.`
     );
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await temporalWorker?.shutdown();
