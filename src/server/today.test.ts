@@ -745,6 +745,142 @@ describe('getToday', () => {
     expect(today.recentResults).toEqual([]);
   });
 
+  async function seedMailbox(options: { status?: string; workspaceId?: string } = {}) {
+    const workspaceId = options.workspaceId ?? WORKSPACE;
+    await db
+      .prepare(
+        `INSERT INTO connections
+         (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,
+          mailbox_address,created_at,updated_at)
+         VALUES (?,?,'gmail','trevra-gmail',?,NULL,?,0,'founder@acme.test',?,?)`
+      )
+      .run(
+        `conn_today_mail_${workspaceId}`,
+        workspaceId,
+        `gmail-today-${workspaceId}`,
+        options.status ?? 'connected',
+        '2026-08-20T08:00:00.000Z',
+        '2026-08-20T08:00:00.000Z'
+      );
+  }
+
+  async function seedCheck(
+    status: 'pass' | 'fail',
+    outreachRequestedAt: string | null,
+    workspaceId = WORKSPACE
+  ) {
+    await db
+      .prepare(
+        `INSERT INTO email_deliverability_checks
+         (workspace_id,domain,provider,status,spf_json,dkim_json,dmarc_json,blockers_json,warnings_json,
+          checked_at,expires_at,outreach_requested_at)
+         VALUES (?,'acme.test','google',?,'{}'::jsonb,'{}'::jsonb,'{}'::jsonb,?::jsonb,'[]'::jsonb,
+                 ?::timestamptz,?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        workspaceId,
+        status,
+        JSON.stringify(
+          status === 'fail'
+            ? [
+                {
+                  code: 'email_dkim_missing',
+                  message: 'No DKIM key is published for acme.test at google._domainkey.',
+                  actionHref: '/setup/workspace'
+                }
+              ]
+            : []
+        ),
+        '2026-08-21T07:30:00.000Z',
+        '2026-08-21T07:40:00.000Z',
+        outreachRequestedAt
+      );
+  }
+
+  it('surfaces a failing sending domain someone planned outreach from', async () => {
+    await seedMailbox();
+    await seedCheck('fail', '2026-08-21T07:30:00.000Z');
+
+    const today = await getToday(db, WORKSPACE, NOW);
+
+    expect(today.needsAttention).toEqual([
+      {
+        id: 'deliverability:acme.test:google',
+        kind: 'deliverability_blocked',
+        priority: 25,
+        title: 'Email from acme.test is blocked',
+        detail: 'No DKIM key is published for acme.test at google._domainkey.',
+        href: '/setup/workspace',
+        observedAt: '2026-08-21T07:30:00.000Z',
+        reference: { type: 'email_domain', id: 'acme.test' },
+        metadata: { provider: 'google', blockerCodes: ['email_dkim_missing'] }
+      }
+    ]);
+  });
+
+  it('stays quiet about domains nobody is about to send from', async () => {
+    await seedMailbox();
+    await seedCheck('fail', null);
+    expect((await getToday(db, WORKSPACE, NOW)).needsAttention).toEqual([]);
+
+    await db.prepare('DELETE FROM email_deliverability_checks WHERE workspace_id=?').run(WORKSPACE);
+    await seedCheck('fail', '2026-07-01T07:30:00.000Z');
+    expect((await getToday(db, WORKSPACE, NOW)).needsAttention).toEqual([]);
+
+    await db.prepare('DELETE FROM email_deliverability_checks WHERE workspace_id=?').run(WORKSPACE);
+    await seedCheck('pass', '2026-08-21T07:30:00.000Z');
+    expect((await getToday(db, WORKSPACE, NOW)).needsAttention).toEqual([]);
+
+    await db.prepare('DELETE FROM email_deliverability_checks WHERE workspace_id=?').run(WORKSPACE);
+    await db
+      .prepare("UPDATE connections SET status='disconnected' WHERE workspace_id=?")
+      .run(WORKSPACE);
+    await seedCheck('fail', '2026-08-21T07:30:00.000Z');
+    expect((await getToday(db, WORKSPACE, NOW)).needsAttention).toEqual([]);
+  });
+
+  it('labels mail read from the inbound mailbox as new email', async () => {
+    await db
+      .prepare(
+        `INSERT INTO contacts
+         (id,workspace_id,name,email,email_normalized,created_at,updated_at)
+         VALUES ('con_today_inbound_mail',?,'Nora Frei','nora@client.test','nora@client.test',?,?)`
+      )
+      .run(WORKSPACE, '2026-08-21T07:00:00.000Z', '2026-08-21T07:45:00.000Z');
+    await db
+      .prepare(
+        `INSERT INTO conversations
+         (id,workspace_id,person_id,status,last_activity_at,created_at,updated_at)
+         VALUES ('conv_today_inbound_mail',?,'con_today_inbound_mail','open',?,?,?)`
+      )
+      .run(
+        WORKSPACE,
+        '2026-08-21T07:45:00.000Z',
+        '2026-08-21T07:00:00.000Z',
+        '2026-08-21T07:45:00.000Z'
+      );
+    await db
+      .prepare(
+        `INSERT INTO conversation_messages
+         (id,workspace_id,conversation_id,channel,provider,direction,body,source_type,source_id,
+          outcome_kind,verification_status,occurred_at,created_at)
+         VALUES ('cmsg_today_inbound_mail',?,'conv_today_inbound_mail','email','gmail','inbound',
+                 'Saw your note, are you free Thursday?','inbound_mailbox_message','msg_today_inbound',
+                 'reply','verified','2026-08-21T07:45:00.000Z','2026-08-21T07:45:00.000Z')`
+      )
+      .run(WORKSPACE);
+
+    const today = await getToday(db, WORKSPACE, NOW);
+
+    expect(today.needsAttention).toEqual([
+      expect.objectContaining({
+        kind: 'verified_reply',
+        title: 'New email from Nora Frei',
+        metadata: expect.objectContaining({ channel: 'email', inboundMailbox: true })
+      })
+    ]);
+  });
+
   it('never leaks another workspace into the projection', async () => {
     const other = 'ws_today_projection_other';
     await clearWorkspace(other);
@@ -753,6 +889,8 @@ describe('getToday', () => {
       .run(other, 'Other', NOW.toISOString());
     await upsertSeat(db, other, { label: 'Other LinkedIn', timezone: 'UTC' }, NOW);
     await pauseSeat(db, other, 'Other workspace pause', NOW);
+    await seedMailbox({ workspaceId: other });
+    await seedCheck('fail', '2026-08-21T07:30:00.000Z', other);
 
     const today = await getToday(db, WORKSPACE, NOW);
     expect(today.needsAttention).toEqual([]);

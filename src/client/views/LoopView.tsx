@@ -747,6 +747,7 @@ function todayActionLabel(
     return item.metadata.demandOrigin === 'known_contact' ? 'Prepare outreach' : 'Prepare response';
   }
   if (item.kind === 'verified_reply') return 'Reply';
+  if (item.kind === 'deliverability_blocked') return 'Fix DNS';
   if (item.kind === 'inbound_submission') return 'Review inbound';
   if (item.kind === 'customer_cancelled') return 'Review customer';
   if (item.kind === 'high_priority_account') return 'Review account';

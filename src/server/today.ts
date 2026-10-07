@@ -27,7 +27,8 @@ export type TodayItemKind =
   | 'milestone_reached'
   | 'customer_cancelled'
   | 'meeting_upcoming'
-  | 'meeting_held';
+  | 'meeting_held'
+  | 'deliverability_blocked';
 
 export interface TodayItem {
   id: string;
@@ -359,13 +360,13 @@ export async function getToday(
 
   const emailReplyRows = await db
     .prepare(
-      `SELECT c.id AS conversation_id,m.id AS message_id,m.body,m.occurred_at,
+      `SELECT c.id AS conversation_id,m.id AS message_id,m.body,m.occurred_at,m.source_type,
               p.id AS person_id,p.name AS person_name,p.email AS person_email
        FROM conversations c
        JOIN contacts p ON p.workspace_id=c.workspace_id AND p.id=c.person_id
        JOIN LATERAL (
          SELECT cm.id,cm.body,cm.occurred_at,cm.channel,cm.direction,
-                cm.verification_status,cm.outcome_kind
+                cm.verification_status,cm.outcome_kind,cm.source_type
          FROM conversation_messages cm
          WHERE cm.workspace_id=c.workspace_id AND cm.conversation_id=c.id
          ORDER BY cm.occurred_at DESC,cm.created_at DESC,cm.id DESC
@@ -376,6 +377,33 @@ export async function getToday(
        ORDER BY m.occurred_at ASC,c.id ASC LIMIT 50`
     )
     .all<Record<string, unknown>>(workspaceId);
+
+  // A failing sending domain needs a human only while it is in use: someone
+  // planned email outreach from it in the last 30 days and a live connected
+  // mailbox still sends from it.
+  const deliverabilityRows = await db
+    .prepare(
+      `SELECT d.domain,d.provider,d.blockers_json,d.checked_at
+       FROM email_deliverability_checks d
+       WHERE d.workspace_id=? AND d.status='fail'
+         AND d.outreach_requested_at IS NOT NULL
+         AND d.outreach_requested_at>=?::timestamptz
+         AND EXISTS (
+           SELECT 1 FROM connections c
+           WHERE c.workspace_id=d.workspace_id AND c.status='connected' AND c.is_demo=0
+             AND c.mailbox_address IS NOT NULL
+             AND SPLIT_PART(c.mailbox_address,'@',2)=d.domain
+             AND CASE
+                   WHEN c.provider IN ('gmail','google-mail') THEN 'google'
+                   WHEN c.provider IN ('microsoft','outlook') THEN 'microsoft'
+                 END=d.provider
+         )
+       ORDER BY d.domain ASC,d.provider ASC LIMIT 10`
+    )
+    .all<Record<string, unknown>>(
+      workspaceId,
+      new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString()
+    );
 
   // Capacity is only worth human attention when work is due now and the same
   // pre-execution gate the worker uses is refusing on a tunable/rate boundary.
@@ -465,11 +493,12 @@ export async function getToday(
       String(row.person_name ?? '').trim() ||
       String(row.person_email ?? '').trim() ||
       'Email reply';
+    const inboundMailbox = row.source_type === 'inbound_mailbox_message';
     items.push({
       id: `email-reply:${String(row.message_id)}`,
       kind: 'verified_reply',
       priority: 20,
-      title: `Reply from ${name}`,
+      title: inboundMailbox ? `New email from ${name}` : `Reply from ${name}`,
       detail:
         String(row.body ?? '')
           .trim()
@@ -480,7 +509,31 @@ export async function getToday(
       metadata: {
         conversationId: String(row.conversation_id),
         personId: String(row.person_id),
-        channel: 'email'
+        channel: 'email',
+        inboundMailbox
+      }
+    });
+  }
+
+  for (const row of deliverabilityRows) {
+    const domain = String(row.domain);
+    const blockers = Array.isArray(row.blockers_json)
+      ? (row.blockers_json as Array<{ code?: unknown; message?: unknown }>)
+      : [];
+    items.push({
+      id: `deliverability:${domain}:${String(row.provider)}`,
+      kind: 'deliverability_blocked',
+      priority: 25,
+      title: `Email from ${domain} is blocked`,
+      detail:
+        String(blockers[0]?.message ?? '').trim() ||
+        `SPF, DKIM or DMARC for ${domain} does not pass, so Trevra will not plan email outreach from it.`,
+      href: '/setup/workspace',
+      observedAt: iso(row.checked_at, now),
+      reference: { type: 'email_domain', id: domain },
+      metadata: {
+        provider: String(row.provider),
+        blockerCodes: blockers.map((blocker) => String(blocker.code ?? '')).filter(Boolean)
       }
     });
   }
