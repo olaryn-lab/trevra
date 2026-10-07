@@ -309,13 +309,15 @@ export async function designateInboundMailbox(
     )
     .run(status, syncError, new Date().toISOString(), input.workspaceId, mailbox.connectionId, at);
   if (settled.changes === 0) {
-    // A concurrent DELETE or PUT replaced this designation while Nango was
-    // starting the sync: do not leave it running for a mailbox nobody chose.
-    await pauseInboundSync({
-      provider_config_key: mailbox.providerConfigKey,
-      external_connection_id: mailbox.externalConnectionId
-    });
     const current = await readInbound(db, input.workspaceId);
+    // A newer PUT for the same connection owns the designation and its sync.
+    // Only a DELETE, or a switch to another mailbox, leaves this sync orphaned.
+    if (!current || current.connection_id !== mailbox.connectionId) {
+      await pauseInboundSync({
+        provider_config_key: mailbox.providerConfigKey,
+        external_connection_id: mailbox.externalConnectionId
+      });
+    }
     return current?.sync_status ?? 'unavailable';
   }
   return status;

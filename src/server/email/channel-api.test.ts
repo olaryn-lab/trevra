@@ -347,6 +347,21 @@ describe('email channel API', () => {
       expect(row?.last_record_at).toBeNull();
     });
 
+    it('keeps the sync running when a newer PUT for the same connection wins the race', async () => {
+      const { owner, connectionId } = await ownerWithMailbox();
+      nangoMock.startSync.mockImplementationOnce(async () => {
+        await designateInboundMailbox(
+          db,
+          { workspaceId: owner.auth.workspaceId, connectionId, actorUserId: owner.userId },
+          new Date(Date.now() + 60_000)
+        );
+      });
+      nangoMock.pauseSync.mockClear();
+      await owner.agent.put('/api/email/inbound-mailbox').send({ connectionId }).expect(200);
+      expect(nangoMock.pauseSync).not.toHaveBeenCalled();
+      expect((await inboundRow(owner.auth.workspaceId))?.sync_status).toBe('syncing');
+    });
+
     it('pauses the sync it just started when a concurrent clear wins the race', async () => {
       const { owner, connectionId, external } = await ownerWithMailbox();
       nangoMock.startSync.mockImplementationOnce(async () => {
