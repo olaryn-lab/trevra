@@ -27,6 +27,7 @@ import {
   classifyVerifiedInboundEmail,
   type VerifiedEmailOutcome
 } from './email-outcomes.js';
+import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
 
 const canonicalRecordSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -641,6 +642,39 @@ export async function executeConnectedAction(
     await markEmailDeliverySent(db, deliveryId, outcome);
     return { provider: outcome.provider, externalRef: outcome.externalRef };
   }
+  // RFC 8058 one-click unsubscribe on every outreach email. The token is bound
+  // to this delivery's stable id, so a retry of a failed delivery carries the
+  // same link. Anything going wrong here happens before any provider call, so it
+  // is reported as a definite (4xx) failure and the delivery stays retryable.
+  let unsubscribeHeaders: string[] = [];
+  if (purpose === 'outreach') {
+    try {
+      unsubscribeHeaders = await outreachUnsubscribeHeaders(db, {
+        workspaceId,
+        deliveryId,
+        recipient
+      });
+    } catch (error) {
+      const wrapped = Object.assign(
+        new Error(
+          `Unsubscribe headers could not be prepared: ${error instanceof Error ? error.message : String(error)}`
+        ),
+        { status: 400 }
+      );
+      await markEmailDeliveryFailure(db, deliveryId, wrapped);
+      throw wrapped;
+    }
+  }
+  if (structuredPayload.requireListUnsubscribe === true && unsubscribeHeaders.length === 0) {
+    const error = Object.assign(
+      new Error(
+        'This email was approved with a one-click unsubscribe link, but this deployment has no HTTPS public origin (TREVRA_PUBLIC_API_URL) or TREVRA_SECRETS_KEY; nothing was sent.'
+      ),
+      { status: 409 }
+    );
+    await markEmailDeliveryFailure(db, deliveryId, error);
+    throw error;
+  }
   const nango = getNango();
 
   const threadExternalRef =
@@ -659,6 +693,53 @@ export async function executeConnectedAction(
 
   try {
     if (provider === 'microsoft' || provider === 'outlook') {
+      if (unsubscribeHeaders.length > 0) {
+        // Graph's JSON message API accepts only x- custom headers, so the RFC
+        // 8058 List-Unsubscribe headers need Graph's MIME send. A follow-up
+        // threads by In-Reply-To/References to the prior delivery's recorded
+        // Message-ID instead of createReply.
+        let inReplyTo: string | null = null;
+        if (threadIdempotencyKey) {
+          const prior = await db
+            .prepare(
+              'SELECT internet_message_id FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?'
+            )
+            .get<{ internet_message_id: string | null }>(workspaceId, threadIdempotencyKey);
+          inReplyTo = prior?.internet_message_id?.trim() || `<${threadIdempotencyKey}@trevra.app>`;
+        }
+        const mime = buildMimeMessage({
+          recipient,
+          subject: String(action.subject),
+          body: String(action.body),
+          idempotencyKey,
+          inReplyTo,
+          htmlBody: htmlBody || null,
+          extraHeaders: unsubscribeHeaders
+        });
+        const mimeDraft = await nango.post<{ id?: string; internetMessageId?: string }>({
+          endpoint: '/v1.0/me/messages',
+          providerConfigKey,
+          connectionId,
+          retries: 0,
+          headers: { 'Content-Type': 'text/plain' },
+          data: Buffer.from(mime).toString('base64')
+        });
+        const mimeDraftId = String(mimeDraft.data.id ?? '').trim();
+        if (!mimeDraftId) throw new Error('Microsoft MIME draft returned no message id.');
+        await nango.post({
+          endpoint: `/v1.0/me/messages/${encodeURIComponent(mimeDraftId)}/send`,
+          providerConfigKey,
+          connectionId,
+          retries: 0
+        });
+        const outcome = {
+          provider: 'microsoft',
+          externalRef: mimeDraftId,
+          internetMessageId: mimeDraft.data.internetMessageId ?? `<${idempotencyKey}@trevra.app>`
+        };
+        await markEmailDeliverySent(db, deliveryId, outcome);
+        return { provider: outcome.provider, externalRef: outcome.externalRef };
+      }
       if (threadExternalRef) {
         const replyDraft = await nango.post<{ id?: string; internetMessageId?: string }>({
           endpoint: `/v1.0/me/messages/${encodeURIComponent(threadExternalRef)}/createReply`,
@@ -739,14 +820,17 @@ export async function executeConnectedAction(
       threadId = String(previous.data.threadId ?? '').trim();
       if (!threadId) throw new Error('Gmail previous message returned no thread id.');
     }
-    const raw = createMimeMessage(
-      String(action.recipient),
-      String(action.subject),
-      String(action.body),
-      String(action.payload_hash),
-      threadIdempotencyKey || null,
-      htmlBody || null
-    );
+    const raw = Buffer.from(
+      buildMimeMessage({
+        recipient,
+        subject: String(action.subject),
+        body: String(action.body),
+        idempotencyKey,
+        inReplyTo: threadIdempotencyKey ? `<${threadIdempotencyKey}@trevra.app>` : null,
+        htmlBody: htmlBody || null,
+        extraHeaders: unsubscribeHeaders
+      })
+    ).toString('base64url');
     const response = await nango.post<{ id?: string; threadId?: string }>({
       endpoint: '/gmail/v1/users/me/messages/send',
       providerConfigKey,
@@ -1607,53 +1691,70 @@ async function completeWebhook(
     .run(status, error, new Date().toISOString(), provider, externalEventId, workspaceId);
 }
 
-function createMimeMessage(
-  recipient: string,
-  subject: string,
-  body: string,
-  idempotencyKey: string,
-  replyToIdempotencyKey: string | null = null,
-  htmlBody: string | null = null
-): string {
-  const encodedSubject = `=?UTF-8?B?${Buffer.from(subject).toString('base64')}?=`;
-  const priorMessageId = replyToIdempotencyKey ? `<${replyToIdempotencyKey}@trevra.app>` : null;
+/**
+ * One RFC 5322 message as raw MIME text: Gmail wants it base64url, Graph's MIME
+ * send wants standard base64. Header values are checked for CR/LF/NUL so a
+ * recipient or extra header can never smuggle in another header; the 400 makes
+ * that a definite failure (no provider call happened).
+ */
+export function buildMimeMessage(input: {
+  recipient: string;
+  subject: string;
+  body: string;
+  idempotencyKey: string;
+  inReplyTo?: string | null;
+  htmlBody?: string | null;
+  extraHeaders?: string[];
+}): string {
+  const extraHeaders = input.extraHeaders ?? [];
+  if (
+    [input.recipient, input.idempotencyKey, input.inReplyTo ?? '', ...extraHeaders].some((value) =>
+      /[\r\n\0]/.test(value)
+    )
+  ) {
+    throw Object.assign(new Error('Email header values cannot contain line breaks.'), {
+      status: 400
+    });
+  }
+  const encodedSubject = `=?UTF-8?B?${Buffer.from(input.subject).toString('base64')}?=`;
   const headers = [
-    `To: ${recipient}`,
+    `To: ${input.recipient}`,
     `Subject: ${encodedSubject}`,
-    ...(priorMessageId ? [`In-Reply-To: ${priorMessageId}`, `References: ${priorMessageId}`] : []),
-    `Message-ID: <${idempotencyKey}@trevra.app>`,
-    `X-Trevra-Idempotency-Key: ${idempotencyKey}`,
+    ...(input.inReplyTo
+      ? [`In-Reply-To: ${input.inReplyTo}`, `References: ${input.inReplyTo}`]
+      : []),
+    `Message-ID: <${input.idempotencyKey}@trevra.app>`,
+    `X-Trevra-Idempotency-Key: ${input.idempotencyKey}`,
+    ...extraHeaders,
     'MIME-Version: 1.0'
   ];
-  const mime = htmlBody
-    ? (() => {
-        const boundary = `trevra-${sha(idempotencyKey).slice(0, 24)}`;
-        return [
-          ...headers,
-          `Content-Type: multipart/alternative; boundary="${boundary}"`,
-          '',
-          `--${boundary}`,
-          'Content-Type: text/plain; charset=UTF-8',
-          'Content-Transfer-Encoding: 8bit',
-          '',
-          body,
-          `--${boundary}`,
-          'Content-Type: text/html; charset=UTF-8',
-          'Content-Transfer-Encoding: 8bit',
-          '',
-          htmlBody,
-          `--${boundary}--`,
-          ''
-        ].join('\r\n');
-      })()
-    : [
-        ...headers,
-        'Content-Type: text/plain; charset=UTF-8',
-        'Content-Transfer-Encoding: 8bit',
-        '',
-        body
-      ].join('\r\n');
-  return Buffer.from(mime).toString('base64url');
+  if (input.htmlBody) {
+    const boundary = `trevra-${sha(input.idempotencyKey).slice(0, 24)}`;
+    return [
+      ...headers,
+      `Content-Type: multipart/alternative; boundary="${boundary}"`,
+      '',
+      `--${boundary}`,
+      'Content-Type: text/plain; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      input.body,
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      'Content-Transfer-Encoding: 8bit',
+      '',
+      input.htmlBody,
+      `--${boundary}--`,
+      ''
+    ].join('\r\n');
+  }
+  return [
+    ...headers,
+    'Content-Type: text/plain; charset=UTF-8',
+    'Content-Transfer-Encoding: 8bit',
+    '',
+    input.body
+  ].join('\r\n');
 }
 
 function sha(value: string): string {

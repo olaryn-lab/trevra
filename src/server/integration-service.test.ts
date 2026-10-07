@@ -33,6 +33,7 @@ const {
   createNangoConnectSession,
   defaultConnectSessionIntegrations,
   handleNangoWebhook,
+  buildMimeMessage,
   executeConnectedAction,
   githubProviderConfigKey,
   ingestCanonicalRecord,
@@ -40,6 +41,7 @@ const {
   readConnectedEmailThreadEvents
 } = await import('./integration-service.js');
 const { createSuppression } = await import('./suppressions.js');
+const { findUnsubscribeDelivery } = await import('./email/unsubscribe.js');
 
 type DbQueryable = ConstructorParameters<typeof Db>[0];
 type LiveDb = InstanceType<typeof Db>;
@@ -69,6 +71,7 @@ let live: LiveDb | undefined;
 const createdWorkspaces: string[] = [];
 
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const key of managedEnv) delete process.env[key];
   nangoMock.createConnectSession.mockClear();
   nangoMock.verifyIncomingWebhookRequest.mockClear();
@@ -570,6 +573,183 @@ describe('connected mailbox threading', () => {
     expect(nangoMock.post.mock.calls[3]?.[0]).toMatchObject({
       endpoint: '/v1.0/me/messages/ms-reply/send'
     });
+  });
+
+  it('adds RFC 8058 one-click unsubscribe headers to Gmail outreach', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    nangoMock.post.mockResolvedValueOnce({ data: { id: 'gmail-outreach' }, headers: {} });
+    await executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Hello',
+      body: 'Hi there',
+      structured_payload_json: '{}',
+      payload_hash: 'outreach-unsubscribe-key'
+    });
+    const send = nangoMock.post.mock.calls[0]?.[0] as { data?: { raw?: string } };
+    const mime = Buffer.from(String(send.data?.raw ?? ''), 'base64url').toString('utf8');
+    const token = /List-Unsubscribe: <https:\/\/api\.trevra\.test\/u\/([^>]+)>/.exec(mime)?.[1];
+    expect(token).toBeTruthy();
+    expect(mime).toContain('List-Unsubscribe-Post: List-Unsubscribe=One-Click');
+    expect(mime.indexOf('List-Unsubscribe:')).toBeLessThan(mime.indexOf('MIME-Version: 1.0'));
+    expect(await findUnsubscribeDelivery(database, token!)).toMatchObject({
+      workspaceId,
+      recipient: 'lead@example.test'
+    });
+  });
+
+  it('keeps unsubscribe headers out of conversation replies', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    nangoMock.post.mockResolvedValueOnce({ data: { id: 'gmail-reply-only' }, headers: {} });
+    await executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Re: Hello',
+      body: 'Thanks!',
+      structured_payload_json: JSON.stringify({ deliveryPurpose: 'reply' }),
+      payload_hash: 'reply-no-unsubscribe-key'
+    });
+    const send = nangoMock.post.mock.calls[0]?.[0] as { data?: { raw?: string } };
+    const mime = Buffer.from(String(send.data?.raw ?? ''), 'base64url').toString('utf8');
+    expect(mime).not.toContain('List-Unsubscribe');
+  });
+
+  it('sends Microsoft outreach as MIME so the unsubscribe headers survive', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+    const { database, workspaceId, connectionId } = await mailbox('microsoft');
+    nangoMock.post
+      .mockResolvedValueOnce({
+        data: { id: 'ms-mime-first', internetMessageId: '<first@outlook.test>' },
+        headers: {}
+      })
+      .mockResolvedValueOnce({ data: {}, headers: {} })
+      .mockResolvedValueOnce({ data: { id: 'ms-mime-second' }, headers: {} })
+      .mockResolvedValueOnce({ data: {}, headers: {} });
+
+    await executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Same subject',
+      body: 'First body',
+      structured_payload_json: JSON.stringify({ threaded: true }),
+      payload_hash: 'ms-mime-first-key'
+    });
+    const draft = nangoMock.post.mock.calls[0]?.[0] as {
+      endpoint?: string;
+      headers?: Record<string, string>;
+      data?: unknown;
+    };
+    expect(draft.endpoint).toBe('/v1.0/me/messages');
+    expect(draft.headers).toEqual({ 'Content-Type': 'text/plain' });
+    const mime = Buffer.from(String(draft.data), 'base64').toString('utf8');
+    expect(mime).toContain('List-Unsubscribe: <https://api.trevra.test/u/del_');
+    expect(nangoMock.post.mock.calls[1]?.[0]).toMatchObject({
+      endpoint: '/v1.0/me/messages/ms-mime-first/send'
+    });
+
+    await executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Same subject',
+      body: 'Second body',
+      structured_payload_json: JSON.stringify({
+        threaded: true,
+        threadExternalRef: 'ms-mime-first',
+        threadIdempotencyKey: 'ms-mime-first-key'
+      }),
+      payload_hash: 'ms-mime-second-key'
+    });
+    const followUp = nangoMock.post.mock.calls[2]?.[0] as { endpoint?: string; data?: unknown };
+    expect(followUp.endpoint).toBe('/v1.0/me/messages');
+    expect(Buffer.from(String(followUp.data), 'base64').toString('utf8')).toContain(
+      'In-Reply-To: <first@outlook.test>'
+    );
+  });
+
+  it('refuses an email approved with unsubscribe when unsubscribe is not configured', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', '');
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test',
+        subject: 'Hello',
+        body: 'Hi',
+        structured_payload_json: JSON.stringify({ requireListUnsubscribe: true }),
+        payload_hash: 'require-unsubscribe-key'
+      })
+    ).rejects.toMatchObject({ status: 409 });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    const row = await database
+      .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+      .get<{ status: string }>(workspaceId, 'require-unsubscribe-key');
+    expect(row?.status).toBe('failed');
+  });
+
+  it('rejects header injection before contacting the provider', async () => {
+    expect(() =>
+      buildMimeMessage({
+        recipient: 'lead@example.test\r\nBcc: spy@example.test',
+        subject: 'x',
+        body: 'y',
+        idempotencyKey: 'k'
+      })
+    ).toThrow(/line breaks/);
+    expect(() =>
+      buildMimeMessage({
+        recipient: 'lead@example.test\0',
+        subject: 'x',
+        body: 'y',
+        idempotencyKey: 'k'
+      })
+    ).toThrow(/line breaks/);
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test\nBcc: spy@example.test',
+        subject: 'Hello',
+        body: 'Hi',
+        structured_payload_json: '{}',
+        payload_hash: 'injection-key'
+      })
+    ).rejects.toMatchObject({ status: 400 });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    const row = await database
+      .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+      .get<{ status: string }>(workspaceId, 'injection-key');
+    expect(row?.status).toBe('failed');
+  });
+
+  it('rejects a CRLF-bearing inbound mailbox address in the unsubscribe mailto before any provider call', async () => {
+    vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    const now = new Date().toISOString();
+    await database
+      .prepare(
+        "INSERT INTO email_inbound_mailboxes (workspace_id,connection_id,address,sync_status,designated_at,updated_at) VALUES (?,?,?,'syncing',?,?)"
+      )
+      .run(workspaceId, connectionId, 'box@example.test\r\nbcc: spy@example.test', now, now);
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test',
+        subject: 'Hello',
+        body: 'Hi',
+        structured_payload_json: '{}',
+        payload_hash: 'mailbox-injection-key'
+      })
+    ).rejects.toMatchObject({ status: 400 });
+    expect(nangoMock.post).not.toHaveBeenCalled();
   });
 
   it('reads Microsoft conversation replies and NDRs as provider events', async () => {
