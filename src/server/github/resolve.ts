@@ -19,6 +19,8 @@ export interface DomainCandidate {
   via: ResolvedVia;
   /** The organization's own display name, when GitHub states one. */
   name: string | null;
+  /** The GitHub organization an `org_website` domain was read from. */
+  orgHandle?: string;
 }
 
 export interface ResolvedActor {
@@ -110,14 +112,24 @@ export async function resolveGitHubActor(
   if (type === 'Organization') {
     const domain = companyDomainFromUrl(profile.blog);
     if (domain)
-      candidates.push({ domain, via: 'org_website', name: text(profile.name) ?? actualLogin });
+      candidates.push({
+        domain,
+        via: 'org_website',
+        name: text(profile.name) ?? actualLogin,
+        orgHandle: actualLogin
+      });
   } else if (type === 'User') {
     const handle = orgHandleFromCompany(profile.company);
     if (handle) {
       const org = await readProfile(client, `/orgs/${encodeURIComponent(handle)}`);
       const domain = org ? companyDomainFromUrl(org.blog) : null;
       if (domain && org)
-        candidates.push({ domain, via: 'org_website', name: text(org.name) ?? handle });
+        candidates.push({
+          domain,
+          via: 'org_website',
+          name: text(org.name) ?? handle,
+          orgHandle: text(org.login) ?? handle
+        });
     }
     const emailDomain = companyDomainFromEmail(profile.email);
     if (emailDomain) candidates.push({ domain: emailDomain, via: 'email_domain', name: null });

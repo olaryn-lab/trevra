@@ -165,6 +165,14 @@ function lemoncrowRoutes(overrides: Record<string, Handler> = {}): Record<string
       }),
     '/users/rejectco': () =>
       ok({ ...user('rejectco', 'Organization'), name: 'Reject Co', blog: 'https://rejectco.com' }),
+    // The founder's own organization: the repository owner.
+    '/orgs/lemoncrow-lab': () =>
+      ok({
+        login: 'lemoncrow-lab',
+        name: 'LemonCrow',
+        blog: 'https://lemoncrow.dev',
+        html_url: 'https://github.com/lemoncrow-lab'
+      }),
     ...overrides
   };
 }
@@ -547,6 +555,82 @@ describe('pollWorkspaceRepositories', () => {
     ]);
     expect(github.calls.some((call) => call.endpoint.endsWith('/forks'))).toBe(true);
     expect(github.calls.some((call) => call.endpoint.endsWith('/issues'))).toBe(true);
+  });
+
+  it("never turns the founder's own company or team into a GitHub account", async () => {
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        [REPO_PATH]: () => ok({ stargazers_count: 2, forks_count: 1 }),
+        [`${REPO_PATH}/stargazers`]: () =>
+          ok([star('crow-dev', '2026-10-05T09:00:00Z'), star('crow-ops', '2026-10-05T09:30:00Z')]),
+        // The owner forks its own repository under another casing.
+        [`${REPO_PATH}/forks`]: () =>
+          ok([
+            { created_at: '2026-10-05T12:00:00Z', owner: user('LemonCrow-Lab', 'Organization') }
+          ]),
+        [`${REPO_PATH}/issues`]: () => ok([]),
+        // A teammate: works at the owner org, mails from the owner's website domain.
+        '/users/crow-dev': () =>
+          ok({
+            ...user('crow-dev'),
+            company: '@lemoncrow-lab',
+            email: 'dev@lemoncrow.dev',
+            blog: null
+          }),
+        // Another teammate with only the owner's domain to go on.
+        '/users/crow-ops': () =>
+          ok({ ...user('crow-ops'), company: 'LemonCrow', email: 'ops@lemoncrow.dev', blog: null })
+      })
+    );
+    await poll(github);
+    expect(await accountByDomain(WORKSPACE_ID, 'lemoncrow.dev')).toBeUndefined();
+    const signals = await db
+      .prepare('SELECT COUNT(*)::int AS count FROM account_signals WHERE workspace_id=?')
+      .get<{ count: number }>(WORKSPACE_ID);
+    expect(signals?.count).toBe(0);
+    const actors = await db
+      .prepare('SELECT login FROM github_repo_actors WHERE workspace_id=?')
+      .all(WORKSPACE_ID);
+    expect(actors).toEqual([]);
+    // The owner itself is never looked up, and neither is counted as untraceable.
+    expect(github.calls.some((call) => call.endpoint === '/users/LemonCrow-Lab')).toBe(false);
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      forksCursor: '2026-10-05T12:00:00.000Z',
+      starsCursor: '2026-10-05T09:30:00.000Z',
+      lastSummary: { forks: 0, created: 0, attached: 0, unresolved: 0 }
+    });
+  });
+
+  it("still drops the owner's organization when the owner's website cannot be read, and keeps polling", async () => {
+    let ownerReads = 0;
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        [REPO_PATH]: () => ok({ stargazers_count: 2, forks_count: 0 }),
+        [`${REPO_PATH}/stargazers`]: () =>
+          ok([star('crow-ops', '2026-10-05T09:00:00Z'), star('sam', '2026-10-05T10:00:00Z')]),
+        [`${REPO_PATH}/forks`]: () => ok([]),
+        [`${REPO_PATH}/issues`]: () => ok([]),
+        '/users/crow-ops': () =>
+          ok({ ...user('crow-ops'), company: '@lemoncrow-lab', email: null, blog: null }),
+        // The teammate's own org lookup succeeds; the owner read after it fails.
+        '/orgs/lemoncrow-lab': () => {
+          ownerReads += 1;
+          return ownerReads === 1
+            ? ok({ login: 'LemonCrow-Lab', name: 'LemonCrow', blog: 'https://lemoncrow.dev' })
+            : { status: 502, data: { message: 'Bad Gateway' }, headers: {} };
+        }
+      })
+    );
+    await poll(github);
+    expect(await accountByDomain(WORKSPACE_ID, 'lemoncrow.dev')).toBeUndefined();
+    // Failing open on the exclusion only: everyone else is still matched.
+    expect(await accountByDomain(WORKSPACE_ID, 'newco.dev')).toMatchObject({ source: 'github' });
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      lastError: null,
+      lastSummary: { stars: 2, created: 1, unresolved: 0 }
+    });
   });
 
   it('marks the connection for reconnecting when GitHub rejects the token', async () => {

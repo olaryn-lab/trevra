@@ -15,7 +15,12 @@ import {
   type RepositoryPatch,
   type WatchedRepository
 } from './repos.js';
-import { resolveGitHubActor, type DomainCandidate, type ResolvedActor } from './resolve.js';
+import {
+  companyDomainFromUrl,
+  resolveGitHubActor,
+  type DomainCandidate,
+  type ResolvedActor
+} from './resolve.js';
 import {
   GITHUB_STAR_ACCEPT,
   GitHubClient,
@@ -139,6 +144,8 @@ interface RunState {
   capHit: boolean;
   touched: Set<string>;
   resolved: Map<string, ResolvedActor | null>;
+  /** Repository owner (lower-cased) to its own website domain; null when it has none or the read failed. */
+  ownerDomains: Map<string, string | null>;
   overBudget: () => boolean;
 }
 
@@ -195,6 +202,11 @@ function actorTypeOf(value: unknown, login: unknown): ActorType {
 
 function byTime(left: TractionEvent, right: TractionEvent): number {
   return left.at.getTime() - right.at.getTime() || left.login.localeCompare(right.login);
+}
+
+/** The repository's own owner is the founder, not demand: treated like an insider issue. */
+function isOwner(repo: WatchedRepository, login: string): boolean {
+  return login.toLowerCase() === repo.owner.toLowerCase();
 }
 
 function repoPath(repo: WatchedRepository): string {
@@ -269,7 +281,7 @@ async function listNewStars(
         continue;
       }
       listing.newest = later(listing.newest, at);
-      if (actorTypeOf(actor.type, actor.login) === 'Bot') continue;
+      if (actorTypeOf(actor.type, actor.login) === 'Bot' || isOwner(repo, actor.login)) continue;
       listing.events.push({
         kind: 'repo-starred',
         login: actor.login,
@@ -317,7 +329,7 @@ async function listNewForks(
     listing.newest = later(listing.newest, at);
     const owner = row.owner as Record<string, unknown> | undefined;
     if (!owner || typeof owner.login !== 'string') continue;
-    if (actorTypeOf(owner.type, owner.login) === 'Bot') continue;
+    if (actorTypeOf(owner.type, owner.login) === 'Bot' || isOwner(repo, owner.login)) continue;
     listing.events.push({
       kind: 'repo-forked',
       login: owner.login,
@@ -370,7 +382,7 @@ async function listNewIssues(
     if (row.pull_request !== undefined && row.pull_request !== null) continue;
     if (INSIDER_ASSOCIATIONS.has(String(row.author_association))) continue;
     if (!author || typeof author.login !== 'string') continue;
-    if (actorTypeOf(author.type, author.login) === 'Bot') continue;
+    if (actorTypeOf(author.type, author.login) === 'Bot' || isOwner(repo, author.login)) continue;
     if (typeof row.number !== 'number' || typeof row.html_url !== 'string') continue;
     listing.events.push({
       kind: 'repo-issue-opened',
@@ -443,6 +455,28 @@ async function knownActor(
 }
 
 /**
+ * The owner's own website domain, from its organization profile or, when it
+ * is a person, its user profile; normalized like every candidate. Any failure
+ * means "no domain": the exclusion fails open, the poll does not fail.
+ */
+async function readOwnerDomain(client: GitHubClient, owner: string): Promise<string | null> {
+  const handle = encodeURIComponent(owner);
+  try {
+    let response;
+    try {
+      response = await client.get(`/orgs/${handle}`);
+    } catch (error) {
+      if (!(error instanceof GitHubNotFoundError)) throw error;
+      response = await client.get(`/users/${handle}`);
+    }
+    const data = response.data as { blog?: unknown } | null;
+    return data && typeof data === 'object' ? companyDomainFromUrl(data.blog) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * One event, written atomically: the account (found or created), the
  * remembered login and the signal land together or not at all.
  */
@@ -496,7 +530,24 @@ async function processEvent(
     summary.unresolved += 1;
     return 'done';
   }
-  const actor = resolved;
+
+  // The founder's own company is never a lead: drop the owner's organization
+  // and the owner's website domain. One owner read per run, as a lookup.
+  const ownerKey = repo.owner.toLowerCase();
+  let ownDomain = run.ownerDomains.get(ownerKey);
+  if (ownDomain === undefined) {
+    if (run.lookups >= MAX_PROFILE_LOOKUPS_PER_RUN || run.overBudget()) return 'defer';
+    run.lookups += 1;
+    ownDomain = await readOwnerDomain(client, repo.owner);
+    run.ownerDomains.set(ownerKey, ownDomain);
+  }
+  const candidates = resolved.candidates.filter(
+    (candidate) => candidate.orgHandle?.toLowerCase() !== ownerKey && candidate.domain !== ownDomain
+  );
+  // Every lead pointed at the founder's own company: a teammate, treated like
+  // an insider issue, neither resolved nor unresolved.
+  if (candidates.length === 0) return 'done';
+  const actor = { ...resolved, candidates };
 
   const outcome = await db.transaction(async (tx): Promise<AttachOutcome> => {
     let match: { id: string; status: string } | undefined;
@@ -825,6 +876,7 @@ async function pollClaimed(
     capHit: false,
     touched: new Set(),
     resolved: new Map(),
+    ownerDomains: new Map(),
     overBudget
   };
   /** Out of time before starting: release untouched, still due next tick. */

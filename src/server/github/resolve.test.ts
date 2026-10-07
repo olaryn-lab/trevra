@@ -99,7 +99,7 @@ describe('resolveGitHubActor', () => {
       profileUrl: 'https://github.com/maya',
       type: 'User',
       candidates: [
-        { domain: 'buyer.io', via: 'org_website', name: 'Buyer Co' },
+        { domain: 'buyer.io', via: 'org_website', name: 'Buyer Co', orgHandle: 'buyerco' },
         { domain: 'buyer-mail.com', via: 'email_domain', name: null },
         { domain: 'maya.dev', via: 'blog', name: null }
       ]
@@ -212,7 +212,7 @@ describe('resolveGitHubActor', () => {
       }
     });
     expect((await resolveGitHubActor(client(transport), 'buyerco'))?.candidates).toEqual([
-      { domain: 'buyer.io', via: 'org_website', name: 'Buyer Co' }
+      { domain: 'buyer.io', via: 'org_website', name: 'Buyer Co', orgHandle: 'buyerco' }
     ]);
   });
 
