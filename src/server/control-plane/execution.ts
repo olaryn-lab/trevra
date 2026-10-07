@@ -46,6 +46,12 @@ export async function executePreparedPlaybookAction(
     const metadata = payload.metadata ?? {};
     const approvedConnectionId = await approvedMailboxConnection(db, input.workspaceId, metadata);
     if (metadata.intent === 'email-outreach') {
+      // Outreach never falls through to the newest-mailbox fallback.
+      if (!approvedConnectionId) {
+        throw mailboxBindingError(
+          'This outreach email was approved without a sending mailbox; nothing was sent.'
+        );
+      }
       await assertOutreachFooter(db, input.workspaceId, payload.body);
     }
     const delivery = await executeConnectedAction(db, input.workspaceId, {

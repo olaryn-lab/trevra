@@ -626,9 +626,17 @@ export async function executeConnectedAction(
   // recommendation cannot route around a workspace suppression.
   await assertNotSuppressed(db, workspaceId, { channel: 'email', email: recipient });
 
+  // A required (approval-bound) connection must still be the live, provider-
+  // verified mailbox; re-authorization clears mailbox_address.
+  const requiredMailbox =
+    action.require_connection_id === true
+      ? " AND is_demo=0 AND provider IN ('gmail','google-mail','microsoft','outlook') AND mailbox_address IS NOT NULL"
+      : '';
   let connection = action.connection_id
     ? ((await db
-        .prepare("SELECT * FROM connections WHERE id=? AND workspace_id=? AND status='connected'")
+        .prepare(
+          `SELECT * FROM connections WHERE id=? AND workspace_id=? AND status='connected'${requiredMailbox}`
+        )
         .get(String(action.connection_id), workspaceId)) as Record<string, unknown> | undefined)
     : undefined;
   if (!connection && action.require_connection_id === true) {

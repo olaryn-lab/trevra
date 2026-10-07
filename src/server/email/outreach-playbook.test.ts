@@ -40,7 +40,7 @@ const FOOTER = `Acme Labs Ltd, 1 Market Street, London EC1A 1AA\n${OUTREACH_OPT_
 const BODY = `Hi Maya,\n\nWould you be open to a short conversation?\n\n${FOOTER}`;
 let db: Db;
 
-async function seedMailbox(id: string, address: string): Promise<void> {
+async function seedMailbox(id: string, address: string, updatedAt: Date = NOW): Promise<void> {
   await db
     .prepare(
       `INSERT INTO connections
@@ -48,7 +48,7 @@ async function seedMailbox(id: string, address: string): Promise<void> {
         mailbox_address,created_at,updated_at)
        VALUES (?,?,'gmail','trevra-gmail',?,NULL,'connected',0,?,?,?)`
     )
-    .run(id, WORKSPACE, `${id}-external`, address, NOW.toISOString(), NOW.toISOString());
+    .run(id, WORKSPACE, `${id}-external`, address, NOW.toISOString(), updatedAt.toISOString());
 }
 
 async function prepareRun(overrides: { idempotencyKey?: string; prepared?: boolean } = {}) {
@@ -257,6 +257,69 @@ describe('gtm.email-outreach', () => {
       'Trevra could not confirm the address of the approved sending mailbox right now; nothing was sent. Prepare this email again.'
     );
     expect(nangoMock.get).toHaveBeenCalled();
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(await deliveries()).toBe(0);
+  });
+
+  it('sends from the approved mailbox even when a newer mailbox is connected', async () => {
+    await seedMailbox(
+      'conn_email_outreach_playbook_newer',
+      'sales@acme.test',
+      new Date(NOW.getTime() + 60_000)
+    );
+    const { run } = await prepareRun();
+
+    const done = await approve(run.id);
+
+    expect(done.status).toBe('completed');
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    const send = nangoMock.post.mock.calls[0]![0] as { connectionId?: string };
+    expect(send.connectionId).toBe(`${CONNECTION}-external`);
+    expect(
+      await db
+        .prepare('SELECT connection_id FROM gtm_deliveries WHERE workspace_id=?')
+        .all(WORKSPACE)
+    ).toEqual([{ connection_id: CONNECTION }]);
+  });
+
+  it('refuses outreach approved without a sending mailbox instead of using the newest one', async () => {
+    await expect(
+      executePreparedPlaybookAction(db, {
+        workspaceId: WORKSPACE,
+        actionType: 'email.send',
+        payload: {
+          recipient: 'maya@northwind.test',
+          subject: 'Quick question, Maya',
+          body: BODY,
+          metadata: { intent: 'email-outreach', deliveryPurpose: 'outreach' }
+        },
+        payloadHash: 'unbound-outreach-key'
+      })
+    ).rejects.toMatchObject({
+      status: 409,
+      message: 'This outreach email was approved without a sending mailbox; nothing was sent.'
+    });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(await deliveries()).toBe(0);
+  });
+
+  it('refuses a required connection whose verified address was cleared by re-authorization', async () => {
+    await db
+      .prepare('UPDATE connections SET mailbox_address=NULL WHERE workspace_id=? AND id=?')
+      .run(WORKSPACE, CONNECTION);
+
+    await expect(
+      executeConnectedAction(db, WORKSPACE, {
+        type: 'email_draft',
+        connection_id: CONNECTION,
+        require_connection_id: true,
+        recipient: 'maya@northwind.test',
+        subject: 'Hello',
+        body: 'Hi',
+        structured_payload_json: '{}',
+        payload_hash: 'cleared-address-key'
+      })
+    ).rejects.toMatchObject({ status: 409 });
     expect(nangoMock.post).not.toHaveBeenCalled();
     expect(await deliveries()).toBe(0);
   });
