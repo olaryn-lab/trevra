@@ -28,7 +28,10 @@ import {
   type VerifiedEmailOutcome
 } from './email-outcomes.js';
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
-import { decideInboundMailboxRecord } from './email/inbound-mailbox.js';
+import {
+  INBOUND_EMAIL_MESSAGE_MODEL,
+  decideInboundMailboxRecord
+} from './email/inbound-mailbox.js';
 
 const canonicalRecordSchema = z.discriminatedUnion('kind', [
   z.object({
@@ -1605,6 +1608,13 @@ async function normalizeSyncedRecord(
     return { kind: 'ignored' };
   }
   const normalized = normalizeNangoRecord(model, raw);
+  // Inbound-mailbox records must never reach the legacy path, which creates Persons.
+  if (
+    model === INBOUND_EMAIL_MESSAGE_MODEL &&
+    !(normalized?.kind === 'message' && normalized.mailboxAddress)
+  ) {
+    return { kind: 'skipped' };
+  }
   return normalized ? { kind: 'record', record: normalized } : { kind: 'skipped' };
 }
 

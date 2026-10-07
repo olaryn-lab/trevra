@@ -322,3 +322,201 @@ describe('inbound mailbox ingestion', () => {
     });
   });
 });
+
+describe('inbound mailbox ingestion, edge cases', () => {
+  async function outcomes(): Promise<string[]> {
+    const rows = await db
+      .prepare('SELECT outcome_kind FROM conversation_messages WHERE workspace_id=?')
+      .all<{ outcome_kind: string }>(WORKSPACE);
+    return rows.map((row) => row.outcome_kind);
+  }
+  const suppressionFor = (email: string) =>
+    findSuppression(db, WORKSPACE, { channel: 'email', email });
+
+  it('suppresses the Person when a threaded unsubscribe comes from an alias', async () => {
+    await db
+      .prepare(
+        `INSERT INTO person_identities (id,workspace_id,person_id,provider,identity_type,identity_value,normalized_value,created_at)
+         VALUES ('pid_alias',?,?,'gmail','email','lead.alt@example.test','lead.alt@example.test',?)`
+      )
+      .run(WORKSPACE, personId, NOW.toISOString());
+    await insertDelivery({ id: 'del_00000000000000c1', internetMessageId: '<alias@trevra.app>' });
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({
+        id: 'gmail-alias',
+        personEmail: 'lead.alt@example.test',
+        body: 'Please unsubscribe me.',
+        replyToMessageIds: ['<alias@trevra.app>']
+      })
+    );
+    expect(await suppressionFor('lead@example.test')).toMatchObject({
+      source: 'email_reply_unsubscribe'
+    });
+  });
+
+  it("resolves an address that is A's primary email and B's identity to A", async () => {
+    const other = (
+      await resolveContact(
+        db,
+        WORKSPACE,
+        { name: 'Other Person', email: 'other@example.test' },
+        NOW
+      )
+    ).contact.id;
+    await db
+      .prepare(
+        `INSERT INTO person_identities (id,workspace_id,person_id,provider,identity_type,identity_value,normalized_value,created_at)
+         VALUES ('pid_clash',?,?,'gmail','email','lead@example.test','lead@example.test',?)`
+      )
+      .run(WORKSPACE, other, NOW.toISOString());
+    await insertDelivery({ id: 'del_00000000000000c2', internetMessageId: '<clash@trevra.app>' });
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({
+        id: 'gmail-clash',
+        body: 'Please unsubscribe me.',
+        replyToMessageIds: ['<clash@trevra.app>']
+      })
+    );
+    const row = await db
+      .prepare(
+        `SELECT c.person_id FROM conversation_messages cm JOIN conversations c ON c.id=cm.conversation_id
+         WHERE cm.workspace_id=?`
+      )
+      .get<{ person_id: string }>(WORKSPACE);
+    expect(row?.person_id).toBe(personId);
+    expect(await suppressionFor('lead@example.test')).not.toBeNull();
+  });
+
+  it('classifies but does not suppress an unsubscribe reply that is not threaded', async () => {
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({ id: 'gmail-unthreaded', body: 'Please remove me' })
+    );
+    expect(await outcomes()).toEqual(['unsubscribe']);
+    expect(await suppressionFor('lead@example.test')).toBeNull();
+  });
+
+  it("does not count a thread that matches only another workspace's delivery", async () => {
+    await insertDelivery({
+      id: 'del_00000000000000c3',
+      workspaceId: OTHER,
+      internetMessageId: '<foreign@trevra.app>'
+    });
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({
+        id: 'gmail-foreign-thread',
+        body: 'Please remove me',
+        replyToMessageIds: ['<foreign@trevra.app>']
+      })
+    );
+    expect(await suppressionFor('lead@example.test')).toBeNull();
+  });
+
+  it('keeps a footer that embeds the opt-out sentence and its own unsubscribe link from counting', async () => {
+    registerEmailComplianceProvider({
+      footer: async () =>
+        `Acme Ltd\n${OUTREACH_OPT_OUT_SENTENCE}\nManage preferences or unsubscribe at example.test`,
+      blockers: async () => []
+    });
+    await insertDelivery({ id: 'del_00000000000000c4', internetMessageId: '<foot@trevra.app>' });
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({
+        id: 'gmail-footer',
+        body: `Great, let's talk.\n\nAcme Ltd\n${OUTREACH_OPT_OUT_SENTENCE}\nManage preferences or unsubscribe at example.test`,
+        replyToMessageIds: ['<foot@trevra.app>']
+      })
+    );
+    expect(await outcomes()).toEqual(['reply']);
+    expect(await suppressionFor('lead@example.test')).toBeNull();
+  });
+
+  it('refreshes the legacy twin outcome instead of leaving it a plain reply', async () => {
+    const { mailboxAddress: _omit, ...legacy } = message({
+      id: 'gmail-twin',
+      body: 'Please remove me'
+    });
+    await ingestCanonicalRecord(db, WORKSPACE, 'gmail', 'conn_inbound', legacy);
+    expect(await outcomes()).toEqual(['reply']);
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({ id: 'gmail-twin', body: 'Please remove me' })
+    );
+    expect(await outcomes()).toEqual(['unsubscribe']);
+  });
+
+  it('ignores mail from the mailbox itself and outbound mail', async () => {
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({ id: 'gmail-own', personEmail: 'inbound@acme.test' })
+    );
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({ id: 'gmail-out', direction: 'outbound' })
+    );
+    expect(await countFor('conversation_messages')).toBe(0);
+    expect(await countFor('source_records')).toBe(0);
+  });
+
+  it('applies the same mailto unsubscribe twice with one suppression and no message', async () => {
+    await insertDelivery({ id: 'del_00000000000000c5' });
+    const token = unsubscribeToken({
+      workspaceId: WORKSPACE,
+      deliveryId: 'del_00000000000000c5',
+      recipient: 'lead@example.test'
+    });
+    const record = message({ id: 'gmail-twice', subject: `unsubscribe ${token}`, body: '' });
+    await ingestCanonicalRecord(db, WORKSPACE, 'gmail', 'conn_inbound', record);
+    await ingestCanonicalRecord(db, WORKSPACE, 'gmail', 'conn_inbound', record);
+    expect(await countFor('suppressions')).toBe(1);
+    expect(await countFor('conversation_messages')).toBe(0);
+  });
+
+  it('leaves last_record_at NULL for a mismatched or undesignated record', async () => {
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_inbound',
+      message({ id: 'gmail-mismatch', mailboxAddress: 'someone-else@acme.test' })
+    );
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'gmail',
+      'conn_other',
+      message({ id: 'gmail-other' })
+    );
+    const mailbox = await db
+      .prepare('SELECT last_record_at FROM email_inbound_mailboxes WHERE workspace_id=?')
+      .get<{ last_record_at: string | null }>(WORKSPACE);
+    expect(mailbox?.last_record_at).toBeNull();
+  });
+});

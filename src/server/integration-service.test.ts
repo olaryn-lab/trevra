@@ -1146,6 +1146,38 @@ describe('Nango calendar sync', () => {
     });
   }
 
+  it('never lets an InboundEmailMessage without a mailbox address reach the Person-creating path', async () => {
+    const database = await openLiveDatabase();
+    const seed = await seedSyncTenant(database, 'gmail', 'trevra-gmail');
+    const before = await database
+      .prepare('SELECT COUNT(*)::int AS total FROM contacts WHERE workspace_id=?')
+      .get<{ total: number }>(seed.workspaceId);
+    nangoMock.listRecords.mockResolvedValueOnce({
+      records: [
+        {
+          kind: 'message',
+          id: 'stranger-1',
+          personEmail: 'stranger@elsewhere.test',
+          direction: 'inbound',
+          subject: 'Hi',
+          body: 'Hello',
+          occurredAt: '2026-10-06T08:30:00.000Z'
+        }
+      ],
+      next_cursor: null
+    });
+    const result = await handleNangoWebhook(database, syncWebhook(seed, 'InboundEmailMessage'), {});
+    expect(result).toEqual({ duplicate: false, processed: 'synced-0-skipped-1' });
+    const after = await database
+      .prepare('SELECT COUNT(*)::int AS total FROM contacts WHERE workspace_id=?')
+      .get<{ total: number }>(seed.workspaceId);
+    expect(after?.total).toBe(before?.total);
+    const messages = await database
+      .prepare('SELECT COUNT(*)::int AS total FROM messages WHERE workspace_id=?')
+      .get<{ total: number }>(seed.workspaceId);
+    expect(messages?.total).toBe(0);
+  });
+
   it('skips one malformed canonical record and still ingests the good ones', async () => {
     const database = await openLiveDatabase();
     const seed = await seedSyncTenant(database, 'gmail', 'trevra-gmail');

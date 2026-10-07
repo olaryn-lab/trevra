@@ -294,7 +294,18 @@ export async function projectCanonicalMessage(
          LIMIT 1`
       )
       .get<{ conversation_id: string }>(workspaceId, provider, externalRef, sourceType);
-    if (twin) return twin.conversation_id;
+    if (twin) {
+      if (options.outcomeKind && message.direction === 'inbound') {
+        await db
+          .prepare(
+            `UPDATE conversation_messages SET outcome_kind=?
+             WHERE workspace_id=? AND channel='email' AND provider=? AND external_ref=?
+               AND source_type='legacy_message'`
+          )
+          .run(options.outcomeKind, workspaceId, provider, externalRef);
+      }
+      return twin.conversation_id;
+    }
   }
   const occurredAt = iso(message.occurred_at) ?? now.toISOString();
   const conversation = await ensureConversation(

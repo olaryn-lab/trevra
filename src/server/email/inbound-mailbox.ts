@@ -17,6 +17,9 @@ import { UNSUBSCRIBE_SUBJECT_PATTERN, applyUnsubscribeToken } from './unsubscrib
  * Must not import integration-service.ts, which calls it.
  */
 
+/** The Nango model the inbound-messages sync emits. Its records may only enter through the designated mailbox. */
+export const INBOUND_EMAIL_MESSAGE_MODEL = 'InboundEmailMessage';
+
 export interface InboundMailboxRecord {
   id: string;
   personEmail?: string;
@@ -59,21 +62,16 @@ function collapse(value: string): string {
 /** Remove, case-insensitively and whitespace-insensitively, text Trevra itself put in outbound mail. */
 async function withoutKnownOptOutText(db: Db, workspaceId: string, body: string): Promise<string> {
   const footer = await emailComplianceProvider().footer(db, workspaceId);
+  // Longest first, so a footer that embeds the shorter sentences is removed whole.
   const known = [OUTREACH_OPT_OUT_SENTENCE, SKILL_DRAFT_UNSUBSCRIBE_LINE, footer]
-    .map((text) => collapse(text ?? ''))
-    .filter(Boolean);
-  let text = collapse(stripQuotedReply(body));
-  for (const phrase of known) {
-    const needle = phrase.toLowerCase();
-    let lower = text.toLowerCase();
-    let at = lower.indexOf(needle);
-    while (at !== -1) {
-      text = `${text.slice(0, at)} ${text.slice(at + needle.length)}`;
-      lower = text.toLowerCase();
-      at = lower.indexOf(needle);
-    }
-  }
-  return collapse(text);
+    .map((text) => collapse(text ?? '').toLowerCase())
+    .filter(Boolean)
+    .sort((x, y) => y.length - x.length);
+  // Everything below works on the lowercased, collapsed copy only: the
+  // classifier is case-insensitive, so the original casing is not needed.
+  let text = collapse(stripQuotedReply(body)).toLowerCase();
+  for (const phrase of known) text = collapse(text.split(phrase).join(' '));
+  return text;
 }
 
 export async function decideInboundMailboxRecord(
@@ -145,11 +143,14 @@ export async function decideInboundMailboxRecord(
   // or by a recorded email identity, before their mail enters the ledger.
   const person = await db
     .prepare(
-      `SELECT id FROM contacts WHERE workspace_id=? AND email_normalized=?
-       UNION ALL
-       SELECT person_id AS id FROM person_identities
-       WHERE workspace_id=? AND identity_type='email' AND normalized_value=?
-       LIMIT 1`
+      // The contact owning the address wins: createSuppression resolves the
+      // same contact by email and refuses when the Person differs.
+      `SELECT id FROM (
+         SELECT id,0 AS precedence FROM contacts WHERE workspace_id=? AND email_normalized=?
+         UNION ALL
+         SELECT person_id AS id,1 AS precedence FROM person_identities
+         WHERE workspace_id=? AND identity_type='email' AND normalized_value=?
+       ) found ORDER BY precedence LIMIT 1`
     )
     .get<{ id: string }>(workspaceId, sender, workspaceId, sender);
   if (!person) return ignore('unknown_sender');
@@ -176,6 +177,7 @@ export async function decideInboundMailboxRecord(
         workspaceId,
         channel: 'email',
         email: sender,
+        personId: person.id,
         reason: 'Recipient asked to stop in a reply',
         source: 'email_reply_unsubscribe',
         sourceRef: record.id,
