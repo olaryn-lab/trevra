@@ -46,6 +46,6 @@ describe('GitHub polling in the automation cycle', () => {
     await runAutomationCycle(db, WORKSPACE_ID);
     const [repo] = await listWatchedRepositories(db, WORKSPACE_ID);
     expect(repo.status).toBe('error');
-    expect(repo.lastError).toBe('NANGO_API_KEY is not configured');
+    expect(repo.lastError).toBe('GitHub integration is not configured');
   });
 });

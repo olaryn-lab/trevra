@@ -1021,13 +1021,142 @@ describe('pollWorkspaceRepositories', () => {
     expect(result.polled).toBe(0);
     expect(await repoRow()).toMatchObject({
       status: 'error',
-      lastError: 'socket hang up',
+      lastError: 'GitHub could not be reached',
       nextPollAt: new Date(T0.getTime() + ERROR_RETRY_MINUTES * 60_000).toISOString()
     });
     const lease = await db
       .prepare('SELECT lease_until FROM watched_repositories WHERE workspace_id=?')
       .get<{ lease_until: string | null }>(WORKSPACE_ID);
     expect(lease?.lease_until).toBeNull();
+  });
+
+  it('stores only a fixed, content-free reason when a check fails', async () => {
+    const offline: GitHubTransport = {
+      async get() {
+        throw new Error('connect ECONNREFUSED 10.0.0.1:3003');
+      }
+    };
+    await poll(offline);
+    const failed = await repoRow();
+    expect(failed.lastError).toBe('GitHub could not be reached');
+    expect(failed.lastError).not.toContain('10.0.0.1');
+    expect(failed.lastError).not.toContain('ECONNREFUSED');
+
+    // A GitHub answer keeps its status code, never the path (and login) it was for.
+    await poll(
+      fakeGitHub(
+        lemoncrowRoutes({
+          '/users/maya': () => ({ status: 500, data: { message: 'boom' }, headers: {} })
+        })
+      ),
+      new Date(T0.getTime() + 2 * HOUR)
+    );
+    const answered = await repoRow();
+    expect(answered).toMatchObject({ status: 'error', lastError: 'GitHub request failed (500)' });
+    expect(answered.lastError).not.toContain('maya');
+  });
+
+  it('gives up on a GitHub call that never answers and defers the rest instead of failing', async () => {
+    let elapsed = 0;
+    const base = lemoncrowRoutes({
+      // From here on 30 ms of the run's budget is left.
+      [`${REPO_PATH}/stargazers`]: (call) => {
+        elapsed = GITHUB_POLL_BUDGET_MS - 30;
+        return lemoncrowRoutes()[`${REPO_PATH}/stargazers`](call);
+      }
+    });
+    const answers = fakeGitHub(base);
+    const hanging: GitHubTransport = {
+      get(endpoint, request) {
+        if (endpoint.endsWith('/forks')) return new Promise<GitHubResponse>(() => undefined);
+        return answers.get(endpoint, request);
+      }
+    };
+    const result = await pollWorkspaceRepositories(db, WORKSPACE_ID, {
+      transport: hanging,
+      now: T0,
+      clock: () => elapsed
+    });
+    expect(result.deferredRepositories).toBe(0);
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      lastError: null,
+      starsCursor: '2026-10-05T11:00:00.000Z',
+      forksCursor: null,
+      nextPollAt: new Date(T0.getTime() + BUDGET_DEFERRAL_MINUTES * 60_000).toISOString(),
+      lastSummary: { stars: 3, created: 1 }
+    });
+  });
+
+  it('locks a remembered company before writing to it, so a concurrent rejection wins', async () => {
+    await poll(fakeGitHub(lemoncrowRoutes()));
+    const buyer = await accountByDomain(WORKSPACE_ID, 'buyer.io');
+    expect(await signalRows(WORKSPACE_ID, buyer!.id)).toHaveLength(2);
+
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let competitor: Promise<void> | null = null;
+    let sawBlockedLock = false;
+    const releaseWhenPollerBlocks = async (): Promise<void> => {
+      for (let attempt = 0; attempt < 50 && !sawBlockedLock; attempt += 1) {
+        const waiting = await db
+          .prepare(
+            `SELECT COUNT(*)::int AS count FROM pg_stat_activity
+             WHERE datname = current_database() AND wait_event_type = 'Lock'
+               AND query ILIKE '%SELECT status FROM accounts%FOR UPDATE%'`
+          )
+          .get<{ count: number }>();
+        if ((waiting?.count ?? 0) > 0) sawBlockedLock = true;
+        else await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      release();
+    };
+    const base = fakeGitHub(
+      lemoncrowRoutes({
+        [`${REPO_PATH}/issues`]: () =>
+          ok([
+            {
+              number: 11,
+              html_url: `https://github.com/${REPO}/issues/11`,
+              created_at: '2026-10-06T13:00:00Z',
+              author_association: 'NONE',
+              user: user('maya')
+            }
+          ])
+      })
+    );
+    // The founder rejects buyer.io while the poll is about to write to it.
+    const racing: GitHubTransport = {
+      async get(endpoint, request) {
+        if (endpoint === `${REPO_PATH}/issues` && !competitor) {
+          let updated!: () => void;
+          const updatedRow = new Promise<void>((resolve) => {
+            updated = resolve;
+          });
+          competitor = db.transaction(async (tx) => {
+            await tx
+              .prepare("UPDATE accounts SET status='not_a_fit' WHERE workspace_id=? AND id=?")
+              .run(WORKSPACE_ID, buyer!.id);
+            updated();
+            await released;
+          });
+          await updatedRow;
+          void releaseWhenPollerBlocks();
+        }
+        return base.get(endpoint, request);
+      }
+    };
+    await poll(racing, new Date(T0.getTime() + 2 * HOUR));
+    await competitor;
+    expect(sawBlockedLock).toBe(true);
+    expect(await signalRows(WORKSPACE_ID, buyer!.id)).toHaveLength(2);
+    expect((await repoRow()).lastSummary).toMatchObject({
+      issues: 1,
+      ignoredRejected: 1,
+      attached: 0
+    });
   });
 
   it('counts the events a spent budget interrupted inside a profile lookup as deferred', async () => {

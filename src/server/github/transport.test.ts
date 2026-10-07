@@ -39,7 +39,7 @@ async function failureOf(work: Promise<unknown>): Promise<unknown> {
 }
 
 describe('nangoGitHubTransport', () => {
-  it('asks Nango for the versioned GitHub API, with the caller headers and no Nango-side retries', async () => {
+  it('asks Nango for the versioned GitHub API with the caller headers', async () => {
     const get = vi.fn(async (_config: Record<string, unknown>) => ({
       status: 200,
       data: [{ id: 1 }],

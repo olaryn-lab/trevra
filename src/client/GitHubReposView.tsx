@@ -80,9 +80,9 @@ export function repoStatusCopy(repo: GitHubRepoWatch, formatTime: (iso: string) 
     case 'needs_reauth':
       return 'Not checked: GitHub needs reconnecting.';
     case 'rate_limited':
-      return `Paused by the GitHub rate limit until ${
-        repo.rateLimitedUntil ? formatTime(repo.rateLimitedUntil) : 'it resets'
-      }. Nothing is lost; checking resumes then.`;
+      return `Paused by the GitHub rate limit; checking resumes ${
+        repo.rateLimitedUntil ? formatTime(repo.rateLimitedUntil) : 'when the limit resets'
+      }.`;
     case 'not_found':
       return 'GitHub cannot find this repository, or it is private. Only public repositories can be watched.';
     case 'error':

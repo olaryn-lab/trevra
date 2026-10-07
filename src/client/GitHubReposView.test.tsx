@@ -65,7 +65,12 @@ describe('GitHubReposView', () => {
     const html = render(
       state([repo({ status: 'rate_limited', rateLimitedUntil: '2026-10-06T13:00:00.000Z' })])
     );
-    expect(html).toContain('Paused by the GitHub rate limit until at 2026-10-06T13:00:00.000Z.');
+    expect(html).toContain(
+      'Paused by the GitHub rate limit; checking resumes at 2026-10-06T13:00:00.000Z.'
+    );
+    expect(
+      repoStatusCopy(repo({ status: 'rate_limited', rateLimitedUntil: null }), formatTime)
+    ).toBe('Paused by the GitHub rate limit; checking resumes when the limit resets.');
   });
 
   it('summarises a check that matched companies, and counts people it could not trace', () => {

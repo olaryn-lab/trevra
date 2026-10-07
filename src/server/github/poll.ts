@@ -27,6 +27,7 @@ import {
   GitHubConnectionRevokedError,
   GitHubNotFoundError,
   GitHubRateLimitedError,
+  GitHubRequestError,
   nangoGitHubTransport,
   type GitHubTransport
 } from './transport.js';
@@ -91,6 +92,8 @@ export const GITHUB_POLL_BUDGET_MS = 20_000;
  * POLL_INTERVAL_MINUTES instead.
  */
 export const BUDGET_DEFERRAL_MINUTES = 10;
+/** Longest one GitHub call may take; the run's remaining budget shortens it further. */
+export const GITHUB_CALL_TIMEOUT_MS = 10_000;
 
 const PAGE_SIZE = 100;
 const DAY_MS = 86_400_000;
@@ -149,7 +152,7 @@ interface RunState {
   overBudget: () => boolean;
 }
 
-/** The run's time budget is spent; thrown instead of making a GitHub call. */
+/** The run's time budget is spent, or one call outlived its time; thrown in place of a GitHub answer. */
 class PollBudgetSpentError extends Error {
   constructor() {
     super(`GitHub poll run exceeded ${GITHUB_POLL_BUDGET_MS} ms`);
@@ -157,11 +160,35 @@ class PollBudgetSpentError extends Error {
   }
 }
 
-function budgetedTransport(transport: GitHubTransport, overBudget: () => boolean): GitHubTransport {
+/**
+ * Every GitHub call of a run goes through here: none starts once the budget
+ * is spent, and none may outlive GITHUB_CALL_TIMEOUT_MS or what is left of the
+ * budget. A call that runs out of time defers the run like a spent budget.
+ *
+ * lc-debt: the abandoned request is not aborted, only no longer awaited (the
+ * Nango SDK proxy takes no AbortSignal); upgrade path is passing an
+ * AbortSignal once the SDK proxy accepts one.
+ */
+function budgetedTransport(
+  transport: GitHubTransport,
+  remainingBudget: () => number
+): GitHubTransport {
   return {
     async get(endpoint, request) {
-      if (overBudget()) throw new PollBudgetSpentError();
-      return transport.get(endpoint, request);
+      const remaining = remainingBudget();
+      if (remaining < 0) throw new PollBudgetSpentError();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new PollBudgetSpentError()),
+          Math.min(GITHUB_CALL_TIMEOUT_MS, remaining)
+        );
+      });
+      try {
+        return await Promise.race([transport.get(endpoint, request), timedOut]);
+      } finally {
+        clearTimeout(timer);
+      }
     }
   };
 }
@@ -183,8 +210,18 @@ function minutesFrom(now: Date, minutes: number): Date {
   return new Date(now.getTime() + minutes * 60_000);
 }
 
-function messageOf(error: unknown): string {
-  return (error instanceof Error ? error.message : String(error)).slice(0, 500);
+/**
+ * What `last_error` may say, which every member sees and exports: a fixed,
+ * content-free vocabulary. Never a login, a URL path, a host or port, or a
+ * raw message.
+ */
+function lastErrorOf(error: unknown): string {
+  if (error instanceof GitHubRequestError && Number.isFinite(error.status)) {
+    return `GitHub request failed (${error.status})`;
+  }
+  if (error instanceof GitHubRequestError) return 'GitHub request failed';
+  if (error instanceof GitHubNotFoundError) return 'GitHub request failed (404)';
+  return 'GitHub could not be reached';
 }
 
 function parseTime(value: unknown): Date | null {
@@ -497,22 +534,33 @@ async function processEvent(
       summary.ignoredRejected += 1;
       return 'done';
     }
-    const written = await db.transaction(async (tx) => {
+    const written = await db.transaction(async (tx): Promise<number | null> => {
+      // Re-read under the row lock, like the domain path: a rejection that
+      // landed after the read above must win.
+      const locked = await tx
+        .prepare('SELECT status FROM accounts WHERE workspace_id=? AND id=? FOR UPDATE')
+        .get<{ status: string }>(workspaceId, known.accountId);
+      if (locked?.status !== 'active') return null;
       await tx
         .prepare(
           'UPDATE github_repo_actors SET last_seen_at=?::timestamptz WHERE id=? AND workspace_id=?'
         )
         .run(now.toISOString(), known.id, workspaceId);
-      return recordSignals(
+      const signals = await recordSignals(
         tx,
         workspaceId,
         known.accountId,
         [signalFor(repo, event, known.profileUrl)],
         now
       );
+      return signals.length;
     });
+    if (written === null) {
+      summary.ignoredRejected += 1;
+      return 'done';
+    }
     summary.attached += 1;
-    if (written.length > 0) run.touched.add(known.accountId);
+    if (written > 0) run.touched.add(known.accountId);
     return 'done';
   }
 
@@ -788,7 +836,7 @@ export async function pollWorkspaceRepositories(
   const now = deps.now ?? new Date();
   const clock = deps.clock ?? Date.now;
   const startedAt = clock();
-  const overBudget = (): boolean => clock() - startedAt > GITHUB_POLL_BUDGET_MS;
+  const remainingBudget = (): number => GITHUB_POLL_BUDGET_MS - (clock() - startedAt);
   const connection = await readGitHubConnection(db, workspaceId);
   const result: WorkspacePollResult = {
     connection: connection.state,
@@ -813,7 +861,17 @@ export async function pollWorkspaceRepositories(
     settled.add(repoId);
   };
   try {
-    await pollClaimed(db, workspaceId, repos, connection, deps, now, overBudget, result, settle);
+    await pollClaimed(
+      db,
+      workspaceId,
+      repos,
+      connection,
+      deps,
+      now,
+      remainingBudget,
+      result,
+      settle
+    );
   } finally {
     for (const repo of repos) {
       if (settled.has(repo.id)) continue;
@@ -834,10 +892,11 @@ async function pollClaimed(
   connection: GitHubConnection,
   deps: PollDeps,
   now: Date,
-  overBudget: () => boolean,
+  remainingBudget: () => number,
   result: WorkspacePollResult,
   settle: (repoId: string, patch: RepositoryPatch) => Promise<void>
 ): Promise<void> {
+  const overBudget = (): boolean => remainingBudget() < 0;
   if (connection.state !== 'connected' || !connection.externalConnectionId) {
     const status = connection.state === 'needs_reauth' ? 'needs_reauth' : 'not_connected';
     for (const repo of repos) {
@@ -858,18 +917,19 @@ async function pollClaimed(
         providerConfigKey: connection.providerConfigKey,
         connectionId: connection.externalConnectionId
       });
-  } catch (error) {
+  } catch {
     for (const repo of repos) {
       await settle(repo.id, {
         status: 'error',
-        lastError: messageOf(error),
+        // Fixed: the Nango client's own message may carry its host.
+        lastError: 'GitHub integration is not configured',
         nextPollAt: minutesFrom(now, ERROR_RETRY_MINUTES)
       });
     }
     return;
   }
 
-  const client = new GitHubClient(budgetedTransport(transport, overBudget), now);
+  const client = new GitHubClient(budgetedTransport(transport, remainingBudget), now);
   const run: RunState = {
     lookups: 0,
     created: 0,
@@ -983,7 +1043,7 @@ async function pollClaimed(
       await settle(repo.id, {
         ...progress,
         status: 'error',
-        lastError: messageOf(error),
+        lastError: lastErrorOf(error),
         lastPolledAt: now,
         addUnresolved: summary.unresolved,
         nextPollAt: minutesFrom(now, ERROR_RETRY_MINUTES)

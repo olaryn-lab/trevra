@@ -4,12 +4,15 @@ import { getNango } from '../integration-service.js';
  * GitHub over the Nango proxy. Nango holds the token and refreshes it; this
  * file only shapes requests and reads GitHub's answers.
  *
- * NO NANGO-SIDE RETRIES. With `retries` above zero Nango backs off on a 429
- * and honours GitHub's reset header -- up to ten minutes per call -- which
- * would hold the workspace's automation lease for the duration. A rate limit
- * is a schedule, not an error: `GitHubClient` turns it into a reset time and
- * the poller simply comes back then. That is not a rebuilt rate limiter; it
- * reads the limit GitHub states and waits for it.
+ * NO NANGO-SIDE RETRIES ARE ASKED FOR. With retries above zero Nango backs off
+ * on a 429 and honours GitHub's reset header -- up to ten minutes per call --
+ * which would hold the workspace's automation lease for the duration.
+ * Whether Nango retries rests on the Nango server's default, not on the
+ * `retries: 0` passed below: the installed SDK drops a falsy `retries`, so
+ * that value never reaches Nango. A rate limit is a schedule, not an error:
+ * `GitHubClient` turns it into a reset time and the poller simply comes back
+ * then. That is not a rebuilt rate limiter; it reads the limit GitHub states
+ * and waits for it.
  */
 
 export interface GitHubRequest {
