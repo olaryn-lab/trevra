@@ -6,6 +6,7 @@ import { projectCampaignEmailDelivery, projectCampaignEmailReply } from '../conv
 import { executeConnectedAction, readConnectedEmailThreadEvents } from '../integration-service.js';
 import { campaignSnapshotSteps } from './managed-campaigns.js';
 import { delayMilliseconds } from './workflows.js';
+import { publicEmailOrigin } from '../email/public-origin.js';
 export type CampaignChannelKind = 'email' | 'find_email';
 export type CampaignChannelStatus =
   'planned' | 'claimed' | 'sent' | 'failed' | 'unknown' | 'skipped';
@@ -54,28 +55,6 @@ function sha(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function trackingOrigin(env: NodeJS.ProcessEnv = process.env): string | null {
-  const raw =
-    env.TREVRA_PUBLIC_API_URL ??
-    env.BETTER_AUTH_URL ??
-    env.APP_ORIGIN?.split(',')[0]?.trim() ??
-    env.PUBLIC_SITE_URL ??
-    '';
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    if (!['http:', 'https:'].includes(url.protocol)) return null;
-    if (
-      env.NODE_ENV === 'production' &&
-      (url.protocol !== 'https:' || ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))
-    )
-      return null;
-    return url.origin;
-  } catch {
-    return null;
-  }
-}
-
 function escapeHtml(value: string): string {
   return value
     .replaceAll('&', '&amp;')
@@ -110,7 +89,7 @@ async function trackedHtmlBody(
   now: Date
 ): Promise<string | null> {
   if (policy === 'off') return null;
-  const origin = trackingOrigin();
+  const origin = publicEmailOrigin();
   if (!origin) {
     throw new Error(
       'Email tracking requires a public HTTPS PUBLIC_SITE_URL (or equivalent app origin); tracking was requested but no recipient-reachable tracking origin is configured.'
