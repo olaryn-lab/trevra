@@ -352,7 +352,7 @@ describe('email channel API', () => {
       nangoMock.startSync.mockImplementationOnce(async () => {
         await designateInboundMailbox(
           db,
-          { workspaceId: owner.auth.workspaceId, connectionId, actorUserId: owner.userId },
+          { workspaceId: owner.auth.workspaceId, connectionId, actorUserId: owner.auth.userId },
           new Date(Date.now() + 60_000)
         );
       });
