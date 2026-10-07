@@ -30,6 +30,37 @@ The Nango canonical sync surface is intentionally narrow. It accepts only GTM re
 }
 ```
 
+### Inbound mailbox message
+
+The `inbound-messages` syncs in `nango-integrations/` emit `message` records with four extra fields: `mailboxAddress`, `internetMessageId`, `replyToMessageIds` and `autoSubmitted`. Only those syncs set them. `externalUrl` stays optional.
+
+```json
+{
+  "kind": "message",
+  "id": "gmail-message-id",
+  "direction": "inbound",
+  "mailboxAddress": "founder@acme.example",
+  "personEmail": "maya@northwind.example",
+  "personName": "Maya Chen",
+  "subject": "Re: Quick question, Maya",
+  "body": "Happy to talk on Thursday.",
+  "occurredAt": "2026-10-06T09:00:00.000Z",
+  "internetMessageId": "<CAF123@mail.gmail.com>",
+  "replyToMessageIds": ["<eo_0123456789abcdef@trevra.app>"],
+  "autoSubmitted": null
+}
+```
+
+A record that carries `mailboxAddress` is kept only when all three of these hold:
+
+- its connection is the workspace's designated inbound mailbox;
+- `mailboxAddress` equals that mailbox's address;
+- `personEmail` belongs to a Person already in the workspace.
+
+Anything else is dropped before Trevra writes source evidence, a message, a Person or a Conversation entry.
+
+The sync skips bulk and mailing-list mail. Unsubscribe requests that arrive as mail suppress the sender, with the sources `email_mailto_unsubscribe` and `email_reply_unsubscribe`.
+
 ### Opportunity
 
 ```json
@@ -80,7 +111,7 @@ External writes use Trevra's prepared-action / exact-payload approval boundary. 
 
 Current prepared execution action types are:
 
-- `email.send` — send through a connected Gmail or Microsoft 365 mailbox.
+- `email.send` — send through a connected Gmail or Microsoft 365 mailbox. When the approved metadata names `connectionId` and `senderAddress`, the email leaves only from that connection. It must also still verify as that address with the provider; otherwise nothing is sent and the action answers 409. Outreach email approved with `requireListUnsubscribe: true` carries RFC 8058 `List-Unsubscribe` and `List-Unsubscribe-Post` headers, or it is not sent. Outreach email is also refused (409) when it carries no mailbox binding, or does not end with the workspace compliance footer.
 - `community.reply` — publish a governed reply through a supported GTM community channel.
 - `crm.log-activity` — append a GTM activity to a connected CRM record.
 - `buffer.create-draft` — create an unscheduled Buffer draft only after exact-payload founder approval. The mutation always uses Buffer's draft mode and never supplies a publish time.
@@ -105,6 +136,23 @@ Records that cannot be read (an unsupported model, or a calendar event in a shap
 The read-only `inbound-messages` sync (model `InboundEmailMessage`) runs on the `trevra-gmail` and `trevra-microsoft` integrations from `nango-integrations/`. Trevra starts it when a workspace designates its inbound mailbox, and it emits canonical `message` records with `mailboxAddress` set. A record with that model but no `mailboxAddress` is skipped, never ingested. The sync drops list and bulk mail and mail sent from the mailbox itself; Trevra re-checks every record server-side and keeps only senders it already knows.
 
 Nango's self-hosted record store retains synced message records, including message bodies, until the connection is deleted. Trevra's own tables never store strangers' mail.
+
+### Trevra-owned Nango functions
+
+The inbound-mailbox syncs are Trevra code in `nango-integrations/`, in Nango's zero-YAML layout. Each folder name equals a Nango integration id (`trevra-gmail`, `trevra-microsoft`). If `NANGO_GMAIL_INTEGRATION` or `NANGO_MICROSOFT_INTEGRATION` names a different integration, rename the folder to match.
+
+Deploy them to each Nango environment, and again whenever they change:
+
+```bash
+cd nango-integrations
+cp .env.example .env   # set NANGO_SECRET_KEY_PROD, and NANGO_HOSTPORT when self-hosting
+npm install
+npx nango deploy prod
+```
+
+The syncs do not start on their own. Trevra starts the sync for one mailbox when an owner chooses it as the inbound mailbox in Workspace settings. It pauses that sync when the owner stops reading mail.
+
+If Nango cannot start the sync, Workspace settings shows the mailbox as unavailable and nothing is read. That happens when the syncs are not deployed, or on a Nango plan without syncs.
 
 ## Inbound website lead capture
 

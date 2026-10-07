@@ -186,7 +186,6 @@ export async function emailOutreachReadiness(
   }
 
   return { blockers, warnings, listName, recipientCount, sender };
-  return { blockers, warnings, listName, recipientCount, sender };
 }
 
 export class EmailOutreachError extends Error {
