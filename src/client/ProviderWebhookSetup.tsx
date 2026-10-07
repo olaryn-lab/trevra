@@ -14,8 +14,9 @@ import { ConfirmDrawer } from './ui/dialog';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import {
-  STRIPE_WEBHOOK_EVENTS,
+  StripeEventSelection,
   WebhookEndpointRow,
+  copyText,
   providerWebhookUrl,
   showStripePanel,
   type WebhookLoadState
@@ -39,6 +40,7 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
   const [confirmRemove, setConfirmRemove] = useState<ProviderWebhookEndpointSummary | null>(null);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const reload = () => {
     setLoad('pending');
@@ -67,6 +69,7 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
   const start = async () => {
     setBusy('draft');
     setProblem('');
+    setCopyFailed(false);
     try {
       setDraft(await draftProviderWebhook('stripe'));
     } catch (error) {
@@ -129,8 +132,12 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
     }
   };
 
-  const copyUrl = (url: string) =>
-    void navigator.clipboard.writeText(url).then(() => setToast('Endpoint URL copied.'));
+  const copyUrl = (url: string) => {
+    setCopyFailed(false);
+    void copyText(url).then((copied) =>
+      copied ? setToast('Endpoint URL copied.') : setCopyFailed(true)
+    );
+  };
 
   if (!showStripePanel(load, available)) return null;
 
@@ -201,12 +208,13 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
             <Button onClick={() => copyUrl(providerWebhookUrl(base, draft.path))}>
               <Copy size={14} aria-hidden /> Copy URL
             </Button>
+            {copyFailed && (
+              <div className="error-banner" role="status">
+                Copy failed — select the URL and copy it manually.
+              </div>
+            )}
           </div>
-          <div className="capture-webhook-events">
-            {STRIPE_WEBHOOK_EVENTS.map((name) => (
-              <code key={name}>{name}</code>
-            ))}
-          </div>
+          <StripeEventSelection />
           <div className="capture-webhook-form">
             <Field
               label="Signing secret"

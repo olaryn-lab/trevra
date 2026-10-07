@@ -371,6 +371,15 @@
   gap: 6px;
 }
 
+.capture-webhook-connect > .li-hint {
+  margin: 0;
+}
+
+.capture-load-error {
+  display: grid;
+  gap: 10px;
+}
+
 .capture-webhook-form {
   display: grid;
   grid-template-columns: minmax(220px, 1fr) auto;

@@ -1,14 +1,40 @@
 import { PauseCircle, PlayCircle, Trash2 } from 'lucide-react';
 import type { ProviderWebhookEndpointSummary } from './api';
+import { STRIPE_OBSERVED_EVENTS } from '../shared/stripe-events';
 import { Button } from './ui/primitives';
 
-/** The events the founder selects in Stripe (server: STRIPE_OBSERVED_EVENTS). */
-export const STRIPE_WEBHOOK_EVENTS = [
-  'checkout.session.completed',
-  'invoice.paid',
-  'customer.subscription.updated',
-  'customer.subscription.deleted'
-] as const;
+/** The events to select in Stripe: the same list the server maps. */
+export function StripeEventSelection() {
+  return (
+    <>
+      <div className="capture-webhook-events">
+        {STRIPE_OBSERVED_EVENTS.map((name) => (
+          <code key={name}>{name}</code>
+        ))}
+      </div>
+      <p className="li-hint">
+        Test-mode events are verified and counted, but never recorded as payments.
+      </p>
+    </>
+  );
+}
+
+/**
+ * Clipboard writes reject without permission or focus, and the API is absent
+ * outside a secure context. Reports the outcome instead of failing silently.
+ */
+export async function copyText(
+  text: string,
+  clipboard: Pick<Clipboard, 'writeText'> | undefined = globalThis.navigator?.clipboard
+): Promise<boolean> {
+  try {
+    if (!clipboard) return false;
+    await clipboard.writeText(text);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export type WebhookLoadState = 'pending' | 'ok' | 'error';
 

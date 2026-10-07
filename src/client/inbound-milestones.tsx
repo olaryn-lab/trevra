@@ -1,12 +1,37 @@
 import type { InboundMilestone } from './api';
 import { GTM_MILESTONE_KINDS } from '../shared/milestones';
+import { Button } from './ui/primitives';
+
+/** A failed read is said out loud with a retry, never shown as an empty state. */
+export function SectionLoadError({ message, onRetry }: { message: string; onRetry?: () => void }) {
+  return (
+    <div className="capture-load-error">
+      <div className="error-banner" role="alert">
+        {message}
+      </div>
+      {onRetry && (
+        <div className="capture-actions">
+          <Button onClick={onRetry}>Try again</Button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * Product milestones are outcomes, not leads: they are listed here as
  * evidence (each anchored for the Today link and the account signal's
  * evidence URL), never as decision cards.
  */
-export function MilestoneSection({ milestones }: { milestones: InboundMilestone[] }) {
+export function MilestoneSection({
+  milestones,
+  error = '',
+  onRetry
+}: {
+  milestones: InboundMilestone[];
+  error?: string;
+  onRetry?: () => void;
+}) {
   return (
     <section className="page-panel" aria-labelledby="inbound-milestones-title">
       <div className="section-heading">
@@ -15,7 +40,9 @@ export function MilestoneSection({ milestones }: { milestones: InboundMilestone[
           <p>Signups, activation, payments and cancellations reported by your product or Stripe.</p>
         </div>
       </div>
-      {milestones.length === 0 ? (
+      {error ? (
+        <SectionLoadError message={error} onRetry={onRetry} />
+      ) : milestones.length === 0 ? (
         <div className="empty-state">
           <h4>No milestones yet</h4>
           <p>

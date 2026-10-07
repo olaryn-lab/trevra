@@ -38,6 +38,35 @@ describe('inbound milestones and attribution', () => {
     expect(html).toContain('usage_threshold_crossed');
   });
 
+  it('says a failed milestone read failed, with a retry, instead of claiming none', () => {
+    const html = renderToStaticMarkup(
+      <MilestoneSection
+        milestones={[]}
+        error="Unable to load product milestones."
+        onRetry={() => undefined}
+      />
+    );
+    expect(html).toContain('Unable to load product milestones.');
+    expect(html).toContain('role="alert"');
+    expect(html).toContain('Try again');
+    expect(html).not.toContain('No milestones yet');
+  });
+
+  it('says a failed attribution read failed, with a retry, instead of vanishing', () => {
+    expect(renderToStaticMarkup(<AttributionTables summary={null} />)).toBe('');
+    const html = renderToStaticMarkup(
+      <AttributionTables
+        summary={null}
+        error="Unable to load where inbound came from."
+        onRetry={() => undefined}
+      />
+    );
+    expect(html).toContain('Where inbound came from');
+    expect(html).toContain('Unable to load where inbound came from.');
+    expect(html).toContain('Try again');
+    expect(html).not.toContain('<table');
+  });
+
   it('renders both 90-day attribution tables with readable channel names', () => {
     const html = renderToStaticMarkup(
       <AttributionTables

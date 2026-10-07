@@ -1,6 +1,7 @@
 import { heardAboutLabel } from '../shared/attribution';
 import type { OpportunityRecord } from '../shared/types';
 import type { InboundAttributionCount, InboundAttributionSummary } from './api';
+import { SectionLoadError } from './inbound-milestones';
 
 /** The self-reported channel as its own chip; UTM keys as `key=value` chips. */
 export function attributionChips(attribution: Record<string, unknown>): {
@@ -79,27 +80,43 @@ function AttributionTable({
   );
 }
 
-export function AttributionTables({ summary }: { summary: InboundAttributionSummary }) {
+/** Nothing while the first read is in flight; an honest error, not a blank, when it failed. */
+export function AttributionTables({
+  summary,
+  error = '',
+  onRetry
+}: {
+  summary: InboundAttributionSummary | null;
+  error?: string;
+  onRetry?: () => void;
+}) {
+  if (!summary && !error) return null;
   return (
     <section className="page-panel" aria-labelledby="inbound-attribution-title">
       <div className="section-heading">
         <div>
-          <h3 id="inbound-attribution-title">Where inbound came from ({summary.days} days)</h3>
+          <h3 id="inbound-attribution-title">
+            {summary ? `Where inbound came from (${summary.days} days)` : 'Where inbound came from'}
+          </h3>
           <p>UTM source and the channel people said they heard about you from.</p>
         </div>
       </div>
-      <div className="capture-attribution">
-        <AttributionTable
-          caption="Heard about us"
-          rows={summary.byHeardAbout}
-          label={(value) => heardAboutLabel(value) ?? value}
-        />
-        <AttributionTable
-          caption="utm_source"
-          rows={summary.byUtmSource}
-          label={(value) => value}
-        />
-      </div>
+      {error || !summary ? (
+        <SectionLoadError message={error} onRetry={onRetry} />
+      ) : (
+        <div className="capture-attribution">
+          <AttributionTable
+            caption="Heard about us"
+            rows={summary.byHeardAbout}
+            label={(value) => heardAboutLabel(value) ?? value}
+          />
+          <AttributionTable
+            caption="utm_source"
+            rows={summary.byUtmSource}
+            label={(value) => value}
+          />
+        </div>
+      )}
     </section>
   );
 }

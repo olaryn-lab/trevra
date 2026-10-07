@@ -143,11 +143,33 @@ export function InboundPeople({
   const [loading, setLoading] = useState(true);
   const [problem, setProblem] = useState('');
   const [milestones, setMilestones] = useState<InboundMilestone[]>([]);
+  const [milestonesError, setMilestonesError] = useState('');
   const [attribution, setAttribution] = useState<InboundAttributionSummary | null>(null);
+  const [attributionError, setAttributionError] = useState('');
   const scrolledMilestone = useRef<string | null>(null);
+
+  // Milestones and attribution each own their error and retry: a failed read
+  // must never render as "No milestones yet" or vanish. Neither rejects.
+  const loadMilestones = useCallback(async () => {
+    try {
+      setMilestones(await getInboundMilestones());
+      setMilestonesError('');
+    } catch (error) {
+      setMilestonesError(errorMessage(error, 'Unable to load product milestones.'));
+    }
+  }, []);
+  const loadAttribution = useCallback(async () => {
+    try {
+      setAttribution(await getInboundAttribution());
+      setAttributionError('');
+    } catch (error) {
+      setAttributionError(errorMessage(error, 'Unable to load where inbound came from.'));
+    }
+  }, []);
 
   const load = useCallback(async () => {
     setLoading(true);
+    const sections = Promise.all([loadMilestones(), loadAttribution()]);
     try {
       // THE THREE INBOUND READS ARE STRICT; THE REST ARE NOT. Lead lists need a
       // LinkedIn seat and ranked accounts need an account import, and neither is
@@ -158,20 +180,11 @@ export function InboundPeople({
         getInboundSubmissions(),
         getCaptureSources()
       ]);
-      const [
-        nextOpportunities,
-        nextSuppressions,
-        nextLists,
-        nextAccounts,
-        nextMilestones,
-        nextAttribution
-      ] = await Promise.all([
+      const [nextOpportunities, nextSuppressions, nextLists, nextAccounts] = await Promise.all([
         getOpportunities().catch(() => [] as OpportunityRecord[]),
         getSuppressions().catch(() => [] as SuppressionSummary[]),
         getLinkedInManagerLeadLists().catch(() => [] as LinkedInLeadList[]),
-        getRankedAccounts({ limit: 500 }).catch(() => [] as RankedAccount[]),
-        getInboundMilestones().catch(() => [] as InboundMilestone[]),
-        getInboundAttribution().catch(() => null)
+        getRankedAccounts({ limit: 500 }).catch(() => [] as RankedAccount[])
       ]);
       setPeople(nextPeople);
       setSubmissions(nextSubmissions);
@@ -180,15 +193,14 @@ export function InboundPeople({
       setSuppressions(nextSuppressions);
       setLeadLists(nextLists);
       setAccounts(nextAccounts);
-      setMilestones(nextMilestones);
-      setAttribution(nextAttribution);
       setProblem('');
     } catch (error) {
       setProblem(errorMessage(error, 'Unable to load inbound leads.'));
     } finally {
+      await sections;
       setLoading(false);
     }
-  }, []);
+  }, [loadMilestones, loadAttribution]);
 
   useEffect(() => {
     void load();
@@ -579,8 +591,16 @@ export function InboundPeople({
           </div>
         )}
       </section>
-      <MilestoneSection milestones={milestones} />
-      {attribution && <AttributionTables summary={attribution} />}
+      <MilestoneSection
+        milestones={milestones}
+        error={milestonesError}
+        onRetry={() => void loadMilestones()}
+      />
+      <AttributionTables
+        summary={attribution}
+        error={attributionError}
+        onRetry={() => void loadAttribution()}
+      />
     </div>
   );
 }
