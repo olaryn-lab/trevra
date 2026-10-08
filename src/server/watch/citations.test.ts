@@ -11,6 +11,7 @@ import {
   type CitationSample,
   type CitationSourceLink
 } from './citations.js';
+import { createCaptureSource } from '../lead-capture/sources.js';
 import { createWatch, listWatchMentions, type BrandWatch } from './store.js';
 
 const WORKSPACE = 'ws_ai_citations';
@@ -234,5 +235,159 @@ describe('AI-answer citations', () => {
       .get<{ samples: string; sources: string }>(WORKSPACE, link.captureSourceId);
     expect(Number(left?.samples)).toBe(0);
     expect(Number(left?.sources)).toBe(0);
+  });
+
+  it('keeps citation mentions out of sentiment-filtered lists', async () => {
+    await record(sample());
+    await db
+      .prepare(
+        `INSERT INTO brand_watch_mentions (
+           id, workspace_id, watch_id, platform, external_id, url, title, content,
+           sentiment_label, sentiment_score, sentiment_span, sentiment_version, content_hash,
+           metadata_json, mention_created_at, first_seen_at, last_seen_at
+         ) VALUES ('bwm_scout',?,?,'hackernews','x1','https://news.example/1','t','c',
+           'neutral',0,'',1,'h','{}'::jsonb,?,?,?)`
+      )
+      .run(WORKSPACE, watch.id, NOW.toISOString(), NOW.toISOString(), NOW.toISOString());
+    const neutral = await listWatchMentions(db, WORKSPACE, watch.id, { sentiment: 'neutral' });
+    expect(neutral.map((m) => m.platform)).toEqual(['hackernews']);
+    const cited = await listWatchMentions(db, WORKSPACE, watch.id, { platform: 'ai_answer' });
+    expect(cited).toHaveLength(1);
+  });
+
+  it('retries the link insert once when the prune closer deletes the reused orphan source', async () => {
+    const other = await createWatch(
+      db,
+      WORKSPACE,
+      { name: 'Other', keywords: ['other'], platforms: ['hackernews'], cadence: 'daily' },
+      NOW
+    );
+    const orphan = await createCaptureSource(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        name: 'orphan',
+        kind: 'ai_citations',
+        preparationKey: `trevra-citations:${other.id}`,
+        preparationHash: createHash('sha256').update(other.id).digest('hex')
+      },
+      NOW
+    );
+    let fired = false;
+    const racing = new Proxy(db, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (prop !== 'prepare') return typeof value === 'function' ? value.bind(target) : value;
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (fired || !sql.includes('INSERT INTO brand_watch_citation_sources')) return stmt;
+          return new Proxy(stmt, {
+            get(st, key) {
+              if (key !== 'get') return Reflect.get(st, key);
+              return async (...args: unknown[]) => {
+                fired = true;
+                await target
+                  .prepare('DELETE FROM capture_sources WHERE id=?')
+                  .run(orphan.source.id);
+                return (st.get as (...a: unknown[]) => Promise<unknown>)(...args);
+              };
+            }
+          });
+        };
+      }
+    }) as Db;
+    const result = await connectCitationSource(
+      racing,
+      { workspaceId: WORKSPACE, actorUserId: USER, watch: other, ownedDomains: ['other.example'] },
+      NOW
+    );
+    expect(fired).toBe(true);
+    expect(result.created).toBe(true);
+    expect(result.link.captureSourceId).not.toBe(orphan.source.id);
+  });
+
+  it('bounds answeredAt to five minutes ahead and 13 months back', async () => {
+    const at = (iso: string) => record(sample({ sampleId: `b-${iso}`, answeredAt: iso }));
+    await expect(at('2026-10-06T09:04:59.000Z')).resolves.toBeTruthy();
+    await expect(at('2026-10-06T09:05:01.000Z')).rejects.toMatchObject({ status: 400 });
+    await expect(at('2025-09-06T09:00:01.000Z')).resolves.toBeTruthy();
+    await expect(at('2025-09-06T08:59:59.000Z')).rejects.toMatchObject({
+      status: 400,
+      message: 'answeredAt is older than the retention window'
+    });
+  });
+
+  it('prunes by calendar months from a 31st-of-month now', async () => {
+    const now = new Date('2026-03-31T12:00:00.000Z');
+    await record(sample({ sampleId: 'old', answeredAt: '2026-03-30T08:00:00.000Z' }), 'k-old');
+    await record(
+      sample({ sampleId: 'new', engine: 'gemini', answeredAt: '2026-03-30T08:00:00.000Z' }),
+      'k-new'
+    );
+    const setReceived = (sampleId: string, at: string) =>
+      db
+        .prepare('UPDATE ai_citation_samples SET received_at=? WHERE watch_id=? AND sample_id=?')
+        .run(at, watch.id, sampleId);
+    await setReceived('old', '2025-02-27T12:00:00Z'); // 13 months + 1 day before
+    await setReceived('new', '2025-03-01T12:00:00Z'); // 13 months - 1 day before
+    await pruneCitationSamples(db, now);
+    const kept = await db
+      .prepare('SELECT sample_id FROM ai_citation_samples WHERE watch_id=?')
+      .all<{ sample_id: string }>(watch.id);
+    expect(kept.map((row) => row.sample_id)).toEqual(['new']);
+  });
+
+  it('serialises concurrent samples so one transition makes one mention', async () => {
+    await record(sample({ sampleId: 'c0', brandCited: false, citedUrls: [], position: null }));
+    const results = await Promise.all([
+      record(sample({ sampleId: 'c1', answeredAt: '2026-10-03T08:00:00.000Z' })),
+      record(sample({ sampleId: 'c2', answeredAt: '2026-10-04T08:00:00.000Z' }))
+    ]);
+    expect(results.filter((r) => r.change === 'gained')).toHaveLength(1);
+    expect(
+      await listWatchMentions(db, WORKSPACE, watch.id, { platform: 'ai_answer' })
+    ).toHaveLength(1);
+  });
+
+  it('refuses the same idempotency key with a different payload', async () => {
+    await record(sample(), 'shared-key');
+    await expect(
+      record(sample({ sampleId: 'beseam-other', position: 9 }), 'shared-key')
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it('makes mentions only on gain and loss across a regained citation', async () => {
+    const miss = { brandCited: false, citedUrls: [], position: null };
+    const steps = [
+      sample({ sampleId: 's1', answeredAt: '2026-10-01T08:00:00.000Z', ...miss }),
+      sample({ sampleId: 's2', answeredAt: '2026-10-02T08:00:00.000Z' }),
+      sample({ sampleId: 's3', answeredAt: '2026-10-03T08:00:00.000Z', ...miss }),
+      sample({ sampleId: 's4', answeredAt: '2026-10-04T08:00:00.000Z', ...miss }),
+      sample({ sampleId: 's5', answeredAt: '2026-10-05T08:00:00.000Z' })
+    ];
+    const outcomes: string[] = [];
+    for (const step of steps) outcomes.push((await record(step)).change);
+    expect(outcomes).toEqual(['absent', 'gained', 'lost', 'absent', 'gained']);
+    expect(
+      await listWatchMentions(db, WORKSPACE, watch.id, { platform: 'ai_answer' })
+    ).toHaveLength(3);
+  });
+
+  it('handles IDN and userinfo cited URLs without storing userinfo or foreign hosts', async () => {
+    const attempt = (url: string, n: string) =>
+      record(sample({ sampleId: `u-${n}`, citedUrls: [url] })).catch((caught: unknown) => caught);
+    const foreign = await attempt('https://bücher.example/', 'idn');
+    expect(foreign).toBeInstanceOf(LeadCaptureError);
+    const reversed = await attempt('https://trevra.com@evil.com/', 'rev');
+    expect((reversed as LeadCaptureError).status).toBe(400);
+    const userinfo = await attempt('https://evil.com@trevra.com/', 'ui');
+    expect(userinfo).toBeInstanceOf(LeadCaptureError);
+    const rows = await db
+      .prepare(
+        "SELECT metadata_json::text AS m FROM brand_watch_mentions WHERE platform='ai_answer'"
+      )
+      .all<{ m: string }>();
+    for (const row of rows) expect(row.m).not.toContain('@');
   });
 });

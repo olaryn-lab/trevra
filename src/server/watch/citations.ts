@@ -4,12 +4,18 @@ import { normalizeAccountDomain } from '../accounts/store.js';
 import { id, type Db } from '../db.js';
 import { createCaptureSource, getWorkspaceCaptureSource } from '../lead-capture/sources.js';
 import {
+  CITATION_PREPARATION_PREFIX,
   CITATION_SOURCE_KIND,
   LeadCaptureError,
   type CaptureSourceRecord
 } from '../lead-capture/types.js';
 import { SENTIMENT_VERSION } from './sentiment.js';
-import { getWatchMention, type BrandWatch, type WatchMention } from './store.js';
+import {
+  AI_ANSWER_PLATFORM,
+  getWatchMention,
+  type BrandWatch,
+  type WatchMention
+} from './store.js';
 
 /**
  * AI-answer citations: content-free samples of whether an AI engine cited the
@@ -27,9 +33,7 @@ import { getWatchMention, type BrandWatch, type WatchMention } from './store.js'
  * strict, so a body carrying either is refused before it reaches storage.
  */
 
-export const AI_ANSWER_PLATFORM = 'ai_answer';
-/** Reserved: prepareGtmPlan rejects user preparation keys that start with this. */
-export const CITATION_PREPARATION_PREFIX = 'trevra-citations:';
+export { AI_ANSWER_PLATFORM, CITATION_PREPARATION_PREFIX };
 export const AI_ANSWER_ENGINES = [
   'chatgpt',
   'google_ai_mode',
@@ -275,33 +279,51 @@ export async function connectCitationSource(
   const existing = await updateExisting();
   if (existing) return withSource(existing);
 
-  const created = await createCaptureSource(
-    db,
-    {
-      workspaceId: input.workspaceId,
-      actorUserId: input.actorUserId,
-      name: `AI answers · ${input.watch.name}`.slice(0, 120),
-      kind: CITATION_SOURCE_KIND,
-      preparationKey: `${CITATION_PREPARATION_PREFIX}${input.watch.id}`,
-      preparationHash: sha256(input.watch.id)
-    },
-    now
-  );
-  const inserted = await db
-    .prepare(
-      `INSERT INTO brand_watch_citation_sources
-         (watch_id, workspace_id, capture_source_id, owned_domains, created_at, updated_at)
-       VALUES (?,?,?,?,?,?)
-       ON CONFLICT (watch_id) DO NOTHING
-       RETURNING *`
-    )
-    .get<LinkRow>(input.watch.id, input.workspaceId, created.source.id, ownedDomains, at, at);
+  const attempt = async () => {
+    const created = await createCaptureSource(
+      db,
+      {
+        workspaceId: input.workspaceId,
+        actorUserId: input.actorUserId,
+        name: `AI answers · ${input.watch.name}`.slice(0, 120),
+        kind: CITATION_SOURCE_KIND,
+        preparationKey: `${CITATION_PREPARATION_PREFIX}${input.watch.id}`,
+        preparationHash: sha256(input.watch.id)
+      },
+      now
+    );
+    const inserted = await db
+      .prepare(
+        `INSERT INTO brand_watch_citation_sources
+           (watch_id, workspace_id, capture_source_id, owned_domains, created_at, updated_at)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT (watch_id) DO NOTHING
+         RETURNING *`
+      )
+      .get<LinkRow>(input.watch.id, input.workspaceId, created.source.id, ownedDomains, at, at);
+    return { created, inserted };
+  };
+  let result;
+  try {
+    result = await attempt();
+  } catch (error) {
+    // The prune closer deleted the orphaned source createCaptureSource just
+    // reused; the retry's create makes a fresh one.
+    if ((error as { code?: unknown }).code !== '23503') throw error;
+    result = await attempt();
+  }
+  const { created, inserted } = result;
   if (!inserted) {
     const raced = await updateExisting();
     if (!raced) throw new Error('Citation source link vanished during connect');
     return withSource(raced);
   }
-  return { link: toLink(inserted), source: created.source, secret: created.secret, created: true };
+  return {
+    link: toLink(inserted),
+    source: created.source,
+    secret: created.secret,
+    created: true
+  };
 }
 
 function decideChange(previouslyCited: boolean | null, cited: boolean): CitationChange {
@@ -341,6 +363,11 @@ export async function recordCitationSample(
   const { link, sample } = input;
   if (new Date(sample.answeredAt).getTime() > now.getTime() + FUTURE_SKEW_MS)
     throw new LeadCaptureError('answeredAt is in the future', 400);
+  const oldest = await db
+    .prepare(`SELECT (?::timestamptz < ?::timestamptz - make_interval(months => ?)) AS too_old`)
+    .get<{ too_old: boolean }>(sample.answeredAt, now.toISOString(), RETENTION_MONTHS);
+  if (oldest?.too_old)
+    throw new LeadCaptureError('answeredAt is older than the retention window', 400);
   if (sample.citedUrls.some((url) => !citedUrlWithinOwnedDomains(url, link.ownedDomains)))
     throw new LeadCaptureError(
       'citedUrls may only contain http(s) URLs on the domains connected to this watch',
@@ -483,14 +510,13 @@ export async function recordCitationSample(
  * the capture_source_secrets cascade.
  */
 export async function pruneCitationSamples(db: Db, now: Date = new Date()): Promise<void> {
-  const cutoff = new Date(
-    Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - RETENTION_MONTHS, now.getUTCDate())
-  ).toISOString();
   const orphanCutoff = new Date(now.getTime() - ORPHAN_GRACE_MS).toISOString();
   try {
     await db
-      .prepare('DELETE FROM ai_citation_samples WHERE received_at < ?::timestamptz')
-      .run(cutoff);
+      .prepare(
+        'DELETE FROM ai_citation_samples WHERE received_at < ?::timestamptz - make_interval(months => ?)'
+      )
+      .run(now.toISOString(), RETENTION_MONTHS);
     await db
       .prepare(
         `DELETE FROM capture_sources s

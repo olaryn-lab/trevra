@@ -5,9 +5,9 @@ import type { AccountImportResult } from '../accounts/types.js';
 import { canonicalPayloadHash } from '../control-plane/payload.js';
 import { listSeats } from '../linkedin/seats.js';
 import { createCaptureSource } from '../lead-capture/sources.js';
-import { CITATION_PREPARATION_PREFIX } from '../watch/citations.js';
 import {
   CAPTURE_SOURCE_KINDS,
+  CITATION_PREPARATION_PREFIX,
   type CaptureSourceKind,
   type CaptureSourceRecord
 } from '../lead-capture/types.js';

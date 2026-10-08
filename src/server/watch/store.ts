@@ -419,6 +419,8 @@ export async function recordWatchMentions(
   return { inserted, updated };
 }
 
+export const AI_ANSWER_PLATFORM = 'ai_answer';
+
 export async function listWatchMentions(
   db: Db,
   workspaceId: string,
@@ -430,7 +432,7 @@ export async function listWatchMentions(
     .prepare(
       `SELECT ${MENTION_COLUMNS} FROM brand_watch_mentions
        WHERE workspace_id=? AND watch_id=?
-         AND (?::text IS NULL OR sentiment_label = ?)
+         AND (?::text IS NULL OR (sentiment_label = ? AND platform <> ?))
          AND (?::text IS NULL OR platform = ?)
        ORDER BY first_seen_at DESC
        LIMIT ?`
@@ -440,6 +442,7 @@ export async function listWatchMentions(
       watchId,
       filters.sentiment ?? null,
       filters.sentiment ?? null,
+      AI_ANSWER_PLATFORM,
       filters.platform ?? null,
       filters.platform ?? null,
       limit

@@ -15,6 +15,8 @@ export type CaptureSourceKind = (typeof CAPTURE_SOURCE_KINDS)[number];
  * secret signs AI-answer citation samples and is refused by lead intake.
  */
 export const CITATION_SOURCE_KIND = 'ai_citations' as const;
+/** Reserved: prepareGtmPlan rejects user preparation keys that start with this. */
+export const CITATION_PREPARATION_PREFIX = 'trevra-citations:';
 export type CaptureSourceRecordKind = CaptureSourceKind | typeof CITATION_SOURCE_KIND;
 
 export const captureSourceCreateSchema = z
