@@ -282,7 +282,8 @@ export async function projectCanonicalMessage(
     .get<Record<string, unknown>>(workspaceId, messageId);
   if (!message?.person_id) return null;
   const provider = String(message.provider ?? '').toLowerCase();
-  if (!['gmail', 'google-mail', 'microsoft', 'outlook'].includes(provider)) return null;
+  if (!['gmail', 'google-mail', 'microsoft', 'outlook', 'zoho-mail'].includes(provider))
+    return null;
   const externalRef = message.external_id ? String(message.external_id) : null;
   if (externalRef) {
     // lc-debt: a provider message reached through both a NANGO_SYNCS_* message sync and the inbound mailbox sync is projected once, by whichever path stored it first; upgrade path: retire the legacy message syncs once every workspace reads mail through the inbound mailbox.

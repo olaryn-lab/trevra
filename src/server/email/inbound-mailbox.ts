@@ -10,6 +10,7 @@ import {
   SKILL_DRAFT_UNSUBSCRIBE_LINE,
   emailComplianceProvider
 } from './compliance.js';
+import { OUTREACH_REPLY_OPT_OUT_SENTENCE, footerForUnsubscribeMode } from './unsubscribe-policy.js';
 import { UNSUBSCRIBE_SUBJECT_PATTERN, applyUnsubscribeToken } from './unsubscribe.js';
 
 /*
@@ -68,7 +69,14 @@ function collapse(value: string): string {
 async function withoutKnownOptOutText(db: Db, workspaceId: string, body: string): Promise<string> {
   const footer = await emailComplianceProvider().footer(db, workspaceId);
   // Longest first, so a footer that embeds the shorter sentences is removed whole.
-  const known = [OUTREACH_OPT_OUT_SENTENCE, SKILL_DRAFT_UNSUBSCRIBE_LINE, footer]
+  const known = [
+    OUTREACH_OPT_OUT_SENTENCE,
+    OUTREACH_REPLY_OPT_OUT_SENTENCE,
+    SKILL_DRAFT_UNSUBSCRIBE_LINE,
+    footer,
+    // The footer Zoho outreach ends with (unsubscribe-policy.ts).
+    footer ? footerForUnsubscribeMode(footer, 'footer_and_reply') : null
+  ]
     .map((text) => collapse(text ?? '').toLowerCase())
     .filter(Boolean)
     .sort((x, y) => y.length - x.length);
@@ -174,8 +182,40 @@ export async function decideInboundMailboxRecord(
       autoSubmitted: record.autoSubmitted ?? null
     });
   }
-  if (outcomeKind === 'unsubscribe' && threaded) {
-    // Only a reply that threads to Trevra's own email counts as verified intent.
+  // A reply that threads to Trevra's own email is verified intent. Zoho Mail
+  // outreach cannot always be threaded (its Message-ID read-back may fail and
+  // clients drop In-Reply-To), and its only opt-out is "reply unsubscribe", so
+  // an unthreaded unsubscribe also counts when this same mailbox sent the
+  // Person Zoho outreach (unsubscribe-policy.ts).
+  const optOutDelivery =
+    outcomeKind === 'unsubscribe' && !threaded
+      ? await db
+          .prepare(
+            `SELECT d.id FROM gtm_deliveries d
+             WHERE d.workspace_id=? AND d.channel='email' AND d.purpose='outreach' AND d.status='sent'
+               AND d.provider='zoho-mail' AND d.connection_id=?
+               AND LOWER(d.recipient) IN (
+                 SELECT email_normalized FROM contacts
+                 WHERE workspace_id=? AND id=? AND email_normalized IS NOT NULL
+                 UNION
+                 SELECT normalized_value FROM person_identities
+                 WHERE workspace_id=? AND person_id=? AND identity_type='email'
+                 UNION
+                 SELECT ?::text
+               )
+             ORDER BY d.sent_at DESC LIMIT 1`
+          )
+          .get<{ id: string }>(
+            workspaceId,
+            connectionId,
+            workspaceId,
+            person.id,
+            workspaceId,
+            person.id,
+            sender
+          )
+      : undefined;
+  if (outcomeKind === 'unsubscribe' && (threaded || optOutDelivery)) {
     await createSuppression(
       db,
       {
