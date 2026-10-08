@@ -493,24 +493,28 @@ async function knownActor(
 
 /**
  * The owner's own website domain, from its organization profile or, when it
- * is a person, its user profile; normalized like every candidate. Any failure
- * means "no domain": the exclusion fails open, the poll does not fail.
+ * is a person, its user profile; normalized like every candidate. Null only
+ * when GitHub has no such owner or the profile names no website. Any other
+ * failure (rate limit, revoked token, spent budget, 5xx) throws, and the
+ * caller defers the event: failing open here would let a teammate who only
+ * shares the owner's domain through as a lead.
  */
 async function readOwnerDomain(client: GitHubClient, owner: string): Promise<string | null> {
   const handle = encodeURIComponent(owner);
+  let response;
   try {
-    let response;
+    response = await client.get(`/orgs/${handle}`);
+  } catch (error) {
+    if (!(error instanceof GitHubNotFoundError)) throw error;
     try {
-      response = await client.get(`/orgs/${handle}`);
-    } catch (error) {
-      if (!(error instanceof GitHubNotFoundError)) throw error;
       response = await client.get(`/users/${handle}`);
+    } catch (userError) {
+      if (userError instanceof GitHubNotFoundError) return null;
+      throw userError;
     }
-    const data = response.data as { blog?: unknown } | null;
-    return data && typeof data === 'object' ? companyDomainFromUrl(data.blog) : null;
-  } catch {
-    return null;
   }
+  const data = response.data as { blog?: unknown } | null;
+  return data && typeof data === 'object' ? companyDomainFromUrl(data.blog) : null;
 }
 
 /**
@@ -586,7 +590,13 @@ async function processEvent(
   if (ownDomain === undefined) {
     if (run.lookups >= MAX_PROFILE_LOOKUPS_PER_RUN || run.overBudget()) return 'defer';
     run.lookups += 1;
-    ownDomain = await readOwnerDomain(client, repo.owner);
+    try {
+      ownDomain = await readOwnerDomain(client, repo.owner);
+    } catch {
+      // Unknown is not "none": defer like a spent lookup budget, cache nothing,
+      // and let a later run read the owner again. The poll does not fail.
+      return 'defer';
+    }
     run.ownerDomains.set(ownerKey, ownDomain);
   }
   const candidates = resolved.candidates.filter(

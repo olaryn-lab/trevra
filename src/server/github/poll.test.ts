@@ -602,34 +602,42 @@ describe('pollWorkspaceRepositories', () => {
     });
   });
 
-  it("still drops the owner's organization when the owner's website cannot be read, and keeps polling", async () => {
-    let ownerReads = 0;
-    const github = fakeGitHub(
-      lemoncrowRoutes({
-        [REPO_PATH]: () => ok({ stargazers_count: 2, forks_count: 0 }),
-        [`${REPO_PATH}/stargazers`]: () =>
-          ok([star('crow-ops', '2026-10-05T09:00:00Z'), star('sam', '2026-10-05T10:00:00Z')]),
-        [`${REPO_PATH}/forks`]: () => ok([]),
-        [`${REPO_PATH}/issues`]: () => ok([]),
-        '/users/crow-ops': () =>
-          ok({ ...user('crow-ops'), company: '@lemoncrow-lab', email: null, blog: null }),
-        // The teammate's own org lookup succeeds; the owner read after it fails.
-        '/orgs/lemoncrow-lab': () => {
-          ownerReads += 1;
-          return ownerReads === 1
-            ? ok({ login: 'LemonCrow-Lab', name: 'LemonCrow', blog: 'https://lemoncrow.dev' })
-            : { status: 502, data: { message: 'Bad Gateway' }, headers: {} };
-        }
-      })
-    );
-    await poll(github);
+  it("defers, rather than admits, an event while the owner's website cannot be read", async () => {
+    let ownerDown = true;
+    const routes = lemoncrowRoutes({
+      [REPO_PATH]: () => ok({ stargazers_count: 2, forks_count: 0 }),
+      [`${REPO_PATH}/stargazers`]: () =>
+        ok([star('crow-ops', '2026-10-05T09:00:00Z'), star('sam', '2026-10-05T10:00:00Z')]),
+      [`${REPO_PATH}/forks`]: () => ok([]),
+      [`${REPO_PATH}/issues`]: () => ok([]),
+      // A teammate with only the owner's website domain to go on.
+      '/users/crow-ops': () =>
+        ok({ ...user('crow-ops'), company: 'LemonCrow', email: 'ops@lemoncrow.dev', blog: null }),
+      '/orgs/lemoncrow-lab': () =>
+        ownerDown
+          ? { status: 502, data: { message: 'Bad Gateway' }, headers: {} }
+          : ok({ login: 'lemoncrow-lab', name: 'LemonCrow', blog: 'https://lemoncrow.dev' })
+    });
+    await poll(fakeGitHub(routes));
+    // Failing open would have made the teammate a lead. Nothing is written and
+    // the cursor stays put, and the poll itself still succeeds.
     expect(await accountByDomain(WORKSPACE_ID, 'lemoncrow.dev')).toBeUndefined();
-    // Failing open on the exclusion only: everyone else is still matched.
-    expect(await accountByDomain(WORKSPACE_ID, 'newco.dev')).toMatchObject({ source: 'github' });
+    expect(await accountByDomain(WORKSPACE_ID, 'newco.dev')).toBeUndefined();
     expect(await repoRow()).toMatchObject({
       status: 'ok',
       lastError: null,
-      lastSummary: { stars: 2, created: 1, unresolved: 0 }
+      starsCursor: null,
+      lastSummary: { stars: 0, created: 0, deferred: 2 }
+    });
+
+    ownerDown = false;
+    await poll(fakeGitHub(routes), new Date(T0.getTime() + POLL_INTERVAL_MINUTES * 60_000));
+    expect(await accountByDomain(WORKSPACE_ID, 'lemoncrow.dev')).toBeUndefined();
+    expect(await accountByDomain(WORKSPACE_ID, 'newco.dev')).toMatchObject({ source: 'github' });
+    expect(await repoRow()).toMatchObject({
+      status: 'ok',
+      starsCursor: '2026-10-05T10:00:00.000Z',
+      lastSummary: { stars: 2, created: 1, deferred: 0 }
     });
   });
 
