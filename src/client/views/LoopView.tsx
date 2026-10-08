@@ -1138,7 +1138,11 @@ function PlanWork({
 
       {open && (
         <div className="gtm-plan-body">
-          <div className="gtm-plan-form">
+          <div
+            className={
+              objective === 'enrich_contacts' ? 'gtm-plan-form is-enrich-contacts' : 'gtm-plan-form'
+            }
+          >
             <label>
               Goal
               <Select
@@ -1158,8 +1162,7 @@ function PlanWork({
 
             {objective === 'prepare_outreach' ? (
               <>
-                <label>
-                  People
+                <Field label="People">
                   <Select
                     value={leadListId}
                     onChange={(event) => {
@@ -1174,9 +1177,8 @@ function PlanWork({
                       </option>
                     ))}
                   </Select>
-                </label>
-                <label>
-                  Channel
+                </Field>
+                <Field label="Channel">
                   <Select
                     value={outreachChannel}
                     onChange={(event) => {
@@ -1187,7 +1189,7 @@ function PlanWork({
                     <option value="linkedin">LinkedIn</option>
                     <option value="email">Email</option>
                   </Select>
-                </label>
+                </Field>
               </>
             ) : objective === 'capture_inbound' ? (
               <>
@@ -1479,7 +1481,7 @@ function PlanWork({
                         with an approved estimate of{' '}
                         {formatCredits(prepared.result.run.estimatedCredits)}. Once it reaches that
                         estimate, it stops before its next call. Its progress, spend and outcome
-                        show in the Contact enrichment panel under Setup › Workspace. Saved contacts
+                        show in the Contact enrichment panel under Setup → Workspace. Saved contacts
                         appear in the Person picker on Opportunities, with unverified ones marked
                         Inferred.
                       </span>

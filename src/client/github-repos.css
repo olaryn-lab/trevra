@@ -53,15 +53,5 @@
 }
 
 .gh-repos-add {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: end;
   margin-top: 16px;
-}
-
-@media (max-width: 640px) {
-  .gh-repos-add {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }

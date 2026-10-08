@@ -1,8 +1,5 @@
 .capture-create-row {
-  display: grid;
-  grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.45fr) auto;
-  gap: 12px;
-  align-items: end;
+  --ui-field-row-cols: minmax(180px, 1fr) minmax(150px, 0.45fr) auto;
 }
 
 .capture-source-grid {
@@ -267,8 +264,7 @@
   flex-wrap: wrap;
 }
 
-.capture-tags span,
-.status-pill {
+.capture-tags span {
   border: 1px solid var(--t-line);
   border-radius: var(--t-r-pill);
   padding: 4px 8px;
@@ -276,12 +272,6 @@
   color: var(--muted);
   font-size: var(--t-text-chip);
   font-weight: var(--t-w-medium);
-}
-
-.status-pill.ok {
-  border-color: var(--t-green-200);
-  background: var(--t-green-50);
-  color: var(--green);
 }
 
 /* The decisions a submission leads to. Wraps rather than scrolls: a refusal
@@ -293,6 +283,14 @@
   gap: 8px;
   border-top: 1px solid var(--t-line-soft);
   padding-top: 11px;
+}
+
+/* A bare row of buttons: no divider above it, for rows that are not a decision. */
+.capture-row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .capture-actions .secondary-button {
@@ -381,10 +379,7 @@
 }
 
 .capture-webhook-form {
-  display: grid;
-  grid-template-columns: minmax(220px, 1fr) auto;
-  gap: 12px;
-  align-items: end;
+  --ui-field-row-cols: minmax(220px, 1fr) auto;
 }
 
 .capture-milestone-list {
@@ -414,10 +409,8 @@
 }
 
 @media (max-width: 780px) {
-  .capture-create-row,
   .capture-source-grid,
-  .capture-metrics,
-  .capture-webhook-form {
+  .capture-metrics {
     grid-template-columns: 1fr;
   }
 

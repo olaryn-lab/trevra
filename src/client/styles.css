@@ -643,6 +643,79 @@ p {
   color: var(--t-amber-ink);
 }
 
+/* A row of Fields and the buttons that act on them. Feature CSS sets only
+   --ui-field-row-cols (the column template); this owns alignment and the
+   narrow collapse. A Field's hint must not drag the button down to the hint's
+   baseline, so where subgrid exists the label, control and hint rows are shared
+   across the row and the buttons sit on the control row. Elsewhere the buttons
+   fall back to the bottom of the row. */
+.ui-field-row {
+  display: grid;
+  grid-template-columns: var(--ui-field-row-cols, minmax(0, 1fr) auto);
+  gap: 12px;
+  align-items: end;
+}
+@media (max-width: 640px) {
+  .ui-field-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (min-width: 641px) {
+  @supports (grid-template-rows: subgrid) {
+    .ui-field-row {
+      grid-template-rows: auto auto auto;
+      row-gap: 0;
+      align-items: start;
+    }
+    .ui-field-row > .ui-field {
+      grid-row: 1 / span 3;
+      grid-template-rows: subgrid;
+      gap: 0;
+    }
+    .ui-field-row > .ui-field > :not(:first-child) {
+      margin-top: 6px;
+    }
+    .ui-field-row > :not(.ui-field) {
+      grid-row: 2;
+      align-self: end;
+    }
+  }
+}
+
+/* A <summary> laid out with flex loses the browser's marker; this puts the
+   shared chevron back on it. */
+.ui-disclosure-summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--t-tap);
+  list-style: none;
+  font-size: var(--t-text-xs);
+  cursor: pointer;
+}
+.ui-disclosure-summary::-webkit-details-marker {
+  display: none;
+}
+.ui-disclosure-summary::after {
+  content: '';
+  width: 7px;
+  height: 7px;
+  margin-left: auto;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(45deg) translateY(-2px);
+  transition: transform 120ms ease;
+  color: var(--muted);
+}
+details[open] > .ui-disclosure-summary::after {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .ui-disclosure-summary::after {
+    transition: none;
+  }
+}
+
 /* Shared form composition. Feature code chooses the semantic layout; these
    rules own width, spacing and responsive collapse so cards do not invent
    local 300/720/880px form systems. */
@@ -1408,6 +1481,31 @@ h1 {
   padding: 4px 9px;
   white-space: nowrap;
 }
+.status-pill {
+  border: 1px solid var(--t-line);
+}
+/* Tone modifiers for the one shared pill: ok (healthy), warn (needs action),
+   fail (broken), muted (neutral / off). An untoned pill stays the plain chip. */
+.status-pill.ok {
+  border-color: var(--t-green-200);
+  background: var(--t-green-50);
+  color: var(--green);
+}
+.status-pill.warn {
+  border-color: var(--t-amber-line);
+  background: var(--t-amber-bg);
+  color: var(--t-amber);
+}
+.status-pill.fail {
+  border-color: var(--t-red-line);
+  background: var(--t-red-bg);
+  color: var(--t-red);
+}
+.status-pill.muted {
+  border-color: var(--t-line);
+  background: var(--t-surface-2);
+  color: var(--muted);
+}
 .prepared-badge {
   margin-left: auto;
   padding: 3px 8px;
@@ -1508,13 +1606,6 @@ h1 {
 .research-citation-setup:not([open]) {
   padding-bottom: 0;
 }
-.research-citation-setup summary {
-  display: flex;
-  align-items: center;
-  min-height: var(--t-tap);
-  cursor: pointer;
-  font-size: var(--t-text-xs);
-}
 .research-citation-status {
   margin: 0;
   color: var(--t-muted);
@@ -1539,12 +1630,6 @@ h1 {
 .research-citation-facts dd {
   margin: 0;
   overflow-wrap: anywhere;
-}
-.research-citation-secret {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: end;
-  gap: 8px;
 }
 .research-brief-panel .client-card-large {
   grid-template-columns: auto minmax(0, 1fr);
@@ -12772,14 +12857,14 @@ button:disabled {
   gap: 10px;
   align-items: end;
 }
-.gtm-plan-form label {
+.gtm-plan-form label:not(.ui-field, .ui-switch-field) {
   display: grid;
   gap: 5px;
   color: var(--muted);
   font-size: var(--t-text-xs);
   font-weight: var(--t-w-medium);
 }
-.gtm-plan-form input,
+.gtm-plan-form input:not(.ui-control, [type='checkbox']),
 .gtm-plan-form select {
   min-height: 40px;
   width: 100%;
@@ -12789,6 +12874,18 @@ button:disabled {
   background: var(--t-field);
   color: var(--ink);
   font: inherit;
+}
+/* Find contacts: a long textarea, a short number and a switch do not fit the
+   four short-control columns. Two columns, the button on its own row. */
+@media (min-width: 901px) {
+  .gtm-plan-form.is-enrich-contacts {
+    grid-template-columns: minmax(12rem, 1fr) minmax(16rem, 2fr);
+    align-items: start;
+  }
+  .gtm-plan-form.is-enrich-contacts > .primary-button {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
 }
 .gtm-plan-preview {
   display: grid;
@@ -12869,20 +12966,12 @@ button:disabled {
   gap: 14px;
 }
 .enrichment-setup-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  align-items: end;
-  gap: 10px;
+  --ui-field-row-cols: minmax(0, 1fr) auto auto;
 }
 .enrichment-setup-status {
   margin: 0;
   color: var(--t-muted);
   font-size: var(--t-text-xs);
-}
-@media (max-width: 640px) {
-  .enrichment-setup-row {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 .enrichment-runs .li-subhead {
   margin-top: 0;
@@ -12939,14 +13028,6 @@ button:disabled {
   color: var(--muted);
   font-size: var(--t-text-xs);
 }
-.status-pill.email-channel-pill-fail {
-  background: var(--t-red-bg);
-  color: var(--t-red);
-}
-.status-pill.email-channel-pill-unknown {
-  background: var(--t-line-soft);
-  color: var(--muted);
-}
 .email-channel-pending {
   margin: 0;
 }
@@ -12982,23 +13063,8 @@ button:disabled {
   width: 100%;
 }
 .email-channel-dkim > summary {
-  display: inline-flex;
-  align-items: center;
-  min-height: var(--t-tap);
   color: var(--muted);
-  font-size: var(--t-text-xs);
   font-weight: var(--t-w-strong);
-  cursor: pointer;
-}
-.email-channel-dkim-form {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px;
-}
-.email-channel-dkim-form .ui-field {
-  flex: 1 1 220px;
-  min-width: 0;
 }
 /* Opportunity-lite: fixed GTM stages, not a configurable CRM pipeline. */
 .opportunity-create {
