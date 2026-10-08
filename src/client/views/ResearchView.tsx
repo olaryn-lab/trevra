@@ -2211,7 +2211,8 @@ export function ResearchView({
                 </div>
               )}
             </div>
-            <CitationSourceSetup watchId={selectedWatch} setToast={setToast} />
+            {/* key remounts per watch so in-flight results and the secret never land on another watch */}
+            <CitationSourceSetup key={selectedWatch} watchId={selectedWatch} setToast={setToast} />
             <div className="client-table">
               {mentionsLoaded &&
                 !mentionsError &&

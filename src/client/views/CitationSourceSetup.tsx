@@ -41,6 +41,7 @@ export function CitationSourceSetup({
     setLoaded(false);
     setSource(null);
     setSecret('');
+    setDomains('');
     setProblem('');
     void getCitationSource(watchId)
       .then((next) => {
@@ -59,10 +60,15 @@ export function CitationSourceSetup({
     };
   }, [watchId]);
 
-  const ownedDomains = domains
-    .split(/[\s,]+/)
-    .map((domain) => domain.trim())
-    .filter(Boolean);
+  const ownedDomains = [
+    ...new Set(
+      domains
+        .split(/[\s,]+/)
+        .map((domain) => domain.trim().toLowerCase())
+        .filter(Boolean)
+    )
+  ];
+  const tooMany = ownedDomains.length > 20;
 
   const connect = async () => {
     setBusy('connect');
@@ -115,16 +121,22 @@ export function CitationSourceSetup({
     <details className="research-citation-setup">
       <summary>AI-answer citations</summary>
       <p className="research-citation-status">
-        {source
-          ? citationSourceStatus(source, new Date())
-          : 'Not connected. Beseam, or any sampler that can sign requests, posts content-free samples of whether AI answers cite your site.'}
+        {!loaded
+          ? 'Loading…'
+          : source
+            ? citationSourceStatus(source, new Date())
+            : 'Not connected. Beseam, or any sampler that can sign requests, posts content-free samples of whether AI answers cite your site.'}
       </p>
       {problem && <div className="error-banner">{problem}</div>}
       {isOwner ? (
         <div className="research-citation-form">
           <Field
             label="Domains you own"
-            hint="One per line, up to 20. Only citations of these domains and their subdomains are accepted."
+            hint={
+              tooMany
+                ? 'At most 20 domains.'
+                : 'One per line, up to 20. Only citations of these domains and their subdomains are accepted.'
+            }
           >
             <Textarea
               rows={3}
@@ -136,9 +148,7 @@ export function CitationSourceSetup({
           <div className="research-citation-actions">
             <Button
               variant="primary"
-              disabled={
-                !loaded || busy !== '' || ownedDomains.length === 0 || ownedDomains.length > 20
-              }
+              disabled={!loaded || busy !== '' || ownedDomains.length === 0 || tooMany}
               onClick={() => void connect()}
             >
               {busy === 'connect' ? 'Saving…' : source ? 'Save domains' : 'Connect'}
