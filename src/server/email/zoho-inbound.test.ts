@@ -57,13 +57,15 @@ async function sentOutreach(input: {
   connectionId: string;
   provider: string;
   recipient: string;
+  status?: string;
 }) {
+  const status = input.status ?? 'sent';
   await db
     .prepare(
       `INSERT INTO gtm_deliveries
        (id,workspace_id,channel,connection_id,purpose,recipient,source_type,source_id,idempotency_key,
         status,provider,external_ref,started_at,sent_at)
-       VALUES (?,?,'email',?,'outreach',?,'email_outreach',?,?,'sent',?,?,?::timestamptz,?::timestamptz)`
+       VALUES (?,?,'email',?,'outreach',?,'email_outreach',?,?,?,?,?,?::timestamptz,?::timestamptz)`
     )
     .run(
       input.id,
@@ -72,10 +74,11 @@ async function sentOutreach(input: {
       input.recipient,
       input.id,
       `key-${input.id}`,
+      status,
       input.provider,
       `ref-${input.id}`,
       NOW.toISOString(),
-      NOW.toISOString()
+      status === 'sent' ? NOW.toISOString() : null
     );
 }
 
@@ -189,6 +192,32 @@ describe('Zoho Mail inbound replies', () => {
       message({ id: 'zoho-no-outreach' })
     );
     expect(await outcomeKind('zoho-no-outreach')).toBe('unsubscribe');
+    expect(await suppressed('maya@northwind.test')).toBeFalsy();
+  });
+
+  it('does not suppress on a Zoho delivery that was not sent', async () => {
+    await sentOutreach({
+      id: 'del_00000000000000a5',
+      connectionId: ZOHO,
+      provider: 'zoho-mail',
+      recipient: 'maya@northwind.test',
+      status: 'failed'
+    });
+    await ingestCanonicalRecord(db, WORKSPACE, 'zoho-mail', ZOHO, message({ id: 'zoho-failed' }));
+    expect(await outcomeKind('zoho-failed')).toBe('unsubscribe');
+    expect(await suppressed('maya@northwind.test')).toBeFalsy();
+  });
+
+  it('does not suppress when the Zoho outreach went to a different Person', async () => {
+    await resolveContact(db, WORKSPACE, { name: 'Other', email: 'other@northwind.test' }, NOW);
+    await sentOutreach({
+      id: 'del_00000000000000a6',
+      connectionId: ZOHO,
+      provider: 'zoho-mail',
+      recipient: 'other@northwind.test'
+    });
+    await ingestCanonicalRecord(db, WORKSPACE, 'zoho-mail', ZOHO, message({ id: 'zoho-other' }));
+    expect(await outcomeKind('zoho-other')).toBe('unsubscribe');
     expect(await suppressed('maya@northwind.test')).toBeFalsy();
   });
 
