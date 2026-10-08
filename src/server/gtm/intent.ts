@@ -18,7 +18,12 @@ import {
   HUNTER_PRICING_URL,
   roundCredits
 } from '../enrichment/provider.js';
-import { enrichmentUsage, getEnrichmentSettings } from '../enrichment/settings.js';
+import {
+  findEnrichmentRunByKey,
+  queueEnrichmentRun,
+  type EnrichmentRunSummary
+} from '../enrichment/runs.js';
+import { EnrichmentError, enrichmentUsage, getEnrichmentSettings } from '../enrichment/settings.js';
 import { emailComplianceFooterUnavailable, emailComplianceProvider } from '../email/compliance.js';
 import {
   EmailOutreachError,
@@ -199,11 +204,33 @@ export interface PreparedEmailOutreachGtmPlanResult {
   result: PreparedEmailOutreachResult;
 }
 
+export interface PreparedEnrichmentGtmPlanResult {
+  status: 'prepared';
+  objective: 'enrich_contacts';
+  artifacts: { enrichmentRunId: string };
+  next: { kind: 'review_accounts'; href: '/outreach' };
+  result: { run: EnrichmentRunSummary; duplicate: boolean };
+}
+
 export type PreparedGtmPlanResult =
   | PreparedOutreachGtmPlanResult
   | PreparedEmailOutreachGtmPlanResult
   | PreparedCaptureGtmPlanResult
-  | PreparedWatchGtmPlanResult;
+  | PreparedWatchGtmPlanResult
+  | PreparedEnrichmentGtmPlanResult;
+
+function preparedEnrichment(
+  run: EnrichmentRunSummary,
+  duplicate: boolean
+): PreparedEnrichmentGtmPlanResult {
+  return {
+    status: 'prepared',
+    objective: 'enrich_contacts',
+    artifacts: { enrichmentRunId: run.id },
+    next: { kind: 'review_accounts', href: '/outreach' },
+    result: { run, duplicate }
+  };
+}
 
 const watchPreparationResultSchema = z
   .object({
@@ -1126,6 +1153,27 @@ export async function prepareGtmPlan(
     throw new GtmPlanError('The supplied plan hash does not match the plan.', 409);
   }
 
+  if (supplied.objective === 'enrich_contacts') {
+    // The owner gate runs before the replay too, so a member cannot read a
+    // queued run's summary back through someone else's idempotency key.
+    if (input.actorRole !== 'owner') {
+      throw new GtmPlanError('Only workspace owners can approve paid contact enrichment.', 403);
+    }
+    // Replay BEFORE re-compiling: a queued run reserves credits, which moves
+    // cost.usedThisMonth, so a retried prepare would otherwise call its own
+    // run's plan stale.
+    const replay = await findEnrichmentRunByKey(db, input.workspaceId, input.idempotencyKey);
+    if (replay) {
+      if (replay.planHash !== supplied.planHash) {
+        throw new GtmPlanError(
+          'This idempotency key was already used for a different enrichment plan.',
+          409
+        );
+      }
+      return preparedEnrichment(replay.run, true);
+    }
+  }
+
   const current = await compileGtmIntent(db, input.workspaceId, supplied.intent, {
     actorRole: input.actorRole
   });
@@ -1177,6 +1225,28 @@ export async function prepareGtmPlan(
       idempotencyKey: input.idempotencyKey,
       plan: current
     });
+  }
+
+  if (current.objective === 'enrich_contacts') {
+    try {
+      // queueEnrichmentRun re-checks the cap under the workspace lock in the
+      // same transaction as the insert, so concurrent approvals cannot both fit.
+      const queued = await queueEnrichmentRun(db, {
+        workspaceId: input.workspaceId,
+        actorType: input.actorType,
+        actorUserId: input.actorUserId,
+        idempotencyKey: input.idempotencyKey,
+        planHash: current.planHash,
+        domains: current.intent.audience?.domains ?? [],
+        emailsPerDomain: Number(current.defaults.emailsPerDomain),
+        includeUnverified: current.defaults.includeUnverified === true,
+        estimatedCredits: current.cost?.estimatedCredits ?? 0
+      });
+      return preparedEnrichment(queued.run, queued.duplicate);
+    } catch (error) {
+      if (error instanceof EnrichmentError) throw new GtmPlanError(error.message, error.status);
+      throw error;
+    }
   }
 
   if (current.objective !== 'prepare_outreach') {

@@ -32,6 +32,7 @@ import {
 import { hostedExecutionMode, hostedSeatFilter } from '../server/linkedin/hosted-execution.js';
 import { runDueResearchSources } from '../server/research/service.js';
 import { runDueBrandWatches } from '../server/watch/service.js';
+import { runQueuedEnrichmentRuns } from '../server/enrichment/runs.js';
 import { refreshDueEmailDeliverability } from '../server/email/sender-deliverability.js';
 import { registerEmailComplianceProvider } from '../server/email/compliance.js';
 import { senderComplianceProvider } from '../server/compliance/provider.js';
@@ -312,6 +313,26 @@ const emailDeliverabilityTimer = setInterval(
   runtime.automationIntervalMs
 );
 emailDeliverabilityTimer.unref();
+// Contact enrichment gets its own loop for the same reason as LinkedIn: one
+// run makes paced paid calls for minutes, and inside `cycle()` it would hold
+// the automation sweep behind it. On drain, `shouldStop` hands the run back to
+// the queue before its next paid call; it keeps its per-domain checkpoint and
+// the next claim resumes it under a new `attempts` fence.
+let enrichmentRunning = false;
+async function enrichmentCycle(): Promise<void> {
+  if (enrichmentRunning || draining) return;
+  enrichmentRunning = true;
+  try {
+    await runQueuedEnrichmentRuns(db, { shouldStop: () => draining });
+  } catch (error) {
+    console.error('Worker enrichment cycle failed', error);
+  } finally {
+    enrichmentRunning = false;
+  }
+}
+void enrichmentCycle();
+const enrichmentTimer = setInterval(() => void enrichmentCycle(), runtime.automationIntervalMs);
+enrichmentTimer.unref();
 
 async function shutdown(signal: string) {
   if (draining) return;
@@ -321,9 +342,14 @@ async function shutdown(signal: string) {
   clearInterval(linkedinTimer);
   clearInterval(companionPresenceTimer);
   clearInterval(emailDeliverabilityTimer);
+  clearInterval(enrichmentTimer);
   const deadline = Date.now() + DRAIN_TIMEOUT_MS;
   while (
-    (running || linkedinRunning || companionPresenceRunning || emailDeliverabilityRunning) &&
+    (running ||
+      linkedinRunning ||
+      companionPresenceRunning ||
+      emailDeliverabilityRunning ||
+      enrichmentRunning) &&
     Date.now() < deadline
   )
     await new Promise((resolve) => setTimeout(resolve, 200));
@@ -334,6 +360,10 @@ async function shutdown(signal: string) {
   if (emailDeliverabilityRunning)
     console.error(
       `Email deliverability sweep still mid-domain after ${DRAIN_TIMEOUT_MS}ms; exiting anyway. Its unfinished domains stay due for the next worker.`
+    );
+  if (enrichmentRunning)
+    console.error(
+      `Enrichment run still mid-run after ${DRAIN_TIMEOUT_MS}ms; exiting anyway. Its lease expires and the next worker resumes it from its last domain checkpoint.`
     );
   await new Promise<void>((resolve) => server.close(() => resolve()));
   await temporalWorker?.shutdown();

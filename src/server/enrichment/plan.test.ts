@@ -230,23 +230,6 @@ describe('enrich_contacts plan', () => {
     ]);
   });
 
-  it('an unblocked plan is not yet preparable', async () => {
-    await readyToEnrich(100);
-    const plan = await compileGtmIntent(db, WORKSPACE, intent(['acme.com']));
-    expect(plan.blockers).toEqual([]);
-    const error = await prepareGtmPlan(db, {
-      workspaceId: WORKSPACE,
-      actorType: 'user',
-      actorUserId: USER,
-      actorRole: 'owner',
-      plan,
-      planHash: plan.planHash,
-      idempotencyKey: 'enrich-owner-0001'
-    }).catch((caught: unknown) => caught);
-    expect(error).toBeInstanceOf(GtmPlanError);
-    expect((error as GtmPlanError).status).toBe(409);
-  });
-
   it('hashes the choices that change what is charged and saved', async () => {
     await readyToEnrich(100);
     const base = await compileGtmIntent(db, WORKSPACE, intent(['acme.com']));

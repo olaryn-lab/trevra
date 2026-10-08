@@ -126,9 +126,16 @@ export async function setEnrichmentKeyStatus(
 export async function enrichmentUsage(
   db: Db,
   workspaceId: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  /**
+   * `excludeRunId` leaves that run's own reservation out, so a running run's
+   * budget check (enrichment/runs.ts) is not blocked by the credits it reserved
+   * for itself. Its charges stay in `chargedCredits`.
+   */
+  options: { excludeRunId?: string } = {}
 ): Promise<EnrichmentUsage> {
   const monthStart = monthStartUtc(now).toISOString();
+  const excludeRunId = options.excludeRunId ?? null;
   const row = await db
     .prepare(
       `SELECT
@@ -140,9 +147,16 @@ export async function enrichmentUsage(
                      SELECT SUM(l.credits) AS total FROM enrichment_usage_ledger l
                      WHERE l.workspace_id=r.workspace_id AND l.run_id=r.id
                    ) spent ON TRUE
-                   WHERE r.workspace_id=? AND r.status IN ('queued','running')), 0) AS reserved`
+                   WHERE r.workspace_id=? AND r.status IN ('queued','running')
+                     AND (?::text IS NULL OR r.id <> ?::text)), 0) AS reserved`
     )
-    .get<{ charged: string; reserved: string }>(workspaceId, monthStart, workspaceId);
+    .get<{ charged: string; reserved: string }>(
+      workspaceId,
+      monthStart,
+      workspaceId,
+      excludeRunId,
+      excludeRunId
+    );
   const chargedCredits = roundCredits(Number(row?.charged ?? 0));
   const reservedCredits = roundCredits(Number(row?.reserved ?? 0));
   return {

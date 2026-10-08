@@ -7,7 +7,7 @@
 **Architecture:**
 
 - **Enrichment** is a new GTM objective, `enrich_contacts`, in the existing compiler (`src/server/gtm/intent.ts`). Its plan carries a deterministic `cost` block (Hunter credit estimate, cap and month-to-date usage) and blockers.
-- Preparing the approved plan only queues an `enrichment_runs` row under a per-workspace advisory lock that re-checks the cap. The standalone worker drains the queue through a `ContactEnrichmentProvider`, of which Hunter is the first implementation. Every paid call is charged to an append-only usage ledger first, and verified, sourced emails are saved as People linked to their Account.
+- Preparing the approved plan only queues an `enrichment_runs` row under a per-workspace advisory lock that re-checks the cap. The standalone worker drains the queue through a `ContactEnrichmentProvider`, of which Hunter is the first implementation. Every paid call is charged to the append-only usage ledger immediately after each call, and verified, sourced emails are saved as People linked to their Account.
 - **Citations** use the existing capture-source HMAC scheme on a second public endpoint. A brand watch binds to one capture source of kind `ai_citations`. Each content-free sample updates `ai_citation_samples`, and only gained/lost transitions become immutable `brand_watch_mentions` rows with platform `ai_answer`.
 - **The Worker** is an example package that verifies Turnstile, signs the canonical body with Web Crypto and posts to `/api/intake/v1/submissions`. It imports no server code; a Vitest test verifies its signature with the server's own verifier (`src/server/lead-capture/signature.ts`, Task 2).
 

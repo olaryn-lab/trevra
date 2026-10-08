@@ -251,8 +251,10 @@ export async function resolveExplicitAccount(
     domain: string;
     name?: string | null;
     role?: string | null;
-    source?: 'capture' | 'import' | 'manual';
+    source?: 'capture' | 'import' | 'manual' | 'enrichment';
     sourceDetail?: string | null;
+    /** Defaults to 'explicit'. Enrichment writes 'verified' or, when opted in, 'inferred'. */
+    confidence?: 'explicit' | 'verified' | 'inferred';
   },
   now: Date = new Date()
 ): Promise<ExplicitAccountResult | null> {
@@ -279,7 +281,7 @@ export async function resolveExplicitAccount(
       `
       INSERT INTO account_contacts (
         id,workspace_id,account_id,contact_id,role,source,confidence,source_detail,created_at,updated_at
-      ) VALUES (?,?,?,?,?,?,'explicit',?,?,?)
+      ) VALUES (?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT (workspace_id,account_id,contact_id) DO NOTHING
     `
     )
@@ -290,6 +292,7 @@ export async function resolveExplicitAccount(
       contactId,
       input.role?.trim() || null,
       input.source ?? 'capture',
+      input.confidence ?? 'explicit',
       input.sourceDetail?.trim() || null,
       at,
       at

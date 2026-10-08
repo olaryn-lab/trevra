@@ -1399,6 +1399,18 @@ function PlanWork({
                         Review accounts <ChevronRight size={15} />
                       </button>
                     </>
+                  ) : prepared.objective === 'enrich_contacts' ? (
+                    <>
+                      <span>
+                        Approved. Hunter enrichment for {prepared.result.run.domainCount}{' '}
+                        {prepared.result.run.domainCount === 1 ? 'company' : 'companies'} is queued
+                        and stops at {prepared.result.run.estimatedCredits} credits. Saved contacts
+                        appear on their Account.
+                      </span>
+                      <Button variant="primary" onClick={() => onNavigate(prepared.next.href)}>
+                        Review accounts <ChevronRight size={15} />
+                      </Button>
+                    </>
                   ) : prepared.channel === 'email' ? (
                     <>
                       <span>
