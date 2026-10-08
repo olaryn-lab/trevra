@@ -99,6 +99,7 @@ export async function compileBrandWatchMarketPulse(
          MAX(first_seen_at) AS newest_at
        FROM brand_watch_mentions
        WHERE workspace_id=? AND watch_id=?
+         AND platform <> 'ai_answer'
          AND first_seen_at>=?::timestamptz AND first_seen_at<?::timestamptz
          AND NULLIF(BTRIM(url),'') IS NOT NULL`
     )
@@ -112,6 +113,7 @@ export async function compileBrandWatchMarketPulse(
          FROM brand_watch_mentions m
          CROSS JOIN LATERAL unnest(m.matched_keywords) AS keyword
          WHERE m.workspace_id=? AND m.watch_id=?
+           AND m.platform <> 'ai_answer'
            AND m.first_seen_at>=?::timestamptz AND m.first_seen_at<?::timestamptz
            AND NULLIF(BTRIM(m.url),'') IS NOT NULL
        ) matched
@@ -127,6 +129,7 @@ export async function compileBrandWatchMarketPulse(
       `SELECT id,platform,author,title,content,url,sentiment_label,first_seen_at
        FROM brand_watch_mentions
        WHERE workspace_id=? AND watch_id=?
+         AND platform <> 'ai_answer'
          AND first_seen_at>=?::timestamptz AND first_seen_at<?::timestamptz
          AND NULLIF(BTRIM(url),'') IS NOT NULL
        ORDER BY first_seen_at DESC,id DESC
@@ -211,6 +214,7 @@ export async function materializeBrandWatchMarketPulse(
       `SELECT id,platform,author,title,content,url,sentiment_label,first_seen_at
        FROM brand_watch_mentions
        WHERE workspace_id=? AND watch_id=?
+         AND platform <> 'ai_answer'
          AND first_seen_at>=?::timestamptz AND first_seen_at<?::timestamptz
          AND NULLIF(BTRIM(url),'') IS NOT NULL
        ORDER BY first_seen_at DESC,id DESC

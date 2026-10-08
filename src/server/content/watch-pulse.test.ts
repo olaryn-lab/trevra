@@ -170,6 +170,33 @@ describe('brand-watch market pulse', () => {
     expect(new Set(ready.opportunity?.evidence.map((row) => row.sourceUrl)).size).toBe(2);
   });
 
+  it('ignores AI-answer citation mentions in counts, platforms and examples', async () => {
+    const watch = await createWatch(
+      db,
+      WORKSPACE,
+      { name: 'Citations', keywords: ['beseam'], platforms: ['hackernews'], cadence: 'daily' },
+      NOW
+    );
+    for (const [id, platform] of [
+      ['hn-a', 'hackernews'],
+      ['hn-b', 'reddit'],
+      ['ai-a', 'ai_answer'],
+      ['ai-b', 'ai_answer']
+    ] as const)
+      await mention(WORKSPACE, watch.id, {
+        id,
+        platform,
+        url: `https://example.com/${id}`,
+        at: '2026-09-11T10:00:00.000Z'
+      });
+    const pulse = await compileBrandWatchMarketPulse(db, WORKSPACE, watch.id, { days: 7 }, NOW);
+    expect(pulse).toMatchObject({ mentionCount: 2, platformCount: 2, sourceCount: 2 });
+    expect(pulse.topKeywords).toEqual([{ keyword: 'beseam', mentionCount: 2 }]);
+    const ready = await materializeBrandWatchMarketPulse(db, WORKSPACE, watch.id, { days: 7 }, NOW);
+    expect(ready.opportunity?.evidence).toHaveLength(2);
+    expect(JSON.stringify(ready)).not.toContain('example.com/ai-');
+  });
+
   it('cannot read a watch from another workspace', async () => {
     const watch = await createWatch(
       db,

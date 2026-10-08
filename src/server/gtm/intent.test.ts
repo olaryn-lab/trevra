@@ -180,6 +180,18 @@ describe('bounded GTM intent compiler', () => {
         message: expect.stringMatching(/idempotency key/i)
       });
 
+      await expect(
+        prepareGtmPlan(db, {
+          workspaceId: WORKSPACE,
+          actorType: 'user',
+          actorUserId: USER,
+          actorRole: 'owner',
+          plan,
+          planHash: plan.planHash,
+          idempotencyKey: 'trevra-citations:bw_anything'
+        })
+      ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/reserved/i) });
+
       const count = await db
         .prepare(
           'SELECT COUNT(*)::int AS total FROM capture_sources WHERE workspace_id=? AND preparation_key=?'

@@ -5,6 +5,7 @@ import type { AccountImportResult } from '../accounts/types.js';
 import { canonicalPayloadHash } from '../control-plane/payload.js';
 import { listSeats } from '../linkedin/seats.js';
 import { createCaptureSource } from '../lead-capture/sources.js';
+import { CITATION_PREPARATION_PREFIX } from '../watch/citations.js';
 import {
   CAPTURE_SOURCE_KINDS,
   type CaptureSourceKind,
@@ -1194,6 +1195,13 @@ export async function prepareGtmPlan(
   }
 
   if (current.objective === 'capture_inbound') {
+    // The prefix is reserved for the preparation key connectCitationSource uses,
+    // so a caller cannot pre-claim or collide with a watch's citation source.
+    if (input.idempotencyKey.trim().startsWith(CITATION_PREPARATION_PREFIX))
+      throw new GtmPlanError(
+        `Idempotency keys starting with ${CITATION_PREPARATION_PREFIX} are reserved.`,
+        400
+      );
     const sourceName =
       typeof current.defaults.sourceName === 'string' ? current.defaults.sourceName : 'Website';
     const sourceKind = CAPTURE_SOURCE_KINDS.includes(
