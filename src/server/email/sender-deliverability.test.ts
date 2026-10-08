@@ -209,6 +209,39 @@ describe('cached sender deliverability', () => {
     expect(untouched?.checkedAt).toBe(hourAgo.toISOString());
     expect(await readSenderDeliverability(db, WORKSPACE, 'c.acme.test', 'google')).toBeNull();
   });
+
+  it('tries the owner DKIM selector first when the scheduled refresh re-checks a domain', async () => {
+    const hourAgo = new Date(NOW.getTime() - 60 * MINUTE);
+    await getSenderDeliverability(
+      db,
+      WORKSPACE,
+      { domain: 'acme.test', provider: 'google', markOutreach: true },
+      { resolver: resolverFor({}), now: hourAgo }
+    );
+    await db
+      .prepare(
+        `INSERT INTO email_dkim_selectors (workspace_id,domain,selector,updated_by_user_id,updated_at)
+         VALUES (?,?,?,NULL,?::timestamptz)`
+      )
+      .run(WORKSPACE, 'acme.test', 'zmail', hourAgo.toISOString());
+    const resolver = resolverFor({
+      ...passingRecords('acme.test'),
+      'zmail._domainkey.acme.test': [DKIM]
+    });
+
+    await refreshDueEmailDeliverability(db, { resolver, now: NOW });
+
+    expect(resolver.calls.filter((name) => name.includes('._domainkey.'))[0]).toBe(
+      'zmail._domainkey.acme.test'
+    );
+    const stored = await db
+      .prepare(
+        `SELECT dkim_json->>'selector' AS selector FROM email_deliverability_checks
+         WHERE workspace_id=? AND domain='acme.test' AND provider='google'`
+      )
+      .get<{ selector: string }>(WORKSPACE);
+    expect(stored?.selector).toBe('zmail');
+  });
 });
 
 describe('deliverability deadlines', () => {

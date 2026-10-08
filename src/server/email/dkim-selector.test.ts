@@ -10,7 +10,7 @@ vi.mock('@nangohq/node', () => ({
 }));
 
 import { openDatabase, type Db } from '../db.js';
-import { EmailChannelError, setMailboxDkimSelector } from './channel.js';
+import { setMailboxDkimSelector } from './channel.js';
 import type { DnsResolver } from './deliverability.js';
 import { dkimSelectorSchema, readDkimSelector, writeDkimSelector } from './dkim-selector.js';
 
@@ -22,7 +22,10 @@ const NOW = new Date('2026-10-07T09:00:00.000Z');
 const DKIM = 'v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAx3';
 let db: Db;
 
-function recordingResolver(): DnsResolver & { calls: string[] } {
+function recordingResolver(): DnsResolver & {
+  calls: string[];
+  records: Record<string, string[]>;
+} {
   const calls: string[] = [];
   const records: Record<string, string[]> = {
     'acme.test': ['v=spf1 include:_spf.google.com ~all'],
@@ -32,6 +35,7 @@ function recordingResolver(): DnsResolver & { calls: string[] } {
   };
   return {
     calls,
+    records,
     async resolveTxt(name: string) {
       calls.push(name);
       const value = records[name];
@@ -110,6 +114,30 @@ describe('DKIM selector store', () => {
     );
     expect(await readDkimSelector(db, WORKSPACE, 'acme.test')).toBeNull();
   });
+
+  it('records the acting user on write and on replace by a different actor', async () => {
+    await db
+      .prepare('INSERT INTO users (id,workspace_id,email,name,created_at) VALUES (?,?,?,?,?)')
+      .run(`${USER}_2`, WORKSPACE, 'owner2@acme.test', 'Owner Two', NOW.toISOString());
+    const actor = () =>
+      db
+        .prepare(
+          'SELECT updated_by_user_id AS actor FROM email_dkim_selectors WHERE workspace_id=? AND domain=?'
+        )
+        .get<{ actor: string }>(WORKSPACE, 'acme.test');
+    await writeDkimSelector(
+      db,
+      { workspaceId: WORKSPACE, domain: 'acme.test', selector: 'zmail', actorUserId: USER },
+      NOW
+    );
+    expect((await actor())?.actor).toBe(USER);
+    await writeDkimSelector(
+      db,
+      { workspaceId: WORKSPACE, domain: 'acme.test', selector: 'zmail2', actorUserId: `${USER}_2` },
+      NOW
+    );
+    expect((await actor())?.actor).toBe(`${USER}_2`);
+  });
 });
 
 describe('setMailboxDkimSelector', () => {
@@ -133,6 +161,36 @@ describe('setMailboxDkimSelector', () => {
     expect(stored?.selector).toBe('zmail');
   });
 
+  it('replaces and clears the stored result even while the cached check is still fresh', async () => {
+    const resolver = recordingResolver();
+    resolver.records['zmail2._domainkey.acme.test'] = [DKIM];
+    const storedSelector = async () =>
+      (
+        await db
+          .prepare(
+            `SELECT dkim_json->>'selector' AS selector FROM email_deliverability_checks
+             WHERE workspace_id=? AND domain='acme.test' AND provider='google'`
+          )
+          .get<{ selector: string | null }>(WORKSPACE)
+      )?.selector;
+    for (const selector of ['zmail', 'zmail2']) {
+      await setMailboxDkimSelector(
+        db,
+        { workspaceId: WORKSPACE, connectionId: CONNECTION, selector, actorUserId: USER },
+        { resolver, now: NOW }
+      );
+      expect(await storedSelector()).toBe(selector);
+    }
+    await setMailboxDkimSelector(
+      db,
+      { workspaceId: WORKSPACE, connectionId: CONNECTION, selector: null, actorUserId: USER },
+      { resolver, now: NOW }
+    );
+    expect(await readDkimSelector(db, WORKSPACE, 'acme.test')).toBeNull();
+    expect(await storedSelector()).not.toBe('zmail2');
+    expect(await storedSelector()).not.toBe('zmail');
+  });
+
   it('refuses a bad selector or another workspace mailbox and stores nothing', async () => {
     await expect(
       setMailboxDkimSelector(db, {
@@ -149,7 +207,7 @@ describe('setMailboxDkimSelector', () => {
         selector: 'zmail',
         actorUserId: USER
       })
-    ).rejects.toBeInstanceOf(EmailChannelError);
+    ).rejects.toMatchObject({ status: 404 });
     const rows = await db
       .prepare(
         'SELECT COUNT(*)::int AS total FROM email_dkim_selectors WHERE workspace_id IN (?,?)'
