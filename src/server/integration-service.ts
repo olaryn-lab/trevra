@@ -117,6 +117,13 @@ export type CanonicalRecord = z.infer<typeof canonicalRecordSchema>;
  * product or service." That clause is unqualified; the "internal tools ... not separately
  * commercialized" carve-out lives in the General Usage Restrictions and does not reach it. Shipping
  * an Apollo connection is exactly what it prohibits, whether Trevra is self-hosted or hosted.
+ *
+ * HUNTER IS NOT A ROW HERE EITHER, for a different reason. Its Terms of Service
+ * (https://hunter.io/terms-of-service, last updated May 23, 2024, read 2026-10-06) allow "use of
+ * the API through a third-party product that accesses the Services" (Section 4) but say "You must
+ * not share your account with others" (Section 1), so it is bring-your-own-key per workspace, and
+ * Nango's provider catalogue has no `hunter` entry. The key is sealed in workspace_secrets as
+ * 'hunter_api_key'; the integration lives in src/server/enrichment/.
  */
 const catalog = [
   {

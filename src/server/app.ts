@@ -553,6 +553,16 @@ import { listProductMilestones } from './lead-capture/milestone-recorder.js';
 import { inboundAttributionSummary } from './lead-capture/attribution.js';
 import { persistImportedPeople } from './lead-capture/import.js';
 import { captureSourceCreateSchema, LeadCaptureError } from './lead-capture/types.js';
+import { createHunterProvider } from './enrichment/hunter.js';
+import { EnrichmentProviderError } from './enrichment/provider.js';
+import {
+  EnrichmentError,
+  enrichmentUsage,
+  getEnrichmentSettings,
+  MAX_MONTHLY_CREDIT_CAP,
+  setEnrichmentCap,
+  setEnrichmentKeyStatus
+} from './enrichment/settings.js';
 import {
   createSuppression,
   liftSuppression,
@@ -2630,6 +2640,118 @@ export function createApp(db: Db) {
       next(error);
     }
   });
+
+  // Hunter bring-your-own-key enrichment (terms and custody: enrichment/hunter.ts).
+  // Same disciplines as the model key above: owner-only writes, a write-only
+  // key, no reveal route, Cache-Control: no-store. The key is checked against
+  // Hunter's free /account endpoint BEFORE it is sealed, so a typo never sits
+  // in custody looking valid.
+  app.get('/api/enrichment', async (req: AuthedRequest, res, next) => {
+    try {
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({
+        settings: await getEnrichmentSettings(db, req.auth!.workspaceId),
+        usage: await enrichmentUsage(db, req.auth!.workspaceId, new Date())
+      });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.put(
+    '/api/enrichment/key',
+    authLimiter,
+    ownerOnly("store this workspace's Hunter API key"),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        if (!secretsConfigured()) {
+          return res.status(400).json({
+            error:
+              'This server has no TREVRA_SECRETS_KEY configured, so it cannot encrypt a Hunter key. ' +
+              'Generate one with `openssl rand -base64 32`, set it in the environment, and restart.'
+          });
+        }
+        const input = z
+          .object({
+            apiKey: z.string().trim().min(8).max(200),
+            label: z.string().trim().max(80).optional()
+          })
+          .strict()
+          .parse(req.body ?? {});
+        try {
+          await createHunterProvider(input.apiKey).checkKey();
+        } catch (error) {
+          if (error instanceof EnrichmentProviderError && error.code === 'key_invalid') {
+            return res
+              .status(400)
+              .json({ error: 'Hunter rejected this API key. Nothing was saved.' });
+          }
+          if (error instanceof EnrichmentProviderError) {
+            return res.status(502).json({
+              error:
+                'Hunter could not confirm this key right now. Nothing was saved; try again shortly.'
+            });
+          }
+          throw error;
+        }
+        await putWorkspaceSecret(db, {
+          workspaceId: req.auth!.workspaceId,
+          kind: 'hunter_api_key',
+          plaintext: input.apiKey,
+          label: input.label,
+          actorUserId: req.auth!.userId
+        });
+        await setEnrichmentKeyStatus(db, req.auth!.workspaceId, 'valid', new Date());
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ settings: await getEnrichmentSettings(db, req.auth!.workspaceId) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.delete(
+    '/api/enrichment/key',
+    ownerOnly("remove this workspace's Hunter API key"),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        await deleteWorkspaceSecret(db, req.auth!.workspaceId, 'hunter_api_key', req.auth!.userId);
+        await setEnrichmentKeyStatus(db, req.auth!.workspaceId, 'unchecked', new Date());
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ settings: await getEnrichmentSettings(db, req.auth!.workspaceId) });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.put(
+    '/api/enrichment/cap',
+    ownerOnly('change the enrichment credit cap'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            monthlyCreditCap: z.number().min(0).max(MAX_MONTHLY_CREDIT_CAP).multipleOf(0.5)
+          })
+          .strict()
+          .parse(req.body ?? {});
+        const settings = await setEnrichmentCap(
+          db,
+          req.auth!.workspaceId,
+          input.monthlyCreditCap,
+          req.auth!.userId,
+          new Date()
+        );
+        res.json({ settings, usage: await enrichmentUsage(db, req.auth!.workspaceId, new Date()) });
+      } catch (error) {
+        if (error instanceof EnrichmentError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        next(error);
+      }
+    }
+  );
 
   // The third way to run the hosted agent: a workspace's own Claude/Codex
   // subscription, opted into per workspace (docs/cli-agent-and-hosted.md).

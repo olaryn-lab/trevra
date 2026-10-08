@@ -61,6 +61,14 @@ import {
  * acceptable where the global-env CLI path is not. The gate that decides
  * whether this kind may be USED lives there and in
  * `workspace_cli_agent_config.risk_accepted_at` (migration 042), not here.
+ *
+ * `hunter_api_key` is a FOURTH widening, deliberate and once: the workspace's
+ * own Hunter.io key for contact enrichment. Hunter's terms forbid sharing an
+ * account (Section 1), so the key is per workspace, never Trevra's, and
+ * Nango has no Hunter provider to hold it instead. Its single plaintext read
+ * is in `enrichment/runs.ts`, at the moment a Hunter request is built, and it
+ * travels only as the X-API-KEY header. Rule 1 above therefore reads "a model
+ * or Hunter request" for this kind.
  */
 export type WorkspaceSecretKind =
   | 'model_api_key'
@@ -68,7 +76,8 @@ export type WorkspaceSecretKind =
   | 'linkedin.email'
   | 'linkedin.password'
   | 'reddit.username'
-  | 'reddit.password';
+  | 'reddit.password'
+  | 'hunter_api_key';
 
 /**
  * What may be SHOWN about a stored secret without decrypting it.
@@ -117,7 +126,11 @@ const KIND_DISPLAY: Record<WorkspaceSecretKind, 'last4' | 'opaque'> = {
   // unmasked, which is a display value the write path computes, not something
   // `last4` may derive from a password.
   'reddit.username': 'opaque',
-  'reddit.password': 'opaque'
+  'reddit.password': 'opaque',
+  // 'opaque' for the cli_oauth_token reason above: one per workspace, never
+  // compared with another, so last4 would buy nothing and cost four
+  // characters of a paid credential in every backup.
+  hunter_api_key: 'opaque'
 };
 
 export interface WorkspaceSecretSummary {
@@ -210,7 +223,10 @@ function privateModelHostsAllowed(env: NodeJS.ProcessEnv = process.env): boolean
  * and migration 049 defines the owner seat as exactly the rows that live here.
  * See the AAD section of crypto.ts.
  */
-export function workspaceSecretContext(workspaceId: string, kind: WorkspaceSecretKind): SecretContext {
+export function workspaceSecretContext(
+  workspaceId: string,
+  kind: WorkspaceSecretKind
+): SecretContext {
   return { store: 'workspace_secrets', workspaceId, seatKey: OWNER_SEAT_COMPONENT, kind };
 }
 
@@ -238,7 +254,9 @@ export async function putWorkspaceSecret(
   const label = normalizeLabel(input.label);
   const now = new Date().toISOString();
 
-  const row = await db.prepare(`
+  const row = await db
+    .prepare(
+      `
     INSERT INTO workspace_secrets (
       id,workspace_id,kind,ciphertext,iv,auth_tag,key_version,key_id,last4,label,created_at,updated_at
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
@@ -252,20 +270,22 @@ export async function putWorkspaceSecret(
       label=EXCLUDED.label,
       updated_at=EXCLUDED.updated_at
     RETURNING id, ${SECRET_COLUMNS}
-  `).get<Record<string, unknown>>(
-    id('wsec'),
-    input.workspaceId,
-    input.kind,
-    sealed.ciphertext,
-    sealed.iv,
-    sealed.authTag,
-    sealed.keyVersion,
-    sealed.keyId,
-    last4,
-    label,
-    now,
-    now
-  );
+  `
+    )
+    .get<Record<string, unknown>>(
+      id('wsec'),
+      input.workspaceId,
+      input.kind,
+      sealed.ciphertext,
+      sealed.iv,
+      sealed.authTag,
+      sealed.keyVersion,
+      sealed.keyId,
+      last4,
+      label,
+      now,
+      now
+    );
   if (!row) throw new Error('Failed to store the workspace secret');
 
   await writeAudit(db, {
@@ -276,7 +296,10 @@ export async function putWorkspaceSecret(
     // last4 and label only, and for an opaque kind not even that: the audit
     // row says a LinkedIn password was replaced, never anything about what it
     // was replaced with.
-    metadata: KIND_DISPLAY[input.kind] === 'last4' ? { kind: input.kind, last4, label } : { kind: input.kind, label },
+    metadata:
+      KIND_DISPLAY[input.kind] === 'last4'
+        ? { kind: input.kind, last4, label }
+        : { kind: input.kind, label },
     now
   });
 
@@ -309,7 +332,9 @@ export async function deleteWorkspaceSecret(
   actorUserId?: string | null
 ): Promise<boolean> {
   const row = await db
-    .prepare('DELETE FROM workspace_secrets WHERE workspace_id=? AND kind=? RETURNING id, last4, label')
+    .prepare(
+      'DELETE FROM workspace_secrets WHERE workspace_id=? AND kind=? RETURNING id, last4, label'
+    )
     .get<{ id: string; last4: string; label: string | null }>(workspaceId, kind);
   if (!row) return false;
 
@@ -318,9 +343,10 @@ export async function deleteWorkspaceSecret(
     actorUserId: actorUserId ?? null,
     eventType: 'workspace_secret.deleted',
     entityId: row.id,
-    metadata: KIND_DISPLAY[kind] === 'last4'
-      ? { kind, last4: row.last4, label: row.label ?? null }
-      : { kind, label: row.label ?? null },
+    metadata:
+      KIND_DISPLAY[kind] === 'last4'
+        ? { kind, last4: row.last4, label: row.label ?? null }
+        : { kind, label: row.label ?? null },
     now: new Date().toISOString()
   });
   return true;
@@ -335,7 +361,9 @@ export async function putWorkspaceAgentConfig(
   if (!model) throw new Error('model is required');
   const label = normalizeLabel(input.label);
 
-  const row = await db.prepare(`
+  const row = await db
+    .prepare(
+      `
     INSERT INTO workspace_agent_config (workspace_id,base_url,model,label,updated_at)
     VALUES (?,?,?,?,?)
     ON CONFLICT (workspace_id) DO UPDATE SET
@@ -344,12 +372,23 @@ export async function putWorkspaceAgentConfig(
       label=EXCLUDED.label,
       updated_at=EXCLUDED.updated_at
     RETURNING ${CONFIG_COLUMNS}
-  `).get<Record<string, unknown>>(input.workspaceId, baseUrl, model, label, new Date().toISOString());
+  `
+    )
+    .get<Record<string, unknown>>(
+      input.workspaceId,
+      baseUrl,
+      model,
+      label,
+      new Date().toISOString()
+    );
   if (!row) throw new Error('Failed to store the workspace agent configuration');
   return serializeConfig(row);
 }
 
-export async function getWorkspaceAgentConfig(db: Db, workspaceId: string): Promise<WorkspaceAgentConfig | null> {
+export async function getWorkspaceAgentConfig(
+  db: Db,
+  workspaceId: string
+): Promise<WorkspaceAgentConfig | null> {
   const row = await db
     .prepare(`SELECT ${CONFIG_COLUMNS} FROM workspace_agent_config WHERE workspace_id=?`)
     .get<Record<string, unknown>>(workspaceId);
@@ -370,7 +409,9 @@ export async function putWorkspaceCliAgentConfig(
   if (!model) throw new Error('model is required');
   const now = new Date().toISOString();
 
-  const row = await db.prepare(`
+  const row = await db
+    .prepare(
+      `
     INSERT INTO workspace_cli_agent_config (workspace_id,cli,model,updated_at)
     VALUES (?,?,?,?)
     ON CONFLICT (workspace_id) DO UPDATE SET
@@ -378,12 +419,17 @@ export async function putWorkspaceCliAgentConfig(
       model=EXCLUDED.model,
       updated_at=EXCLUDED.updated_at
     RETURNING ${CLI_CONFIG_COLUMNS}
-  `).get<Record<string, unknown>>(input.workspaceId, input.cli, model, now);
+  `
+    )
+    .get<Record<string, unknown>>(input.workspaceId, input.cli, model, now);
   if (!row) throw new Error('Failed to store the workspace CLI agent configuration');
   return serializeCliConfig(row);
 }
 
-export async function getWorkspaceCliAgentConfig(db: Db, workspaceId: string): Promise<WorkspaceCliAgentConfig | null> {
+export async function getWorkspaceCliAgentConfig(
+  db: Db,
+  workspaceId: string
+): Promise<WorkspaceCliAgentConfig | null> {
   const row = await db
     .prepare(`SELECT ${CLI_CONFIG_COLUMNS} FROM workspace_cli_agent_config WHERE workspace_id=?`)
     .get<Record<string, unknown>>(workspaceId);
@@ -410,17 +456,24 @@ export async function setWorkspaceCliRiskAccepted(
   accepted: boolean
 ): Promise<WorkspaceCliAgentConfig | null> {
   const now = new Date().toISOString();
-  const row = await db.prepare(`
+  const row = await db
+    .prepare(
+      `
     UPDATE workspace_cli_agent_config
     SET risk_accepted_at=?, updated_at=?
     WHERE workspace_id=?
     RETURNING ${CLI_CONFIG_COLUMNS}
-  `).get<Record<string, unknown>>(accepted ? now : null, now, workspaceId);
+  `
+    )
+    .get<Record<string, unknown>>(accepted ? now : null, now, workspaceId);
   return row ? serializeCliConfig(row) : null;
 }
 
 /** Everything the UI may know about a workspace's BYOK setup, and nothing more. */
-export async function getWorkspaceAgentSetup(db: Db, workspaceId: string): Promise<WorkspaceAgentSetup> {
+export async function getWorkspaceAgentSetup(
+  db: Db,
+  workspaceId: string
+): Promise<WorkspaceAgentSetup> {
   const [config, secret] = await Promise.all([
     getWorkspaceAgentConfig(db, workspaceId),
     describeWorkspaceSecret(db, workspaceId, 'model_api_key')
@@ -435,10 +488,18 @@ export async function getWorkspaceAgentSetup(db: Db, workspaceId: string): Promi
  * a route, do not put it in a variable that outlives the request, and do not
  * add a caller without re-reading section 3 of docs/byok-and-hosted-agent.md.
  *
- * TWO CALL SITES, BOTH NAMED. The agent's model call, which passes the key
- * straight into an Authorization header; and `secrets/linkedin.ts`, which
- * passes the LinkedIn email and password straight into a Playwright `fill()`
- * and holds neither afterwards. A third one is a decision, not a refactor.
+ * EVERY CALL SITE IS NAMED HERE, and each is the single moment of use:
+ *  - `agent/provider.ts`: the model key, straight into the model call's
+ *    Authorization header.
+ *  - `agent/cli.ts`: the workspace's Claude/Codex subscription token, handed
+ *    to that one CLI run when its backend is resolved.
+ *  - `secrets/linkedin.ts`: the LinkedIn email and password, straight into a
+ *    Playwright `fill()`, holding neither afterwards.
+ *  - `secrets/reddit.ts`: the Reddit username and password, read together for
+ *    the local Reddit worker's sign-in.
+ *  - `enrichment/runs.ts`: the workspace's Hunter key, straight into the
+ *    X-API-KEY header of a Hunter request.
+ * Another one is a decision, not a refactor.
  */
 export async function readWorkspaceSecretPlaintext(
   db: Db,
@@ -447,8 +508,16 @@ export async function readWorkspaceSecretPlaintext(
   env: NodeJS.ProcessEnv = process.env
 ): Promise<string | null> {
   const row = await db
-    .prepare('SELECT ciphertext, iv, auth_tag, key_version, key_id FROM workspace_secrets WHERE workspace_id=? AND kind=?')
-    .get<{ ciphertext: Buffer; iv: Buffer; auth_tag: Buffer; key_version: number; key_id: string | null }>(workspaceId, kind);
+    .prepare(
+      'SELECT ciphertext, iv, auth_tag, key_version, key_id FROM workspace_secrets WHERE workspace_id=? AND kind=?'
+    )
+    .get<{
+      ciphertext: Buffer;
+      iv: Buffer;
+      auth_tag: Buffer;
+      key_version: number;
+      key_id: string | null;
+    }>(workspaceId, kind);
   if (!row) return null;
   // The context is built from the arguments this row was FOUND by, so a row
   // that was moved here from another workspace fails to open instead of
@@ -495,7 +564,10 @@ function normalizeLabel(label: string | null | undefined): string | null {
  * address belongs at call time, where the loop must dial through
  * `createSsrfFetch()` and revalidate every hop.
  */
-async function assertUsableBaseUrl(baseUrl: string, env: NodeJS.ProcessEnv = process.env): Promise<string> {
+async function assertUsableBaseUrl(
+  baseUrl: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<string> {
   const raw = typeof baseUrl === 'string' ? baseUrl.trim() : '';
   if (!raw) throw new Error('baseUrl is required');
   let url: URL;
@@ -522,14 +594,17 @@ async function assertUsableBaseUrl(baseUrl: string, env: NodeJS.ProcessEnv = pro
     await validatePublicHost(url.hostname, { resolve: false });
   } catch (cause) {
     throw new Error(
-      `baseUrl must point at a public host (${cause instanceof Error ? cause.message : String(cause)}). `
-      + `Running a model on your own network? Set ${PRIVATE_HOSTS_ENV}=true.`
+      `baseUrl must point at a public host (${cause instanceof Error ? cause.message : String(cause)}). ` +
+        `Running a model on your own network? Set ${PRIVATE_HOSTS_ENV}=true.`
     );
   }
   return raw;
 }
 
-function serializeSecret(row: Record<string, unknown>, keyIds: ConfiguredKeyIds): WorkspaceSecretSummary {
+function serializeSecret(
+  row: Record<string, unknown>,
+  keyIds: ConfiguredKeyIds
+): WorkspaceSecretSummary {
   const keyVersion = Number(row.key_version);
   const keyId = row.key_id == null ? null : String(row.key_id);
   return {
@@ -573,19 +648,23 @@ async function writeAudit(
     now: string;
   }
 ): Promise<void> {
-  await db.prepare(`
+  await db
+    .prepare(
+      `
     INSERT INTO audit_events (
       id,workspace_id,actor_type,actor_id,event_type,entity_type,entity_id,metadata_json,created_at
     ) VALUES (?,?,?,?,?,?,?,?,?)
-  `).run(
-    id('audit'),
-    event.workspaceId,
-    event.actorUserId ? 'user' : 'system',
-    event.actorUserId,
-    event.eventType,
-    'workspace_secret',
-    event.entityId,
-    JSON.stringify(event.metadata),
-    event.now
-  );
+  `
+    )
+    .run(
+      id('audit'),
+      event.workspaceId,
+      event.actorUserId ? 'user' : 'system',
+      event.actorUserId,
+      event.eventType,
+      'workspace_secret',
+      event.entityId,
+      JSON.stringify(event.metadata),
+      event.now
+    );
 }
