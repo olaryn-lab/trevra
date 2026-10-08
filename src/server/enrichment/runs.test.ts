@@ -39,13 +39,18 @@ function candidate(
   };
 }
 
-function fakeHunter(script: {
+interface FakeScript {
   search?: Record<string, EnrichmentCandidate[]>;
   verify?: Record<string, EmailVerificationStatus>;
+  /** Read on every call, so a test can clear it between ticks. */
   failVerifyWith?: EnrichmentProviderErrorCode;
   /** Runs inside domainSearch, while the paid call is in flight. */
   duringSearch?: () => Promise<void>;
-}) {
+  /** Runs inside verifyEmail, while the paid call is in flight. */
+  duringVerify?: () => Promise<void>;
+}
+
+function fakeHunter(script: FakeScript) {
   const calls: string[] = [];
   const provider: ContactEnrichmentProvider = {
     id: 'hunter',
@@ -58,12 +63,36 @@ function fakeHunter(script: {
     },
     async verifyEmail(email) {
       calls.push(`verify:${email}`);
+      await script.duringVerify?.();
       if (script.failVerifyWith) throw new EnrichmentProviderError('fake', script.failVerifyWith);
       // Hunter charges every terminal verification (provider.ts).
       return { status: script.verify?.[email] ?? 'valid', credits: 0.5 };
     }
   };
   return { calls, providerFor: () => provider };
+}
+
+/** A sourced three-person team on `domain`. */
+function team(domain: string): EnrichmentCandidate[] {
+  return ['a', 'b', 'c'].map((local) => candidate(`${local}@${domain}`, `https://${domain}/team`));
+}
+
+/** shouldStop that answers true from its `n`th call on (call 1 is the pre-claim check). */
+function stopFromCall(n: number): () => boolean {
+  let calls = 0;
+  return () => {
+    calls += 1;
+    return calls >= n;
+  };
+}
+
+function progressOf(row: { progress_json: unknown } | undefined) {
+  return row?.progress_json as {
+    doneDomains: number;
+    saved: number;
+    skipped: number;
+    pending?: { domainIndex: number; next: number; candidates: unknown[] };
+  };
 }
 
 async function queue(
@@ -404,7 +433,9 @@ describe('enrichment runs', () => {
     const hunter = fakeHunter({
       search: { 'acme.com': [candidate('maya@acme.com')] },
       failVerifyWith: 'key_invalid',
-      async duringSearch() {
+      // Replaced while the verification is in flight, after the run's own
+      // key check: only the markKeyInvalid fence can protect the new key.
+      async duringVerify() {
         await putWorkspaceSecret(db, {
           workspaceId: WORKSPACE,
           kind: 'hunter_api_key',
@@ -458,16 +489,20 @@ describe('enrichment runs', () => {
     const { run } = await queue('enrich-whole-0001', ['acme.com', 'northstar.ai'], {
       estimatedCredits: 10
     });
-    const team = (domain: string) =>
-      ['a', 'b', 'c'].map((local) => candidate(`${local}@${domain}`, `https://${domain}/team`));
+    const snapshots: unknown[] = [];
     const hunter = fakeHunter({
-      search: { 'acme.com': team('acme.com'), 'northstar.ai': team('northstar.ai') }
+      search: { 'acme.com': team('acme.com'), 'northstar.ai': team('northstar.ai') },
+      async duringSearch() {
+        snapshots.push(progressOf(await runRow(run.id)));
+      }
     });
     await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
     expect(hunter.calls).toHaveLength(8);
     expect(await ledgerTotal(run.id)).toBe(9);
     expect(await runRow(run.id)).toMatchObject({ status: 'completed', last_error: null });
     expect(await savedEmails()).toHaveLength(6);
+    // The first domain's checkpoint dropped its stored candidates.
+    expect(snapshots[1]).toEqual({ doneDomains: 1, saved: 3, skipped: 0 });
   });
 
   it('lowering the cap after approval stops a queued run before any call', async () => {
@@ -502,6 +537,8 @@ describe('enrichment runs', () => {
       status: 'failed',
       last_error: 'Stopped after 3 attempts.'
     });
+    // A failed run keeps no stored candidates.
+    expect(progressOf(await runRow(run.id)).pending).toBeUndefined();
   });
 
   it('a draining worker releases its run before the next paid call', async () => {
@@ -522,7 +559,7 @@ describe('enrichment runs', () => {
     expect(await ledgerTotal(run.id)).toBe(1);
     expect(await runRow(run.id)).toMatchObject({
       status: 'queued',
-      attempts: 1,
+      attempts: 0,
       lease_until: null
     });
     // Still draining: nothing new is claimed.
@@ -536,6 +573,219 @@ describe('enrichment runs', () => {
     expect((await runRow(run.id))?.status).toBe('queued');
   });
 
+  it('a key deleted mid-run stops the run before its next paid call', async () => {
+    const { run } = await queue('enrich-delmid-001', ['acme.com', 'northstar.ai']);
+    const hunter = fakeHunter({
+      search: { 'acme.com': [candidate('maya@acme.com')] },
+      async duringSearch() {
+        await deleteWorkspaceSecret(db, WORKSPACE, 'hunter_api_key', USER);
+      }
+    });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(hunter.calls).toEqual(['search:acme.com:3']);
+    expect(await ledgerTotal(run.id)).toBe(1);
+    const row = await runRow(run.id);
+    expect(row).toMatchObject({
+      status: 'failed',
+      last_error: 'The Hunter key was removed before this run finished.'
+    });
+    expect(progressOf(row).pending).toBeUndefined();
+    const failed = await db
+      .prepare(
+        "SELECT payload_json FROM domain_events WHERE workspace_id=? AND event_type='enrichment_run.failed'"
+      )
+      .get<{ payload_json: unknown }>(WORKSPACE);
+    expect(failed?.payload_json).toMatchObject({ reason: 'key_removed' });
+  });
+
+  it('a drain right after a domain search resumes from its candidates without searching again', async () => {
+    const { run } = await queue('enrich-resume-001', ['acme.com']);
+    let draining = false;
+    const hunter = fakeHunter({
+      search: { 'acme.com': team('acme.com') },
+      async duringSearch() {
+        draining = true;
+      }
+    });
+    await runQueuedEnrichmentRuns(db, {
+      now: NOW,
+      providerFor: hunter.providerFor,
+      shouldStop: () => draining
+    });
+    const paused = progressOf(await runRow(run.id));
+    expect(paused.pending).toMatchObject({ domainIndex: 0, next: 0 });
+    expect(paused.pending?.candidates).toHaveLength(3);
+    draining = false;
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(hunter.calls.filter((call) => call.startsWith('search:'))).toEqual([
+      'search:acme.com:3'
+    ]);
+    expect(hunter.calls.filter((call) => call.startsWith('verify:'))).toHaveLength(3);
+    const row = await runRow(run.id);
+    expect(row).toMatchObject({ status: 'completed', last_error: null });
+    expect(await ledgerTotal(run.id)).toBe(run.estimatedCredits);
+    expect(progressOf(row)).toEqual({ doneDomains: 1, saved: 3, skipped: 0 });
+  });
+
+  it('a rate-limited verification mid-domain resumes without searching again', async () => {
+    const { run } = await queue('enrich-resume-002', ['acme.com']);
+    const script: FakeScript = {
+      search: { 'acme.com': team('acme.com') },
+      failVerifyWith: 'rate_limited'
+    };
+    const hunter = fakeHunter(script);
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(await runRow(run.id)).toMatchObject({ status: 'queued', attempts: 1 });
+    delete script.failVerifyWith;
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(hunter.calls).toEqual([
+      'search:acme.com:3',
+      'verify:a@acme.com',
+      'verify:a@acme.com',
+      'verify:b@acme.com',
+      'verify:c@acme.com'
+    ]);
+    expect(await runRow(run.id)).toMatchObject({ status: 'completed' });
+    expect(await ledgerTotal(run.id)).toBe(run.estimatedCredits);
+  });
+
+  it('draining three times does not use up the run attempts', async () => {
+    const { run } = await queue('enrich-drain3-001', ['acme.com']);
+    let draining = false;
+    const hunter = fakeHunter({
+      search: { 'acme.com': team('acme.com') },
+      async duringSearch() {
+        draining = true;
+      }
+    });
+    await runQueuedEnrichmentRuns(db, {
+      now: NOW,
+      providerFor: hunter.providerFor,
+      shouldStop: () => draining
+    });
+    for (let drain = 0; drain < 2; drain += 1) {
+      await runQueuedEnrichmentRuns(db, {
+        now: NOW,
+        providerFor: hunter.providerFor,
+        shouldStop: stopFromCall(2)
+      });
+      expect(await runRow(run.id)).toMatchObject({ status: 'queued', attempts: 0 });
+    }
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(await runRow(run.id)).toMatchObject({ status: 'completed', attempts: 1 });
+  });
+
+  it('an unexpected error is re-thrown without content, keeping its stack and pg names', async () => {
+    const { run } = await queue('enrich-unexp-001', ['acme.com']);
+    const hunter = fakeHunter({});
+    const providerFor = (): ContactEnrichmentProvider => ({
+      ...hunter.providerFor(),
+      async domainSearch() {
+        throw Object.assign(new Error('duplicate key (maya@acme.com) already exists'), {
+          code: '23505',
+          constraint: 'contacts_email_idx',
+          table: 'contacts',
+          routine: '_bt_check_unique'
+        });
+      }
+    });
+    const caught = (await runQueuedEnrichmentRuns(db, { now: NOW, providerFor }).catch(
+      (error: unknown) => error
+    )) as Error;
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught.message).toContain('code 23505');
+    expect(caught.message).toContain('constraint contacts_email_idx');
+    expect(caught.message).toContain('table contacts');
+    expect(caught.message).toContain('routine _bt_check_unique');
+    expect(caught.message).not.toContain('maya@acme.com');
+    // The original frames survive (the throw site in the fake provider).
+    expect(caught.stack).toContain('domainSearch');
+    expect(caught.stack).not.toContain('maya@acme.com');
+    expect(await runRow(run.id)).toMatchObject({
+      status: 'queued',
+      attempts: 1,
+      last_error: 'Unexpected error; the run will be retried.'
+    });
+  });
+
+  it('a run that crosses a UTC month boundary books later charges to the new month', async () => {
+    const october = new Date('2026-10-31T23:59:00.000Z');
+    const november = new Date('2026-11-01T00:01:00.000Z');
+    let at = october;
+    let searches = 0;
+    const { run } = await queue('enrich-month-0001', ['acme.com', 'northstar.ai']);
+    const hunter = fakeHunter({
+      search: {
+        'acme.com': [candidate('maya@acme.com')],
+        'northstar.ai': [candidate('nora@northstar.ai', 'https://northstar.ai/team')]
+      },
+      async duringSearch() {
+        searches += 1;
+        if (searches === 2) at = november;
+      }
+    });
+    await runQueuedEnrichmentRuns(db, {
+      now: october,
+      clock: () => at,
+      providerFor: hunter.providerFor
+    });
+    expect((await runRow(run.id))?.status).toBe('completed');
+    const months = await db
+      .prepare(
+        `SELECT to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM') AS month, SUM(credits) AS total
+         FROM enrichment_usage_ledger WHERE run_id=? GROUP BY 1 ORDER BY 1`
+      )
+      .all<{ month: string; total: string }>(run.id);
+    expect(months.map((row) => [row.month, Number(row.total)])).toEqual([
+      ['2026-10', 1.5],
+      ['2026-11', 1.5]
+    ]);
+    expect((await enrichmentUsage(db, WORKSPACE, november)).chargedCredits).toBe(1.5);
+  });
+
+  it('re-saving an already-linked Person is not counted as saved', async () => {
+    const team1 = { search: { 'acme.com': [candidate('maya@acme.com')] } };
+    const first = await queue('enrich-resave-001', ['acme.com'], { emailsPerDomain: 1 });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: fakeHunter(team1).providerFor });
+    expect(progressOf(await runRow(first.run.id))).toMatchObject({ saved: 1, skipped: 0 });
+    const second = await queue('enrich-resave-002', ['acme.com'], { emailsPerDomain: 1 });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: fakeHunter(team1).providerFor });
+    expect(progressOf(await runRow(second.run.id))).toMatchObject({ saved: 0, skipped: 1 });
+  });
+
+  it('a stale copy rate-limited after a re-claim leaves the row to the new holder', async () => {
+    const { run } = await queue('enrich-stale-rl01', ['acme.com']);
+    const hunter = fakeHunter({
+      search: { 'acme.com': [candidate('maya@acme.com')] },
+      failVerifyWith: 'rate_limited',
+      async duringVerify() {
+        await db.prepare('UPDATE enrichment_runs SET attempts=attempts+1 WHERE id=?').run(run.id);
+      }
+    });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(await runRow(run.id)).toMatchObject({
+      status: 'running',
+      attempts: 2,
+      last_error: null
+    });
+  });
+
+  it('a stale copy that fails after a re-claim leaves the row to the new holder', async () => {
+    const { run } = await queue('enrich-stale-fl01', ['acme.com']);
+    const hunter = fakeHunter({
+      search: { 'acme.com': [candidate('maya@acme.com')] },
+      failVerifyWith: 'quota_exhausted',
+      async duringVerify() {
+        await db.prepare('UPDATE enrichment_runs SET attempts=attempts+1 WHERE id=?').run(run.id);
+      }
+    });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(await runRow(run.id)).toMatchObject({
+      status: 'running',
+      attempts: 2,
+      last_error: null
+    });
+  });
   it('a copy whose lease another replica took over stops before its next paid call', async () => {
     const { run } = await queue('enrich-lease-0001', ['acme.com', 'northstar.ai']);
     const hunter = fakeHunter({

@@ -536,6 +536,31 @@ export async function readWorkspaceSecretPlaintext(
 }
 
 /**
+ * Names the exact sealing of a stored secret without opening it: the hex of its
+ * GCM nonce, which is random per write (see migration 015) and not secret. A
+ * caller that read the plaintext can later ask "is this still the key I used?"
+ * (enrichment/runs.ts fences a key-invalid verdict and stops a run whose key
+ * was removed or replaced). `lock: 'share'` takes FOR SHARE inside the
+ * caller's transaction, so a concurrent replacement is waited out and the new
+ * sealing is what comes back.
+ */
+export async function workspaceSecretSeal(
+  db: Db,
+  workspaceId: string,
+  kind: WorkspaceSecretKind,
+  options: { lock?: 'share' } = {}
+): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT encode(iv,'hex') AS seal FROM workspace_secrets WHERE workspace_id=? AND kind=?${
+        options.lock === 'share' ? ' FOR SHARE' : ''
+      }`
+    )
+    .get<{ seal: string }>(workspaceId, kind);
+  return row?.seal ?? null;
+}
+
+/**
  * Display only, and deliberately stingy: fewer than four characters stays
  * fewer, never padded.
  *

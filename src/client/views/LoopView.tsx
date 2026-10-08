@@ -1404,7 +1404,8 @@ function PlanWork({
                       <span>
                         Approved. Hunter enrichment for {prepared.result.run.domainCount}{' '}
                         {prepared.result.run.domainCount === 1 ? 'company' : 'companies'} is queued
-                        and stops at {prepared.result.run.estimatedCredits} credits. Saved contacts
+                        with an approved estimate of {prepared.result.run.estimatedCredits} credits.
+                        Once it reaches that estimate, it stops before its next call. Saved contacts
                         appear on their Account.
                       </span>
                       <Button variant="primary" onClick={() => onNavigate(prepared.next.href)}>
