@@ -6,7 +6,9 @@ import { dkimSelectorSchema, readDkimSelector, writeDkimSelector } from './dkim-
 import { INBOUND_SYNC_FAILED_ERROR, INBOUND_SYNC_NAME } from './inbound-mailbox.js';
 import { listSendingMailboxes, resolveMailboxAddress } from './mailbox-address.js';
 import { getSenderDeliverability } from './sender-deliverability.js';
+import { outreachUnsubscribeModeFor } from './unsubscribe-policy.js';
 import { unsubscribeConfigured } from './unsubscribe.js';
+import { ZOHO_OUTREACH_DAILY_CAP } from './zoho-mail.js';
 import type {
   EmailChannelStatus,
   EmailInboundMailboxState,
@@ -158,7 +160,9 @@ export async function getEmailChannelStatus(
         displayName: mailbox.displayName,
         address,
         deliverability,
-        dkimSelector: domain ? await readDkimSelector(db, workspaceId, domain) : null
+        dkimSelector: domain ? await readDkimSelector(db, workspaceId, domain) : null,
+        unsubscribeMode: outreachUnsubscribeModeFor(mailbox.providerKey),
+        dailyCap: mailbox.providerKey === 'zoho' ? ZOHO_OUTREACH_DAILY_CAP : null
       };
     })
   );
@@ -243,7 +247,7 @@ export async function designateInboundMailbox(
   );
   if (!mailbox) {
     throw new EmailChannelError(
-      'Connect this Gmail or Microsoft 365 mailbox before using it for inbound mail.',
+      'Connect this Gmail, Microsoft 365 or Zoho Mail mailbox before using it for inbound mail.',
       404
     );
   }

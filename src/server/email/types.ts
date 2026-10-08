@@ -61,6 +61,10 @@ export interface EmailChannelStatus {
       deliverability: StoredDeliverability | null;
       /** The owner-set DKIM selector for this mailbox's sending domain. */
       dkimSelector: string | null;
+      /** How outreach from this mailbox carries its opt-out. */
+      unsubscribeMode: OutreachUnsubscribeMode;
+      /** Outreach emails per rolling 24 hours this provider allows at most, or null for the operator setting alone. */
+      dailyCap: number | null;
     }
   >;
   inbound: EmailInboundMailboxState | null;

@@ -139,6 +139,19 @@ const catalog = [
     env: 'NANGO_MICROSOFT_INTEGRATION',
     fallback: 'trevra-microsoft'
   },
+  // Nango's built-in zoho-mail provider (OAuth2; the Connect UI asks for the
+  // data-centre extension). Outreach only, from the approved mailbox, with the
+  // reply-to-unsubscribe footer (src/server/email/unsubscribe-policy.ts).
+  {
+    key: 'zoho-mail',
+    provider: 'zoho-mail',
+    name: 'Zoho Mail',
+    category: 'communication',
+    description: 'Send approved outreach email from Zoho Mail and read replies into Conversations.',
+    mode: 'oauth',
+    env: 'NANGO_ZOHO_MAIL_INTEGRATION',
+    fallback: 'trevra-zoho-mail'
+  },
   {
     key: 'hubspot',
     provider: 'hubspot',
@@ -630,7 +643,7 @@ export async function executeConnectedAction(
   // verified mailbox; re-authorization clears mailbox_address.
   const requiredMailbox =
     action.require_connection_id === true
-      ? " AND is_demo=0 AND provider IN ('gmail','google-mail','microsoft','outlook') AND mailbox_address IS NOT NULL"
+      ? " AND is_demo=0 AND provider IN ('gmail','google-mail','microsoft','outlook','zoho-mail') AND mailbox_address IS NOT NULL"
       : '';
   let connection = action.connection_id
     ? ((await db
@@ -649,6 +662,9 @@ export async function executeConnectedAction(
     );
   }
   if (!connection) {
+    // Zoho Mail is deliberately absent: it sends only outreach bound to it by
+    // approval (require_connection_id), never as the newest-mailbox fallback
+    // for campaign, skill or legacy sends that expect List-Unsubscribe or threading.
     connection = (await db
       .prepare(
         "SELECT * FROM connections WHERE workspace_id=? AND status='connected' AND provider IN ('gmail','google-mail','microsoft','outlook') ORDER BY is_demo ASC,updated_at DESC LIMIT 1"

@@ -3,6 +3,7 @@ import type { Db } from '../db.js';
 import { getNango } from '../integration-service.js';
 import { mailProviderFor } from './deliverability.js';
 import type { EmailChannelMailbox } from './types.js';
+import { readZohoAccount } from './zoho-mail.js';
 
 export interface SendingMailbox extends EmailChannelMailbox {
   providerConfigKey: string;
@@ -28,14 +29,14 @@ const addressSchema = z.string().email();
  */
 export const MAILBOX_ADDRESS_DEADLINE_MS = 5_000;
 
-/** Live (non-demo) connected Gmail / Microsoft 365 mailboxes, newest first. */
+/** Live (non-demo) connected Gmail / Microsoft 365 / Zoho Mail mailboxes, newest first. */
 export async function listSendingMailboxes(db: Db, workspaceId: string): Promise<SendingMailbox[]> {
   const rows = await db
     .prepare(
       `SELECT id,provider,provider_config_key,external_connection_id,display_name,mailbox_address
        FROM connections
        WHERE workspace_id=? AND status='connected' AND is_demo=0
-         AND provider IN ('gmail','google-mail','microsoft','outlook')
+         AND provider IN ('gmail','google-mail','microsoft','outlook','zoho-mail')
        ORDER BY updated_at DESC,id ASC`
     )
     .all<ConnectionRow>(workspaceId);
@@ -58,6 +59,15 @@ export async function listSendingMailboxes(db: Db, workspaceId: string): Promise
 
 async function readProviderAddress(mailbox: SendingMailbox): Promise<string> {
   const nango = getNango();
+  if (mailbox.providerKey === 'zoho') {
+    // Exactly one Zoho account, or no address: readZohoAccount throws on an
+    // ambiguous list and resolveMailboxAddress then caches nothing.
+    const account = await readZohoAccount(nango, {
+      providerConfigKey: mailbox.providerConfigKey,
+      connectionId: mailbox.externalConnectionId
+    });
+    return account.address;
+  }
   if (mailbox.providerKey === 'google') {
     const profile = await nango.get<{ emailAddress?: string }>({
       endpoint: '/gmail/v1/users/me/profile',
@@ -79,7 +89,7 @@ async function readProviderAddress(mailbox: SendingMailbox): Promise<string> {
 
 /**
  * The address this mailbox actually sends as, read from the provider (Gmail
- * users/me/profile, Graph /me) and cached on the connection. The auth webhook's
+ * users/me/profile, Graph /me, Zoho /api/accounts) and cached on the connection. The auth webhook's
  * end_user_email tag is the Trevra user, not the mailbox, so it is never used.
  * Returns null when the provider cannot be asked, answers with no address, or
  * does not answer within `deadlineMs`.

@@ -29,7 +29,9 @@ const MAILBOX: EmailChannelStatus['mailboxes'][number] = {
   displayName: null,
   address: 'founder@acme.test',
   deliverability: deliverability(),
-  dkimSelector: null
+  dkimSelector: null,
+  unsubscribeMode: 'list_unsubscribe_headers',
+  dailyCap: null
 };
 
 function channel(overrides: Partial<EmailChannelStatus> = {}): EmailChannelStatus {
