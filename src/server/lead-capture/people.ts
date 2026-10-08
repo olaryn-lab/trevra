@@ -346,6 +346,9 @@ export async function listContacts(
   workspaceId: string,
   limit = 100
 ): Promise<ListedContact[]> {
+  // lc-debt: an enrichment link's provider is the first word of source_detail;
+  // the only writer is enrichment/runs.ts ("hunter <uri>"). Upgrade path: a
+  // provider column on account_contacts.
   const rows = await db
     .prepare(
       `SELECT c.*, link.confidence AS link_confidence, link.source AS link_source
