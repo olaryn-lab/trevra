@@ -9252,7 +9252,11 @@ const WORKSPACE_CHILD_TABLES: ReadonlyArray<{ table: string; where: string }> = 
 const WORKSPACE_EXPORT_SEALED_TABLES: ReadonlySet<string> = new Set([
   'workspace_secrets',
   'linkedin_seat_credentials',
-  'agent_tokens'
+  'agent_tokens',
+  // Sealed signing secrets: a webhook's, and a capture source's (the source
+  // row itself holds no secret and is exported).
+  'provider_webhook_endpoints',
+  'capture_source_secrets'
 ]);
 
 /** The same ceiling `ledger-export.ts` uses, for the same reason: a bounded file. */
@@ -9400,6 +9404,14 @@ async function workspaceWorkInFlight(db: Db, workspaceId: string): Promise<strin
       `${campaigns} LinkedIn campaign(s) are still running. Stop them first: POST /api/linkedin/manager/campaigns/:id/stop.`
     );
   }
+
+  const enrichment = await count(
+    "SELECT COUNT(*) AS count FROM enrichment_runs WHERE workspace_id=? AND status='running'"
+  );
+  if (enrichment > 0)
+    blockers.push(
+      `${enrichment} enrichment run(s) are calling Hunter right now. They finish on their own; try again in a minute.`
+    );
 
   return blockers;
 }

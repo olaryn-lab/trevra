@@ -1472,6 +1472,15 @@ describe('export and erasure', () => {
     expect(bundle.tables.messages.length).toBeGreaterThan(0);
     expect(bundle.tables.workspace_settings.length).toBe(1);
     expect(bundle.tables.workspace_secrets).toBeUndefined();
+    expect(bundle.withheld).toEqual(
+      expect.arrayContaining([
+        'workspace_secrets',
+        'provider_webhook_endpoints',
+        'capture_source_secrets'
+      ])
+    );
+    expect(bundle.tables.provider_webhook_endpoints).toBeUndefined();
+    expect(bundle.tables.capture_source_secrets).toBeUndefined();
     expect(JSON.stringify(bundle)).not.toContain(apiKey);
     expect(bundle.truncated).toEqual([]);
   });
@@ -1527,9 +1536,19 @@ describe('export and erasure', () => {
     `
       )
       .run('cmp_inflight', auth.workspaceId, 'Mid-flight', now, now);
+    // A paid Hunter call mid-run is a race too.
+    await db
+      .prepare(
+        `
+      INSERT INTO enrichment_runs (id,workspace_id,provider,idempotency_key,plan_hash,domains,emails_per_domain,estimated_credits,status)
+      VALUES (?,?,'hunter','erasure-race',?,ARRAY['acme.test'],1,1,'running')
+    `
+      )
+      .run('enr_inflight', auth.workspaceId, 'plan-hash');
 
     const busy = await owner.agent.delete('/api/workspace').send({ confirm: phrase }).expect(409);
     expect(busy.body.inFlight.join(' ')).toMatch(/campaign/i);
+    expect(busy.body.inFlight.join(' ')).toMatch(/enrichment run/i);
 
     // Neither refusal deleted anything.
     const survived = await db
@@ -1540,6 +1559,7 @@ describe('export and erasure', () => {
     await db
       .prepare("UPDATE linkedin_campaigns SET status='stopped' WHERE id='cmp_inflight'")
       .run();
+    await db.prepare("UPDATE enrichment_runs SET status='completed' WHERE id='enr_inflight'").run();
     const erased = await owner.agent.delete('/api/workspace').send({ confirm: phrase }).expect(200);
     expect(erased.body.erased).toBe(true);
     expect(erased.body.removed.linkedin_campaigns).toBe(1);
