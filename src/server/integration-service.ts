@@ -28,6 +28,19 @@ import {
   type VerifiedEmailOutcome
 } from './email-outcomes.js';
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
+import { mailProviderFor } from './email/deliverability.js';
+import {
+  UnsubscribePolicyError,
+  assertUnsubscribeModeAllowed,
+  parseOutreachUnsubscribeMode
+} from './email/unsubscribe-policy.js';
+import {
+  ZOHO_MAIL_PROVIDER,
+  ZohoMailError,
+  readZohoAccount,
+  readZohoSentMessageId,
+  sendZohoMessage
+} from './email/zoho-mail.js';
 import {
   INBOUND_EMAIL_MESSAGE_MODEL,
   INBOUND_SYNC_FAILED_ERROR,
@@ -708,6 +721,23 @@ export async function executeConnectedAction(
     structuredPayload.deliverySourceId.trim()
       ? structuredPayload.deliverySourceId.trim()
       : idempotencyKey;
+  const requireListUnsubscribe = structuredPayload.requireListUnsubscribe === true;
+  const unsubscribeMode = parseOutreachUnsubscribeMode(structuredPayload.unsubscribeMode);
+  // The one provider-aware unsubscribe decision (src/server/email/unsubscribe-policy.ts),
+  // enforced before any delivery row so a refusal leaves nothing to retry.
+  assertUnsubscribeModeAllowed({
+    provider,
+    purpose,
+    requireListUnsubscribe,
+    unsubscribeMode
+  });
+  // Reply-to-unsubscribe is reachable only from approved email outreach, never
+  // from a campaign, skill or legacy send that claims the mode in its payload.
+  if (unsubscribeMode === 'footer_and_reply' && sourceType !== 'email_outreach') {
+    throw new UnsubscribePolicyError(
+      'Reply-to-unsubscribe is allowed only for approved email outreach; nothing was sent.'
+    );
+  }
   const localConnectionId = String(connection.id);
   const claimed = await claimEmailDelivery(db, {
     workspaceId,
@@ -758,7 +788,6 @@ export async function executeConnectedAction(
   // carries the same link. Anything going wrong here happens before any
   // provider call, so it is reported as a definite (4xx) failure and the
   // delivery stays retryable.
-  const requireListUnsubscribe = structuredPayload.requireListUnsubscribe === true;
   let unsubscribeHeaders: string[] = [];
   if (requireListUnsubscribe && purpose === 'outreach') {
     try {
@@ -921,6 +950,58 @@ export async function executeConnectedAction(
       return { provider: outcome.provider, externalRef: outcome.externalRef };
     }
 
+    if (mailProviderFor(provider) === 'zoho') {
+      // Zoho sends only plain first-touch outreach approved in footer_and_reply
+      // mode (checked above). No threading: its Message-ID cannot be set and a
+      // follow-up could not thread reliably.
+      if (threadExternalRef || threadIdempotencyKey || htmlBody) {
+        throw new ZohoMailError(
+          'Zoho Mail sends only plain first-touch outreach from Trevra; this email asks for threading or HTML, so nothing was sent.'
+        );
+      }
+      const zohoConnection = { providerConfigKey, connectionId };
+      let account: Awaited<ReturnType<typeof readZohoAccount>>;
+      try {
+        account = await readZohoAccount(nango, zohoConnection);
+      } catch (error) {
+        // Nothing has been sent yet, so this is a definite, retryable failure.
+        throw error instanceof ZohoMailError
+          ? error
+          : new ZohoMailError(
+              `Trevra could not confirm which Zoho Mail account this connection sends as; nothing was sent. ${error instanceof Error ? error.message : String(error)}`
+            );
+      }
+      const approvedAddress = String(connection.mailbox_address ?? '')
+        .trim()
+        .toLowerCase();
+      if (!approvedAddress || account.address !== approvedAddress) {
+        throw new ZohoMailError(
+          'This Zoho Mail connection now sends as a different address than the approved mailbox; nothing was sent. Reconnect it and prepare the email again.'
+        );
+      }
+      const sent = await sendZohoMessage(nango, zohoConnection, {
+        accountId: account.accountId,
+        fromAddress: approvedAddress,
+        toAddress: recipient,
+        subject: String(action.subject),
+        content: String(action.body)
+      });
+      const outcome = {
+        provider: ZOHO_MAIL_PROVIDER,
+        externalRef: sent.messageId ?? id('zoho'),
+        // Zoho writes its own Message-ID. Without the read-back there is no id
+        // to thread on, and an unthreaded opt-out reply still suppresses
+        // (src/server/email/inbound-mailbox.ts).
+        internetMessageId: sent.messageId
+          ? await readZohoSentMessageId(nango, zohoConnection, {
+              accountId: account.accountId,
+              messageId: sent.messageId
+            })
+          : null
+      };
+      await markEmailDeliverySent(db, deliveryId, outcome);
+      return { provider: outcome.provider, externalRef: outcome.externalRef };
+    }
     if (!['gmail', 'google-mail'].includes(provider))
       throw new Error(`Provider ${provider} cannot execute ${actionType}`);
     let threadId = '';
