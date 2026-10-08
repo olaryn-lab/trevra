@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Db } from '../db.js';
-import { importAccounts } from '../accounts/store.js';
+import { importAccounts, normalizeAccountDomain } from '../accounts/store.js';
 import type { AccountImportResult } from '../accounts/types.js';
 import { canonicalPayloadHash } from '../control-plane/payload.js';
 import { listSeats } from '../linkedin/seats.js';
@@ -11,6 +11,14 @@ import {
   type CaptureSourceRecord
 } from '../lead-capture/types.js';
 import { secretsConfigured } from '../secrets/crypto.js';
+import {
+  ENRICHMENT_MAX_DOMAINS,
+  ENRICHMENT_MAX_EMAILS_PER_DOMAIN,
+  estimateEnrichmentCredits,
+  HUNTER_PRICING_URL,
+  roundCredits
+} from '../enrichment/provider.js';
+import { enrichmentUsage, getEnrichmentSettings } from '../enrichment/settings.js';
 import { emailComplianceFooterUnavailable, emailComplianceProvider } from '../email/compliance.js';
 import {
   EmailOutreachError,
@@ -31,7 +39,8 @@ export const GTM_OBJECTIVES = [
   'research_accounts',
   'prepare_outreach',
   'watch_accounts',
-  'capture_inbound'
+  'capture_inbound',
+  'enrich_contacts'
 ] as const;
 
 export type GtmObjective = (typeof GTM_OBJECTIVES)[number];
@@ -67,12 +76,22 @@ const captureSchema = z
     kind: z.enum(CAPTURE_SOURCE_KINDS).optional()
   })
   .strict();
+
+const DEFAULT_EMAILS_PER_DOMAIN = 3;
+
+const enrichmentSchema = z
+  .object({
+    emailsPerDomain: z.number().int().min(1).max(ENRICHMENT_MAX_EMAILS_PER_DOMAIN).optional(),
+    includeUnverified: z.boolean().optional()
+  })
+  .strict();
 export const gtmIntentSchema = z
   .object({
     objective: z.enum(GTM_OBJECTIVES),
     audience: audienceSchema.optional(),
     people: peopleSchema.optional(),
     capture: captureSchema.optional(),
+    enrichment: enrichmentSchema.optional(),
     channels: z
       .array(z.enum(['linkedin', 'email', 'community']))
       .max(3)
@@ -97,6 +116,21 @@ export interface GtmPlanBlocker {
   actionHref?: string;
 }
 
+/** Present only on enrich_contacts plans; part of the hashed plan, so a changed price is a stale plan. */
+export interface GtmPlanCost {
+  provider: 'hunter';
+  unit: 'credits';
+  domains: number;
+  emailsPerDomain: number;
+  searchCredits: number;
+  verificationCredits: number;
+  estimatedCredits: number;
+  monthlyCap: number;
+  usedThisMonth: number;
+  remainingAfter: number;
+  pricingUrl: string;
+}
+
 export interface GtmPlan {
   objective: GtmObjective;
   intent: GtmIntent;
@@ -113,6 +147,7 @@ export interface GtmPlan {
     kind: string;
     href: string;
   };
+  cost?: GtmPlanCost;
   planHash: string;
 }
 
@@ -329,6 +364,22 @@ const blockerSchema = z
   })
   .strict();
 
+const planCostSchema = z
+  .object({
+    provider: z.literal('hunter'),
+    unit: z.literal('credits'),
+    domains: z.number(),
+    emailsPerDomain: z.number(),
+    searchCredits: z.number(),
+    verificationCredits: z.number(),
+    estimatedCredits: z.number(),
+    monthlyCap: z.number(),
+    usedThisMonth: z.number(),
+    remainingAfter: z.number(),
+    pricingUrl: z.string()
+  })
+  .strict();
+
 const suppliedPlanSchema = z
   .object({
     objective: z.enum(GTM_OBJECTIVES),
@@ -345,6 +396,7 @@ const suppliedPlanSchema = z
       })
       .strict(),
     next: z.object({ kind: z.string().min(1), href: z.string().min(1) }).strict(),
+    cost: planCostSchema.optional(),
     planHash: z.string().regex(/^[a-f0-9]{64}$/)
   })
   .strict();
@@ -889,6 +941,145 @@ function captureInboundPlan(intent: GtmIntent, actorRole: 'owner' | 'member'): G
   });
 }
 
+async function enrichContactsPlan(
+  db: Db,
+  workspaceId: string,
+  intent: GtmIntent,
+  actorRole: 'owner' | 'member'
+): Promise<GtmPlan> {
+  const domains = intent.audience?.domains ?? [];
+  const emailsPerDomain = intent.enrichment?.emailsPerDomain ?? DEFAULT_EMAILS_PER_DOMAIN;
+  const includeUnverified = intent.enrichment?.includeUnverified ?? false;
+  const blockers: GtmPlanBlocker[] = [];
+  if (actorRole !== 'owner') {
+    blockers.push({
+      code: 'enrichment_owner_required',
+      message: 'Only workspace owners can approve paid contact enrichment.',
+      actionHref: '/setup/workspace'
+    });
+  }
+  if (domains.length === 0) {
+    blockers.push({
+      code: 'enrichment_domains_required',
+      message: 'Name the company domains to search for contacts.'
+    });
+  }
+  if (domains.length > ENRICHMENT_MAX_DOMAINS) {
+    blockers.push({
+      code: 'enrichment_too_many_domains',
+      message: `One enrichment run searches at most ${ENRICHMENT_MAX_DOMAINS} domains.`
+    });
+  }
+  const invalid = domains.filter((domain) => normalizeAccountDomain(domain) !== domain);
+  if (invalid.length > 0) {
+    blockers.push({
+      code: 'enrichment_invalid_domains',
+      message: `${invalid.length === 1 ? 'This entry is' : 'These entries are'} not a public company domain: ${invalid.slice(0, 3).join(', ')}.`
+    });
+  }
+
+  const settings = await getEnrichmentSettings(db, workspaceId);
+  if (!secretsConfigured()) {
+    blockers.push({
+      code: 'enrichment_secrets_unavailable',
+      message: 'This deployment cannot hold a Hunter key until secret encryption is configured.',
+      actionHref: '/setup/workspace'
+    });
+  } else if (settings.keyStatus === 'missing') {
+    blockers.push({
+      code: 'enrichment_key_missing',
+      message: 'Add your own Hunter API key before enriching contacts.',
+      actionHref: '/setup/workspace'
+    });
+  } else if (settings.keyStatus === 'invalid') {
+    blockers.push({
+      code: 'enrichment_key_invalid',
+      message: 'Hunter rejected the saved key. Replace it before enriching contacts.',
+      actionHref: '/setup/workspace'
+    });
+  }
+
+  // No run exists yet at compile time, so usedCredits (charged this UTC month
+  // plus every open run's unspent estimate) is exactly what this plan competes with.
+  const usage = await enrichmentUsage(db, workspaceId, new Date());
+  const estimate = estimateEnrichmentCredits({ domains: domains.length, emailsPerDomain });
+  const remainingAfter = roundCredits(
+    settings.monthlyCreditCap - usage.usedCredits - estimate.estimatedCredits
+  );
+  if (settings.monthlyCreditCap <= 0) {
+    blockers.push({
+      code: 'enrichment_cap_missing',
+      message: 'Set a monthly Hunter credit cap before enriching contacts.',
+      actionHref: '/setup/workspace'
+    });
+  } else if (domains.length > 0 && remainingAfter < 0) {
+    blockers.push({
+      code: 'enrichment_cap_exceeded',
+      message: `This plan could use up to ${estimate.estimatedCredits} credits, but ${Math.max(0, roundCredits(settings.monthlyCreditCap - usage.usedCredits))} remain under this month's cap.`,
+      actionHref: '/setup/workspace'
+    });
+  }
+
+  const companies = `${domains.length} ${domains.length === 1 ? 'company' : 'companies'}`;
+  return finalizePlan({
+    objective: 'enrich_contacts',
+    intent,
+    summary: `Find up to ${emailsPerDomain} verified ${emailsPerDomain === 1 ? 'contact' : 'contacts'} at each of ${companies} with your Hunter key`,
+    steps: [
+      {
+        kind: 'domain_search',
+        title: 'Domain search',
+        detail: `Ask Hunter for up to ${emailsPerDomain} personal emails per domain (1 credit per email found).`,
+        externalEffect: false
+      },
+      {
+        kind: 'verify',
+        title: 'Verify',
+        detail:
+          'Verify each sourced email before saving it (0.5 credit per completed verification).',
+        externalEffect: false
+      },
+      {
+        kind: 'person',
+        title: 'People',
+        detail: includeUnverified
+          ? 'Save verified emails, plus accept-all or unknown ones marked unverified, as People on their Account.'
+          : 'Save only verified emails with a published source as People on their Account.',
+        externalEffect: false
+      }
+    ],
+    blockers,
+    defaults: {
+      prepareSupported: blockers.length === 0,
+      provider: 'hunter',
+      emailsPerDomain,
+      includeUnverified,
+      verify: true
+    },
+    consequences: {
+      createsInternalState: true,
+      externalWrites: false,
+      approvalRequired: true
+    },
+    next: { kind: 'review_accounts', href: '/outreach' },
+    // Set only here: canonicalPayloadHash hashes an undefined member as null,
+    // so a `cost: undefined` on other objectives would change their plan hashes.
+    cost: {
+      provider: 'hunter',
+      unit: 'credits',
+      domains: domains.length,
+      emailsPerDomain,
+      searchCredits: estimate.searchCredits,
+      verificationCredits: estimate.verificationCredits,
+      estimatedCredits: estimate.estimatedCredits,
+      monthlyCap: settings.monthlyCreditCap,
+      usedThisMonth: usage.usedCredits,
+      remainingAfter,
+      pricingUrl: HUNTER_PRICING_URL
+    }
+  });
+}
+
 export async function compileGtmIntent(
   db: Db,
   workspaceId: string,
@@ -903,6 +1094,9 @@ export async function compileGtmIntent(
     intent.objective === 'watch_accounts'
   ) {
     return accountPlan(db, workspaceId, intent);
+  }
+  if (intent.objective === 'enrich_contacts') {
+    return enrichContactsPlan(db, workspaceId, intent, context.actorRole ?? 'owner');
   }
   return captureInboundPlan(intent, context.actorRole ?? 'owner');
 }
@@ -936,7 +1130,12 @@ export async function prepareGtmPlan(
   }
   if (current.blockers.length > 0) {
     const first = current.blockers[0]!;
-    throw new GtmPlanError(first.message, first.code === 'capture_owner_required' ? 403 : 409);
+    throw new GtmPlanError(
+      first.message,
+      first.code === 'capture_owner_required' || first.code === 'enrichment_owner_required'
+        ? 403
+        : 409
+    );
   }
 
   if (current.objective === 'capture_inbound') {
