@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { Db } from '../db.js';
+import { OUTREACH_UNSUBSCRIBE_MODES } from '../email/unsubscribe-policy.js';
 import { outreachThreadSchema } from '../outreach/scorer.js';
 import type { PlaybookDefinition } from './types.js';
 
@@ -560,6 +561,91 @@ export const emailOutreachPlaybook: PlaybookDefinition = {
   preparedOnly: true
 };
 
+/**
+ * 1.1.0 puts how the email carries its opt-out inside the hashed approval
+ * payload (src/server/email/unsubscribe-policy.ts): one-click List-Unsubscribe
+ * headers (Gmail, Microsoft 365) or the reply-to-unsubscribe footer (Zoho
+ * Mail). 1.0.0 stays registered so runs prepared before it resume and send
+ * exactly as approved; runs, indexes and unsubscribe lookups key on playbook_key.
+ */
+export const emailOutreachPlaybookV1_1: PlaybookDefinition = {
+  id: 'gtm.email-outreach',
+  version: '1.1.0',
+  name: 'Outreach email',
+  description:
+    'Prepare one first-touch outreach email to a known Person from the approved mailbox, with one-click unsubscribe (Gmail, Microsoft 365) or a reply-to-unsubscribe footer (Zoho Mail), and require approval of the exact bytes before provider execution.',
+  inputSchema: z
+    .object({
+      idempotencyKey: z.string().trim().min(8).max(200),
+      conversationId: z.string().trim().min(1).max(160),
+      personId: z.string().trim().min(1).max(160),
+      contactId: z.string().trim().min(1).max(160),
+      leadListId: z.string().trim().min(1).max(160),
+      connectionId: z.string().trim().min(1).max(160),
+      senderAddress: z.string().email(),
+      recipient: z.string().email(),
+      subject: z.string().trim().min(1).max(200),
+      body: z.string().trim().min(1).max(20_000),
+      unsubscribeMode: z.enum(OUTREACH_UNSUBSCRIBE_MODES),
+      requireListUnsubscribe: z.boolean()
+    })
+    .strict()
+    .superRefine((input, ctx) => {
+      if (input.requireListUnsubscribe !== (input.unsubscribeMode === 'list_unsubscribe_headers')) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['requireListUnsubscribe'],
+          message:
+            'requireListUnsubscribe must be true exactly when unsubscribeMode is list_unsubscribe_headers.'
+        });
+      }
+    }),
+  steps: [
+    {
+      id: 'approve-outreach',
+      type: 'approval',
+      title: 'Approve outreach email',
+      payload: {
+        recipient: { $ref: '$.input.recipient' },
+        subject: { $ref: '$.input.subject' },
+        body: { $ref: '$.input.body' },
+        metadata: {
+          conversationId: { $ref: '$.input.conversationId' },
+          personId: { $ref: '$.input.personId' },
+          contactId: { $ref: '$.input.contactId' },
+          leadListId: { $ref: '$.input.leadListId' },
+          connectionId: { $ref: '$.input.connectionId' },
+          senderAddress: { $ref: '$.input.senderAddress' },
+          requireListUnsubscribe: { $ref: '$.input.requireListUnsubscribe' },
+          unsubscribeMode: { $ref: '$.input.unsubscribeMode' },
+          deliveryPurpose: 'outreach',
+          deliverySourceType: 'email_outreach',
+          deliverySourceId: { $ref: '$.input.idempotencyKey' },
+          conversationSourceType: 'email_outreach',
+          conversationSourceId: { $ref: '$.input.idempotencyKey' },
+          intent: 'email-outreach'
+        }
+      }
+    },
+    {
+      id: 'send-outreach',
+      type: 'action',
+      actionType: 'email.send',
+      approvalStepId: 'approve-outreach',
+      needs: ['approve-outreach'],
+      payload: { $ref: '$.steps.approve-outreach.input' },
+      retry: { maxAttempts: 1, delaySeconds: 0 }
+    }
+  ],
+  output: {
+    approved: { $ref: '$.steps.approve-outreach.output.approved' },
+    delivery: { $ref: '$.steps.send-outreach.output' },
+    personId: { $ref: '$.input.personId' }
+  },
+  source: { type: 'builtin' },
+  preparedOnly: true
+};
+
 export const bufferDraftPlaybook: PlaybookDefinition = {
   id: 'gtm.buffer-draft',
   version: '1.0.0',
@@ -617,6 +703,7 @@ registerPlaybook(threadReplyPlaybook);
 registerPlaybook(qualifiedDemandEmailPlaybook);
 registerPlaybook(conversationEmailReplyPlaybook);
 registerPlaybook(emailOutreachPlaybook);
+registerPlaybook(emailOutreachPlaybookV1_1);
 registerPlaybook(bufferDraftPlaybook);
 
 export function registerPlaybook(playbook: PlaybookDefinition): PlaybookDefinition {

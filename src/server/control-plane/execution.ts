@@ -3,6 +3,12 @@ import type { Db } from '../db.js';
 import { executeConnectedAction } from '../integration-service.js';
 import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-address.js';
 import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from '../email/compliance.js';
+import type { OutreachUnsubscribeMode } from '../email/types.js';
+import {
+  footerForUnsubscribeMode,
+  OUTREACH_REPLY_OPT_OUT_SENTENCE,
+  parseOutreachUnsubscribeMode
+} from '../email/unsubscribe-policy.js';
 import { assertNotSuppressed, SuppressionError } from '../suppressions.js';
 import { projectPreparedConversationEmail } from '../conversations.js';
 import { communityReplyPayloadSchema, publishCommunityReply } from '../outreach/publish.js';
@@ -53,7 +59,13 @@ export async function executePreparedPlaybookAction(
           'This outreach email was approved without a sending mailbox; nothing was sent.'
         );
       }
-      await assertOutreachFooter(db, input.workspaceId, payload.body);
+      await assertOutreachFooter(
+        db,
+        input.workspaceId,
+        payload.body,
+        // A 1.0.0 approval carries no mode; it was prepared for one-click headers.
+        parseOutreachUnsubscribeMode(metadata.unsubscribeMode) ?? 'list_unsubscribe_headers'
+      );
       await assertOutreachRecipientStillReachable(db, input.workspaceId, {
         metadata,
         recipient: payload.recipient
@@ -250,21 +262,37 @@ async function approvedMailboxConnection(
  * address, privacy policy URL, opt-out line) as its last text. The footer is
  * re-read at send time, not trusted from drafting: the approval flow can edit
  * the body, and this is the check that makes the footer non-removable. Runs
- * before any delivery row or provider call.
+ * before any delivery row or provider call. The footer expected is the one for
+ * the approved opt-out mode: Zoho outreach (footer_and_reply) ends with the same
+ * footer, its opt-out sentence swapped for reply-to-unsubscribe
+ * (src/server/email/unsubscribe-policy.ts).
  */
-async function assertOutreachFooter(db: Db, workspaceId: string, body: string): Promise<void> {
+async function assertOutreachFooter(
+  db: Db,
+  workspaceId: string,
+  body: string,
+  mode: OutreachUnsubscribeMode
+): Promise<void> {
   const footer = (await emailComplianceProvider().footer(db, workspaceId))?.trim() ?? '';
   if (!footer) {
     throw mailboxBindingError(
       'No compliance footer (postal address, privacy policy URL, opt-out line) is available for this workspace; nothing was sent.'
     );
   }
+  // null when the footer no longer carries its opt-out sentence exactly once,
+  // so no reply-mode footer can be derived from it.
+  const expected = footerForUnsubscribeMode(footer, mode);
   const tail = body.trimEnd();
-  if (!tail.endsWith(footer)) {
-    // Every footer ends with the opt-out sentence. A body that still ends with
-    // it was prepared with a footer that has since changed: the sender identity
-    // was edited after preparation. Otherwise the footer was edited out.
-    if (tail.endsWith(OUTREACH_OPT_OUT_SENTENCE)) {
+  if (!expected || !tail.endsWith(expected)) {
+    // Every footer ends with an opt-out sentence. A body that still ends with
+    // one was prepared with a footer that has since changed: the sender identity
+    // was edited after preparation, or the email was prepared for the other
+    // opt-out mode. Otherwise the footer was edited out.
+    if (
+      !expected ||
+      tail.endsWith(OUTREACH_OPT_OUT_SENTENCE) ||
+      tail.endsWith(OUTREACH_REPLY_OPT_OUT_SENTENCE)
+    ) {
       throw mailboxBindingError(
         'The sender details changed after this email was prepared; nothing was sent. Prepare it again.'
       );

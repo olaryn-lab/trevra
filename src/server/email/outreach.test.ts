@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Mock } from 'vitest';
 
 const nangoMock = vi.hoisted(() => ({
   get: vi.fn(async (_config: Record<string, unknown>) => ({ data: {}, headers: {} })),
@@ -15,6 +16,13 @@ vi.mock('@nangohq/node', () => ({
   }
 }));
 
+// Pass-through spy: the real engine runs, and the test can read the exact
+// playbook version each run start asked for.
+vi.mock('../playbooks/engine.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../playbooks/engine.js')>();
+  return { ...actual, startPlaybookRun: vi.fn(actual.startPlaybookRun) };
+});
+
 import { openDatabase, type Db } from '../db.js';
 import {
   compileGtmIntent,
@@ -23,15 +31,20 @@ import {
   type PreparedGtmPlanResult
 } from '../gtm/intent.js';
 import { createLeadList, importLeadCsv, updateLeadContact } from '../linkedin/lead-lists.js';
-import { decidePlaybookApproval } from '../playbooks/engine.js';
+import { decidePlaybookApproval, startPlaybookRun } from '../playbooks/engine.js';
 import { createSuppression } from '../suppressions.js';
 import {
   OUTREACH_OPT_OUT_SENTENCE,
   registerEmailComplianceProvider,
   resetEmailComplianceProvider
 } from './compliance.js';
-import { isOutreachRunConflict, prepareEmailOutreach } from './outreach.js';
+import {
+  EMAIL_OUTREACH_PLAYBOOK_VERSION,
+  isOutreachRunConflict,
+  prepareEmailOutreach
+} from './outreach.js';
 import type { PreparedEmailOutreachResult } from './types.js';
+import { OUTREACH_REPLY_OPT_OUT_SENTENCE } from './unsubscribe-policy.js';
 
 const WORKSPACE = 'ws_email_outreach_prepare';
 const USER = 'usr_email_outreach_prepare';
@@ -39,6 +52,7 @@ const CONNECTION = 'conn_email_outreach_prepare';
 const NOW = new Date('2026-10-06T09:00:00.000Z');
 const PASSING = JSON.stringify({ status: 'pass', detail: 'Published.', record: null });
 const FOOTER = `Acme Labs Ltd, 1 Market Street, London EC1A 1AA\n${OUTREACH_OPT_OUT_SENTENCE}`;
+const ZOHO_FOOTER = `Acme Labs Ltd, 1 Market Street, London EC1A 1AA\n${OUTREACH_REPLY_OPT_OUT_SENTENCE}`;
 let db: Db;
 let listId: string;
 
@@ -118,6 +132,83 @@ async function updateLead(sql: string, email: string): Promise<void> {
   await db.prepare(sql).run(NOW.toISOString(), WORKSPACE, email);
 }
 
+/** Turn the sending mailbox into a Zoho Mail connection that answers as founder@acme.test. */
+async function useZohoMailbox(): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE connections SET provider='zoho-mail',provider_config_key='trevra-zoho-mail'
+       WHERE workspace_id=? AND id=?`
+    )
+    .run(WORKSPACE, CONNECTION);
+  (nangoMock.get as unknown as Mock).mockImplementation(
+    async ({ endpoint }: { endpoint: string }) => {
+      if (endpoint === '/api/accounts') {
+        return {
+          data: {
+            data: [
+              {
+                accountId: '1000000001',
+                type: 'ZOHO_ACCOUNT',
+                primaryEmailAddress: 'founder@acme.test'
+              }
+            ]
+          },
+          headers: {}
+        };
+      }
+      if (endpoint === '/api/accounts/1000000001/folders') {
+        return {
+          data: { data: [{ folderId: '9', folderName: 'Sent', folderType: 'Sent' }] },
+          headers: {}
+        };
+      }
+      return {
+        data: { data: { headerContent: 'Message-ID: <zoho-1777@mx.zoho.test>' } },
+        headers: {}
+      };
+    }
+  );
+  (nangoMock.post as unknown as Mock).mockResolvedValue({
+    data: { status: { code: 200 }, data: { messageId: '1777' } },
+    headers: {}
+  });
+}
+
+/** prepareEmailOutreach's input for the seeded mailbox, without compiling a plan. */
+function directInput(idempotencyKey: string) {
+  return {
+    workspaceId: WORKSPACE,
+    actorType: 'user' as const,
+    actorId: USER,
+    idempotencyKey,
+    planHash: `plan-${idempotencyKey}`,
+    leadListId: listId,
+    connectionId: CONNECTION,
+    senderAddress: 'founder@acme.test'
+  };
+}
+
+interface OutreachRunInput {
+  id: string;
+  playbook_version: string;
+  recipient: string;
+  body: string;
+  unsubscribe_mode: string | null;
+  require_list_unsubscribe: string | null;
+}
+
+async function outreachRunInputs(): Promise<OutreachRunInput[]> {
+  return db
+    .prepare(
+      `SELECT id,playbook_version,input_json->>'recipient' AS recipient,input_json->>'body' AS body,
+              input_json->>'unsubscribeMode' AS unsubscribe_mode,
+              input_json->>'requireListUnsubscribe' AS require_list_unsubscribe
+       FROM playbook_runs WHERE workspace_id=? AND playbook_key='gtm.email-outreach'
+       ORDER BY input_json->>'recipient'`
+    )
+    .all<OutreachRunInput>(WORKSPACE);
+}
+
 async function count(table: string): Promise<number> {
   const row = await db
     .prepare(`SELECT COUNT(*)::int AS total FROM ${table} WHERE workspace_id=?`)
@@ -130,6 +221,7 @@ beforeEach(async () => {
   vi.stubEnv('NANGO_API_KEY', 'test-nango-key');
   nangoMock.get.mockClear();
   nangoMock.post.mockClear();
+  vi.mocked(startPlaybookRun).mockClear();
   registerEmailComplianceProvider({ footer: async () => FOOTER, blockers: async () => [] });
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   await db.prepare('DELETE FROM workspaces WHERE id=?').run(WORKSPACE);
@@ -203,6 +295,11 @@ beforeEach(async () => {
 
 afterEach(async () => {
   vi.unstubAllEnvs();
+  // A Zoho implementation must never leak into the next test.
+  nangoMock.get.mockReset();
+  nangoMock.get.mockResolvedValue({ data: {}, headers: {} });
+  nangoMock.post.mockReset();
+  nangoMock.post.mockResolvedValue({ data: { id: 'gmail-outreach-1' }, headers: {} });
   resetEmailComplianceProvider();
   await db?.prepare('DELETE FROM workspaces WHERE id=?').run(WORKSPACE);
   await db?.close();
@@ -547,5 +644,128 @@ describe('prepareEmailOutreach', () => {
         )
         .all(WORKSPACE, maya!.conversation_id)
     ).toEqual([{ direction: 'outbound', source_type: 'email_outreach' }]);
+  });
+});
+
+describe('prepareEmailOutreach opt-out mode (gtm.email-outreach@1.1.0)', () => {
+  it('pins every new run to 1.1.0 explicitly, never to whatever version is latest', async () => {
+    emailResult(await prepare('email-prepare-0001'));
+
+    expect(EMAIL_OUTREACH_PLAYBOOK_VERSION).toBe('1.1.0');
+    const starts = vi.mocked(startPlaybookRun).mock.calls.map(([, input]) => input);
+    expect(starts).toHaveLength(2);
+    for (const start of starts) {
+      expect(start).toMatchObject({ playbookId: 'gtm.email-outreach', version: '1.1.0' });
+    }
+    expect((await outreachRunInputs()).map((run) => run.playbook_version)).toEqual([
+      '1.1.0',
+      '1.1.0'
+    ]);
+  });
+
+  it('prepares Gmail outreach in header mode, and the approved email carries one-click unsubscribe', async () => {
+    emailResult(await prepare('email-prepare-0001'));
+    const runs = await outreachRunInputs();
+    for (const run of runs) {
+      expect(run).toMatchObject({
+        playbook_version: '1.1.0',
+        unsubscribe_mode: 'list_unsubscribe_headers',
+        require_list_unsubscribe: 'true'
+      });
+      expect(run.body.endsWith(`\n\n${FOOTER}`)).toBe(true);
+    }
+    const maya = runs.find((run) => run.recipient === 'maya@northwind.test')!;
+
+    const sent = await decidePlaybookApproval(db, {
+      workspaceId: WORKSPACE,
+      runId: maya.id,
+      stepId: 'approve-outreach',
+      userId: USER,
+      decision: 'approve'
+    });
+
+    expect(sent.status).toBe('completed');
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    const send = nangoMock.post.mock.calls[0]![0] as { endpoint?: string; data?: { raw?: string } };
+    expect(send.endpoint).toBe('/gmail/v1/users/me/messages/send');
+    const mime = Buffer.from(String(send.data?.raw ?? ''), 'base64url').toString('utf8');
+    expect(mime).toContain('List-Unsubscribe: <https://api.trevra.test/u/del_');
+    expect(mime).toContain('List-Unsubscribe-Post: List-Unsubscribe=One-Click');
+  });
+
+  it('prepares Zoho outreach with the reply-to-unsubscribe footer, which then sends through Zoho', async () => {
+    await useZohoMailbox();
+
+    const result = await prepareEmailOutreach(db, directInput('email-prepare-zoho'));
+
+    expect((await outcome(result)).prepared).toEqual(['Ana', 'Maya']);
+    const runs = await outreachRunInputs();
+    expect(runs).toHaveLength(2);
+    for (const run of runs) {
+      expect(run).toMatchObject({
+        playbook_version: '1.1.0',
+        unsubscribe_mode: 'footer_and_reply',
+        require_list_unsubscribe: 'false'
+      });
+      expect(run.body.endsWith(`?\n\n${ZOHO_FOOTER}`)).toBe(true);
+      expect(run.body.trimEnd().endsWith(OUTREACH_REPLY_OPT_OUT_SENTENCE)).toBe(true);
+      expect(run.body).not.toContain(OUTREACH_OPT_OUT_SENTENCE);
+    }
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    const maya = runs.find((run) => run.recipient === 'maya@northwind.test')!;
+
+    const sent = await decidePlaybookApproval(db, {
+      workspaceId: WORKSPACE,
+      runId: maya.id,
+      stepId: 'approve-outreach',
+      userId: USER,
+      decision: 'approve'
+    });
+
+    expect(sent.status).toBe('completed');
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    expect(nangoMock.post.mock.calls[0]![0]).toMatchObject({
+      endpoint: '/api/accounts/1000000001/messages',
+      providerConfigKey: 'trevra-zoho-mail',
+      connectionId: `${CONNECTION}-external`,
+      data: { fromAddress: 'founder@acme.test', content: maya.body, mailFormat: 'plaintext' }
+    });
+    expect(JSON.stringify(nangoMock.post.mock.calls)).not.toContain('List-Unsubscribe');
+    expect(
+      await db
+        .prepare(
+          `SELECT provider,status,recipient FROM gtm_deliveries
+           WHERE workspace_id=? AND source_type='email_outreach'`
+        )
+        .all(WORKSPACE)
+    ).toEqual([{ provider: 'zoho-mail', status: 'sent', recipient: 'maya@northwind.test' }]);
+  });
+
+  it('refuses to prepare Zoho outreach, writing nothing, without one opt-out line or a connected mailbox', async () => {
+    await useZohoMailbox();
+    registerEmailComplianceProvider({
+      footer: async () => 'Acme Labs Ltd, 1 Market Street, London EC1A 1AA',
+      blockers: async () => []
+    });
+    await expect(
+      prepareEmailOutreach(db, directInput('email-prepare-zoho-no-line'))
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/needs its opt-out line exactly once/)
+    });
+
+    registerEmailComplianceProvider({ footer: async () => FOOTER, blockers: async () => [] });
+    await db
+      .prepare("UPDATE connections SET status='disconnected' WHERE workspace_id=? AND id=?")
+      .run(WORKSPACE, CONNECTION);
+    await expect(
+      prepareEmailOutreach(db, directInput('email-prepare-zoho-gone'))
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringMatching(/no longer connected/)
+    });
+
+    expect(await count('playbook_runs')).toBe(0);
+    expect(await count('email_outreach_preparations')).toBe(0);
   });
 });

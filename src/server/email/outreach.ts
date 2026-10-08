@@ -6,16 +6,18 @@ import { startPlaybookRun } from '../playbooks/engine.js';
 import { findSuppression } from '../suppressions.js';
 import { emailComplianceProvider } from './compliance.js';
 import { RECIPIENT_SQL, recipientSchema } from './recipient-sql.js';
-import { emailDomainOf, type DnsResolver } from './deliverability.js';
+import { emailDomainOf, mailProviderFor, type DnsResolver } from './deliverability.js';
 import { listSendingMailboxes, resolveMailboxAddress } from './mailbox-address.js';
 import { getSenderDeliverability } from './sender-deliverability.js';
 import type {
   EmailChannelIssue,
   EmailOutreachSkipReason,
   MailProvider,
+  OutreachUnsubscribeMode,
   PreparedEmailOutreachResult
 } from './types.js';
 import { unsubscribeConfigured } from './unsubscribe.js';
+import { footerForUnsubscribeMode, outreachUnsubscribeModeFor } from './unsubscribe-policy.js';
 
 export interface EmailOutreachOptions {
   resolver?: DnsResolver;
@@ -192,6 +194,8 @@ export class EmailOutreachError extends Error {
 }
 
 export const EMAIL_OUTREACH_PLAYBOOK_ID = 'gtm.email-outreach';
+/** Every new run pins this version; 1.0.0 runs keep resuming as approved. */
+export const EMAIL_OUTREACH_PLAYBOOK_VERSION = '1.1.0';
 
 // lc-debt: one preparation starts at most 200 approval runs and reads at most LEAD_CONTACT_READ_LIMIT list members; upgrade path: prepare in pages with a cursor stored on email_outreach_preparations once founders approve more than 200 first-touch emails at a time.
 const MAX_PREPARED_PER_CALL = 200;
@@ -248,9 +252,10 @@ function oneLine(value: string | null | undefined, max: number): string {
 /**
  * The first-touch email Trevra prepares. It is short and plain on purpose: the
  * founder approves its exact text before anything is sent, and the
- * List-Unsubscribe header carries the one-click opt-out. The sender's
- * compliance footer, appended by prepareEmailOutreach, owns the visible
- * opt-out line (OUTREACH_OPT_OUT_SENTENCE), so the body does not repeat it.
+ * List-Unsubscribe header carries the one-click opt-out (Zoho Mail: the reply
+ * line instead). The sender's compliance footer, appended by
+ * prepareEmailOutreach for the sender's opt-out mode, owns the visible opt-out
+ * line, so the body does not repeat it.
  */
 export function firstTouchEmail(input: { firstName: string | null; company: string | null }): {
   subject: string;
@@ -329,12 +334,14 @@ async function startOutreachRun(
     recipient: string;
     subject: string;
     body: string;
+    unsubscribeMode: OutreachUnsubscribeMode;
   }
 ): Promise<{ runId: string } | { skip: EmailOutreachSkipReason }> {
   try {
     const started = await startPlaybookRun(db, {
       workspaceId: input.workspaceId,
       playbookId: EMAIL_OUTREACH_PLAYBOOK_ID,
+      version: EMAIL_OUTREACH_PLAYBOOK_VERSION,
       payload: {
         idempotencyKey: run.runKey,
         conversationId: run.conversationId,
@@ -345,7 +352,9 @@ async function startOutreachRun(
         senderAddress: input.senderAddress,
         recipient: run.recipient,
         subject: run.subject,
-        body: run.body
+        body: run.body,
+        unsubscribeMode: run.unsubscribeMode,
+        requireListUnsubscribe: run.unsubscribeMode === 'list_unsubscribe_headers'
       },
       actorType: input.actorType,
       actorId: input.actorId,
@@ -407,6 +416,27 @@ export async function prepareEmailOutreach(
   if (!footer) {
     throw new EmailOutreachError(
       'No compliance footer (postal address, privacy policy URL, opt-out line) is available for this workspace. Check the sender identity in Workspace settings before preparing outreach email.'
+    );
+  }
+  // The opt-out mode comes from the sending connection itself, never from the
+  // plan: Zoho Mail cannot carry List-Unsubscribe (unsubscribe-policy.ts).
+  const sending = await db
+    .prepare(
+      `SELECT provider FROM connections
+       WHERE workspace_id=? AND id=? AND status='connected' AND is_demo=0`
+    )
+    .get<{ provider: string }>(input.workspaceId, input.connectionId);
+  const providerKey = sending ? mailProviderFor(sending.provider) : null;
+  if (!providerKey) {
+    throw new EmailOutreachError(
+      'The mailbox this plan sends from is no longer connected. Plan again before preparing.'
+    );
+  }
+  const unsubscribeMode = outreachUnsubscribeModeFor(providerKey);
+  const sentFooter = footerForUnsubscribeMode(footer, unsubscribeMode);
+  if (!sentFooter) {
+    throw new EmailOutreachError(
+      'Your compliance footer needs its opt-out line exactly once so Trevra can turn it into "reply unsubscribe" for Zoho Mail. Complete sender compliance in Workspace settings before preparing outreach email.'
     );
   }
 
@@ -506,7 +536,8 @@ export async function prepareEmailOutreach(
       contactId: member.contact_id,
       recipient,
       subject: email.subject,
-      body: `${email.body}\n\n${footer}`
+      body: `${email.body}\n\n${sentFooter}`,
+      unsubscribeMode
     });
     if ('skip' in started) {
       skip(member.contact_id, started.skip);
