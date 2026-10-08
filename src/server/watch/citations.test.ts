@@ -75,6 +75,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Due watches left behind would be picked up by other files' runDueBrandWatches.
+  await db?.prepare('DELETE FROM brand_watches WHERE workspace_id=?').run(WORKSPACE);
   await db?.prepare('DELETE FROM workspaces WHERE id=?').run(WORKSPACE);
   await db?.close();
 });

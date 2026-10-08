@@ -96,7 +96,13 @@ beforeAll(async () => {
   );
 });
 
+// Workspaces whose watches this file created; removed so other files'
+// runDueBrandWatches never sees them.
+const extraWorkspaces: string[] = [];
+
 afterAll(async () => {
+  for (const workspaceId of [WORKSPACE_ID, ...extraWorkspaces])
+    await db?.prepare('DELETE FROM brand_watches WHERE workspace_id=?').run(workspaceId);
   await db?.close();
   await closeAuthDatabase();
 });
@@ -268,6 +274,7 @@ describe('citation source route guards', () => {
       .post('/api/auth/organization/set-active')
       .send({ organizationId: owner.auth.workspaceId })
       .expect(200);
+    extraWorkspaces.push(owner.auth.workspaceId);
     const ownedWatch = await createWatch(
       db,
       owner.auth.workspaceId,

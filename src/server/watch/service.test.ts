@@ -317,6 +317,9 @@ describe('brand watch service', () => {
     // What the test asserts is unchanged: runDueBrandWatches selects only
     // enabled, due watches, respects the LIMIT, invokes runBrandWatch, and
     // lastRunAt becomes non-null.
+    // Hermetic: runDueBrandWatches is not workspace-scoped, so drop any other
+    // file's leftover watches (this file owns its per-worker database).
+    await db.prepare('DELETE FROM brand_watches WHERE workspace_id <> ?').run(DEMO_WORKSPACE_ID);
     const due = await createWatch(
       db,
       DEMO_WORKSPACE_ID,
