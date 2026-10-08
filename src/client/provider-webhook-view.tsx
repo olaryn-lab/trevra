@@ -36,6 +36,18 @@ export async function copyText(
   }
 }
 
+/** One founder-facing sentence wherever a signing secret cannot be stored. */
+export const SECRET_CUSTODY_MISSING =
+  'This Trevra deployment has no secret storage turned on yet, so it cannot keep a signing secret. Ask whoever runs your deployment to enable it.';
+
+export function SecretCustodyNotice() {
+  return (
+    <div className="error-banner" role="status">
+      {SECRET_CUSTODY_MISSING}
+    </div>
+  );
+}
+
 export type WebhookLoadState = 'pending' | 'ok' | 'error';
 
 /** Hidden only while loading or when the server does not offer Stripe; a failed load stays visible. */
@@ -70,7 +82,7 @@ export function WebhookEndpointRow({
     <article className="capture-webhook-endpoint">
       <header>
         <strong>{providerLabel} endpoint</strong>
-        <span className={active ? 'status-pill ok' : 'status-pill'}>
+        <span className={active ? 'status-pill ok' : 'status-pill muted'}>
           {active ? 'Listening' : 'Paused'}
         </span>
       </header>

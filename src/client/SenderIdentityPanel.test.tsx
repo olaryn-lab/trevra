@@ -38,13 +38,16 @@ describe('sender identity panel', () => {
         onChange={() => undefined}
         onSave={() => undefined}
         busy={false}
-        isOwner
+        role="owner"
         error=""
         gaps={senderIdentityGaps(EMPTY)}
       />
     );
     expect(html).toContain('Sender identity');
     expect(html).toContain('Email outreach blocked');
+    // Blocked is a warning, never the green of a healthy state.
+    expect(html).toContain('status-pill warn');
+    expect(html).not.toContain('status-pill ok');
     expect(html).toContain('Missing: postal address and privacy policy URL.');
     expect(html).toContain('Postal address');
     expect(html).toContain('Privacy policy URL');
@@ -59,15 +62,32 @@ describe('sender identity panel', () => {
         onChange={() => undefined}
         onSave={() => undefined}
         busy={false}
-        isOwner={false}
+        role="member"
         error=""
         gaps={[]}
       />
     );
     expect(html).toContain('Northwind GmbH');
+    expect(html).toContain('status-pill ok');
     expect(html).toContain('Complete');
     expect(html).toContain('Only the workspace owner can change the sender identity.');
     expect(html).not.toContain('Save sender identity');
+  });
+
+  it('renders neither a save nor the member line while the role is pending', () => {
+    const html = renderToStaticMarkup(
+      <SenderIdentityForm
+        draft={draftFromIdentity(EMPTY)}
+        onChange={() => undefined}
+        onSave={() => undefined}
+        busy={false}
+        role="pending"
+        error=""
+        gaps={[]}
+      />
+    );
+    expect(html).not.toContain('Save sender identity');
+    expect(html).not.toContain('Only the workspace owner can');
   });
 
   it('claims neither blocked nor complete before the saved identity loads', () => {
@@ -78,7 +98,7 @@ describe('sender identity panel', () => {
         onSave={() => undefined}
         busy={false}
         loading
-        isOwner
+        role="owner"
         error=""
         gaps={null}
       />

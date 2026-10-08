@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { EmailChannelStatus, StoredDeliverability } from '../server/email/types';
+import type { WorkspaceRole } from './auth-client';
 import { EmailChannelSummary, type EmailChannelBusy } from './EmailChannelSummary';
 
 const noop = () => undefined;
@@ -64,12 +65,12 @@ function inbound(
 
 function render(
   status: EmailChannelStatus,
-  options: { isOwner?: boolean; busy?: EmailChannelBusy } = {}
+  options: { role?: WorkspaceRole; busy?: EmailChannelBusy } = {}
 ): string {
   return renderToStaticMarkup(
     <EmailChannelSummary
       channel={status}
-      isOwner={options.isOwner ?? true}
+      role={options.role ?? 'owner'}
       busy={options.busy ?? null}
       onUseForInbound={noop}
       onStopInbound={noop}
@@ -130,11 +131,30 @@ describe('EmailChannelSummary', () => {
   });
 
   it('shows members the state without the owner-only controls', () => {
-    const markup = render(channel({ inbound: inbound('syncing') }), { isOwner: false });
+    const markup = render(channel({ inbound: inbound('syncing') }), { role: 'member' });
     expect(markup).toContain('Reading founder@acme.test.');
     expect(markup).not.toContain('Use for inbound mail');
     expect(markup).not.toContain('Stop reading mail');
     expect(markup).toContain('Re-check DNS');
+    expect(markup).toContain(
+      'Only the workspace owner can choose the inbound mailbox or set a DKIM selector.'
+    );
+  });
+
+  it('shows neither owner controls nor the member line while the role is pending', () => {
+    const markup = render(channel({ inbound: inbound('syncing') }), { role: 'pending' });
+    expect(markup).toContain('Re-check DNS');
+    expect(markup).not.toContain('Stop reading mail');
+    expect(markup).not.toContain('Use for inbound mail');
+    expect(markup).not.toContain('dkimSelector');
+    expect(markup).not.toContain('Only the workspace owner can');
+    expect(render(channel(), { role: 'owner' })).not.toContain('Only the workspace owner can');
+  });
+
+  it('does not point at a position on the page when no mailbox is connected', () => {
+    const markup = render(channel({ mailboxes: [] }));
+    expect(markup).not.toContain('above');
+    expect(markup).toContain('under Connections');
   });
 
   it('tells a workspace without a mailbox how to start and disables the DNS check', () => {
@@ -163,9 +183,9 @@ describe('EmailChannelSummary', () => {
     );
     expect(markup).toContain('DNS check pending');
     expect(markup).toContain(detail);
-    expect(markup).toContain('email-channel-pill-unknown');
+    expect(markup).toContain('status-pill muted');
     expect(markup).not.toContain('Sending blocked');
-    expect(markup).not.toContain('email-channel-pill-fail');
+    expect(markup).not.toContain('status-pill fail');
   });
 
   it('shows an unknown sending address as neutral', () => {
@@ -173,8 +193,17 @@ describe('EmailChannelSummary', () => {
       channel({ mailboxes: [{ ...MAILBOX, address: null, deliverability: null }] })
     );
     expect(markup).toContain('Address unknown');
-    expect(markup).toContain('email-channel-pill-unknown');
+    expect(markup).toContain('status-pill muted');
     expect(markup).not.toContain('Sending blocked');
+  });
+
+  it('uses the shared pill tones: ok when DNS passes, fail when sending is blocked', () => {
+    expect(render(channel())).toContain('status-pill ok');
+    const failed = render(
+      channel({ mailboxes: [{ ...MAILBOX, deliverability: deliverability({ status: 'fail' }) }] })
+    );
+    expect(failed).toContain('status-pill fail');
+    expect(failed).not.toContain('email-channel-pill');
   });
 
   it('says the inbound sync is starting', () => {
@@ -238,7 +267,7 @@ describe('EmailChannelSummary', () => {
     expect(owner).toContain('<span class="ui-field-label">DKIM selector</span>');
     expect(owner).toMatch(/<input[^>]*name="dkimSelector"/);
     expect(owner).toMatch(/<button[^>]*type="submit"[^>]*>Save selector<\/button>/);
-    expect(render(channel({ mailboxes: [ZOHO] }), { isOwner: false })).not.toContain(
+    expect(render(channel({ mailboxes: [ZOHO] }), { role: 'member' })).not.toContain(
       'dkimSelector'
     );
   });

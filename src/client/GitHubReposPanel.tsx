@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { getGitHubRepos, unwatchGitHubRepo, watchGitHubRepo, type GitHubReposState } from './api';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceRole } from './auth-client';
 import { GitHubReposView } from './GitHubReposView';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
@@ -8,7 +8,7 @@ import './github-repos.css';
 
 /** Setup -> Workspace: which public repositories feed GitHub traction signals. */
 export function GitHubReposPanel({ setToast }: { setToast: (message: string) => void }) {
-  const isOwner = useIsWorkspaceOwner();
+  const role = useWorkspaceRole();
   const [state, setState] = useState<GitHubReposState | null>(null);
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -61,13 +61,14 @@ export function GitHubReposPanel({ setToast }: { setToast: (message: string) => 
     <GitHubReposView
       state={state}
       error={error}
-      isOwner={isOwner}
+      role={role}
       draft={draft}
       busy={busy}
       formatTime={relativeTime}
       onDraftChange={setDraft}
       onAdd={() => void add()}
       onRemove={(repo) => void remove(repo.id, repo.fullName)}
+      onRetry={() => void load()}
     />
   );
 }

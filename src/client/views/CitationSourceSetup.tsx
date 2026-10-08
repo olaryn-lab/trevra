@@ -6,8 +6,9 @@ import {
   rotateCaptureSourceSecret,
   type CitationSourceSummary
 } from '../api';
-import { authClient, useIsWorkspaceOwner } from '../auth-client';
+import { useWorkspaceRole } from '../auth-client';
 import { errorMessage } from '../LinkedInSafety';
+import { OwnerOnlyNote } from '../ui/forms';
 import { Button, Field, Input, Textarea } from '../ui/primitives';
 import { citationSourceStatus } from './researchFormat';
 
@@ -22,14 +23,13 @@ export function CitationSourceSetup({
   watchId: string;
   setToast: (message: string) => void;
 }) {
-  const isOwner = useIsWorkspaceOwner();
-  // useIsWorkspaceOwner is false while the member read is pending; hold both
-  // the form and the member-only line until the role is known.
-  const { isPending: orgPending } = authClient.useActiveOrganization();
-  const { isPending: memberPending } = authClient.useActiveMember();
-  const roleKnown = !orgPending && !memberPending;
+  // While the role is pending neither the form nor the member line render.
+  const role = useWorkspaceRole();
   const [source, setSource] = useState<CitationSourceSummary | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // A failed read is not "Not connected": Connect stays off until a retry succeeds.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [attempt, setAttempt] = useState(0);
   const [domains, setDomains] = useState('');
   const [secret, setSecret] = useState('');
   const [copied, setCopied] = useState(false);
@@ -39,6 +39,7 @@ export function CitationSourceSetup({
   useEffect(() => {
     let cancelled = false;
     setLoaded(false);
+    setLoadFailed(false);
     setSource(null);
     setSecret('');
     setDomains('');
@@ -53,12 +54,13 @@ export function CitationSourceSetup({
       .catch((error: unknown) => {
         if (cancelled) return;
         setProblem(errorMessage(error, 'AI-answer citations could not be loaded.'));
+        setLoadFailed(true);
         setLoaded(true);
       });
     return () => {
       cancelled = true;
     };
-  }, [watchId]);
+  }, [watchId, attempt]);
 
   const ownedDomains = [
     ...new Set(
@@ -119,16 +121,29 @@ export function CitationSourceSetup({
 
   return (
     <details className="research-citation-setup">
-      <summary>AI-answer citations</summary>
+      <summary className="ui-disclosure-summary">
+        AI-answer citations{loadFailed ? ' · could not load' : ''}
+      </summary>
       <p className="research-citation-status">
         {!loaded
           ? 'Loading…'
-          : source
-            ? citationSourceStatus(source, new Date())
-            : 'Not connected. Beseam, or any sampler that can sign requests, posts content-free samples of whether AI answers cite your site.'}
+          : loadFailed
+            ? 'The citation source could not be read, so connecting is off until it loads.'
+            : source
+              ? citationSourceStatus(source, new Date())
+              : 'Not connected. Beseam, or any sampler that can sign requests, posts content-free samples of whether AI answers cite your site.'}
       </p>
-      {problem && <div className="error-banner">{problem}</div>}
-      {isOwner ? (
+      {problem && (
+        <div className="error-banner" role="alert">
+          {problem}
+        </div>
+      )}
+      {loadFailed && (
+        <div className="research-citation-actions">
+          <Button onClick={() => setAttempt((current) => current + 1)}>Try again</Button>
+        </div>
+      )}
+      {role === 'owner' ? (
         <div className="research-citation-form">
           <Field
             label="Domains you own"
@@ -148,7 +163,9 @@ export function CitationSourceSetup({
           <div className="research-citation-actions">
             <Button
               variant="primary"
-              disabled={!loaded || busy !== '' || ownedDomains.length === 0 || tooMany}
+              disabled={
+                !loaded || loadFailed || busy !== '' || ownedDomains.length === 0 || tooMany
+              }
               onClick={() => void connect()}
             >
               {busy === 'connect' ? 'Saving…' : source ? 'Save domains' : 'Connect'}
@@ -161,10 +178,8 @@ export function CitationSourceSetup({
             )}
           </div>
         </div>
-      ) : roleKnown ? (
-        <p className="research-citation-status">
-          Only the workspace owner can connect a citation source.
-        </p>
+      ) : role === 'member' ? (
+        <OwnerOnlyNote>connect a citation source</OwnerOnlyNote>
       ) : null}
       {source && (
         <dl className="research-citation-facts">
@@ -179,7 +194,7 @@ export function CitationSourceSetup({
         </dl>
       )}
       {secret && (
-        <div className="research-citation-secret">
+        <div className="research-citation-secret ui-field-row">
           <Field
             label="Signing secret"
             hint="Shown once. Keep it in the sampler's server-side secrets."

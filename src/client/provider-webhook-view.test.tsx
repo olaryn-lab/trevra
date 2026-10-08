@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import type { ProviderWebhookEndpointSummary } from './api';
 import { STRIPE_OBSERVED_EVENTS } from '../shared/stripe-events';
 import {
+  SECRET_CUSTODY_MISSING,
+  SecretCustodyNotice,
   StripeEventSelection,
   WebhookEndpointRow,
   copyText,
@@ -81,6 +83,30 @@ describe('Stripe webhook setup view', () => {
     expect(html).toContain('Pause');
     expect(html).toContain('Remove');
     expect(html).not.toContain('whsec_');
+  });
+
+  it('shows a paused endpoint in a different tone from a listening one', () => {
+    const row = (status: ProviderWebhookEndpointSummary['status']) =>
+      renderToStaticMarkup(
+        <WebhookEndpointRow
+          endpoint={{ ...endpoint, status }}
+          url="https://app.trevra.example/x"
+          lastDelivery="None yet"
+          busy={false}
+          onToggle={() => undefined}
+          onRemove={() => undefined}
+        />
+      );
+    expect(row('active')).toContain('status-pill ok');
+    expect(row('disabled')).toContain('status-pill muted');
+    expect(row('disabled')).not.toContain('status-pill ok');
+  });
+
+  it('says missing secret storage in one founder-facing sentence, without an env var name', () => {
+    const html = renderToStaticMarkup(<SecretCustodyNotice />);
+    expect(html).toContain(SECRET_CUSTODY_MISSING);
+    expect(SECRET_CUSTODY_MISSING).not.toContain('TREVRA_SECRETS_KEY');
+    expect(html).toContain('role="status"');
   });
 
   it('names the provider it is given instead of Stripe', () => {

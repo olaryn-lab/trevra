@@ -26,15 +26,29 @@ export const authClient = createAuthClient({
 });
 
 /**
- * The one owner signal every owner-only control in the app reads. `isPending`
- * gates on the org read finishing so a member (or an owner whose read just
- * has not resolved yet) never sees an owner-only control -- New/Edit/Delete
- * limits, the export/erase block, who manages the team -- flash on before
- * disappearing; `activeMember?.role === 'owner'` is the one place that
- * decides who gets them once it has.
+ * `pending` until BOTH the organization and the member read have resolved, so
+ * a panel can hold back the owner controls AND the member's read-only line:
+ * an owner on a hard reload must not see "Only the workspace owner can ..."
+ * flash on, and a member must not see an owner control flash on.
+ */
+export type WorkspaceRole = 'pending' | 'owner' | 'member';
+
+/**
+ * The one role signal every owner-only control in the app reads.
+ * `activeMember?.role === 'owner'` is the one place that decides who is an
+ * owner once the reads have resolved; everyone else is a member.
+ */
+export function useWorkspaceRole(): WorkspaceRole {
+  const { isPending: orgPending } = authClient.useActiveOrganization();
+  const { data: activeMember, isPending: memberPending } = authClient.useActiveMember();
+  if (orgPending || memberPending) return 'pending';
+  return activeMember?.role === 'owner' ? 'owner' : 'member';
+}
+
+/**
+ * Owner-only controls that have no member line of their own (limits, the
+ * export/erase block, who manages the team). False while the role is pending.
  */
 export function useIsWorkspaceOwner(): boolean {
-  const { isPending } = authClient.useActiveOrganization();
-  const { data: activeMember } = authClient.useActiveMember();
-  return !isPending && activeMember?.role === 'owner';
+  return useWorkspaceRole() === 'owner';
 }

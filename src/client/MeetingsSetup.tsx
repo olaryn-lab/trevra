@@ -12,16 +12,18 @@ import {
   type MeetingsSetupState,
   type ProviderWebhookEndpointSummary
 } from './api';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceRole } from './auth-client';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import {
+  SecretCustodyNotice,
   WebhookEndpointRow,
   copyText,
   providerWebhookUrl,
   type WebhookLoadState
 } from './provider-webhook-view';
 import { ConfirmDrawer } from './ui/dialog';
+import { OwnerOnlyNote } from './ui/forms';
 import { Button, Field, Input } from './ui/primitives';
 import './lead-capture.css';
 
@@ -43,7 +45,8 @@ function calendarStatusText(calendar: MeetingsSetupState['googleCalendar']): str
  * owner edits the link or manages Cal.com webhooks (whose reads are owner-only).
  */
 export function MeetingsSetup({ setToast }: { setToast: (message: string) => void }) {
-  const isOwner = useIsWorkspaceOwner();
+  // While the role is pending neither the owner controls nor the member lines render.
+  const role = useWorkspaceRole();
   const [setup, setSetup] = useState<MeetingsSetupState | null>(null);
   const [load, setLoad] = useState<WebhookLoadState>('pending');
   const [draft, setDraft] = useState('');
@@ -103,7 +106,7 @@ export function MeetingsSetup({ setToast }: { setToast: (message: string) => voi
       )}
       {load === 'pending' && <p className="li-hint">Loading…</p>}
       {load === 'error' && (
-        <div className="capture-actions">
+        <div className="capture-row-actions">
           <Button onClick={reload}>Try again</Button>
         </div>
       )}
@@ -115,8 +118,8 @@ export function MeetingsSetup({ setToast }: { setToast: (message: string) => voi
             Sequences insert it with {'{{booking_link}}'}. A sequence that uses it will not start,
             and holds instead of sending, while this is empty.
           </p>
-          {isOwner ? (
-            <div className="capture-create-row">
+          {role === 'owner' ? (
+            <div className="capture-create-row ui-field-row">
               <Field
                 label="Booking link"
                 hint="A full https:// address, for example https://cal.com/you/intro."
@@ -144,9 +147,12 @@ export function MeetingsSetup({ setToast }: { setToast: (message: string) => voi
                 </Button>
               )}
             </div>
-          ) : (
-            <p>{savedLink || 'No booking link yet. The workspace owner can add one here.'}</p>
-          )}
+          ) : role === 'member' ? (
+            <>
+              {savedLink && <p>{savedLink}</p>}
+              <OwnerOnlyNote>change the booking link</OwnerOnlyNote>
+            </>
+          ) : null}
 
           <h4>Google Calendar</h4>
           <p className="li-hint">{calendarStatusText(setup.googleCalendar)}</p>
@@ -154,14 +160,15 @@ export function MeetingsSetup({ setToast }: { setToast: (message: string) => voi
       )}
 
       <h4>Cal.com</h4>
-      {isOwner ? (
+      {role === 'owner' ? (
         <CalcomWebhooks setToast={setToast} />
-      ) : setup ? (
-        <p className="li-hint">
-          {setup.calcomConnected
-            ? 'Cal.com webhook is set up.'
-            : 'Not connected. The workspace owner can connect Cal.com here.'}
-        </p>
+      ) : role === 'member' && setup ? (
+        <>
+          <p className="li-hint">
+            {setup.calcomConnected ? 'Cal.com webhook is set up.' : 'Cal.com is not connected.'}
+          </p>
+          <OwnerOnlyNote>manage the Cal.com webhook</OwnerOnlyNote>
+        </>
       ) : null}
     </section>
   );
@@ -296,14 +303,9 @@ function CalcomWebhooks({ setToast }: { setToast: (message: string) => void }) {
           {problem}
         </div>
       )}
-      {load === 'ok' && !custody && (
-        <div className="error-banner" role="status">
-          This server has no TREVRA_SECRETS_KEY configured, so it cannot keep a Cal.com signing
-          secret yet.
-        </div>
-      )}
+      {load === 'ok' && !custody && <SecretCustodyNotice />}
       {load === 'error' && (
-        <div className="capture-actions">
+        <div className="capture-row-actions">
           <Button onClick={reload}>Try again</Button>
         </div>
       )}
@@ -373,7 +375,7 @@ function CalcomWebhooks({ setToast }: { setToast: (message: string) => void }) {
       ))}
 
       {load === 'ok' && available && !revealed && (
-        <div className="capture-actions">
+        <div className="capture-row-actions">
           <Button disabled={!custody || busy === 'connect'} onClick={() => void connect()}>
             {busy === 'connect' ? (
               <LoaderCircle className="spin" size={15} aria-hidden />

@@ -9,13 +9,17 @@ import {
   type EnrichmentSettings,
   type EnrichmentUsage
 } from './api';
-import { authClient, useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceRole } from './auth-client';
 import { errorMessage } from './LinkedInSafety';
+import { relativeTime } from './LinkedInScreen';
 import { Panel } from './ui/layout';
 import { ConfirmDrawer } from './ui/dialog';
+import { OwnerOnlyNote } from './ui/forms';
 import { Button, Field, Input } from './ui/primitives';
 import {
+  keyEntryHint,
   keyStatusLine,
+  MIN_HUNTER_KEY_LENGTH,
   parseCreditCap,
   runCompaniesLine,
   runContactsLine,
@@ -25,12 +29,8 @@ import {
 } from './views/planCost';
 
 export function EnrichmentSetup({ setToast }: { setToast: (message: string) => void }) {
-  const isOwner = useIsWorkspaceOwner();
-  // useIsWorkspaceOwner is false while the member read is pending; hold both
-  // the owner controls and the member line until it resolves.
-  const { isPending: orgPending } = authClient.useActiveOrganization();
-  const { isPending: memberPending } = authClient.useActiveMember();
-  const roleKnown = !orgPending && !memberPending;
+  // While the role is pending neither the owner controls nor the member line render.
+  const role = useWorkspaceRole();
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [settings, setSettings] = useState<EnrichmentSettings | null>(null);
   const [usage, setUsage] = useState<EnrichmentUsage | null>(null);
@@ -116,16 +116,20 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
       description="Find verified contacts at named accounts with your own Hunter key. Each run is approved in a plan and stops at the credits that plan showed."
       icon={<KeyRound size={18} />}
     >
-      {problem && <div className="error-banner">{problem}</div>}
+      {problem && (
+        <div className="error-banner" role="alert">
+          {problem}
+        </div>
+      )}
       {settings && usage ? (
         <div className="enrichment-setup">
           <p className="enrichment-setup-status">
             {keyStatusLine(settings)} {usageLine(settings, usage)}
           </p>
-          {isOwner ? (
+          {role === 'owner' ? (
             <>
-              <div className="enrichment-setup-row">
-                <Field label="Hunter API key" hint="Stored encrypted. Trevra never shows it again.">
+              <div className="enrichment-setup-row ui-field-row">
+                <Field label="Hunter API key" hint={keyEntryHint(apiKey)}>
                   <Input
                     type="password"
                     autoComplete="off"
@@ -140,7 +144,7 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
                 </Field>
                 <Button
                   variant="primary"
-                  disabled={busy !== '' || apiKey.trim().length < 8}
+                  disabled={busy !== '' || apiKey.trim().length < MIN_HUNTER_KEY_LENGTH}
                   onClick={() => void saveKey()}
                 >
                   {busy === 'key' ? 'Checking…' : 'Save key'}
@@ -155,7 +159,7 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
                   </Button>
                 )}
               </div>
-              <div className="enrichment-setup-row">
+              <div className="enrichment-setup-row ui-field-row">
                 <Field
                   label="Monthly credit cap"
                   hint="0 turns enrichment off. Hunter's free plan includes 50 credits a month."
@@ -178,10 +182,8 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
                 </Button>
               </div>
             </>
-          ) : roleKnown ? (
-            <p className="enrichment-setup-status">
-              Only the workspace owner can change the key or the cap.
-            </p>
+          ) : role === 'member' ? (
+            <OwnerOnlyNote>change the key or the cap</OwnerOnlyNote>
           ) : null}
           {runs && (
             <section className="enrichment-runs" aria-labelledby="enrichment-runs-heading">
@@ -205,7 +207,11 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
                     <tbody>
                       {runs.map((run) => (
                         <tr key={run.id}>
-                          <td>{run.createdAt.slice(0, 10)}</td>
+                          <td>
+                            <time dateTime={run.createdAt} title={run.createdAt.slice(0, 10)}>
+                              {relativeTime(run.createdAt)}
+                            </time>
+                          </td>
                           <td>
                             {runStatusLabel(run.status)}
                             {run.error && <p className="enrichment-run-error">{run.error}</p>}

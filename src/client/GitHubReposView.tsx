@@ -5,6 +5,8 @@ import type {
   GitHubRepoWatch,
   GitHubReposState
 } from './api';
+import type { WorkspaceRole } from './auth-client';
+import { OwnerOnlyNote } from './ui/forms';
 import { EmptyState, Panel } from './ui/layout';
 import { plural } from './ui/plural';
 import { Button, Field, Input } from './ui/primitives';
@@ -32,9 +34,9 @@ function statusClass(status: GitHubRepoStatus): string {
 export function connectionNotice(state: GitHubConnectionState): string | null {
   if (state === 'connected') return null;
   if (state === 'needs_reauth') {
-    return 'GitHub needs reconnecting. Nothing is read until you reconnect it under Connections.';
+    return 'GitHub needs reconnecting. Nothing is read until you reconnect it under Setup → Workspace.';
   }
-  return 'GitHub is not connected. Add it under Connections; until then no stars, forks or issues are read.';
+  return 'GitHub is not connected. Connect it under Setup → Workspace; until then no stars, forks or issues are read.';
 }
 
 function checkedCopy(repo: GitHubRepoWatch, formatTime: (iso: string) => string): string {
@@ -95,7 +97,8 @@ export function repoStatusCopy(repo: GitHubRepoWatch, formatTime: (iso: string) 
 export interface GitHubReposViewProps {
   state: GitHubReposState | null;
   error: string;
-  isOwner: boolean;
+  /** `pending` renders nothing owner-specific and no member line. */
+  role: WorkspaceRole;
   draft: string;
   /** 'add' while adding, a repository id while removing it, otherwise null. */
   busy: string | null;
@@ -103,19 +106,23 @@ export interface GitHubReposViewProps {
   onDraftChange: (value: string) => void;
   onAdd: () => void;
   onRemove: (repo: GitHubRepoWatch) => void;
+  /** Re-reads the list after a failed first load. */
+  onRetry: () => void;
 }
 
 export function GitHubReposView({
   state,
   error,
-  isOwner,
+  role,
   draft,
   busy,
   formatTime,
   onDraftChange,
   onAdd,
-  onRemove
+  onRemove,
+  onRetry
 }: GitHubReposViewProps) {
+  const isOwner = role === 'owner';
   const notice = state ? connectionNotice(state.connection.state) : null;
   const atLimit = state !== null && state.repos.length >= state.limit;
   return (
@@ -136,14 +143,20 @@ export function GitHubReposView({
         </p>
       ) : null}
       {state === null ? (
-        <p className="gh-repos-quiet">Loading watched repositories.</p>
+        error ? (
+          <div>
+            <Button onClick={onRetry}>Try again</Button>
+          </div>
+        ) : (
+          <p className="gh-repos-quiet">Loading watched repositories.</p>
+        )
       ) : state.repos.length === 0 ? (
         <EmptyState
           title="No repositories watched"
           description={
             isOwner
               ? 'Add a public repository you own, for example lemoncrow-lab/lemoncrow.'
-              : 'The workspace owner chooses which repositories to watch.'
+              : 'No public repositories are being watched yet.'
           }
         />
       ) : (
@@ -179,7 +192,7 @@ export function GitHubReposView({
       )}
       {isOwner && state ? (
         <form
-          className="gh-repos-add"
+          className="gh-repos-add ui-field-row"
           onSubmit={(event) => {
             event.preventDefault();
             onAdd();
@@ -210,6 +223,9 @@ export function GitHubReposView({
             Watch repository
           </Button>
         </form>
+      ) : null}
+      {role === 'member' && state ? (
+        <OwnerOnlyNote>choose which repositories to watch</OwnerOnlyNote>
       ) : null}
     </Panel>
   );

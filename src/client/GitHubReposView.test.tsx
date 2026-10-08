@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { GitHubRepoWatch, GitHubReposState } from './api';
+import type { WorkspaceRole } from './auth-client';
 import { GitHubReposView, repoStatusCopy } from './GitHubReposView';
 
 const formatTime = (iso: string) => `at ${iso}`;
@@ -31,20 +32,21 @@ function state(
 
 function render(
   value: GitHubReposState | null,
-  isOwner = true,
+  role: WorkspaceRole = 'owner',
   extra: { error?: string; busy?: string | null } = {}
 ): string {
   return renderToStaticMarkup(
     <GitHubReposView
       state={value}
       error={extra.error ?? ''}
-      isOwner={isOwner}
+      role={role}
       draft=""
       busy={extra.busy ?? null}
       formatTime={formatTime}
       onDraftChange={() => undefined}
       onAdd={() => undefined}
       onRemove={() => undefined}
+      onRetry={() => undefined}
     />
   );
 }
@@ -101,12 +103,38 @@ describe('GitHubReposView', () => {
     expect(owner).toContain('aria-label="Stop watching lemoncrow-lab/lemoncrow"');
     expect(owner).toContain('Watch repository');
 
-    const member = render(state([repo()]), false);
+    const member = render(state([repo()]), 'member');
     expect(member).not.toContain('Stop watching');
     expect(member).not.toContain('Watch repository');
-    expect(render(state([]), false)).toContain(
-      'The workspace owner chooses which repositories to watch.'
+    expect(member).toContain('Only the workspace owner can choose which repositories to watch.');
+    const memberEmpty = render(state([]), 'member');
+    expect(memberEmpty).toContain(
+      'Only the workspace owner can choose which repositories to watch.'
     );
+    expect(memberEmpty).not.toContain('Watch repository');
+  });
+
+  it('shows neither owner controls nor the member line while the role is pending', () => {
+    const html = render(state([repo()]), 'pending');
+    expect(html).not.toContain('Stop watching');
+    expect(html).not.toContain('Watch repository');
+    expect(html).not.toContain('Only the workspace owner can');
+  });
+
+  it('offers a retry instead of loading forever when the first read failed', () => {
+    const failed = render(null, 'owner', { error: 'Unable to load watched repositories.' });
+    expect(failed).toContain('Unable to load watched repositories.');
+    expect(failed).toContain('Try again');
+    expect(failed).not.toContain('Loading watched repositories.');
+    expect(failed).not.toContain('Watch repository');
+    const loading = render(null);
+    expect(loading).toContain('Loading watched repositories.');
+    expect(loading).not.toContain('Try again');
+  });
+
+  it('points a missing or revoked connection at Setup → Workspace', () => {
+    expect(render(state([], 'not_connected'))).toContain('Connect it under Setup → Workspace');
+    expect(render(state([], 'needs_reauth'))).toContain('reconnect it under Setup → Workspace');
   });
 
   it('disables adding at the repository limit', () => {
@@ -143,11 +171,11 @@ describe('GitHubReposView', () => {
   });
 
   it('shows errors and disables every control while an action is in flight', () => {
-    const failed = render(state([repo()]), true, { error: 'Repository limit reached.' });
+    const failed = render(state([repo()]), 'owner', { error: 'Repository limit reached.' });
     expect(failed).toContain('role="alert"');
     expect(failed).toContain('Repository limit reached.');
 
-    const busy = render(state([repo()]), true, { busy: 'add' });
+    const busy = render(state([repo()]), 'owner', { busy: 'add' });
     expect(busy).toMatch(/<input[^>]*disabled=""/);
     expect(busy).toMatch(/<button[^>]*aria-label="Stop watching[^"]*"[^>]*disabled=""/);
     expect(busy).toMatch(/<button[^>]*type="submit"[^>]*disabled=""/);

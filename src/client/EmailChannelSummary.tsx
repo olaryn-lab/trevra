@@ -1,5 +1,8 @@
-import type { FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import type { EmailChannelStatus, StoredDeliverability } from '../server/email/types';
+import type { WorkspaceRole } from './auth-client';
+import { ConfirmDrawer } from './ui/dialog';
+import { OwnerOnlyNote } from './ui/forms';
 import { Button, Field, Input } from './ui/primitives';
 import { prettyProvider } from './views/format';
 
@@ -8,13 +11,14 @@ export type EmailChannelBusy = 'recheck' | 'stop' | `inbound:${string}` | `dkim:
 
 function deliverabilityBadge(deliverability: StoredDeliverability | null): {
   label: string;
-  tone: 'pass' | 'fail' | 'unknown';
+  /** The shared `.status-pill` tone modifier. */
+  tone: 'ok' | 'fail' | 'muted';
 } {
-  if (!deliverability) return { label: 'Address unknown', tone: 'unknown' };
+  if (!deliverability) return { label: 'Address unknown', tone: 'muted' };
   // A DNS check that ran out of time is "unknown" with no blockers: neutral, never a failure.
-  if (deliverability.status === 'pass') return { label: 'SPF, DKIM and DMARC pass', tone: 'pass' };
+  if (deliverability.status === 'pass') return { label: 'SPF, DKIM and DMARC pass', tone: 'ok' };
   if (deliverability.status === 'fail') return { label: 'Sending blocked', tone: 'fail' };
-  return { label: 'DNS check pending', tone: 'unknown' };
+  return { label: 'DNS check pending', tone: 'muted' };
 }
 
 function inboundSentence(inbound: EmailChannelStatus['inbound']): string {
@@ -32,7 +36,7 @@ function inboundSentence(inbound: EmailChannelStatus['inbound']): string {
 
 export function EmailChannelSummary({
   channel,
-  isOwner,
+  role,
   busy,
   onUseForInbound,
   onStopInbound,
@@ -40,13 +44,17 @@ export function EmailChannelSummary({
   onSaveDkimSelector
 }: {
   channel: EmailChannelStatus;
-  isOwner: boolean;
+  /** `pending` renders neither the owner controls nor the member line. */
+  role: WorkspaceRole;
   busy: EmailChannelBusy;
   onUseForInbound: (connectionId: string) => void;
   onStopInbound: () => void;
   onRecheck: () => void;
   onSaveDkimSelector: (connectionId: string, selector: string | null) => void;
 }) {
+  const isOwner = role === 'owner';
+  const [confirmStop, setConfirmStop] = useState(false);
+
   function saveSelector(event: FormEvent<HTMLFormElement>, connectionId: string) {
     event.preventDefault();
     const value = String(new FormData(event.currentTarget).get('dkimSelector') ?? '').trim();
@@ -62,7 +70,8 @@ export function EmailChannelSummary({
     <div className="email-channel">
       {channel.mailboxes.length === 0 ? (
         <p className="empty-copy">
-          Connect Gmail, Microsoft 365 or Zoho Mail above to send outreach email and read replies.
+          Connect Gmail, Microsoft 365 or Zoho Mail under Connections to send outreach email and
+          read replies.
         </p>
       ) : (
         <ul className="email-channel-mailboxes">
@@ -93,9 +102,7 @@ export function EmailChannelSummary({
                       {isInbound ? ' · inbound mailbox' : ''}
                     </span>
                   </div>
-                  <span className={`status-pill email-channel-pill-${badge.tone}`}>
-                    {badge.label}
-                  </span>
+                  <span className={`status-pill ${badge.tone}`}>{badge.label}</span>
                 </div>
                 {issues.length > 0 && (
                   <ul className="email-channel-issues">
@@ -117,13 +124,13 @@ export function EmailChannelSummary({
                 )}
                 {isOwner && domain && (
                   <details className="email-channel-dkim" open={needsSelector}>
-                    <summary>
+                    <summary className="ui-disclosure-summary">
                       {mailbox.dkimSelector
                         ? `DKIM selector: ${mailbox.dkimSelector}`
                         : 'DKIM selector'}
                     </summary>
                     <form
-                      className="email-channel-dkim-form"
+                      className="email-channel-dkim-form ui-field-row"
                       onSubmit={(event) => saveSelector(event, mailbox.connectionId)}
                     >
                       <Field
@@ -183,7 +190,7 @@ export function EmailChannelSummary({
         </Button>
         {isOwner && channel.inbound && (
           <>
-            <Button variant="ghost" disabled={busy !== null} onClick={onStopInbound}>
+            <Button variant="ghost" disabled={busy !== null} onClick={() => setConfirmStop(true)}>
               {busy === 'stop' ? 'Stopping…' : 'Stop reading mail'}
             </Button>
             {inboundMailbox?.unsubscribeMode === 'footer_and_reply' && (
@@ -194,7 +201,28 @@ export function EmailChannelSummary({
             )}
           </>
         )}
+        {role === 'member' && (
+          <OwnerOnlyNote>choose the inbound mailbox or set a DKIM selector</OwnerOnlyNote>
+        )}
       </div>
+      {confirmStop && (
+        <ConfirmDrawer
+          title="Stop reading this mailbox?"
+          body={
+            <p>
+              Replies to your outreach, including unsubscribe replies, are no longer read from{' '}
+              {channel.inbound?.address ?? 'this mailbox'}. You can choose it again at any time.
+            </p>
+          }
+          confirmLabel="Stop reading mail"
+          busy={busy === 'stop'}
+          onCancel={() => setConfirmStop(false)}
+          onConfirm={() => {
+            setConfirmStop(false);
+            onStopInbound();
+          }}
+        />
+      )}
     </div>
   );
 }

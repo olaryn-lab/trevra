@@ -67,3 +67,12 @@ export function ActionRow({
     </div>
   );
 }
+
+/**
+ * The one read-only line a member sees where an owner-only control would be:
+ * "Only the workspace owner can <verb phrase>." Render it only for the
+ * `member` role (never while the role is `pending`).
+ */
+export function OwnerOnlyNote({ children }: { children: ReactNode }) {
+  return <p className="li-hint">Only the workspace owner can {children}.</p>;
+}

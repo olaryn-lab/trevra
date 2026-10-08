@@ -2,8 +2,9 @@ import { useEffect, useState } from 'react';
 import { Mail } from 'lucide-react';
 import type { SenderIdentity } from '../server/compliance/sender-identity';
 import { getSenderIdentity, saveSenderIdentity } from './api';
+import type { WorkspaceRole } from './auth-client';
 import { errorMessage } from './LinkedInSafety';
-import { ActionRow, FormGrid } from './ui/forms';
+import { ActionRow, FormGrid, OwnerOnlyNote } from './ui/forms';
 import { Panel } from './ui/layout';
 import { Button, Field, Input, Textarea } from './ui/primitives';
 
@@ -44,7 +45,7 @@ export function SenderIdentityForm({
   onSave,
   busy,
   loading = false,
-  isOwner,
+  role,
   error,
   gaps
 }: {
@@ -55,11 +56,13 @@ export function SenderIdentityForm({
   busy: boolean;
   /** The saved identity has not loaded (or failed to): nothing to edit yet. */
   loading?: boolean;
-  isOwner: boolean;
+  /** `pending` disables the fields and renders neither the save row nor the member line. */
+  role: WorkspaceRole;
   error: string;
   /** Null until the saved identity has loaded: never claim Complete before knowing. */
   gaps: string[] | null;
 }) {
+  const isOwner = role === 'owner';
   return (
     <Panel
       title="Sender identity"
@@ -67,7 +70,7 @@ export function SenderIdentityForm({
       icon={<Mail size={18} />}
       actions={
         gaps === null ? undefined : (
-          <span className="status-pill">
+          <span className={`status-pill ${gaps.length > 0 ? 'warn' : 'ok'}`}>
             {gaps.length > 0 ? 'Email outreach blocked' : 'Complete'}
           </span>
         )
@@ -115,19 +118,19 @@ export function SenderIdentityForm({
             {busy ? 'Saving…' : 'Save sender identity'}
           </Button>
         </ActionRow>
-      ) : (
-        <p className="li-hint">Only the workspace owner can change the sender identity.</p>
-      )}
+      ) : role === 'member' ? (
+        <OwnerOnlyNote>change the sender identity</OwnerOnlyNote>
+      ) : null}
     </Panel>
   );
 }
 
 export function SenderIdentityPanel({
   setToast,
-  isOwner
+  role
 }: {
   setToast: (message: string) => void;
-  isOwner: boolean;
+  role: WorkspaceRole;
 }) {
   const [saved, setSaved] = useState<SenderIdentity | null>(null);
   const [draft, setDraft] = useState<SenderIdentityDraft>({
@@ -176,7 +179,7 @@ export function SenderIdentityPanel({
       onSave={() => void save()}
       busy={busy}
       loading={saved === null}
-      isOwner={isOwner}
+      role={role}
       error={error}
       gaps={saved ? senderIdentityGaps(saved) : null}
     />

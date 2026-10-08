@@ -8,7 +8,7 @@ import {
   saveDkimSelector,
   stopInboundMailbox
 } from './api';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceRole } from './auth-client';
 import { EmailChannelSummary, type EmailChannelBusy } from './EmailChannelSummary';
 import { Panel } from './ui/layout';
 
@@ -17,7 +17,7 @@ function problemText(error: unknown, fallback: string): string {
 }
 
 export function EmailChannelPanel({ setToast }: { setToast: (message: string) => void }) {
-  const isOwner = useIsWorkspaceOwner();
+  const role = useWorkspaceRole();
   const [channel, setChannel] = useState<EmailChannelStatus | null>(null);
   const [busy, setBusy] = useState<EmailChannelBusy>(null);
   const [problem, setProblem] = useState('');
@@ -66,7 +66,7 @@ export function EmailChannelPanel({ setToast }: { setToast: (message: string) =>
       {channel ? (
         <EmailChannelSummary
           channel={channel}
-          isOwner={isOwner}
+          role={role}
           busy={busy}
           onUseForInbound={(connectionId) =>
             void run(

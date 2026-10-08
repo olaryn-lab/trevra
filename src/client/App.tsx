@@ -72,7 +72,7 @@ import {
   workspaceExportDownloadPath,
   type WorkspaceErasurePreview
 } from './api';
-import { authClient, useIsWorkspaceOwner } from './auth-client';
+import { authClient, useIsWorkspaceOwner, useWorkspaceRole } from './auth-client';
 import { ActiveLinkedInAccountName } from './LinkedInActiveAccount';
 import { reloadOutreach } from './LinkedInSafety';
 import { LinkedInAccounts } from './LinkedInAccounts';
@@ -88,7 +88,7 @@ import { GitHubReposPanel } from './GitHubReposPanel';
 import { ResearchView } from './views/ResearchView';
 import { trackEvent, trackPageView } from './analytics';
 import { ConfirmDrawer, useDialog } from './ui/dialog';
-import { ActionRow, FormGrid, FormSection } from './ui/forms';
+import { ActionRow, FormGrid, FormSection, OwnerOnlyNote } from './ui/forms';
 import { EmptyState, GridSpan, InlineActions, PageGrid, Panel } from './ui/layout';
 import { Button, Field, Input, Select, SwitchField, Textarea } from './ui/primitives';
 import { BrandMark } from './ui/BrandMark';
@@ -560,7 +560,8 @@ function SetupView({
   // `/setup/team/:id` is the accept-invitation link from an email. It is a
   // full screen with no tabs: the reader has no workspace to configure yet.
   const invitationId = sub === 'team' ? route.id : null;
-  const isOwner = useIsWorkspaceOwner();
+  const role = useWorkspaceRole();
+  const isOwner = role === 'owner';
 
   if (invitationId) {
     return (
@@ -602,7 +603,7 @@ function SetupView({
           />
           <GitHubReposPanel setToast={setToast} />
           <EmailChannelPanel setToast={setToast} />
-          <SenderIdentityPanel setToast={setToast} isOwner={isOwner} />
+          <SenderIdentityPanel setToast={setToast} role={role} />
           <LimitsView setToast={setToast} />
           <EnrichmentSetup setToast={setToast} />
           <LinkedInExclusions setToast={setToast} />
@@ -1402,6 +1403,11 @@ function HostedAgentPanel({
   setToast: (message: string) => void;
   onInspectRun: (runId: string) => void;
 }) {
+  // The model endpoint, key, subscription token, spending limit and Autopilot
+  // writes are owner-only on the server. While the role is pending neither
+  // those controls nor the member line render.
+  const role = useWorkspaceRole();
+  const isOwner = role === 'owner';
   const [setup, setSetup] = useState<AgentSetup | null>(null);
   const [agents, setAgents] = useState<AgentPrincipal[]>([]);
   const [agentId, setAgentId] = useState('');
@@ -1720,11 +1726,15 @@ function HostedAgentPanel({
     : modelAccessDirty
       ? 'Save model access first — a run uses what is stored, not what is typed.'
       : !byokReady && !cliReady
-        ? 'Configure model access before starting a hosted run.'
+        ? isOwner
+          ? 'Configure model access before starting a hosted run.'
+          : 'The workspace owner has to configure model access before a hosted run can start.'
         : !budget.enabled
-          ? 'Turn on model spending before starting a hosted run.'
+          ? isOwner
+            ? 'Turn on model spending before starting a hosted run.'
+            : 'The workspace owner has to turn on model spending before a hosted run can start.'
           : capReached
-            ? `This month’s ${usd(budget.monthlyCapCents)} is used up. Raise the limit to run again.`
+            ? `This month’s ${usd(budget.monthlyCapCents)} is used up. ${isOwner ? 'Raise the limit to run again.' : 'The workspace owner can raise the limit.'}`
             : !agentId
               ? 'Choose an active Agent first.'
               : !goal.trim()
@@ -1783,162 +1793,87 @@ function HostedAgentPanel({
         <FormGrid>{agentField('Selected Agent')}</FormGrid>
       </FormSection>
 
-      <FormSection
-        title="Model access"
-        description="Configure one credential path at a time. If both paths are ready, Trevra uses the subscription path first."
-      >
-        <FormGrid>
-          <Field label="Method to configure">
-            <Select
-              value={accessMethod}
-              onChange={(event) => setAccessMethod(event.target.value as 'api' | 'subscription')}
-            >
-              <option value="api">API key</option>
-              <option value="subscription">Claude/Codex subscription</option>
-            </Select>
-          </Field>
-        </FormGrid>
-
-        {byokReady && cliReady && (
+      {role === 'member' && (
+        <FormSection
+          title="Model access"
+          description="How hosted runs reach a model, and what they may spend."
+        >
           <p className="byok-method-note">
-            Both methods are ready. Hosted runs use the workspace subscription first; API access
-            remains stored if that subscription setup is removed.
+            {byokReady || cliReady
+              ? 'Model access is configured.'
+              : 'Model access is not set up yet.'}{' '}
+            Model spending is {budget.enabled ? 'on' : 'off'}, with {usd(budget.spentCents)} of{' '}
+            {usd(budget.monthlyCapCents)} used this month.
           </p>
-        )}
+          <OwnerOnlyNote>change model access or the spending limit</OwnerOnlyNote>
+        </FormSection>
+      )}
 
-        {accessMethod === 'api' ? (
-          <>
-            <FormGrid layout="split">
-              <Field label="Endpoint">
-                <Input
-                  value={baseUrl}
-                  onChange={(event) => setBaseUrl(event.target.value)}
-                  placeholder="https://api.openai.com/v1"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </Field>
-              <Field label="Model">
-                <Input
-                  value={model}
-                  onChange={(event) => setModel(event.target.value)}
-                  placeholder="Model name from your provider"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </Field>
-            </FormGrid>
+      {isOwner && (
+        <FormSection
+          title="Model access"
+          description="Configure one credential path at a time. If both paths are ready, Trevra uses the subscription path first."
+        >
+          <FormGrid>
+            <Field label="Method to configure">
+              <Select
+                value={accessMethod}
+                onChange={(event) => setAccessMethod(event.target.value as 'api' | 'subscription')}
+              >
+                <option value="api">API key</option>
+                <option value="subscription">Claude/Codex subscription</option>
+              </Select>
+            </Field>
+          </FormGrid>
 
-            {secret && !replacingKey ? (
-              <div className="byok-key-stored">
-                <span className="byok-key-mask">
-                  <KeyRound size={16} /> •••• {secret.last4}
-                </span>
-                <span>
-                  {secret.label ? `${secret.label} · ` : ''}Added{' '}
-                  {new Date(secret.createdAt).toLocaleDateString()}
-                </span>
-                <div className="byok-key-actions">
-                  <Button onClick={() => setReplacingKey(true)}>Replace</Button>
-                  <Button
-                    variant="ghost"
-                    className="danger"
-                    disabled={busy === 'key-remove'}
-                    onClick={() => setConfirmRemoveKey(true)}
-                  >
-                    {busy === 'key-remove' ? (
-                      <LoaderCircle className="spin" size={15} />
-                    ) : (
-                      <Trash2 size={15} />
-                    )}{' '}
-                    Remove
-                  </Button>
-                </div>
-              </div>
-            ) : (
-              <>
-                <FormGrid>
-                  <Field label={secret ? 'New API key' : 'API key'}>
-                    <Input
-                      type="password"
-                      value={apiKey}
-                      onChange={(event) => setApiKey(event.target.value)}
-                      placeholder="Paste the key here"
-                      autoComplete="off"
-                      spellCheck={false}
-                    />
-                  </Field>
-                </FormGrid>
-                {secret && (
-                  <ActionRow>
-                    <Button
-                      variant="ghost"
-                      onClick={() => {
-                        setReplacingKey(false);
-                        setApiKey('');
-                      }}
-                    >
-                      Cancel replacement
-                    </Button>
-                  </ActionRow>
-                )}
-              </>
-            )}
-          </>
-        ) : (
-          <>
-            <FormGrid layout="split">
-              <Field label="Subscription">
-                <Select
-                  value={cliKind}
-                  onChange={(event) => setCliKind(event.target.value as 'claude' | 'codex')}
-                >
-                  <option value="claude">Claude</option>
-                  <option value="codex">Codex</option>
-                </Select>
-              </Field>
-              <Field label="Model">
-                <Input
-                  value={cliModel}
-                  onChange={(event) => setCliModel(event.target.value)}
-                  placeholder="Model name used by the subscription CLI"
-                  autoComplete="off"
-                  spellCheck={false}
-                />
-              </Field>
-            </FormGrid>
+          {byokReady && cliReady && (
+            <p className="byok-method-note">
+              Both methods are ready. Hosted runs use the workspace subscription first; API access
+              remains stored if that subscription setup is removed.
+            </p>
+          )}
 
-            <SwitchField
-              className="is-caution"
-              label="Accept subscription risk"
-              description="Using a personal subscription for unattended Trevra runs may breach your provider's terms."
-              checked={cliSetup.riskAccepted}
-              disabled={busy === 'cli-risk' || !cliConfigSaved}
-              onChange={(event) => void setCliRisk(event.target.checked)}
-            />
-            {!cliConfigSaved && (
-              <p className="byok-method-note">
-                Save the subscription and model first. Then you can accept the risk and store its
-                token.
-              </p>
-            )}
+          {accessMethod === 'api' ? (
+            <>
+              <FormGrid layout="split">
+                <Field label="Endpoint">
+                  <Input
+                    value={baseUrl}
+                    onChange={(event) => setBaseUrl(event.target.value)}
+                    placeholder="https://api.openai.com/v1"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </Field>
+                <Field label="Model">
+                  <Input
+                    value={model}
+                    onChange={(event) => setModel(event.target.value)}
+                    placeholder="Model name from your provider"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </Field>
+              </FormGrid>
 
-            {cliSetup.riskAccepted &&
-              (cliSetup.tokenStored && !replacingCliToken ? (
+              {secret && !replacingKey ? (
                 <div className="byok-key-stored">
                   <span className="byok-key-mask">
-                    <KeyRound size={16} /> Subscription token stored
+                    <KeyRound size={16} /> •••• {secret.last4}
                   </span>
-                  <span />
+                  <span>
+                    {secret.label ? `${secret.label} · ` : ''}Added{' '}
+                    {new Date(secret.createdAt).toLocaleDateString()}
+                  </span>
                   <div className="byok-key-actions">
-                    <Button onClick={() => setReplacingCliToken(true)}>Replace</Button>
+                    <Button onClick={() => setReplacingKey(true)}>Replace</Button>
                     <Button
                       variant="ghost"
                       className="danger"
-                      disabled={busy === 'cli-token-remove'}
-                      onClick={() => setConfirmRemoveCliToken(true)}
+                      disabled={busy === 'key-remove'}
+                      onClick={() => setConfirmRemoveKey(true)}
                     >
-                      {busy === 'cli-token-remove' ? (
+                      {busy === 'key-remove' ? (
                         <LoaderCircle className="spin" size={15} />
                       ) : (
                         <Trash2 size={15} />
@@ -1950,26 +1885,24 @@ function HostedAgentPanel({
               ) : (
                 <>
                   <FormGrid>
-                    <Field
-                      label={cliSetup.tokenStored ? 'New subscription token' : 'Subscription token'}
-                    >
+                    <Field label={secret ? 'New API key' : 'API key'}>
                       <Input
                         type="password"
-                        value={cliToken}
-                        onChange={(event) => setCliToken(event.target.value)}
-                        placeholder="Paste the token here"
+                        value={apiKey}
+                        onChange={(event) => setApiKey(event.target.value)}
+                        placeholder="Paste the key here"
                         autoComplete="off"
                         spellCheck={false}
                       />
                     </Field>
                   </FormGrid>
-                  {cliSetup.tokenStored && (
+                  {secret && (
                     <ActionRow>
                       <Button
                         variant="ghost"
                         onClick={() => {
-                          setReplacingCliToken(false);
-                          setCliToken('');
+                          setReplacingKey(false);
+                          setApiKey('');
                         }}
                       >
                         Cancel replacement
@@ -1977,141 +1910,260 @@ function HostedAgentPanel({
                     </ActionRow>
                   )}
                 </>
-              ))}
-          </>
-        )}
+              )}
+            </>
+          ) : (
+            <>
+              <FormGrid layout="split">
+                <Field label="Subscription">
+                  <Select
+                    value={cliKind}
+                    onChange={(event) => setCliKind(event.target.value as 'claude' | 'codex')}
+                  >
+                    <option value="claude">Claude</option>
+                    <option value="codex">Codex</option>
+                  </Select>
+                </Field>
+                <Field label="Model">
+                  <Input
+                    value={cliModel}
+                    onChange={(event) => setCliModel(event.target.value)}
+                    placeholder="Model name used by the subscription CLI"
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </Field>
+              </FormGrid>
 
-        <ActionRow
-          note={
-            accessMethod === 'api'
-              ? secret
-                ? 'The stored API key is encrypted and cannot be revealed again.'
-                : 'Trevra stores the key encrypted and never shows it again.'
-              : cliSetup.riskAccepted
-                ? 'The subscription token is stored encrypted and cannot be revealed again.'
-                : 'Subscription access stays off until the risk is accepted.'
-          }
-        >
-          <Button
-            disabled={!modelAccessCanSave || busy === 'model-access-save'}
-            onClick={() => void saveModelAccess()}
-          >
-            {busy === 'model-access-save' ? (
-              <LoaderCircle className="spin" size={15} />
-            ) : (
-              <Check size={15} />
-            )}{' '}
-            Save model access
-          </Button>
-        </ActionRow>
-      </FormSection>
-
-      <FormSection
-        title="Spending limit"
-        description="Control whether hosted runs may use paid model access and set the monthly hard limit."
-      >
-        <SwitchField
-          label="Allow model spending"
-          description="When off, scheduled and one-off hosted runs cannot make model calls."
-          checked={budget.enabled}
-          disabled={busy === 'spend'}
-          onChange={(event) => void setSpending(event.target.checked)}
-        />
-        <FormGrid>
-          <Field label="Monthly maximum" hint="Hard workspace limit for hosted model calls.">
-            <span className="byok-amount">
-              <small>$</small>
-              <Input
-                type="number"
-                min="0"
-                max="10000"
-                step="1"
-                value={capDollars}
-                onChange={(event) => setCapDollars(event.target.value)}
+              <SwitchField
+                className="is-caution"
+                label="Accept subscription risk"
+                description="Using a personal subscription for unattended Trevra runs may breach your provider's terms."
+                checked={cliSetup.riskAccepted}
+                disabled={busy === 'cli-risk' || !cliConfigSaved}
+                onChange={(event) => void setCliRisk(event.target.checked)}
               />
-            </span>
-          </Field>
-        </FormGrid>
-        <ActionRow note={`${usd(budget.spentCents)} spent in the current period.`}>
-          <Button
-            disabled={!capValid || !dirtyCap || busy === 'cap-save'}
-            onClick={() => void saveCap()}
-          >
-            {busy === 'cap-save' ? (
-              <LoaderCircle className="spin" size={14} />
-            ) : (
-              <Check size={14} />
-            )}{' '}
-            Save spending limit
-          </Button>
-        </ActionRow>
-      </FormSection>
+              {!cliConfigSaved && (
+                <p className="byok-method-note">
+                  Save the subscription and model first. Then you can accept the risk and store its
+                  token.
+                </p>
+              )}
 
-      <FormSection
-        title="Autopilot"
-        description="Run this Agent automatically on a cadence with one standing GTM job."
-      >
-        <SwitchField
-          label="Run automatically"
-          description="When on, Trevra starts this Agent on the schedule below without waiting for your computer."
-          checked={Boolean(setup.schedule?.enabled)}
-          disabled={busy === 'schedule-toggle' || !scheduleGoal.trim() || !agentId}
-          onChange={(event) => void setAutopilot(event.target.checked)}
-        />
-        <FormGrid>
-          <Field label="Cadence">
-            <Select
-              value={scheduleInterval}
-              onChange={(event) => setScheduleInterval(Number(event.target.value))}
-            >
-              {AUTOPILOT_CADENCES.map((cadence) => (
-                <option key={cadence.minutes} value={cadence.minutes}>
-                  {cadence.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
-        </FormGrid>
-        <FormGrid>
-          <Field label="Standing job">
-            <Textarea
-              rows={5}
-              value={scheduleGoal}
-              onChange={(event) => setScheduleGoal(event.target.value)}
-            />
-          </Field>
-        </FormGrid>
-        {setup.schedule && (
-          <p className="byok-schedule-status">
-            {setup.schedule.enabled ? 'Running' : 'Paused'} · last run{' '}
-            {setup.schedule.lastRunAt
-              ? new Date(setup.schedule.lastRunAt).toLocaleString()
-              : 'never'}{' '}
-            · next {new Date(setup.schedule.nextRunAt ?? Date.now()).toLocaleString()}
-          </p>
-        )}
-        {!budget.enabled && (
-          <p className="byok-schedule-status">
-            Autopilot can be configured while spending is off, but scheduled model runs will not
-            start until spending is enabled.
-          </p>
-        )}
-        <ActionRow>
-          <Button
-            disabled={
-              !scheduleDirty || !scheduleGoal.trim() || !agentId || busy === 'schedule-save'
+              {cliSetup.riskAccepted &&
+                (cliSetup.tokenStored && !replacingCliToken ? (
+                  <div className="byok-key-stored">
+                    <span className="byok-key-mask">
+                      <KeyRound size={16} /> Subscription token stored
+                    </span>
+                    <span />
+                    <div className="byok-key-actions">
+                      <Button onClick={() => setReplacingCliToken(true)}>Replace</Button>
+                      <Button
+                        variant="ghost"
+                        className="danger"
+                        disabled={busy === 'cli-token-remove'}
+                        onClick={() => setConfirmRemoveCliToken(true)}
+                      >
+                        {busy === 'cli-token-remove' ? (
+                          <LoaderCircle className="spin" size={15} />
+                        ) : (
+                          <Trash2 size={15} />
+                        )}{' '}
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <FormGrid>
+                      <Field
+                        label={
+                          cliSetup.tokenStored ? 'New subscription token' : 'Subscription token'
+                        }
+                      >
+                        <Input
+                          type="password"
+                          value={cliToken}
+                          onChange={(event) => setCliToken(event.target.value)}
+                          placeholder="Paste the token here"
+                          autoComplete="off"
+                          spellCheck={false}
+                        />
+                      </Field>
+                    </FormGrid>
+                    {cliSetup.tokenStored && (
+                      <ActionRow>
+                        <Button
+                          variant="ghost"
+                          onClick={() => {
+                            setReplacingCliToken(false);
+                            setCliToken('');
+                          }}
+                        >
+                          Cancel replacement
+                        </Button>
+                      </ActionRow>
+                    )}
+                  </>
+                ))}
+            </>
+          )}
+
+          <ActionRow
+            note={
+              accessMethod === 'api'
+                ? secret
+                  ? 'The stored API key is encrypted and cannot be revealed again.'
+                  : 'Trevra stores the key encrypted and never shows it again.'
+                : cliSetup.riskAccepted
+                  ? 'The subscription token is stored encrypted and cannot be revealed again.'
+                  : 'Subscription access stays off until the risk is accepted.'
             }
-            onClick={() => void saveAutopilot()}
           >
-            {busy === 'schedule-save' ? (
-              <LoaderCircle className="spin" size={15} />
-            ) : (
-              <Check size={15} />
-            )}{' '}
-            Save Autopilot
-          </Button>
-        </ActionRow>
-      </FormSection>
+            <Button
+              disabled={!modelAccessCanSave || busy === 'model-access-save'}
+              onClick={() => void saveModelAccess()}
+            >
+              {busy === 'model-access-save' ? (
+                <LoaderCircle className="spin" size={15} />
+              ) : (
+                <Check size={15} />
+              )}{' '}
+              Save model access
+            </Button>
+          </ActionRow>
+        </FormSection>
+      )}
+
+      {isOwner && (
+        <FormSection
+          title="Spending limit"
+          description="Control whether hosted runs may use paid model access and set the monthly hard limit."
+        >
+          <SwitchField
+            label="Allow model spending"
+            description="When off, scheduled and one-off hosted runs cannot make model calls."
+            checked={budget.enabled}
+            disabled={busy === 'spend'}
+            onChange={(event) => void setSpending(event.target.checked)}
+          />
+          <FormGrid>
+            <Field label="Monthly maximum" hint="Hard workspace limit for hosted model calls.">
+              <span className="byok-amount">
+                <small>$</small>
+                <Input
+                  type="number"
+                  min="0"
+                  max="10000"
+                  step="1"
+                  value={capDollars}
+                  onChange={(event) => setCapDollars(event.target.value)}
+                />
+              </span>
+            </Field>
+          </FormGrid>
+          <ActionRow note={`${usd(budget.spentCents)} spent in the current period.`}>
+            <Button
+              disabled={!capValid || !dirtyCap || busy === 'cap-save'}
+              onClick={() => void saveCap()}
+            >
+              {busy === 'cap-save' ? (
+                <LoaderCircle className="spin" size={14} />
+              ) : (
+                <Check size={14} />
+              )}{' '}
+              Save spending limit
+            </Button>
+          </ActionRow>
+        </FormSection>
+      )}
+
+      {role === 'member' && (
+        <FormSection
+          title="Autopilot"
+          description="Run this Agent automatically on a cadence with one standing GTM job."
+        >
+          <p className="byok-schedule-status">
+            {setup.schedule
+              ? `${setup.schedule.enabled ? 'Running' : 'Paused'} · last run ${
+                  setup.schedule.lastRunAt
+                    ? new Date(setup.schedule.lastRunAt).toLocaleString()
+                    : 'never'
+                }`
+              : 'Autopilot is not set up.'}
+          </p>
+          <OwnerOnlyNote>change Autopilot</OwnerOnlyNote>
+        </FormSection>
+      )}
+
+      {isOwner && (
+        <FormSection
+          title="Autopilot"
+          description="Run this Agent automatically on a cadence with one standing GTM job."
+        >
+          <SwitchField
+            label="Run automatically"
+            description="When on, Trevra starts this Agent on the schedule below without waiting for your computer."
+            checked={Boolean(setup.schedule?.enabled)}
+            disabled={busy === 'schedule-toggle' || !scheduleGoal.trim() || !agentId}
+            onChange={(event) => void setAutopilot(event.target.checked)}
+          />
+          <FormGrid>
+            <Field label="Cadence">
+              <Select
+                value={scheduleInterval}
+                onChange={(event) => setScheduleInterval(Number(event.target.value))}
+              >
+                {AUTOPILOT_CADENCES.map((cadence) => (
+                  <option key={cadence.minutes} value={cadence.minutes}>
+                    {cadence.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </FormGrid>
+          <FormGrid>
+            <Field label="Standing job">
+              <Textarea
+                rows={5}
+                value={scheduleGoal}
+                onChange={(event) => setScheduleGoal(event.target.value)}
+              />
+            </Field>
+          </FormGrid>
+          {setup.schedule && (
+            <p className="byok-schedule-status">
+              {setup.schedule.enabled ? 'Running' : 'Paused'} · last run{' '}
+              {setup.schedule.lastRunAt
+                ? new Date(setup.schedule.lastRunAt).toLocaleString()
+                : 'never'}{' '}
+              · next {new Date(setup.schedule.nextRunAt ?? Date.now()).toLocaleString()}
+            </p>
+          )}
+          {!budget.enabled && (
+            <p className="byok-schedule-status">
+              Autopilot can be configured while spending is off, but scheduled model runs will not
+              start until spending is enabled.
+            </p>
+          )}
+          <ActionRow>
+            <Button
+              disabled={
+                !scheduleDirty || !scheduleGoal.trim() || !agentId || busy === 'schedule-save'
+              }
+              onClick={() => void saveAutopilot()}
+            >
+              {busy === 'schedule-save' ? (
+                <LoaderCircle className="spin" size={15} />
+              ) : (
+                <Check size={15} />
+              )}{' '}
+              Save Autopilot
+            </Button>
+          </ActionRow>
+        </FormSection>
+      )}
 
       <FormSection
         title="Run once"
@@ -2130,7 +2182,7 @@ function HostedAgentPanel({
         </ActionRow>
       </FormSection>
 
-      {confirmRemoveKey && secret && (
+      {isOwner && confirmRemoveKey && secret && (
         <ConfirmDrawer
           title="Remove this key from Trevra?"
           tone="danger"
@@ -2158,7 +2210,7 @@ function HostedAgentPanel({
         />
       )}
 
-      {confirmRemoveCliToken && (
+      {isOwner && confirmRemoveCliToken && (
         <ConfirmDrawer
           title="Remove this subscription token from Trevra?"
           tone="danger"

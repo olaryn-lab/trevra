@@ -14,6 +14,7 @@ import { ConfirmDrawer } from './ui/dialog';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import {
+  SecretCustodyNotice,
   StripeEventSelection,
   WebhookEndpointRow,
   copyText,
@@ -153,15 +154,15 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
         </div>
         <CreditCard size={20} aria-hidden />
       </div>
-      {problem && <div className="error-box">{problem}</div>}
-      {!custody && (
-        <div className="error-box">
-          Secret custody is not configured on this deployment, so a signing secret cannot be stored.
+      {problem && (
+        <div className="error-banner" role="alert">
+          {problem}
         </div>
       )}
+      {!custody && <SecretCustodyNotice />}
 
       {load === 'error' && (
-        <div className="capture-actions">
+        <div className="capture-row-actions">
           <Button onClick={reload}>Try again</Button>
         </div>
       )}
@@ -179,7 +180,7 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
       ))}
 
       {load === 'ok' && endpoints.length === 0 && !draft && (
-        <div className="capture-actions">
+        <div className="capture-row-actions">
           <Button
             variant="primary"
             disabled={!custody || busy === 'draft'}
@@ -215,7 +216,7 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
             )}
           </div>
           <StripeEventSelection />
-          <div className="capture-webhook-form">
+          <div className="capture-webhook-form ui-field-row">
             <Field
               label="Signing secret"
               hint="Starts with whsec_. Stored encrypted and never shown again."
@@ -238,7 +239,7 @@ export function ProviderWebhookSetup({ setToast }: { setToast: (message: string)
               Save and listen
             </Button>
           </div>
-          <div className="capture-actions">
+          <div className="capture-row-actions">
             <Button
               variant="ghost"
               onClick={() => {

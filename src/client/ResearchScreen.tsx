@@ -185,7 +185,7 @@ export function ResearchScreen({
               and refresh tokens stay in Nango.
             </p>
           </div>
-          <span className={`status-pill ${reddit ? '' : 'warning'}`}>
+          <span className={`status-pill ${reddit ? 'ok' : 'warn'}`}>
             {reddit
               ? 'Reddit connected'
               : redditConnection?.status === 'needs_reauth'

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   Check,
   Copy,
+  CreditCard,
   KeyRound,
   LoaderCircle,
   PauseCircle,
@@ -16,7 +17,8 @@ import {
   setCaptureSourceStatus,
   type CaptureSourceSummary
 } from './api';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceRole } from './auth-client';
+import { OwnerOnlyNote } from './ui/forms';
 import { Button, Field, Input, Select } from './ui/primitives';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
@@ -61,7 +63,9 @@ async function signBrowser(secret: string, timestamp: string, idempotencyKey: st
 }
 
 export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => void }) {
-  const isOwner = useIsWorkspaceOwner();
+  // While the role is pending no owner control and no member line renders.
+  const role = useWorkspaceRole();
+  const isOwner = role === 'owner';
   const [sources, setSources] = useState<CaptureSourceSummary[]>([]);
   const [name, setName] = useState('Website');
   const [kind, setKind] = useState<CaptureSourceSummary['kind']>('website');
@@ -191,9 +195,13 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
           </div>
           <KeyRound size={20} />
         </div>
-        {problem && <div className="error-box">{problem}</div>}
+        {problem && (
+          <div className="error-banner" role="alert">
+            {problem}
+          </div>
+        )}
         {isOwner && (
-          <div className="capture-create-row">
+          <div className="capture-create-row ui-field-row">
             <Field label="Source name">
               <Input
                 value={name}
@@ -270,7 +278,7 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
                 <h3>{selected.name}</h3>
                 <p>{selected.id}</p>
               </div>
-              <span className={`status-pill ${selected.status === 'active' ? 'ok' : ''}`}>
+              <span className={`status-pill ${selected.status === 'active' ? 'ok' : 'muted'}`}>
                 {selected.status}
               </span>
             </div>
@@ -398,6 +406,18 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
         )}
       </section>
       {isOwner && <ProviderWebhookSetup setToast={setToast} />}
+      {role === 'member' && (
+        <section className="page-panel" id="stripe-payments">
+          <div className="section-heading">
+            <div>
+              <h3>Stripe payments</h3>
+              <p>Observe paid, upgraded and cancelled customers.</p>
+            </div>
+            <CreditCard size={20} aria-hidden />
+          </div>
+          <OwnerOnlyNote>connect Stripe payments</OwnerOnlyNote>
+        </section>
+      )}
       <MeetingsSetup setToast={setToast} />
     </div>
   );
