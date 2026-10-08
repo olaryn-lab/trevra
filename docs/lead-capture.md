@@ -197,3 +197,9 @@ Trevra compares each sample with the latest earlier sample for the same engine a
 | `429`  | source rate limit reached                                                                                                                                                                                                   |
 
 Samples are kept for 13 months. Deleting the watch deletes its samples, and its citation source is removed within the hour.
+
+## 10. Sites without a backend
+
+A static page cannot hold the capture secret. Deploy the Cloudflare Worker in `examples/capture-worker/` and point the form's `action` at it. The Worker verifies Cloudflare Turnstile (the token's hostname must match `TURNSTILE_HOSTNAMES`, which defaults to the host of `ALLOWED_ORIGIN`), signs the canonical body with the secret stored as a Worker secret, and posts to `/api/intake/v1/submissions`. It sends `consent` only when the visitor ticked an explicit, unticked-by-default `marketing_email` box. Its README has the form markup, and its test proves the signature verifies with Trevra's own verifier.
+
+Hosted form builders are not a substitute. Tally signs its webhooks with its own `Tally-Signature` header (base64 HMAC of Tally's payload with a Tally-issued secret), and Formbricks uses [Standard Webhooks](https://formbricks.com/docs/platform/features/integrations/webhooks) (`webhook-signature: v1,<base64>` with a `whsec_` secret). Neither can sign `<timestamp>.<idempotency-key>.<raw body>` with a Trevra capture secret, and neither sends Trevra's canonical body, so neither can call this endpoint directly. To use one, put the Worker or another small server in between to verify the builder's own signature, map its fields and re-sign.

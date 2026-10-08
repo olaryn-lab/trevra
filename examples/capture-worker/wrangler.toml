@@ -1,0 +1,21 @@
+# Trevra lead capture for a site with no backend.
+# Replace every value under [vars] with your own, then add the two secrets:
+#   npx wrangler secret put TREVRA_CAPTURE_SECRET
+#   npx wrangler secret put TURNSTILE_SECRET_KEY
+name = "trevra-capture"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
+
+[vars]
+# Setup -> Lead capture shows this base URL in every recipe.
+TREVRA_API_BASE_URL = "https://trevra.example.com"
+# The source ID is not secret; the signing secret is.
+TREVRA_CAPTURE_SOURCE_ID = "cap_replace_me"
+# The one origin your form is served from, scheme included.
+ALLOWED_ORIGIN = "https://www.example.com"
+# Optional: hostnames a Turnstile token must be issued on, comma-separated.
+# When unset, the hostname of ALLOWED_ORIGIN is required.
+# TURNSTILE_HOSTNAMES = "www.example.com,example.com"
+SUBMISSION_KIND = "demo_request"
+# Uncomment to send visitors to a thank-you page instead of a JSON reply.
+# REDIRECT_URL = "https://www.example.com/thanks"
