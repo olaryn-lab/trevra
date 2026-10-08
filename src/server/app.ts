@@ -180,7 +180,8 @@ import {
   clearInboundMailbox,
   designateInboundMailbox,
   getEmailChannelStatus,
-  recheckEmailDeliverability
+  recheckEmailDeliverability,
+  setMailboxDkimSelector
 } from './email/channel.js';
 import { ConversationReplyError, prepareConversationEmailReply } from './conversation-replies.js';
 import { PrepareOutreachError, prepareOutreach } from './outreach/prepare.js';
@@ -4245,6 +4246,35 @@ export function createApp(db: Db) {
       next(error);
     }
   });
+
+  app.put(
+    '/api/email/dkim-selector',
+    ownerOnly('set the DKIM selector'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            connectionId: z.string().trim().min(1).max(200),
+            selector: z.string().max(300).nullable()
+          })
+          .strict()
+          .parse(req.body ?? {});
+        await setMailboxDkimSelector(db, {
+          workspaceId: req.auth!.workspaceId,
+          connectionId: input.connectionId,
+          selector: input.selector,
+          actorUserId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ channel: await getEmailChannelStatus(db, req.auth!.workspaceId) });
+      } catch (error) {
+        if (error instanceof EmailChannelError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        next(error);
+      }
+    }
+  );
 
   app.get('/api/research', async (req: AuthedRequest, res) => {
     res.json({

@@ -199,6 +199,48 @@ describe('email channel API', () => {
     expect(response.body.channel.mailboxes[0].deliverability.status).toBe('unknown');
   });
 
+  it('lets only the owner set the DKIM selector for a connected mailbox domain', async () => {
+    const { owner, connectionId } = await ownerWithMailbox();
+    const member = await signUp('email-dkim-member');
+    await betterAuth.api.addMember({
+      body: { userId: member.userId, organizationId: owner.auth.workspaceId, role: 'member' }
+    });
+    await member.agent
+      .post('/api/auth/organization/set-active')
+      .send({ organizationId: owner.auth.workspaceId })
+      .expect(200);
+    await member.agent
+      .put('/api/email/dkim-selector')
+      .send({ connectionId, selector: 'zmail' })
+      .expect(403);
+
+    const saved = await owner.agent
+      .put('/api/email/dkim-selector')
+      .send({ connectionId, selector: ' ZMail ' })
+      .expect(200);
+    expect(saved.headers['cache-control']).toBe('no-store');
+    expect(saved.body.channel.mailboxes[0].dkimSelector).toBe('zmail');
+
+    await owner.agent
+      .put('/api/email/dkim-selector')
+      .send({ connectionId, selector: 'zmail._domainkey' })
+      .expect(400);
+    await owner.agent
+      .put('/api/email/dkim-selector')
+      .send({ connectionId: 'conn_not_here', selector: 'zmail' })
+      .expect(404);
+    await owner.agent
+      .put('/api/email/dkim-selector')
+      .send({ connectionId, selector: 'zmail', extra: true })
+      .expect(400);
+
+    const cleared = await owner.agent
+      .put('/api/email/dkim-selector')
+      .send({ connectionId, selector: null })
+      .expect(200);
+    expect(cleared.body.channel.mailboxes[0].dkimSelector).toBeNull();
+  });
+
   describe('inbound sync closer', () => {
     function syncEvent(external: string, success: boolean, syncName = 'inbound-messages') {
       return JSON.stringify({

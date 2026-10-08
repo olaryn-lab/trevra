@@ -56,7 +56,13 @@ export interface EmailInboundMailboxState {
 
 export interface EmailChannelStatus {
   unsubscribe: { oneClick: boolean; mailto: boolean; detail: string };
-  mailboxes: Array<EmailChannelMailbox & { deliverability: StoredDeliverability | null }>;
+  mailboxes: Array<
+    EmailChannelMailbox & {
+      deliverability: StoredDeliverability | null;
+      /** The owner-set DKIM selector for this mailbox's sending domain. */
+      dkimSelector: string | null;
+    }
+  >;
   inbound: EmailInboundMailboxState | null;
 }
 

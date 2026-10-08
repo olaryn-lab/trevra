@@ -28,7 +28,8 @@ const MAILBOX: EmailChannelStatus['mailboxes'][number] = {
   providerKey: 'google',
   displayName: null,
   address: 'founder@acme.test',
-  deliverability: deliverability()
+  deliverability: deliverability(),
+  dkimSelector: null
 };
 
 function channel(overrides: Partial<EmailChannelStatus> = {}): EmailChannelStatus {

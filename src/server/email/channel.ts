@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { Db } from '../db.js';
 import { getNango } from '../integration-service.js';
 import { emailDomainOf, type DnsResolver } from './deliverability.js';
+import { dkimSelectorSchema, readDkimSelector, writeDkimSelector } from './dkim-selector.js';
 import { INBOUND_SYNC_FAILED_ERROR, INBOUND_SYNC_NAME } from './inbound-mailbox.js';
 import { listSendingMailboxes, resolveMailboxAddress } from './mailbox-address.js';
 import { getSenderDeliverability } from './sender-deliverability.js';
@@ -156,7 +157,8 @@ export async function getEmailChannelStatus(
         providerKey: mailbox.providerKey,
         displayName: mailbox.displayName,
         address,
-        deliverability
+        deliverability,
+        dkimSelector: domain ? await readDkimSelector(db, workspaceId, domain) : null
       };
     })
   );
@@ -357,5 +359,64 @@ export async function recheckEmailDeliverability(
         options
       );
     })
+  );
+}
+
+/**
+ * The owner names the DKIM selector their provider signs this mailbox's domain
+ * with. The domain comes from the provider-verified mailbox address, never
+ * from the request, so a selector can only be set for a domain this workspace
+ * sends from. Saving forces a fresh DNS check that tries the selector first.
+ */
+export async function setMailboxDkimSelector(
+  db: Db,
+  input: {
+    workspaceId: string;
+    connectionId: string;
+    selector: string | null;
+    actorUserId: string;
+  },
+  options: EmailChannelOptions = {}
+): Promise<void> {
+  const mailbox = (await listSendingMailboxes(db, input.workspaceId)).find(
+    (candidate) => candidate.connectionId === input.connectionId
+  );
+  if (!mailbox) {
+    throw new EmailChannelError(
+      'Connect this mailbox before setting the DKIM selector for its domain.',
+      404
+    );
+  }
+  let selector: string | null = null;
+  if (input.selector !== null && input.selector.trim() !== '') {
+    const parsed = dkimSelectorSchema.safeParse(input.selector);
+    if (!parsed.success) {
+      throw new EmailChannelError(
+        parsed.error.issues[0]?.message ?? 'That is not a DKIM selector.',
+        400
+      );
+    }
+    selector = parsed.data;
+  }
+  const address = await resolveMailboxAddress(db, input.workspaceId, mailbox, {
+    deadlineMs: options.deadlineMs
+  });
+  const domain = address ? emailDomainOf(address) : null;
+  if (!domain) {
+    throw new EmailChannelError(
+      'Trevra could not read the address of this mailbox, so it does not know which domain the selector is for. Reconnect it and try again.',
+      409
+    );
+  }
+  await writeDkimSelector(
+    db,
+    { workspaceId: input.workspaceId, domain, selector, actorUserId: input.actorUserId },
+    options.now
+  );
+  await getSenderDeliverability(
+    db,
+    input.workspaceId,
+    { domain, provider: mailbox.providerKey, force: true },
+    { resolver: options.resolver, now: options.now, deadlineMs: options.deadlineMs }
   );
 }

@@ -1,4 +1,5 @@
 import type { Db } from '../db.js';
+import { readDkimSelector } from './dkim-selector.js';
 import {
   defaultDnsResolver,
   evaluateDeliverability,
@@ -167,7 +168,7 @@ function sleepToNull(ms: number): { promise: Promise<null>; cancel: () => void }
 
 /** Evaluates within `deadlineMs`; past it, an unknown "rechecking" evaluation. */
 async function evaluateWithin(
-  input: { domain: string; provider: MailProvider },
+  input: { domain: string; provider: MailProvider; dkimSelector?: string | null },
   resolver: DnsResolver,
   deadlineMs: number
 ): Promise<{ evaluation: DeliverabilityEvaluation; timedOut: boolean }> {
@@ -299,8 +300,9 @@ export async function getSenderDeliverability(
     }
   }
   const requestDeadlineMs = options.deadlineMs ?? DELIVERABILITY_REQUEST_DEADLINE_MS;
+  const dkimSelector = await readDkimSelector(db, workspaceId, domain);
   const running = evaluateWithin(
-    { domain, provider: input.provider },
+    { domain, provider: input.provider, dkimSelector },
     options.resolver ?? defaultDnsResolver(),
     options.domainDeadlineMs ?? DELIVERABILITY_DOMAIN_DEADLINE_MS
   );
@@ -405,8 +407,9 @@ export async function refreshDueEmailDeliverability(
           if (sweepDeadline - Date.now() < domainDeadlineMs) break;
           const checkedAt = clock();
           try {
+            const dkimSelector = await readDkimSelector(db, row.workspace_id, row.domain);
             const { evaluation, timedOut } = await evaluateWithin(
-              { domain: row.domain, provider: row.provider },
+              { domain: row.domain, provider: row.provider, dkimSelector },
               resolver,
               domainDeadlineMs
             );
