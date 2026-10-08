@@ -70,8 +70,8 @@ export function EmailChannelSummary({
     <div className="email-channel">
       {channel.mailboxes.length === 0 ? (
         <p className="empty-copy">
-          Connect Gmail, Microsoft 365 or Zoho Mail under Connections to send outreach email and
-          read replies.
+          Connect Gmail, Microsoft 365 or Zoho Mail under Setup → Workspace to send outreach email
+          and read replies.
         </p>
       ) : (
         <ul className="email-channel-mailboxes">

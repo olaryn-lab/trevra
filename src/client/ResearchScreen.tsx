@@ -203,9 +203,9 @@ export function ResearchScreen({
             </h4>
             <p>
               {redditConnection?.status === 'needs_reauth'
-                ? 'Reddit rejected the current authorization. Go to Setup → Connections and reconnect it through Nango.'
+                ? 'Reddit rejected the current authorization. Go to Setup → Workspace and reconnect it through Nango.'
                 : redditConnection?.lastError ||
-                  'Go to Setup → Connections, connect Reddit through Nango, then return here to create sources.'}
+                  'Go to Setup → Workspace, connect Reddit through Nango, then return here to create sources.'}
             </p>
           </div>
         )}

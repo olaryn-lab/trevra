@@ -334,8 +334,11 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
               </p>
             )}
 
-            <div className="capture-actions">
-              {isOwner && (
+            {role === 'member' && (
+              <OwnerOnlyNote>create, disable or rotate capture sources</OwnerOnlyNote>
+            )}
+            {isOwner && (
+              <div className="capture-actions">
                 <button
                   className="secondary-button"
                   type="button"
@@ -349,8 +352,6 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
                   )}{' '}
                   {selected.status === 'active' ? 'Disable' : 'Enable'}
                 </button>
-              )}
-              {isOwner && (
                 <button
                   className="secondary-button"
                   type="button"
@@ -364,8 +365,8 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
                   )}{' '}
                   Rotate secret
                 </button>
-              )}
-            </div>
+              </div>
+            )}
 
             <details className="capture-recipes">
               <summary>Implementation recipe</summary>

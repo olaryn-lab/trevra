@@ -414,11 +414,13 @@
     grid-template-columns: 1fr;
   }
 
-  .capture-create-row .primary-button {
-    width: 100%;
-  }
-
   .capture-submission-card header {
     display: grid;
+  }
+}
+
+@media (max-width: 640px) {
+  .capture-create-row .primary-button {
+    width: 100%;
   }
 }

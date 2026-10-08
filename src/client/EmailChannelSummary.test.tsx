@@ -154,7 +154,7 @@ describe('EmailChannelSummary', () => {
   it('does not point at a position on the page when no mailbox is connected', () => {
     const markup = render(channel({ mailboxes: [] }));
     expect(markup).not.toContain('above');
-    expect(markup).toContain('under Connections');
+    expect(markup).toContain('under Setup → Workspace');
   });
 
   it('tells a workspace without a mailbox how to start and disables the DNS check', () => {

@@ -1143,8 +1143,7 @@ function PlanWork({
               objective === 'enrich_contacts' ? 'gtm-plan-form is-enrich-contacts' : 'gtm-plan-form'
             }
           >
-            <label>
-              Goal
+            <Field label="Goal">
               <Select
                 value={objective}
                 onChange={(event) => {
@@ -1158,7 +1157,7 @@ function PlanWork({
                   </option>
                 ))}
               </Select>
-            </label>
+            </Field>
 
             {objective === 'prepare_outreach' ? (
               <>
