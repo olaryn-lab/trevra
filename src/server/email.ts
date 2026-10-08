@@ -326,6 +326,7 @@ function humanProvider(provider: string): string {
   const key = provider.toLowerCase();
   if (['gmail', 'google-mail'].includes(key)) return 'Gmail';
   if (['microsoft', 'outlook'].includes(key)) return 'Microsoft 365';
+  if (key === 'zoho-mail') return 'Zoho Mail';
   if (key === 'hubspot') return 'HubSpot';
   if (key === 'attio') return 'Attio';
   if (key === 'reddit') return 'Reddit';

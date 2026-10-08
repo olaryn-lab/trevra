@@ -413,6 +413,7 @@ export async function getToday(
              AND CASE
                    WHEN c.provider IN ('gmail','google-mail') THEN 'google'
                    WHEN c.provider IN ('microsoft','outlook') THEN 'microsoft'
+                   WHEN c.provider='zoho-mail' THEN 'zoho'
                  END=d.provider
          )
        ORDER BY d.domain ASC,d.provider ASC LIMIT 10`

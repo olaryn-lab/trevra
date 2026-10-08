@@ -146,4 +146,50 @@ describe('conversation email reply preparation', () => {
       })
     ).rejects.toMatchObject({ status: 409 });
   });
+
+  it('refuses to prepare a reply through Zoho Mail, which cannot thread one', async () => {
+    const database = await openTestDb();
+    const person = await resolveContact(database, DEMO_WORKSPACE_ID, {
+      name: 'Zoho Thread',
+      email: 'zoho.thread@northwind.test'
+    });
+    const conversationId = id('conv');
+    const now = new Date().toISOString();
+    await database
+      .prepare(
+        `INSERT INTO conversations (id,workspace_id,person_id,last_activity_at,created_at,updated_at)
+         VALUES (?,?,?,?,?,?)`
+      )
+      .run(conversationId, DEMO_WORKSPACE_ID, person.contact.id, now, now, now);
+    await database
+      .prepare(
+        `INSERT INTO conversation_messages (
+          id,workspace_id,conversation_id,channel,provider,direction,subject,body,external_ref,
+          source_type,source_id,occurred_at,created_at
+        ) VALUES (?,?,?,'email','zoho-mail','inbound','Re: Hello','Friday works.','zoho-mail:1777',
+          'email_inbound','zoho-mail:1777',?,?)`
+      )
+      .run(id('cmsg'), DEMO_WORKSPACE_ID, conversationId, now, now);
+    const runsBefore = await database
+      .prepare('SELECT COUNT(*)::int AS total FROM playbook_runs WHERE workspace_id=?')
+      .get<{ total: number }>(DEMO_WORKSPACE_ID);
+
+    await expect(
+      prepareConversationEmailReply(database, {
+        workspaceId: DEMO_WORKSPACE_ID,
+        actorUserId: DEMO_USER_ID,
+        conversationId,
+        idempotencyKey: 'reply-idempotency-zoho-01',
+        subject: 'Re: Hello',
+        body: 'Great, Friday it is.'
+      })
+    ).rejects.toMatchObject({
+      status: 409,
+      message: expect.stringContaining('Zoho Mail')
+    });
+    const runsAfter = await database
+      .prepare('SELECT COUNT(*)::int AS total FROM playbook_runs WHERE workspace_id=?')
+      .get<{ total: number }>(DEMO_WORKSPACE_ID);
+    expect(runsAfter?.total).toBe(runsBefore?.total);
+  });
 });

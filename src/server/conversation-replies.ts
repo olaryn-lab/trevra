@@ -1,4 +1,5 @@
 import type { Db } from './db.js';
+import { mailProviderFor } from './email/deliverability.js';
 import { getPlaybookRun, startPlaybookRun } from './playbooks/engine.js';
 import type { PlaybookRun } from './playbooks/types.js';
 
@@ -166,6 +167,15 @@ export async function prepareConversationEmailReply(
   if (!thread) {
     throw new ConversationReplyError(
       'No provider-backed email thread is stored for this conversation, so Trevra will not pretend a new email is a reply.',
+      409
+    );
+  }
+  // Zoho Mail's send API takes no In-Reply-To or References, so Trevra cannot
+  // thread a reply there (src/server/email/zoho-mail.ts). Refuse rather than
+  // send a new email that pretends to be a reply.
+  if (mailProviderFor(thread.provider) === 'zoho') {
+    throw new ConversationReplyError(
+      'Trevra cannot send replies through Zoho Mail yet. Reply from Zoho Mail directly.',
       409
     );
   }

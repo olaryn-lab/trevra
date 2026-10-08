@@ -844,6 +844,24 @@ describe('getToday', () => {
     expect(items[0]?.metadata).toEqual(expect.objectContaining({ provider: 'microsoft' }));
   });
 
+  it('matches a Zoho Mail mailbox to a failing zoho check', async () => {
+    await seedMailbox({ provider: 'zoho-mail' });
+    await seedCheck('fail', '2026-08-21T07:30:00.000Z', WORKSPACE, 'google');
+    expect(
+      (await getToday(db, WORKSPACE, NOW)).needsAttention.filter(
+        (item) => item.kind === 'deliverability_blocked'
+      )
+    ).toEqual([]);
+
+    await db.prepare('DELETE FROM email_deliverability_checks WHERE workspace_id=?').run(WORKSPACE);
+    await seedCheck('fail', '2026-08-21T07:30:00.000Z', WORKSPACE, 'zoho');
+    const items = (await getToday(db, WORKSPACE, NOW)).needsAttention.filter(
+      (item) => item.kind === 'deliverability_blocked'
+    );
+    expect(items).toHaveLength(1);
+    expect(items[0]?.metadata).toEqual(expect.objectContaining({ provider: 'zoho' }));
+  });
+
   it('stays quiet about domains nobody is about to send from', async () => {
     await seedMailbox();
     await seedCheck('fail', null);
