@@ -1,4 +1,6 @@
 import { id, type Db } from './db.js';
+import { mailProviderFor } from './email/deliverability.js';
+import { ZOHO_OUTREACH_DAILY_CAP } from './email/zoho-mail.js';
 
 export type EmailDeliveryStatus = 'sending' | 'sent' | 'failed' | 'uncertain';
 export type EmailDeliveryPurpose = 'outreach' | 'reply' | 'other';
@@ -185,40 +187,83 @@ export class EmailDeliveryCapacityError extends Error {
   readonly status = 429;
 }
 
+/** Cold outreach has a safety ceiling even before the operator customizes a mailbox. */
+export const DEFAULT_OUTREACH_DAILY_CAP = 50;
+
+/**
+ * Outreach emails this mailbox may send in a rolling 24 hours: the operator's
+ * per-mailbox daily_limit (1-500, default 50), and never more than the
+ * provider's own ceiling (Zoho Mail: ZOHO_OUTREACH_DAILY_CAP).
+ */
+export async function outreachDailyCap(
+  db: Db,
+  input: { workspaceId: string; connectionId: string | null }
+): Promise<number> {
+  if (!input.connectionId) return DEFAULT_OUTREACH_DAILY_CAP;
+  const setting = await db
+    .prepare(
+      `SELECT daily_limit FROM linkedin_campaign_mailbox_settings
+       WHERE workspace_id=? AND connection_id=?`
+    )
+    .get<{ daily_limit: number }>(input.workspaceId, input.connectionId);
+  const cap = Math.max(
+    1,
+    Math.min(500, Number(setting?.daily_limit ?? DEFAULT_OUTREACH_DAILY_CAP))
+  );
+  const connection = await db
+    .prepare('SELECT provider FROM connections WHERE workspace_id=? AND id=?')
+    .get<{ provider: string }>(input.workspaceId, input.connectionId);
+  return connection && mailProviderFor(connection.provider) === 'zoho'
+    ? Math.min(cap, ZOHO_OUTREACH_DAILY_CAP)
+    : cap;
+}
+
+/**
+ * Outreach emails this mailbox has used in the 24 hours before `now`: confirmed
+ * sends, plus claims still in flight or uncertain (the provider may have taken
+ * them), so concurrent claims cannot overshoot the cap. `excludeDeliveryId`
+ * omits the caller's own already-claimed row.
+ */
+export async function sentOutreachInLastDay(
+  db: Db,
+  input: { workspaceId: string; connectionId: string | null; excludeDeliveryId?: string },
+  now = new Date()
+): Promise<number> {
+  const since = new Date(now.getTime() - 86_400_000).toISOString();
+  const used = await db
+    .prepare(
+      `SELECT COUNT(*)::int AS total FROM gtm_deliveries
+       WHERE workspace_id=? AND purpose='outreach'
+         AND connection_id IS NOT DISTINCT FROM ?
+         AND (?::text IS NULL OR id<>?)
+         AND ((status='sent' AND sent_at>=?::timestamptz)
+           OR (status IN ('sending','uncertain') AND started_at>=?::timestamptz))`
+    )
+    .get<{ total: number }>(
+      input.workspaceId,
+      input.connectionId,
+      input.excludeDeliveryId ?? null,
+      input.excludeDeliveryId ?? null,
+      since,
+      since
+    );
+  return Number(used?.total ?? 0);
+}
+
 export async function assertEmailDeliveryCapacity(
   db: Db,
   input: {
     workspaceId: string;
     connectionId: string | null;
     purpose: EmailDeliveryPurpose;
+    excludeDeliveryId?: string;
   },
   now = new Date()
 ): Promise<void> {
+  // Conversation replies declare purpose='reply' and never consume the cap.
   if (input.purpose !== 'outreach') return;
-  const setting = input.connectionId
-    ? await db
-        .prepare(
-          `SELECT daily_limit FROM linkedin_campaign_mailbox_settings
-           WHERE workspace_id=? AND connection_id=?`
-        )
-        .get<{ daily_limit: number }>(input.workspaceId, input.connectionId)
-    : undefined;
-  // Cold outreach has a safety ceiling even before the operator customizes a
-  // mailbox. Conversation replies declare purpose='reply' and never consume it.
-  const cap = Math.max(1, Math.min(500, Number(setting?.daily_limit ?? 50)));
-  const used = await db
-    .prepare(
-      `SELECT COUNT(*)::int AS total FROM gtm_deliveries
-       WHERE workspace_id=? AND purpose='outreach' AND status='sent'
-         AND connection_id IS NOT DISTINCT FROM ?
-         AND sent_at>=?::timestamptz`
-    )
-    .get<{ total: number }>(
-      input.workspaceId,
-      input.connectionId,
-      new Date(now.getTime() - 86_400_000).toISOString()
-    );
-  if (Number(used?.total ?? 0) >= cap) {
+  const cap = await outreachDailyCap(db, input);
+  if ((await sentOutreachInLastDay(db, input, now)) >= cap) {
     throw new EmailDeliveryCapacityError(
       `Outbound email daily cap reached for this mailbox (${cap}); no provider call was attempted.`
     );

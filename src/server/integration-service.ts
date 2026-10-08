@@ -780,7 +780,8 @@ export async function executeConnectedAction(
     await assertEmailDeliveryCapacity(db, {
       workspaceId,
       connectionId: localConnectionId,
-      purpose
+      purpose,
+      excludeDeliveryId: deliveryId
     });
   } catch (error) {
     await markEmailDeliveryFailure(db, deliveryId, error);
