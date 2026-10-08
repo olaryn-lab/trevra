@@ -68,7 +68,7 @@ describe('inbound-messages sync helpers', () => {
 
   it('has a sync file per integration that uses the shared constants and model', () => {
     const root = new URL('../../../nango-integrations/', import.meta.url);
-    for (const integration of ['trevra-gmail', 'trevra-microsoft']) {
+    for (const integration of ['trevra-gmail', 'trevra-microsoft', 'trevra-zoho-mail']) {
       const source = readFileSync(
         new URL(`${integration}/syncs/${INBOUND_SYNC_NAME}.ts`, root),
         'utf8'
