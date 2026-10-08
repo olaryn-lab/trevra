@@ -109,6 +109,7 @@ describe('email-only prepare_outreach plans', () => {
       leadListId: listId,
       connectionId: CONNECTION,
       senderAddress: 'founder@acme.test',
+      unsubscribeMode: 'list_unsubscribe_headers',
       recipientCount: 2,
       warnings: [],
       prepareSupported: true

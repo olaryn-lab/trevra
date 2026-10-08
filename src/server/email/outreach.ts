@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ensureConversationForPerson } from '../conversations.js';
 import type { Db } from '../db.js';
+import { outreachDailyCap, sentOutreachInLastDay } from '../email-deliveries.js';
 import { LEAD_CONTACT_READ_LIMIT } from '../linkedin/lead-lists.js';
 import { startPlaybookRun } from '../playbooks/engine.js';
 import { findSuppression } from '../suppressions.js';
@@ -18,6 +19,7 @@ import type {
 } from './types.js';
 import { unsubscribeConfigured } from './unsubscribe.js';
 import { footerForUnsubscribeMode, outreachUnsubscribeModeFor } from './unsubscribe-policy.js';
+import { ZOHO_OUTREACH_DAILY_CAP } from './zoho-mail.js';
 
 export interface EmailOutreachOptions {
   resolver?: DnsResolver;
@@ -29,6 +31,7 @@ export interface EmailOutreachSender {
   connectionId: string;
   address: string;
   provider: MailProvider;
+  unsubscribeMode: OutreachUnsubscribeMode;
 }
 
 export interface EmailOutreachReadiness {
@@ -94,7 +97,11 @@ export async function emailOutreachReadiness(
     }
   }
 
-  if (!unsubscribeConfigured(env)) {
+  const mailboxes = await listSendingMailboxes(db, workspaceId);
+  // Zoho Mail outreach carries no List-Unsubscribe header (unsubscribe-policy.ts),
+  // so a deployment without the one-click origin can still send from it.
+  const onlyZoho = mailboxes.length === 1 && mailboxes[0]!.providerKey === 'zoho';
+  if (!onlyZoho && !unsubscribeConfigured(env)) {
     blockers.push({
       code: 'email_unsubscribe_unavailable',
       message:
@@ -103,12 +110,12 @@ export async function emailOutreachReadiness(
     });
   }
 
-  const mailboxes = await listSendingMailboxes(db, workspaceId);
   let sender: EmailOutreachSender | null = null;
   if (mailboxes.length === 0) {
     blockers.push({
       code: 'email_sender_missing',
-      message: 'Connect the Gmail or Microsoft 365 mailbox you want to send outreach from.',
+      message:
+        'Connect the Gmail, Microsoft 365 or Zoho Mail mailbox you want to send outreach from.',
       actionHref: SETUP_HREF
     });
   } else if (mailboxes.length > 1) {
@@ -131,7 +138,12 @@ export async function emailOutreachReadiness(
         actionHref: SETUP_HREF
       });
     } else {
-      sender = { connectionId: mailbox.connectionId, address, provider: mailbox.providerKey };
+      sender = {
+        connectionId: mailbox.connectionId,
+        address,
+        provider: mailbox.providerKey,
+        unsubscribeMode: outreachUnsubscribeModeFor(mailbox.providerKey)
+      };
       const deliverability = await getSenderDeliverability(
         db,
         workspaceId,
@@ -161,6 +173,20 @@ export async function emailOutreachReadiness(
         });
       }
       warnings.push(...deliverability.warnings);
+      if (mailbox.providerKey === 'zoho') {
+        warnings.push(
+          {
+            code: 'email_reply_only_unsubscribe',
+            message: `Zoho Mail cannot add a one-click unsubscribe link. Each email from ${address} ends with your footer asking the recipient to reply "unsubscribe", and such a reply stops all email to them.`,
+            actionHref: SETUP_HREF
+          },
+          {
+            code: 'email_zoho_daily_cap',
+            message: `Zoho Mail sends at most ${ZOHO_OUTREACH_DAILY_CAP} outreach emails a day from ${address}. People beyond that are skipped; prepare them again the next day.`,
+            actionHref: SETUP_HREF
+          }
+        );
+      }
 
       const inbound = await db
         .prepare(
@@ -440,6 +466,29 @@ export async function prepareEmailOutreach(
     );
   }
 
+  // Zoho Mail: prepare no more than today's remaining sends for this mailbox.
+  // Approvals still waiting on this connection count as spent, so two
+  // preparations on one day cannot together pass the cap. A race between two
+  // concurrent preparations is still stopped at send time by
+  // assertEmailDeliveryCapacity.
+  let remaining = Number.POSITIVE_INFINITY;
+  if (providerKey === 'zoho') {
+    const mailbox = { workspaceId: input.workspaceId, connectionId: input.connectionId };
+    const waiting = await db
+      .prepare(
+        `SELECT COUNT(*)::int AS total FROM playbook_runs
+           WHERE workspace_id=? AND playbook_key=? AND status IN ('queued','running','waiting_approval')
+             AND input_json->>'connectionId'=?`
+      )
+      .get<{ total: number }>(input.workspaceId, EMAIL_OUTREACH_PLAYBOOK_ID, input.connectionId);
+    remaining = Math.max(
+      0,
+      (await outreachDailyCap(db, mailbox)) -
+        (await sentOutreachInLastDay(db, mailbox, now)) -
+        Number(waiting?.total ?? 0)
+    );
+  }
+
   const rows = await db
     .prepare(
       `SELECT lc.id AS contact_id,lc.person_id,lc.do_not_contact,lc.first_name,lc.company,
@@ -526,6 +575,10 @@ export async function prepareEmailOutreach(
       skip(member.contact_id, 'already_pending');
       continue;
     }
+    if (remaining <= 0) {
+      skip(member.contact_id, 'daily_cap');
+      continue;
+    }
 
     const email = firstTouchEmail({ firstName: member.first_name, company: member.company });
     const conversationId = await ensureConversationForPerson(db, input.workspaceId, personId, now);
@@ -544,6 +597,7 @@ export async function prepareEmailOutreach(
       continue;
     }
     const runId = started.runId;
+    remaining -= 1;
     prepared.push({ contactId: member.contact_id, personId, runId });
     openRuns.set(personId, { id: runId, person_id: personId, idempotency_key: runKey });
     batchRecipients.add(recipient);

@@ -76,7 +76,8 @@ export type EmailOutreachSkipReason =
   | 'do_not_contact'
   | 'suppressed'
   | 'already_pending'
-  | 'already_contacted';
+  | 'already_contacted'
+  | 'daily_cap';
 
 export interface PreparedEmailOutreachResult {
   prepared: Array<{ contactId: string; personId: string; runId: string }>;

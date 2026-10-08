@@ -18,6 +18,8 @@ import {
   prepareEmailOutreach
 } from '../email/outreach.js';
 import type { PreparedEmailOutreachResult } from '../email/types.js';
+import { footerForUnsubscribeMode } from '../email/unsubscribe-policy.js';
+import { ZOHO_OUTREACH_DAILY_CAP } from '../email/zoho-mail.js';
 import {
   DEFAULT_LINKEDIN_OUTREACH_WORKFLOW_NAME,
   prepareOutreach,
@@ -588,6 +590,20 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
   );
   if (!footer && !footerNamed) compliance.push(emailComplianceFooterUnavailable());
   blockers.push(...compliance);
+  // Zoho outreach swaps the footer's opt-out sentence for reply-to-unsubscribe;
+  // without exactly one such sentence preparing would refuse.
+  if (
+    footer &&
+    readiness.sender?.unsubscribeMode === 'footer_and_reply' &&
+    !footerForUnsubscribeMode(footer, 'footer_and_reply')
+  ) {
+    blockers.push({
+      code: 'email_opt_out_line_missing',
+      message:
+        'Your compliance footer needs its opt-out line exactly once so Trevra can turn it into "reply unsubscribe" for Zoho Mail. Complete sender compliance in Workspace settings.',
+      actionHref: '/setup/workspace'
+    });
+  }
   const sender = readiness.sender;
   const listLabel = readiness.listName ?? 'the selected People list';
   return finalizePlan({
@@ -610,7 +626,7 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
         title: 'Sender',
         detail: sender
           ? `Send from ${sender.address}. SPF, DKIM and DMARC for its domain must pass.`
-          : 'Connect exactly one Gmail or Microsoft 365 mailbox to send from.',
+          : 'Connect exactly one Gmail, Microsoft 365 or Zoho Mail mailbox to send from.',
         externalEffect: false
       },
       {
@@ -624,7 +640,9 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
         kind: 'send',
         title: 'Send after approval',
         detail:
-          'Each approved email leaves from the approved mailbox with a one-click unsubscribe link.',
+          sender?.unsubscribeMode === 'footer_and_reply'
+            ? `Each approved email leaves from ${sender.address} through Zoho Mail, at most ${ZOHO_OUTREACH_DAILY_CAP} a day, and ends with your footer asking the recipient to reply "unsubscribe" to opt out.`
+            : 'Each approved email leaves from the approved mailbox with a one-click unsubscribe link.',
         externalEffect: true
       }
     ],
@@ -634,6 +652,7 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
       leadListId: existingListId,
       connectionId: sender?.connectionId ?? null,
       senderAddress: sender?.address ?? null,
+      unsubscribeMode: sender?.unsubscribeMode ?? null,
       recipientCount: readiness.recipientCount,
       warnings: readiness.warnings,
       prepareSupported: blockers.length === 0 && Boolean(existingListId && sender)
