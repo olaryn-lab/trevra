@@ -66,16 +66,25 @@ CREATE INDEX IF NOT EXISTS enrichment_usage_ledger_run_idx
 CREATE INDEX IF NOT EXISTS enrichment_usage_ledger_occurred_idx
   ON enrichment_usage_ledger(occurred_at);
 
+-- Composite targets so child rows cannot reference another workspace's rows.
+CREATE UNIQUE INDEX IF NOT EXISTS brand_watches_workspace_id_idx
+  ON brand_watches(workspace_id, id);
+CREATE UNIQUE INDEX IF NOT EXISTS brand_watch_mentions_workspace_id_idx
+  ON brand_watch_mentions(workspace_id, id);
+
 -- One signed AI-answer citation source per brand watch. The capture source is
 -- an ordinary capture_sources row of kind 'ai_citations', so it reuses the
 -- sealed secret, rotation and disable machinery unchanged.
 CREATE TABLE IF NOT EXISTS brand_watch_citation_sources (
-  watch_id TEXT PRIMARY KEY REFERENCES brand_watches(id) ON DELETE CASCADE,
+  watch_id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   capture_source_id TEXT NOT NULL UNIQUE,
   owned_domains TEXT[] NOT NULL CHECK (cardinality(owned_domains) BETWEEN 1 AND 20),
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE (watch_id, capture_source_id),
+  FOREIGN KEY (workspace_id, watch_id)
+    REFERENCES brand_watches(workspace_id, id) ON DELETE CASCADE,
   FOREIGN KEY (workspace_id, capture_source_id)
     REFERENCES capture_sources(workspace_id, id) ON DELETE CASCADE
 );
@@ -86,7 +95,7 @@ CREATE TABLE IF NOT EXISTS brand_watch_citation_sources (
 CREATE TABLE IF NOT EXISTS ai_citation_samples (
   id TEXT PRIMARY KEY,
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-  watch_id TEXT NOT NULL REFERENCES brand_watches(id) ON DELETE CASCADE,
+  watch_id TEXT NOT NULL,
   capture_source_id TEXT NOT NULL,
   idempotency_key TEXT NOT NULL,
   payload_hash TEXT NOT NULL,
@@ -96,10 +105,16 @@ CREATE TABLE IF NOT EXISTS ai_citation_samples (
   answered_at TIMESTAMPTZ NOT NULL,
   brand_cited BOOLEAN NOT NULL,
   change TEXT NOT NULL CHECK (change IN ('gained', 'lost', 'kept', 'absent', 'stale')),
-  mention_id TEXT REFERENCES brand_watch_mentions(id) ON DELETE SET NULL,
+  mention_id TEXT,
   received_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   UNIQUE (capture_source_id, idempotency_key),
   UNIQUE (watch_id, sample_id),
+  FOREIGN KEY (workspace_id, watch_id)
+    REFERENCES brand_watches(workspace_id, id) ON DELETE CASCADE,
+  FOREIGN KEY (watch_id, capture_source_id)
+    REFERENCES brand_watch_citation_sources(watch_id, capture_source_id) ON DELETE CASCADE,
+  FOREIGN KEY (workspace_id, mention_id)
+    REFERENCES brand_watch_mentions(workspace_id, id) ON DELETE SET NULL (mention_id),
   FOREIGN KEY (workspace_id, capture_source_id)
     REFERENCES capture_sources(workspace_id, id) ON DELETE CASCADE
 );

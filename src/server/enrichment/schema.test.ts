@@ -139,4 +139,107 @@ describe('phase F schema', () => {
         .run('bw_schema_2', WORKSPACE, 'cap_schema_other', ['trevra.com'])
     ).rejects.toThrow();
   });
+
+  async function seedLinked(watchId: string, sourceId: string): Promise<void> {
+    await seedWatch(WORKSPACE, watchId);
+    await seedSource(WORKSPACE, sourceId);
+    await db
+      .prepare(
+        'INSERT INTO brand_watch_citation_sources (watch_id,workspace_id,capture_source_id,owned_domains) VALUES (?,?,?,?)'
+      )
+      .run(watchId, WORKSPACE, sourceId, ['trevra.com']);
+  }
+
+  const insertSample = (watchId: string, sourceId: string, mentionId: string | null = null) =>
+    db
+      .prepare(
+        `INSERT INTO ai_citation_samples
+           (id,workspace_id,watch_id,capture_source_id,idempotency_key,payload_hash,sample_id,engine,prompt_ref,answered_at,brand_cited,change,mention_id)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      )
+      .run(
+        `acs_${watchId}`,
+        WORKSPACE,
+        watchId,
+        sourceId,
+        `k-${watchId}`,
+        'b'.repeat(64),
+        `s-${watchId}`,
+        'chatgpt',
+        'id:pricing',
+        NOW,
+        true,
+        'gained',
+        mentionId
+      );
+
+  it('refuses a citation link whose watch belongs to another workspace', async () => {
+    await seedWatch(OTHER, 'bw_schema_foreign');
+    await seedSource(WORKSPACE, 'cap_schema_3');
+    await expect(
+      db
+        .prepare(
+          'INSERT INTO brand_watch_citation_sources (watch_id,workspace_id,capture_source_id,owned_domains) VALUES (?,?,?,?)'
+        )
+        .run('bw_schema_foreign', WORKSPACE, 'cap_schema_3', ['trevra.com'])
+    ).rejects.toThrow();
+  });
+
+  it('refuses a sample whose source is not its watch linked source', async () => {
+    await seedLinked('bw_schema_4', 'cap_schema_4');
+    await seedSource(WORKSPACE, 'cap_schema_4b');
+    await expect(insertSample('bw_schema_4', 'cap_schema_4b')).rejects.toThrow();
+  });
+
+  it('deleting a mention nulls the sample mention_id and keeps the workspace', async () => {
+    await seedLinked('bw_schema_5', 'cap_schema_5');
+    await db
+      .prepare(
+        `INSERT INTO brand_watch_mentions
+           (id,workspace_id,watch_id,platform,external_id,url,sentiment_label,sentiment_score,sentiment_version,content_hash,first_seen_at,last_seen_at)
+         VALUES (?,?,?,?,?,?,'neutral',0,1,?,?,?)`
+      )
+      .run(
+        'bwm_schema_5',
+        WORKSPACE,
+        'bw_schema_5',
+        'ai_answer',
+        'x1',
+        'https://trevra.com',
+        'h',
+        NOW,
+        NOW
+      );
+    await insertSample('bw_schema_5', 'cap_schema_5', 'bwm_schema_5');
+    await db.prepare('DELETE FROM brand_watch_mentions WHERE id=?').run('bwm_schema_5');
+    const row = await db
+      .prepare('SELECT workspace_id, mention_id FROM ai_citation_samples WHERE id=?')
+      .get<{ workspace_id: string; mention_id: string | null }>('acs_bw_schema_5');
+    expect(row).toEqual({ workspace_id: WORKSPACE, mention_id: null });
+  });
+
+  it('round-trips half credits in the ledger', async () => {
+    await db
+      .prepare(
+        `INSERT INTO enrichment_usage_ledger (id,workspace_id,run_id,provider,operation,credits)
+         VALUES (?,?,?,'hunter','email_verifier',?)`
+      )
+      .run('eul_1', WORKSPACE, 'enr_x', 0.5);
+    const row = await db
+      .prepare('SELECT credits FROM enrichment_usage_ledger WHERE id=?')
+      .get<{ credits: number }>('eul_1');
+    expect(Number(row?.credits)).toBe(0.5);
+  });
+
+  it('rejects a run with zero estimated credits', async () => {
+    await expect(
+      db
+        .prepare(
+          `INSERT INTO enrichment_runs
+             (id,workspace_id,provider,idempotency_key,plan_hash,domains,emails_per_domain,estimated_credits)
+           VALUES (?,?,'hunter',?,?,?,?,?)`
+        )
+        .run('enr_zero', WORKSPACE, 'k-zero', 'a'.repeat(64), ['acme.com'], 3, 0)
+    ).rejects.toThrow();
+  });
 });
