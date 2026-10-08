@@ -241,6 +241,8 @@ export interface ExplicitAccountResult {
   accountId: string;
   created: boolean;
   linked: boolean;
+  /** Enrichment only: an existing inferred link was upgraded to verified. */
+  upgraded: boolean;
 }
 
 export async function resolveExplicitAccount(
@@ -276,6 +278,45 @@ export async function resolveExplicitAccount(
   }
 
   const at = now.toISOString();
+  const values = [
+    id('acp'),
+    workspaceId,
+    row.id,
+    contactId,
+    input.role?.trim() || null,
+    input.source ?? 'capture',
+    input.confidence ?? 'explicit',
+    input.sourceDetail?.trim() || null,
+    at,
+    at
+  ];
+  if (input.source === 'enrichment') {
+    // Enrichment only: a later verified result upgrades an inferred link (and
+    // its provenance); an inferred result never downgrades a verified link, and
+    // an explicit link is never touched. Capture, import, manual and Stripe
+    // links keep first-write-wins below.
+    const written = await db
+      .prepare(
+        `
+        INSERT INTO account_contacts (
+          id,workspace_id,account_id,contact_id,role,source,confidence,source_detail,created_at,updated_at
+        ) VALUES (?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT (workspace_id,account_id,contact_id) DO UPDATE SET
+          confidence=excluded.confidence,
+          source_detail=excluded.source_detail,
+          updated_at=excluded.updated_at
+        WHERE account_contacts.confidence='inferred' AND excluded.confidence='verified'
+        RETURNING (xmax = 0) AS inserted
+      `
+      )
+      .get<{ inserted: boolean }>(...values);
+    return {
+      accountId: row.id,
+      created,
+      linked: written?.inserted === true,
+      upgraded: written?.inserted === false
+    };
+  }
   const inserted = await db
     .prepare(
       `
@@ -285,28 +326,51 @@ export async function resolveExplicitAccount(
       ON CONFLICT (workspace_id,account_id,contact_id) DO NOTHING
     `
     )
-    .run(
-      id('acp'),
-      workspaceId,
-      row.id,
-      contactId,
-      input.role?.trim() || null,
-      input.source ?? 'capture',
-      input.confidence ?? 'explicit',
-      input.sourceDetail?.trim() || null,
-      at,
-      at
-    );
-  return { accountId: row.id, created, linked: inserted.changes > 0 };
+    .run(...values);
+  return { accountId: row.id, created, linked: inserted.changes > 0, upgraded: false };
+}
+
+export type AccountLinkConfidence = 'explicit' | 'verified' | 'inferred';
+
+export interface ListedContact extends ContactRecord {
+  /**
+   * The strongest Account link (explicit > verified > inferred) and where it
+   * came from: the enrichment provider ('hunter') or the link source
+   * ('capture', 'import', 'manual'). Null when the Person is on no Account.
+   */
+  accountLink: { confidence: AccountLinkConfidence; source: string } | null;
 }
 
 export async function listContacts(
   db: Db,
   workspaceId: string,
   limit = 100
-): Promise<ContactRecord[]> {
+): Promise<ListedContact[]> {
   const rows = await db
-    .prepare('SELECT * FROM contacts WHERE workspace_id=? ORDER BY created_at DESC LIMIT ?')
+    .prepare(
+      `SELECT c.*, link.confidence AS link_confidence, link.source AS link_source
+       FROM contacts c
+       LEFT JOIN LATERAL (
+         SELECT ac.confidence,
+                CASE WHEN ac.source='enrichment'
+                  THEN COALESCE(NULLIF(split_part(ac.source_detail, ' ', 1), ''), ac.source)
+                  ELSE ac.source END AS source
+         FROM account_contacts ac
+         WHERE ac.workspace_id=c.workspace_id AND ac.contact_id=c.id
+         ORDER BY CASE ac.confidence WHEN 'explicit' THEN 3 WHEN 'verified' THEN 2 ELSE 1 END DESC,
+                  ac.updated_at DESC
+         LIMIT 1
+       ) link ON TRUE
+       WHERE c.workspace_id=? ORDER BY c.created_at DESC LIMIT ?`
+    )
     .all<Record<string, unknown>>(workspaceId, Math.max(1, Math.min(limit, 500)));
-  return rows.map(toContact);
+  return rows.map((row) => ({
+    ...toContact(row),
+    accountLink: row.link_confidence
+      ? {
+          confidence: String(row.link_confidence) as AccountLinkConfidence,
+          source: String(row.link_source)
+        }
+      : null
+  }));
 }

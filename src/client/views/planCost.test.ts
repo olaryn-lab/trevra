@@ -1,11 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import type { EnrichmentSettings, GtmPlanCost } from '../api';
+import type { EnrichmentRunView, EnrichmentSettings, GtmPlanCost } from '../api';
 import {
   approveLabel,
   formatCredits,
+  inferredContactTitle,
   keyStatusLine,
   parseCreditCap,
+  personOptionLabel,
   planCostLines,
+  runCompaniesLine,
+  runContactsLine,
+  runCreditsLine,
+  runStatusLabel,
   usageLine
 } from './planCost';
 
@@ -96,5 +102,54 @@ describe('plan cost copy', () => {
         }
       )
     ).toBe('Enrichment is off until you set a monthly credit cap.');
+  });
+
+  it('describes a run in companies, contacts saved and credits', () => {
+    const run: EnrichmentRunView = {
+      id: 'enr_1',
+      status: 'failed',
+      error: "Stopped at this month's Hunter credit cap.",
+      domainsDone: 2,
+      domainCount: 3,
+      contactsSaved: 4,
+      creditsSpent: 5.5,
+      estimatedCredits: 9,
+      createdAt: '2026-10-06T09:00:00.000Z',
+      finishedAt: '2026-10-06T09:05:00.000Z'
+    };
+    expect(runStatusLabel('queued')).toBe('Queued');
+    expect(runStatusLabel('running')).toBe('Running');
+    expect(runStatusLabel('completed')).toBe('Completed');
+    expect(runStatusLabel('failed')).toBe('Failed');
+    expect(runCompaniesLine(run)).toBe('2 of 3 companies');
+    expect(runCompaniesLine({ ...run, domainsDone: 0, domainCount: 1 })).toBe('0 of 1 company');
+    expect(runContactsLine(run)).toBe('4 contacts saved');
+    expect(runContactsLine({ ...run, contactsSaved: 1 })).toBe('1 contact saved');
+    expect(runCreditsLine(run)).toBe('5.5 of 9 credits');
+    expect(runCreditsLine({ ...run, creditsSpent: 0, estimatedCredits: 1 })).toBe('0 of 1 credit');
+  });
+
+  it('labels inferred contacts wherever the people list is shown', () => {
+    const person = { id: 'con_1', name: 'Maya Chen', email: 'maya@acme.com', accountLink: null };
+    expect(personOptionLabel(person)).toBe('Maya Chen');
+    expect(inferredContactTitle(person)).toBeNull();
+    const inferred = {
+      ...person,
+      accountLink: { confidence: 'inferred' as const, source: 'hunter' }
+    };
+    expect(personOptionLabel(inferred)).toBe('Maya Chen · Inferred');
+    expect(inferredContactTitle(inferred)).toBe(
+      'Inferred: Hunter could not verify this address. Check it before you rely on it.'
+    );
+    expect(
+      personOptionLabel({
+        ...person,
+        name: null,
+        accountLink: { confidence: 'verified', source: 'hunter' }
+      })
+    ).toBe('maya@acme.com');
+    expect(personOptionLabel({ id: 'con_2', name: null, email: null, accountLink: null })).toBe(
+      'con_2'
+    );
   });
 });

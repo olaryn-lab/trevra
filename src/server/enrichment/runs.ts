@@ -10,6 +10,7 @@ import {
   HUNTER_CREDIT_PRICE,
   roundCredits,
   type ContactEnrichmentProvider,
+  type DomainSearchResult,
   type EnrichmentProviderId
 } from './provider.js';
 import {
@@ -99,6 +100,8 @@ interface RunProgress {
   doneDomains: number;
   saved: number;
   skipped: number;
+  /** Companies Hunter refused to search (a 400 for that domain); uncharged, not retried. */
+  skippedDomains?: number;
   pending?: PendingDomain;
 }
 
@@ -127,9 +130,41 @@ class KeyChanged extends Error {
   }
 }
 
-const BUDGET_MESSAGES: Record<BudgetReached['reason'], string> = {
+/**
+ * Every `last_error` the runner writes, keyed by what happened. Fixed,
+ * plain-language strings only: never a provider message, response body or key.
+ * The runs list shows a stored error only when it is one of these
+ * (enrichmentRunErrorMessage).
+ */
+export const RUN_ERROR_MESSAGES = {
   estimate_reached: 'Stopped before exceeding the approved credit estimate.',
-  cap_reached: "Stopped at this month's Hunter credit cap."
+  cap_reached: "Stopped at this month's Hunter credit cap.",
+  key_removed: 'The Hunter key was removed before this run finished.',
+  key_replaced: 'The Hunter key was replaced before this run finished. Re-plan to use the new key.',
+  key_invalid: 'Hunter rejected the saved key. Replace it and re-plan.',
+  quota_exhausted: 'The Hunter account has no credits left this period.',
+  rejected: 'Hunter refused a request this run needed. Re-plan to try again.',
+  attempts_exhausted: `Stopped after ${MAX_ATTEMPTS} attempts.`,
+  rate_limited: 'Paused by a Hunter rate limit; it resumes automatically.',
+  unavailable: 'Paused because Hunter could not be reached; it resumes automatically.',
+  drained: 'Paused while the worker restarted; it resumes automatically.',
+  unexpected: 'Unexpected error; the run will be retried.'
+} as const;
+
+/** Shown for a stored error that is not one of RUN_ERROR_MESSAGES. */
+export const UNKNOWN_RUN_ERROR = 'The run stopped on an unexpected error.';
+
+const KNOWN_RUN_ERRORS: ReadonlySet<string> = new Set(Object.values(RUN_ERROR_MESSAGES));
+
+/** The one mapping from a run's stored `last_error` to what a person is shown. */
+export function enrichmentRunErrorMessage(lastError: string | null): string | null {
+  if (!lastError) return null;
+  return KNOWN_RUN_ERRORS.has(lastError) ? lastError : UNKNOWN_RUN_ERROR;
+}
+
+const BUDGET_MESSAGES: Record<BudgetReached['reason'], string> = {
+  estimate_reached: RUN_ERROR_MESSAGES.estimate_reached,
+  cap_reached: RUN_ERROR_MESSAGES.cap_reached
 };
 
 function summarize(row: RunRow): EnrichmentRunSummary {
@@ -175,17 +210,90 @@ function readProgress(value: unknown): RunProgress {
     typeof value === 'string' ? JSON.parse(value) : value
   ) as Partial<RunProgress> | null;
   const pending = readPending(raw?.pending);
+  const skippedDomains = Number(raw?.skippedDomains ?? 0) || 0;
   return {
     doneDomains: Number(raw?.doneDomains ?? 0) || 0,
     saved: Number(raw?.saved ?? 0) || 0,
     skipped: Number(raw?.skipped ?? 0) || 0,
+    ...(skippedDomains > 0 ? { skippedDomains } : {}),
     ...(pending ? { pending } : {})
   };
 }
 
 /** The counts a finished run keeps; never the pending candidates. */
 function finishedProgress(progress: RunProgress): RunProgress {
-  return { doneDomains: progress.doneDomains, saved: progress.saved, skipped: progress.skipped };
+  return {
+    doneDomains: progress.doneDomains,
+    saved: progress.saved,
+    skipped: progress.skipped,
+    ...(progress.skippedDomains ? { skippedDomains: progress.skippedDomains } : {})
+  };
+}
+
+/** What the Contact enrichment panel shows for one run: counts and spend only. */
+export interface EnrichmentRunView {
+  id: string;
+  status: EnrichmentRunSummary['status'];
+  /** Plain language from RUN_ERROR_MESSAGES, never raw provider text. */
+  error: string | null;
+  domainsDone: number;
+  domainCount: number;
+  contactsSaved: number;
+  creditsSpent: number;
+  estimatedCredits: number;
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+/** The workspace's most recent runs, newest first, with each run's ledger spend. */
+export async function listEnrichmentRuns(
+  db: Db,
+  workspaceId: string,
+  limit = 10
+): Promise<EnrichmentRunView[]> {
+  // lc-debt: no (workspace_id, created_at) index on enrichment_runs, so this
+  // scans the workspace's rows (bounded by 13-month retention); add the index
+  // in a migration if a workspace accumulates thousands of runs.
+  const rows = await db
+    .prepare(
+      `SELECT r.id, r.status, r.last_error, cardinality(r.domains) AS domain_count,
+              r.estimated_credits, r.progress_json, r.created_at, r.finished_at,
+              COALESCE(spent.total, 0) AS spent
+       FROM enrichment_runs r
+       LEFT JOIN LATERAL (
+         SELECT SUM(l.credits) AS total FROM enrichment_usage_ledger l
+         WHERE l.workspace_id=r.workspace_id AND l.run_id=r.id
+       ) spent ON TRUE
+       WHERE r.workspace_id=?
+       ORDER BY r.created_at DESC, r.id DESC
+       LIMIT ?`
+    )
+    .all<{
+      id: string;
+      status: string;
+      last_error: string | null;
+      domain_count: number;
+      estimated_credits: string;
+      progress_json: unknown;
+      created_at: string;
+      finished_at: string | null;
+      spent: string;
+    }>(workspaceId, Math.max(1, Math.min(limit, 50)));
+  return rows.map((row) => {
+    const progress = readProgress(row.progress_json);
+    return {
+      id: row.id,
+      status: row.status as EnrichmentRunView['status'],
+      error: enrichmentRunErrorMessage(row.last_error),
+      domainsDone: progress.doneDomains,
+      domainCount: Number(row.domain_count),
+      contactsSaved: progress.saved,
+      creditsSpent: roundCredits(Number(row.spent)),
+      estimatedCredits: Number(row.estimated_credits),
+      createdAt: new Date(String(row.created_at)).toISOString(),
+      finishedAt: row.finished_at ? new Date(String(row.finished_at)).toISOString() : null
+    };
+  });
 }
 
 export async function findEnrichmentRunByKey(
@@ -356,13 +464,14 @@ async function failExhaustedRuns(db: Db, now: Date): Promise<void> {
     const rows = await tx
       .prepare(
         `UPDATE enrichment_runs
-           SET status='failed', last_error='Stopped after 3 attempts.', finished_at=?::timestamptz,
+           SET status='failed', last_error=?, finished_at=?::timestamptz,
                lease_until=NULL, progress_json=progress_json - 'pending'
          WHERE attempts >= ?
            AND (status='queued' OR (status='running' AND lease_until < ?::timestamptz))
          RETURNING id, workspace_id`
       )
       .all<{ id: string; workspace_id: string }>(
+        RUN_ERROR_MESSAGES.attempts_exhausted,
         now.toISOString(),
         MAX_ATTEMPTS,
         now.toISOString()
@@ -454,7 +563,8 @@ async function saveCandidate(
         },
         at
       );
-      return linked?.linked === true || resolved.created;
+      // An inferred link upgraded to verified is a newly verified contact.
+      return linked?.linked === true || linked?.upgraded === true || resolved.created;
     });
   } catch (error) {
     // Two existing People claim this identity: leave it for review, never merge.
@@ -507,6 +617,7 @@ async function finishRun(
         domainsDone: progress.doneDomains,
         saved: progress.saved,
         skipped: progress.skipped,
+        skippedDomains: progress.skippedDomains ?? 0,
         creditsSpent: outcome.spent
       },
       occurredAt: at
@@ -518,7 +629,11 @@ async function finishRun(
  * Back to the queue after a rate limit or an unexpected error; the attempt
  * counts. Fenced so a stale copy cannot release a run another replica holds.
  */
-async function releaseRun(db: Db, run: RunRow, reason: string): Promise<void> {
+async function releaseRun(
+  db: Db,
+  run: RunRow,
+  reason: (typeof RUN_ERROR_MESSAGES)[keyof typeof RUN_ERROR_MESSAGES]
+): Promise<void> {
   await db
     .prepare(
       `UPDATE enrichment_runs SET status='queued', lease_until=NULL, last_error=?
@@ -541,12 +656,7 @@ async function releaseDrainedRun(db: Db, run: RunRow): Promise<void> {
          SET status='queued', lease_until=NULL, attempts=attempts-1, last_error=?
        WHERE id=? AND workspace_id=? AND status='running' AND attempts=?`
     )
-    .run(
-      'Paused while the worker restarted; it resumes automatically.',
-      run.id,
-      run.workspace_id,
-      run.attempts
-    );
+    .run(RUN_ERROR_MESSAGES.drained, run.id, run.workspace_id, run.attempts);
 }
 
 /**
@@ -624,6 +734,9 @@ async function executeRun(
     if (shouldStop()) throw new Draining();
     const current = await workspaceSecretSeal(db, workspaceId, 'hunter_api_key');
     if (current !== seal) throw new KeyChanged(current === null);
+    // Re-read, not the running total: a stalled copy's late charge for this run
+    // (written after this copy claimed it) must count against the estimate.
+    spent = await spentOnRun(db, workspaceId, run.id);
     if (roundCredits(estimate - spent) < maxCredits) throw new BudgetReached('estimate_reached');
     const settings = await getEnrichmentSettings(db, workspaceId);
     const usage = await enrichmentUsage(db, workspaceId, clock(), { excludeRunId: run.id });
@@ -654,13 +767,15 @@ async function executeRun(
     // Read the seal BEFORE the plaintext: if the key is replaced in between,
     // the fence mismatches and the run stops before its first paid call.
     seal = await workspaceSecretSeal(db, workspaceId, 'hunter_api_key');
-    // The ONE plaintext read of 'hunter_api_key' (secrets/store.ts module comment).
-    const apiKey = seal
-      ? await readWorkspaceSecretPlaintext(db, workspaceId, 'hunter_api_key')
-      : null;
-    if (!apiKey) {
-      return await fail('The Hunter key was removed before this run finished.', 'key_removed');
+    if (!seal) return await fail(RUN_ERROR_MESSAGES.key_removed, 'key_removed');
+    // A key Hunter already rejected fails the run at claim, before any provider
+    // call. Saving a new key marks it valid in the same transaction.
+    if ((await getEnrichmentSettings(db, workspaceId)).keyStatus === 'invalid') {
+      return await fail(RUN_ERROR_MESSAGES.key_invalid, 'key_invalid');
     }
+    // The ONE plaintext read of 'hunter_api_key' (secrets/store.ts module comment).
+    const apiKey = await readWorkspaceSecretPlaintext(db, workspaceId, 'hunter_api_key');
+    if (!apiKey) return await fail(RUN_ERROR_MESSAGES.key_removed, 'key_removed');
     const provider = providerFor(apiKey);
 
     for (let index = progress.doneDomains; index < run.domains.length; index += 1) {
@@ -669,27 +784,37 @@ async function executeRun(
       // A suppressed company is skipped before it costs anything.
       if (!pending && !(await findSuppression(db, workspaceId, { channel: 'email', domain }))) {
         await beforePaidCall(limit * HUNTER_CREDIT_PRICE.perEmailFound);
-        const search = await provider.domainSearch(domain, { limit });
-        await charge('domain_search', search.credits);
-        const candidates: PendingCandidate[] = [];
-        for (const candidate of search.candidates.slice(0, limit)) {
-          // contact.ts rule 3 (SOURCED): an address with no public page is never saved.
-          if (!candidate.sourceUri || !emailOnDomain(candidate.email, domain)) {
-            progress.skipped += 1;
-            continue;
-          }
-          candidates.push({
-            email: candidate.email,
-            firstName: candidate.firstName,
-            lastName: candidate.lastName,
-            position: candidate.position,
-            sourceUri: candidate.sourceUri
-          });
+        let search: DomainSearchResult | null = null;
+        try {
+          search = await provider.domainSearch(domain, { limit });
+        } catch (error) {
+          // Hunter refusing one company (a 400 for that domain) skips it, uncharged,
+          // and the run moves on. Every other provider error ends or releases the run.
+          if (!(error instanceof EnrichmentProviderError && error.code === 'rejected')) throw error;
+          progress.skippedDomains = (progress.skippedDomains ?? 0) + 1;
         }
-        pending = { domainIndex: index, next: 0, candidates };
-        progress.pending = pending;
-        // The search is paid for: keep its result so a resumed run never buys it twice.
-        await checkpoint();
+        if (search) {
+          await charge('domain_search', search.credits);
+          const candidates: PendingCandidate[] = [];
+          for (const candidate of search.candidates.slice(0, limit)) {
+            // contact.ts rule 3 (SOURCED): an address with no public page is never saved.
+            if (!candidate.sourceUri || !emailOnDomain(candidate.email, domain)) {
+              progress.skipped += 1;
+              continue;
+            }
+            candidates.push({
+              email: candidate.email,
+              firstName: candidate.firstName,
+              lastName: candidate.lastName,
+              position: candidate.position,
+              sourceUri: candidate.sourceUri
+            });
+          }
+          pending = { domainIndex: index, next: 0, candidates };
+          progress.pending = pending;
+          // The search is paid for: keep its result so a resumed run never buys it twice.
+          await checkpoint();
+        }
       }
       for (let at = pending?.next ?? 0; pending && at < pending.candidates.length; at += 1) {
         const candidate = pending.candidates[at]!;
@@ -730,9 +855,7 @@ async function executeRun(
     if (error instanceof Draining) return releaseDrainedRun(db, run);
     if (error instanceof KeyChanged) {
       return fail(
-        error.removed
-          ? 'The Hunter key was removed before this run finished.'
-          : 'The Hunter key was replaced before this run finished. Re-plan to use the new key.',
+        error.removed ? RUN_ERROR_MESSAGES.key_removed : RUN_ERROR_MESSAGES.key_replaced,
         'key_removed'
       );
     }
@@ -740,18 +863,18 @@ async function executeRun(
     if (error instanceof EnrichmentProviderError) {
       if (error.code === 'key_invalid') {
         if (seal) await markKeyInvalid(db, workspaceId, seal, clock());
-        return fail('Hunter rejected the saved key. Replace it and re-plan.', 'key_invalid');
+        return fail(RUN_ERROR_MESSAGES.key_invalid, 'key_invalid');
       }
       if (error.code === 'rate_limited' || error.code === 'unavailable') {
         // Resumes from the pending checkpoint: the domain is not searched again.
-        return releaseRun(db, run, error.message);
+        return releaseRun(db, run, RUN_ERROR_MESSAGES[error.code]);
       }
-      return fail(error.message, error.code);
+      return fail(RUN_ERROR_MESSAGES[error.code], error.code);
     }
     // Workspace erasure deletes the run row mid-run: a clean stop, not a
     // worker error (its remaining writes fail on the erased workspace).
     if (!(await runStillExists(db, run))) return;
-    await releaseRun(db, run, 'Unexpected error; the run will be retried.');
+    await releaseRun(db, run, RUN_ERROR_MESSAGES.unexpected);
     throw contentFreeError(run, error);
   }
 }

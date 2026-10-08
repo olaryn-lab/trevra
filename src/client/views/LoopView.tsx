@@ -1478,11 +1478,13 @@ function PlanWork({
                         {prepared.result.run.domainCount === 1 ? 'company' : 'companies'} is queued
                         with an approved estimate of{' '}
                         {formatCredits(prepared.result.run.estimatedCredits)}. Once it reaches that
-                        estimate, it stops before its next call. Saved contacts appear on their
-                        Account.
+                        estimate, it stops before its next call. Its progress, spend and outcome
+                        show in the Contact enrichment panel under Setup › Workspace. Saved contacts
+                        appear in the Person picker on Opportunities, with unverified ones marked
+                        Inferred.
                       </span>
                       <Button variant="primary" onClick={() => onNavigate(prepared.next.href)}>
-                        Review accounts <ChevronRight size={15} />
+                        View enrichment runs <ChevronRight size={15} />
                       </Button>
                     </>
                   ) : prepared.channel === 'email' ? (

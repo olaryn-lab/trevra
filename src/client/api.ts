@@ -70,8 +70,10 @@ import type {
 import type { PreparedOutreachResult } from '../server/outreach/prepare';
 import type { GtmIntent, GtmPlan, PreparedGtmPlanResult } from '../server/gtm/intent';
 import type { EnrichmentSettings, EnrichmentUsage } from '../server/enrichment/settings';
+import type { EnrichmentRunView } from '../server/enrichment/runs';
 export type { GtmPlanCost } from '../server/gtm/intent';
 export type { EnrichmentSettings, EnrichmentUsage } from '../server/enrichment/settings';
+export type { EnrichmentRunView } from '../server/enrichment/runs';
 import type { CitationSourceView } from '../server/watch/citations';
 export type CitationSourceSummary = CitationSourceView;
 import type { EmailChannelStatus } from '../server/email/types';
@@ -590,6 +592,7 @@ export async function prepareCompiledGtmPlan(
 export async function getEnrichment(): Promise<{
   settings: EnrichmentSettings;
   usage: EnrichmentUsage;
+  runs: EnrichmentRunView[];
 }> {
   return request('/api/enrichment');
 }
@@ -3645,6 +3648,11 @@ export interface InboundPerson {
   role: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Strongest Account link; 'inferred' renders an "Inferred" badge (views/planCost.ts). */
+  accountLink: {
+    confidence: 'explicit' | 'verified' | 'inferred';
+    source: string;
+  } | null;
 }
 
 export interface SuppressionSummary {

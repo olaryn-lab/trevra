@@ -12884,6 +12884,13 @@ button:disabled {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+.enrichment-runs .li-subhead {
+  margin-top: 0;
+}
+.enrichment-run-error {
+  margin: 4px 0 0;
+  color: var(--t-muted);
+}
 .gtm-plan-result {
   padding-top: 12px;
   border-top: 1px solid var(--line);

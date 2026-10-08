@@ -72,6 +72,8 @@ describe('enrich_contacts plan', () => {
       approvalRequired: true
     });
     expect(plan.defaults).toMatchObject({ prepareSupported: true, includeUnverified: false });
+    // Where a run's outcome is visible: the Contact enrichment panel.
+    expect(plan.next).toEqual({ kind: 'review_enrichment_runs', href: '/setup/workspace' });
   });
 
   it('blocks a plan the remaining cap cannot cover', async () => {

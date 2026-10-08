@@ -5,6 +5,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { auth as betterAuth, closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { createApp } from '../app.js';
 import { openDatabase, type Db } from '../db.js';
+import { putWorkspaceSecret } from '../secrets/store.js';
+import { RUN_ERROR_MESSAGES, UNKNOWN_RUN_ERROR } from './runs.js';
 
 let db: Db;
 let app: Express;
@@ -220,6 +222,150 @@ describe('enrichment API', () => {
     await authed().put('/api/enrichment/cap').send({ monthlyCreditCap: 0.3 }).expect(400);
     await authed().put('/api/enrichment/cap').send({ monthlyCreditCap: '10' }).expect(400);
     await authed().put('/api/enrichment/cap').send({ monthlyCreditCap: -1 }).expect(400);
+  });
+
+  it("shows owners and members the workspace's recent runs, spend and plain-language errors", async () => {
+    const { owner, member } = await ownerAndMember();
+    const outsider = await signUp('enrichment-outsider');
+    const ws = owner.auth.workspaceId;
+    const tag = randomBytes(4).toString('hex');
+    await putWorkspaceSecret(db, {
+      workspaceId: ws,
+      kind: 'hunter_api_key',
+      plaintext: KEY,
+      actorUserId: owner.userId
+    });
+    const insertRun = (
+      workspaceId: string,
+      runId: string,
+      fields: { status: string; lastError?: string; progress?: unknown; createdAt: string }
+    ) =>
+      db
+        .prepare(
+          `INSERT INTO enrichment_runs
+             (id,workspace_id,provider,idempotency_key,plan_hash,domains,emails_per_domain,
+              estimated_credits,status,last_error,progress_json,created_at,finished_at)
+           VALUES (?,?,'hunter',?,?,?,3,9,?,?,?::jsonb,?::timestamptz,
+                   CASE WHEN ? IN ('completed','failed') THEN ?::timestamptz END)`
+        )
+        .run(
+          runId,
+          workspaceId,
+          `key-${runId}`,
+          'a'.repeat(64),
+          ['acme.com', 'northstar.ai', 'beta.io'],
+          fields.status,
+          fields.lastError ?? null,
+          JSON.stringify(fields.progress ?? {}),
+          fields.createdAt,
+          fields.status,
+          fields.createdAt
+        );
+    const done = `enr_done_${tag}`;
+    const raw = `enr_raw_${tag}`;
+    const capped = `enr_cap_${tag}`;
+    await insertRun(ws, done, {
+      status: 'completed',
+      progress: { doneDomains: 3, saved: 4, skipped: 1 },
+      createdAt: '2026-10-05T09:00:00Z'
+    });
+    await insertRun(ws, raw, {
+      status: 'running',
+      // Raw provider text from an older build, plus pending contact data.
+      lastError: 'Hunter returned 503.',
+      progress: {
+        doneDomains: 1,
+        saved: 0,
+        skipped: 0,
+        pending: {
+          domainIndex: 1,
+          next: 0,
+          candidates: [{ email: 'secret-person@northstar.ai', sourceUri: 'https://x.test' }]
+        }
+      },
+      createdAt: '2026-10-06T09:00:00Z'
+    });
+    await insertRun(ws, capped, {
+      status: 'failed',
+      lastError: RUN_ERROR_MESSAGES.cap_reached,
+      progress: { doneDomains: 2, saved: 1, skipped: 0 },
+      createdAt: '2026-10-04T09:00:00Z'
+    });
+    for (let index = 0; index < 9; index += 1) {
+      await insertRun(ws, `enr_old${index}_${tag}`, {
+        status: 'completed',
+        createdAt: `2026-09-0${index + 1}T09:00:00Z`
+      });
+    }
+    await insertRun(outsider.auth.workspaceId, `enr_out_${tag}`, {
+      status: 'queued',
+      createdAt: '2026-10-07T09:00:00Z'
+    });
+    await db
+      .prepare(
+        `INSERT INTO enrichment_usage_ledger (id,workspace_id,run_id,provider,operation,credits,occurred_at)
+         VALUES (?,?,?,'hunter','domain_search',3,'2026-10-05T09:00:00Z'),
+                (?,?,?,'hunter','email_verifier',1.5,'2026-10-05T09:01:00Z'),
+                (?,?,?,'hunter','domain_search',7,'2026-10-05T09:02:00Z')`
+      )
+      .run(
+        `enl_a_${tag}`,
+        ws,
+        done,
+        `enl_b_${tag}`,
+        ws,
+        done,
+        // Another workspace's ledger row with the same run id is never summed.
+        `enl_c_${tag}`,
+        outsider.auth.workspaceId,
+        done
+      );
+
+    const asOwner = await owner.agent.get('/api/enrichment').expect(200);
+    const runs = asOwner.body.runs as Array<Record<string, unknown>>;
+    expect(runs).toHaveLength(10);
+    expect(runs.slice(0, 3)).toEqual([
+      {
+        id: raw,
+        status: 'running',
+        error: UNKNOWN_RUN_ERROR,
+        domainsDone: 1,
+        domainCount: 3,
+        contactsSaved: 0,
+        creditsSpent: 0,
+        estimatedCredits: 9,
+        createdAt: '2026-10-06T09:00:00.000Z',
+        finishedAt: null
+      },
+      {
+        id: done,
+        status: 'completed',
+        error: null,
+        domainsDone: 3,
+        domainCount: 3,
+        contactsSaved: 4,
+        creditsSpent: 4.5,
+        estimatedCredits: 9,
+        createdAt: '2026-10-05T09:00:00.000Z',
+        finishedAt: '2026-10-05T09:00:00.000Z'
+      },
+      expect.objectContaining({
+        id: capped,
+        status: 'failed',
+        error: RUN_ERROR_MESSAGES.cap_reached
+      })
+    ]);
+    const body = JSON.stringify(asOwner.body);
+    expect(body).not.toContain(KEY);
+    expect(body).not.toContain('secret-person@northstar.ai');
+    expect(body).not.toContain('Hunter returned 503.');
+
+    const asMember = await member.agent.get('/api/enrichment').expect(200);
+    expect(asMember.body.runs).toEqual(runs);
+    const asOutsider = await outsider.agent.get('/api/enrichment').expect(200);
+    expect((asOutsider.body.runs as Array<{ id: string }>).map((run) => run.id)).toEqual([
+      `enr_out_${tag}`
+    ]);
   });
 });
 

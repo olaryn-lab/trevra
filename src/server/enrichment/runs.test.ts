@@ -11,7 +11,16 @@ import {
   type EnrichmentCandidate,
   type EnrichmentProviderErrorCode
 } from './provider.js';
-import { pruneEnrichmentHistory, queueEnrichmentRun, runQueuedEnrichmentRuns } from './runs.js';
+import { listContacts, resolveContact, resolveExplicitAccount } from '../lead-capture/people.js';
+import {
+  enrichmentRunErrorMessage,
+  listEnrichmentRuns,
+  pruneEnrichmentHistory,
+  queueEnrichmentRun,
+  RUN_ERROR_MESSAGES,
+  runQueuedEnrichmentRuns,
+  UNKNOWN_RUN_ERROR
+} from './runs.js';
 import {
   EnrichmentError,
   enrichmentUsage,
@@ -44,6 +53,8 @@ interface FakeScript {
   verify?: Record<string, EmailVerificationStatus>;
   /** Read on every call, so a test can clear it between ticks. */
   failVerifyWith?: EnrichmentProviderErrorCode;
+  /** A provider error for the domain search of one domain. */
+  failSearchFor?: Record<string, EnrichmentProviderErrorCode>;
   /** Runs inside domainSearch, while the paid call is in flight. */
   duringSearch?: () => Promise<void>;
   /** Runs inside verifyEmail, while the paid call is in flight. */
@@ -58,6 +69,8 @@ function fakeHunter(script: FakeScript) {
     async domainSearch(domain, { limit }) {
       calls.push(`search:${domain}:${limit}`);
       await script.duringSearch?.();
+      const failure = script.failSearchFor?.[domain];
+      if (failure) throw new EnrichmentProviderError('fake', failure);
       const candidates = script.search?.[domain] ?? [];
       return { candidates, credits: candidates.length };
     },
@@ -853,7 +866,7 @@ describe('enrichment runs', () => {
     expect(first).toMatchObject({
       status: 'prepared',
       objective: 'enrich_contacts',
-      next: { kind: 'review_accounts', href: '/outreach' },
+      next: { kind: 'review_enrichment_runs', href: '/setup/workspace' },
       result: { duplicate: false, run: { status: 'queued', domainCount: 1, estimatedCredits: 4.5 } }
     });
     // The queued run now reserves credits, so a re-compiled plan differs;
@@ -891,5 +904,283 @@ describe('enrichment runs', () => {
       .get<{ runs: string; ledger: string }>(WORKSPACE);
     expect(Number(left?.runs)).toBe(0);
     expect(left?.ledger).toBe('enl_new');
+  });
+
+  it("re-reads the run's own spend before each paid call, so a stalled copy's late charge stops it", async () => {
+    const { run } = await queue('enrich-late-00001', ['acme.com']);
+    const hunter = fakeHunter({
+      search: { 'acme.com': [candidate('maya@acme.com')] },
+      // A stalled replica's charge for this run lands while this copy's search
+      // is in flight: only a fresh read of the ledger can see it.
+      async duringSearch() {
+        await db
+          .prepare(
+            `INSERT INTO enrichment_usage_ledger (id,workspace_id,run_id,provider,operation,credits,occurred_at)
+             VALUES ('enl_late_0001',?,?,'hunter','email_verifier',3.5,?::timestamptz)`
+          )
+          .run(WORKSPACE, run.id, NOW.toISOString());
+      }
+    });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(hunter.calls).toEqual(['search:acme.com:3']);
+    expect(await runRow(run.id)).toMatchObject({
+      status: 'failed',
+      last_error: 'Stopped before exceeding the approved credit estimate.'
+    });
+    expect(await ledgerTotal(run.id)).toBe(4.5);
+  });
+
+  it('a domain Hunter rejects is skipped without a charge and the run continues', async () => {
+    const { run } = await queue('enrich-reject-001', ['acme.com', 'bad.example', 'northstar.ai'], {
+      emailsPerDomain: 1
+    });
+    const hunter = fakeHunter({
+      search: {
+        'acme.com': [candidate('maya@acme.com')],
+        'northstar.ai': [candidate('nora@northstar.ai', 'https://northstar.ai/team')]
+      },
+      failSearchFor: { 'bad.example': 'rejected' }
+    });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(hunter.calls).toEqual([
+      'search:acme.com:1',
+      'verify:maya@acme.com',
+      'search:bad.example:1',
+      'search:northstar.ai:1',
+      'verify:nora@northstar.ai'
+    ]);
+    const row = await runRow(run.id);
+    expect(row).toMatchObject({ status: 'completed', last_error: null });
+    expect(progressOf(row)).toEqual({ doneDomains: 3, saved: 2, skipped: 0, skippedDomains: 1 });
+    expect(await ledgerTotal(run.id)).toBe(3);
+    const completed = await db
+      .prepare(
+        "SELECT payload_json FROM domain_events WHERE workspace_id=? AND event_type='enrichment_run.completed'"
+      )
+      .get<{ payload_json: unknown }>(WORKSPACE);
+    expect(completed?.payload_json).toMatchObject({ skippedDomains: 1, saved: 2 });
+  });
+
+  it('any other provider error on a domain search still fails the run', async () => {
+    const { run } = await queue('enrich-quota-0001', ['acme.com', 'northstar.ai']);
+    const hunter = fakeHunter({ failSearchFor: { 'acme.com': 'quota_exhausted' } });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: hunter.providerFor });
+    expect(hunter.calls).toEqual(['search:acme.com:3']);
+    expect(await runRow(run.id)).toMatchObject({
+      status: 'failed',
+      last_error: RUN_ERROR_MESSAGES.quota_exhausted
+    });
+  });
+
+  it('a queued run fails fast, with no provider call, when the key is already marked invalid', async () => {
+    const { run } = await queue('enrich-invalid-01', ['acme.com']);
+    await setEnrichmentKeyStatus(db, WORKSPACE, 'invalid', NOW);
+    let built = 0;
+    const hunter = fakeHunter({ search: { 'acme.com': [candidate('maya@acme.com')] } });
+    await runQueuedEnrichmentRuns(db, {
+      now: NOW,
+      providerFor: () => {
+        built += 1;
+        return hunter.providerFor();
+      }
+    });
+    expect(built).toBe(0);
+    expect(hunter.calls).toEqual([]);
+    expect(await runRow(run.id)).toMatchObject({
+      status: 'failed',
+      last_error: 'Hunter rejected the saved key. Replace it and re-plan.'
+    });
+    const failed = await db
+      .prepare(
+        "SELECT payload_json FROM domain_events WHERE workspace_id=? AND event_type='enrichment_run.failed'"
+      )
+      .get<{ payload_json: unknown }>(WORKSPACE);
+    expect(failed?.payload_json).toMatchObject({ reason: 'key_invalid', creditsSpent: 0 });
+  });
+
+  it('a later verified result upgrades an inferred link; an inferred one never downgrades it', async () => {
+    const sam = { search: { 'acme.com': [candidate('sam@acme.com', 'https://acme.com/people')] } };
+    const linkOf = () =>
+      db
+        .prepare('SELECT confidence, source_detail FROM account_contacts WHERE workspace_id=?')
+        .get<{ confidence: string; source_detail: string }>(WORKSPACE);
+
+    const loose = await queue('enrich-upgrade-01', ['acme.com'], {
+      emailsPerDomain: 1,
+      includeUnverified: true
+    });
+    await runQueuedEnrichmentRuns(db, {
+      now: NOW,
+      providerFor: fakeHunter({
+        search: { 'acme.com': [candidate('sam@acme.com')] },
+        verify: { 'sam@acme.com': 'accept_all' }
+      }).providerFor
+    });
+    expect(progressOf(await runRow(loose.run.id))).toMatchObject({ saved: 1 });
+    expect(await linkOf()).toEqual({
+      confidence: 'inferred',
+      source_detail: 'hunter https://acme.com/team'
+    });
+
+    // Verified now: the inferred link is upgraded in place, and that counts as saved.
+    const strict = await queue('enrich-upgrade-02', ['acme.com'], { emailsPerDomain: 1 });
+    await runQueuedEnrichmentRuns(db, { now: NOW, providerFor: fakeHunter(sam).providerFor });
+    expect(progressOf(await runRow(strict.run.id))).toMatchObject({ saved: 1, skipped: 0 });
+    expect(await linkOf()).toEqual({
+      confidence: 'verified',
+      source_detail: 'hunter https://acme.com/people'
+    });
+
+    // Inferred again later: the verified link stays as it is.
+    const again = await queue('enrich-upgrade-03', ['acme.com'], {
+      emailsPerDomain: 1,
+      includeUnverified: true
+    });
+    await runQueuedEnrichmentRuns(db, {
+      now: NOW,
+      providerFor: fakeHunter({
+        search: { 'acme.com': [candidate('sam@acme.com')] },
+        verify: { 'sam@acme.com': 'unknown' }
+      }).providerFor
+    });
+    expect(progressOf(await runRow(again.run.id))).toMatchObject({ saved: 0, skipped: 1 });
+    expect(await linkOf()).toEqual({
+      confidence: 'verified',
+      source_detail: 'hunter https://acme.com/people'
+    });
+  });
+
+  it('lead capture keeps first-write links: it never upgrades or overwrites an inferred link', async () => {
+    const { contact } = await resolveContact(db, WORKSPACE, { email: 'lee@acme.com' }, NOW);
+    await resolveExplicitAccount(
+      db,
+      WORKSPACE,
+      contact.id,
+      {
+        domain: 'acme.com',
+        source: 'enrichment',
+        confidence: 'inferred',
+        sourceDetail: 'hunter x'
+      },
+      NOW
+    );
+    const captured = await resolveExplicitAccount(
+      db,
+      WORKSPACE,
+      contact.id,
+      { domain: 'acme.com', source: 'capture', sourceDetail: 'form' },
+      NOW
+    );
+    expect(captured).toMatchObject({ linked: false, upgraded: false });
+    const link = await db
+      .prepare(
+        'SELECT source, confidence, source_detail FROM account_contacts WHERE workspace_id=?'
+      )
+      .get(WORKSPACE);
+    expect(link).toEqual({
+      source: 'enrichment',
+      confidence: 'inferred',
+      source_detail: 'hunter x'
+    });
+  });
+
+  it('listContacts reports the strongest account link and its source', async () => {
+    const person = async (email: string) =>
+      (await resolveContact(db, WORKSPACE, { email }, NOW)).contact.id;
+    const inferred = await person('ina@acme.com');
+    const mixed = await person('max@acme.com');
+    await person('solo@nowhere.io');
+    await resolveExplicitAccount(
+      db,
+      WORKSPACE,
+      inferred,
+      {
+        domain: 'acme.com',
+        source: 'enrichment',
+        confidence: 'inferred',
+        sourceDetail: 'hunter https://acme.com/team'
+      },
+      NOW
+    );
+    await resolveExplicitAccount(
+      db,
+      WORKSPACE,
+      mixed,
+      {
+        domain: 'acme.com',
+        source: 'enrichment',
+        confidence: 'inferred',
+        sourceDetail: 'hunter y'
+      },
+      NOW
+    );
+    await resolveExplicitAccount(
+      db,
+      WORKSPACE,
+      mixed,
+      { domain: 'northstar.ai', source: 'capture' },
+      NOW
+    );
+    const people = new Map(
+      (await listContacts(db, WORKSPACE)).map((entry) => [entry.email, entry.accountLink])
+    );
+    expect(people.get('ina@acme.com')).toEqual({ confidence: 'inferred', source: 'hunter' });
+    expect(people.get('max@acme.com')).toEqual({ confidence: 'explicit', source: 'capture' });
+    expect(people.get('solo@nowhere.io')).toBeNull();
+  });
+
+  it('maps every error the runner writes to plain language, and nothing else through', async () => {
+    for (const message of Object.values(RUN_ERROR_MESSAGES)) {
+      expect(enrichmentRunErrorMessage(message)).toBe(message);
+    }
+    expect(Object.keys(RUN_ERROR_MESSAGES).sort()).toEqual(
+      [
+        'attempts_exhausted',
+        'cap_reached',
+        'drained',
+        'estimate_reached',
+        'key_invalid',
+        'key_removed',
+        'key_replaced',
+        'quota_exhausted',
+        'rate_limited',
+        'rejected',
+        'unavailable',
+        'unexpected'
+      ].sort()
+    );
+    expect(enrichmentRunErrorMessage(null)).toBeNull();
+    // Raw provider text (an older row, or anything unforeseen) never reaches the client.
+    expect(enrichmentRunErrorMessage('Hunter returned 503.')).toBe(UNKNOWN_RUN_ERROR);
+    expect(enrichmentRunErrorMessage('duplicate key (maya@acme.com)')).toBe(UNKNOWN_RUN_ERROR);
+  });
+
+  it('lists the newest runs with their counts and ledger spend', async () => {
+    const { run } = await queue('enrich-list-0001', ['acme.com', 'northstar.ai'], {
+      emailsPerDomain: 1
+    });
+    await runQueuedEnrichmentRuns(db, {
+      now: NOW,
+      clock: () => NOW,
+      providerFor: fakeHunter({
+        search: { 'acme.com': [candidate('maya@acme.com')] },
+        failSearchFor: { 'northstar.ai': 'quota_exhausted' }
+      }).providerFor
+    });
+    const runs = await listEnrichmentRuns(db, WORKSPACE);
+    expect(runs).toEqual([
+      {
+        id: run.id,
+        status: 'failed',
+        error: RUN_ERROR_MESSAGES.quota_exhausted,
+        domainsDone: 1,
+        domainCount: 2,
+        contactsSaved: 1,
+        creditsSpent: 1.5,
+        estimatedCredits: 3,
+        createdAt: NOW.toISOString(),
+        finishedAt: NOW.toISOString()
+      }
+    ]);
   });
 });

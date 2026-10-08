@@ -13,6 +13,7 @@ import type { OpportunityRecord, OpportunityStage } from '../shared/types';
 import { errorMessage } from './LinkedInSafety';
 import { opportunitySourceLine } from './inbound-attribution';
 import { Select } from './ui/primitives';
+import { personOptionLabel } from './views/planCost';
 
 const STAGES: ReadonlyArray<{ id: OpportunityStage; label: string }> = [
   { id: 'new', label: 'New' },
@@ -175,7 +176,7 @@ export function Opportunities({ setToast }: { setToast: (message: string) => voi
                 <option value="">None</option>
                 {people.map((person) => (
                   <option key={person.id} value={person.id}>
-                    {person.name || person.email || person.id}
+                    {personOptionLabel(person)}
                   </option>
                 ))}
               </Select>

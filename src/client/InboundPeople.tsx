@@ -40,6 +40,7 @@ import { relativeTime } from './LinkedInScreen';
 import { Select } from './ui/primitives';
 import { isMilestoneKind } from '../shared/milestones';
 import { scrollToId } from './ui/scrollToId';
+import { inferredContactTitle } from './views/planCost';
 import { AttributionTables, attributionChips } from './inbound-attribution';
 import { MilestoneSection } from './inbound-milestones';
 import './lead-capture.css';
@@ -557,7 +558,20 @@ export function InboundPeople({
                       <dt>Person id</dt>
                       <dd>{submission.contactId}</dd>
                       <dt>Email</dt>
-                      <dd>{person?.email || submitted.email || '—'}</dd>
+                      <dd>
+                        {person?.email || submitted.email || '—'}
+                        {person && inferredContactTitle(person) && (
+                          <>
+                            {' '}
+                            <span
+                              className="li-tag li-tag-reported li-tag-compact"
+                              title={inferredContactTitle(person) ?? undefined}
+                            >
+                              Inferred
+                            </span>
+                          </>
+                        )}
+                      </dd>
                       <dt>Phone</dt>
                       <dd>{person?.phone || submitted.phone || '—'}</dd>
                       <dt>Role</dt>

@@ -561,6 +561,7 @@ import { persistImportedPeople } from './lead-capture/import.js';
 import { captureSourceCreateSchema, LeadCaptureError } from './lead-capture/types.js';
 import { createHunterProvider } from './enrichment/hunter.js';
 import { EnrichmentProviderError } from './enrichment/provider.js';
+import { listEnrichmentRuns } from './enrichment/runs.js';
 import {
   EnrichmentError,
   enrichmentUsage,
@@ -2659,7 +2660,9 @@ export function createApp(db: Db) {
       res.setHeader('Cache-Control', 'no-store');
       res.json({
         settings: await getEnrichmentSettings(db, req.auth!.workspaceId),
-        usage: await enrichmentUsage(db, req.auth!.workspaceId, new Date())
+        usage: await enrichmentUsage(db, req.auth!.workspaceId, new Date()),
+        // Counts, spend and plain-language errors only: never contacts or the key.
+        runs: await listEnrichmentRuns(db, req.auth!.workspaceId)
       });
     } catch (error) {
       next(error);

@@ -113,6 +113,11 @@ const server = app.listen(runtime.port, () =>
 // SIGKILL. An agent run can outlast that, which is exactly why the reaper
 // exists: what the drain cannot finish, the next worker writes off instead of
 // leaving it to wedge that workspace's schedule forever.
+// lc-debt: an enrichment run mid-verification (Hunter's 202 poll can run ~100s)
+// outlasts this 20s drain, so the process exits with the lease held; the next
+// claim after lease expiry costs one of MAX_ATTEMPTS=3 and resumes from the
+// checkpoint. Upgrade: a drain-aware abort of the in-flight verify poll that
+// releases the run (attempt returned) before exit.
 const DRAIN_TIMEOUT_MS = 20_000;
 let running = false;
 let draining = false;

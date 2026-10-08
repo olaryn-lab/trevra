@@ -5,6 +5,7 @@ import {
   getEnrichment,
   saveEnrichmentCap,
   saveHunterKey,
+  type EnrichmentRunView,
   type EnrichmentSettings,
   type EnrichmentUsage
 } from './api';
@@ -13,7 +14,15 @@ import { errorMessage } from './LinkedInSafety';
 import { Panel } from './ui/layout';
 import { ConfirmDrawer } from './ui/dialog';
 import { Button, Field, Input } from './ui/primitives';
-import { keyStatusLine, parseCreditCap, usageLine } from './views/planCost';
+import {
+  keyStatusLine,
+  parseCreditCap,
+  runCompaniesLine,
+  runContactsLine,
+  runCreditsLine,
+  runStatusLabel,
+  usageLine
+} from './views/planCost';
 
 export function EnrichmentSetup({ setToast }: { setToast: (message: string) => void }) {
   const isOwner = useIsWorkspaceOwner();
@@ -25,6 +34,8 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
   const [confirmRemove, setConfirmRemove] = useState(false);
   const [settings, setSettings] = useState<EnrichmentSettings | null>(null);
   const [usage, setUsage] = useState<EnrichmentUsage | null>(null);
+  // Null until loaded: a failed load shows the error banner, never "no runs".
+  const [runs, setRuns] = useState<EnrichmentRunView[] | null>(null);
   const [apiKey, setApiKey] = useState('');
   const [cap, setCap] = useState('');
   const [busy, setBusy] = useState<'' | 'key' | 'remove' | 'cap'>('');
@@ -37,10 +48,12 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
         if (cancelled) return;
         setSettings(result.settings);
         setUsage(result.usage);
+        setRuns(result.runs);
         setCap(String(result.settings.monthlyCreditCap));
       })
       .catch((error: unknown) => {
-        if (!cancelled) setProblem(errorMessage(error, 'Enrichment settings could not be loaded.'));
+        if (!cancelled)
+          setProblem(errorMessage(error, 'Enrichment settings and runs could not be loaded.'));
       });
     return () => {
       cancelled = true;
@@ -170,6 +183,44 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
               Only the workspace owner can change the key or the cap.
             </p>
           ) : null}
+          {runs && (
+            <section className="enrichment-runs" aria-labelledby="enrichment-runs-heading">
+              <h4 id="enrichment-runs-heading" className="li-subhead" aria-level={3}>
+                Recent runs
+              </h4>
+              {runs.length === 0 ? (
+                <p className="enrichment-setup-status">No enrichment runs yet.</p>
+              ) : (
+                <div className="li-table-scroll">
+                  <table className="li-table">
+                    <thead>
+                      <tr>
+                        <th>Approved</th>
+                        <th>Status</th>
+                        <th>Companies</th>
+                        <th>Contacts</th>
+                        <th>Credits</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {runs.map((run) => (
+                        <tr key={run.id}>
+                          <td>{run.createdAt.slice(0, 10)}</td>
+                          <td>
+                            {runStatusLabel(run.status)}
+                            {run.error && <p className="enrichment-run-error">{run.error}</p>}
+                          </td>
+                          <td>{runCompaniesLine(run)}</td>
+                          <td>{runContactsLine(run)}</td>
+                          <td>{runCreditsLine(run)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </section>
+          )}
         </div>
       ) : !problem ? (
         <p className="enrichment-setup-status">Loading…</p>

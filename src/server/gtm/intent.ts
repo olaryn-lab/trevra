@@ -209,7 +209,8 @@ export interface PreparedEnrichmentGtmPlanResult {
   status: 'prepared';
   objective: 'enrich_contacts';
   artifacts: { enrichmentRunId: string };
-  next: { kind: 'review_accounts'; href: '/outreach' };
+  /** The Contact enrichment panel, which lists each run's progress, spend and outcome. */
+  next: { kind: 'review_enrichment_runs'; href: '/setup/workspace' };
   result: { run: EnrichmentRunSummary; duplicate: boolean };
 }
 
@@ -228,7 +229,7 @@ function preparedEnrichment(
     status: 'prepared',
     objective: 'enrich_contacts',
     artifacts: { enrichmentRunId: run.id },
-    next: { kind: 'review_accounts', href: '/outreach' },
+    next: { kind: 'review_enrichment_runs', href: '/setup/workspace' },
     result: { run, duplicate }
   };
 }
@@ -1096,7 +1097,7 @@ async function enrichContactsPlan(
       externalWrites: false,
       approvalRequired: true
     },
-    next: { kind: 'review_accounts', href: '/outreach' },
+    next: { kind: 'review_enrichment_runs', href: '/setup/workspace' },
     // Set only here: canonicalPayloadHash hashes an undefined member as null,
     // so a `cost: undefined` on other objectives would change their plan hashes.
     cost: {
