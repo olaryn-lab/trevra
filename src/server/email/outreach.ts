@@ -19,7 +19,6 @@ import type {
 } from './types.js';
 import { unsubscribeConfigured } from './unsubscribe.js';
 import { footerForUnsubscribeMode, outreachUnsubscribeModeFor } from './unsubscribe-policy.js';
-import { ZOHO_OUTREACH_DAILY_CAP } from './zoho-mail.js';
 
 export interface EmailOutreachOptions {
   resolver?: DnsResolver;
@@ -174,6 +173,10 @@ export async function emailOutreachReadiness(
       }
       warnings.push(...deliverability.warnings);
       if (mailbox.providerKey === 'zoho') {
+        const dailyCap = await outreachDailyCap(db, {
+          workspaceId,
+          connectionId: mailbox.connectionId
+        });
         warnings.push(
           {
             code: 'email_reply_only_unsubscribe',
@@ -182,7 +185,7 @@ export async function emailOutreachReadiness(
           },
           {
             code: 'email_zoho_daily_cap',
-            message: `Zoho Mail sends at most ${ZOHO_OUTREACH_DAILY_CAP} outreach emails a day from ${address}. People beyond that are skipped; prepare them again the next day.`,
+            message: `Zoho Mail sends at most ${dailyCap} outreach emails a day from ${address}. People beyond that are skipped; prepare them again the next day.`,
             actionHref: SETUP_HREF
           }
         );

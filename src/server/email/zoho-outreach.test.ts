@@ -175,6 +175,10 @@ describe('Zoho Mail outreach plans', () => {
     const plan = await compileGtmIntent(db, WORKSPACE, emailIntent());
     const send = plan.steps.find((step) => step.kind === 'send');
     expect(send?.detail).toContain('at most 5 a day');
+    const capWarning = (plan.defaults.warnings as Array<{ code: string; message: string }>).find(
+      (warning) => warning.code === 'email_zoho_daily_cap'
+    );
+    expect(capWarning?.message).toContain('at most 5 outreach emails a day');
   });
 
   it('still requires one-click unsubscribe for a Gmail sender', async () => {
