@@ -14,6 +14,7 @@ import {
 import { InboundEmailMessage, InboundSyncMetadata } from '../../shared/inbound-model.js';
 import {
   ZOHO_LIST_CEILING,
+  ZOHO_LIST_MAX_PAGES,
   ZOHO_LIST_NEWEST_FIRST,
   ZOHO_LIST_PAGE_SIZE,
   ZOHO_MAX_MESSAGES_PER_RUN,
@@ -22,7 +23,7 @@ import {
   parseZohoHeaders,
   pickZohoAccount,
   pickZohoFolderId,
-  zohoListEntries,
+  zohoListPage,
   type ZohoListEntry
 } from '../../shared/zoho-mail.js';
 
@@ -59,9 +60,12 @@ export default createSync({
     const checkpoint = await nango.getCheckpoint();
     const sinceMs = checkpoint?.sinceMs ?? startedAt - BACKFILL_MS;
     const listed: ZohoListEntry[] = [];
+    const seen = new Set<string>();
     let start = 1;
+    let pages = 0;
     let more = true;
-    while (more && listed.length < ZOHO_LIST_CEILING) {
+    while (more && listed.length < ZOHO_LIST_CEILING && pages < ZOHO_LIST_MAX_PAGES) {
+      pages += 1;
       // lc-debt: reads only the Inbox, as the Gmail and Microsoft syncs do; a reply filtered out of the Inbox before the next 15-minute run is never read.
       const page = await nango.get<unknown>({
         endpoint: `${base}/messages/view`,
@@ -74,22 +78,20 @@ export default createSync({
         },
         retries: 3
       });
-      const entries = zohoListEntries(page.data);
-      for (const entry of entries) {
-        // Newest first: everything after the first older entry is older too.
-        if (entry.receivedMs < sinceMs) {
-          more = false;
-          break;
-        }
+      const { recent, exhausted } = zohoListPage(page.data, sinceMs);
+      for (const entry of recent) {
+        if (seen.has(entry.messageId)) continue;
+        seen.add(entry.messageId);
         listed.push(entry);
       }
-      if (entries.length < ZOHO_LIST_PAGE_SIZE) more = false;
+      // lc-debt: stopping relies on received-time order within ZOHO_SORT_SLACK_MS (smoke S5); confirm the sort key in S5 or page by a received-time filter.
+      if (exhausted) more = false;
       start += ZOHO_LIST_PAGE_SIZE;
     }
     if (more) {
       // lc-debt: more than ZOHO_LIST_CEILING inbox messages in one window reads only the newest of them, as the Gmail sync does.
       await nango.log(
-        `More than ${ZOHO_LIST_CEILING} inbox messages since the last run; reading the newest ${ZOHO_LIST_CEILING}.`,
+        `Inbox listing hit its bound (${ZOHO_LIST_CEILING} messages or ${ZOHO_LIST_MAX_PAGES} pages) since the last run; reading the newest messages found.`,
         { level: 'warn' }
       );
     }
@@ -100,6 +102,8 @@ export default createSync({
       .slice(0, ZOHO_MAX_MESSAGES_PER_RUN);
     let batch: InboundEmailRecord[] = [];
     let lastMs = sinceMs;
+    let partial = 0;
+    let headerless = 0;
     for (const entry of queue) {
       const messageId = encodeURIComponent(entry.messageId);
       let headers: MailHeader[] = [];
@@ -116,17 +120,19 @@ export default createSync({
           if (parsed.text) body = parsed.text;
         }
       } catch {
-        await nango.log(
-          `Zoho Mail did not return message ${entry.messageId} in full; reading its headers and summary.`,
-          { level: 'warn' }
-        );
+        // Falls through to the header request and the list summary.
       }
       if (headers.length === 0) {
-        const header = await nango.get<unknown>({
-          endpoint: `${base}/folders/${encodeURIComponent(inboxId)}/messages/${messageId}/header`,
-          retries: 3
-        });
-        headers = parseZohoHeaders(header.data);
+        partial += 1;
+        try {
+          const header = await nango.get<unknown>({
+            endpoint: `${base}/folders/${encodeURIComponent(inboxId)}/messages/${messageId}/header`,
+            retries: 3
+          });
+          headers = parseZohoHeaders(header.data);
+        } catch {
+          headerless += 1;
+        }
       }
       // lc-debt: emits the body of every person-to-person message, as the Gmail sync does; Trevra keeps only known senders server-side.
       const record = buildInboundRecord({
@@ -149,6 +155,12 @@ export default createSync({
       }
     }
     if (batch.length > 0) await nango.batchSave(batch, INBOUND_EMAIL_MESSAGE_MODEL);
+    if (partial > 0 || headerless > 0) {
+      await nango.log(
+        `Zoho Mail returned ${partial} message(s) without full content and ${headerless} without headers; used list summaries instead.`,
+        { level: 'warn' }
+      );
+    }
     const finished = queue.length === listed.length && !more;
     await nango.saveCheckpoint({
       sinceMs: finished ? Math.max(sinceMs, startedAt - OVERLAP_MS) : lastMs - 1000

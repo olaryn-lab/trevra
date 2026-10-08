@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { headerValue } from '../../../nango-integrations/shared/inbound-email.js';
+import { MAX_BODY_CHARS, headerValue } from '../../../nango-integrations/shared/inbound-email.js';
 import {
   ZOHO_LIST_CEILING,
   ZOHO_LIST_PAGE_SIZE,
   ZOHO_MAX_MESSAGES_PER_RUN,
+  ZOHO_SORT_SLACK_MS,
+  zohoListPage,
   mimeFromOriginalMessage,
   parseMimeMessage,
   parseZohoHeaders as syncParseZohoHeaders,
@@ -26,6 +28,12 @@ const ACCOUNTS: unknown[] = [
       { accountId: '2', type: 'ZOHO_ACCOUNT', primaryEmailAddress: 'other@acme.test' }
     ]
   },
+  {
+    data: [
+      { accountId: 2 ** 53 + 2, type: 'ZOHO_ACCOUNT', primaryEmailAddress: 'founder@acme.test' }
+    ]
+  },
+  { data: [{ accountId: 1.5, type: 'ZOHO_ACCOUNT', primaryEmailAddress: 'founder@acme.test' }] },
   { data: [{ accountId: '3', type: 'POP_ACCOUNT', primaryEmailAddress: 'pop@acme.test' }] },
   { data: [{ accountId: '4', type: 'ZOHO_ACCOUNT', primaryEmailAddress: 'not-an-address' }] },
   { data: [] },
@@ -46,6 +54,7 @@ const FOLDERS: unknown[] = [
       { folderId: 22, folderName: 'Posteingang', folderType: 'Inbox' }
     ]
   },
+  { data: [{ folderId: 2 ** 53 + 2, folderType: 'Inbox' }] },
   { data: [] },
   'nope'
 ];
@@ -109,6 +118,48 @@ function nestedMultipart(levels: number): string {
   return `From: deep@northwind.test\n${entity}`;
 }
 
+describe('zohoListPage', () => {
+  const SINCE = 1791363600000;
+  const page = (times: Array<number | string | undefined>) => ({
+    data: times.map((receivedTime, index) => ({ messageId: String(index + 1), receivedTime }))
+  });
+  const full = (fill: number | string | undefined) =>
+    Array.from({ length: ZOHO_LIST_PAGE_SIZE }, () => fill);
+
+  it('does not stop on a full page where one entry fails to parse', () => {
+    const times = full(SINCE + 1000);
+    times[10] = undefined;
+    const result = zohoListPage(page(times), SINCE);
+    expect(result.exhausted).toBe(false);
+    expect(result.recent).toHaveLength(ZOHO_LIST_PAGE_SIZE - 1);
+  });
+
+  it('keeps listing past entries older than sinceMs but inside the slack', () => {
+    const times = full(SINCE - 1000);
+    const result = zohoListPage(page(times), SINCE);
+    expect(result.recent).toEqual([]);
+    expect(result.exhausted).toBe(false);
+  });
+
+  it('stops when every parsed entry is older than the slack', () => {
+    const result = zohoListPage(page(full(SINCE - ZOHO_SORT_SLACK_MS - 1)), SINCE);
+    expect(result.exhausted).toBe(true);
+    expect(result.recent).toEqual([]);
+  });
+
+  it('stops on a short page and keeps its recent entries', () => {
+    const result = zohoListPage(page([SINCE + 1, SINCE + 2]), SINCE);
+    expect(result.exhausted).toBe(true);
+    expect(result.recent).toHaveLength(2);
+  });
+
+  it('does not stop on a full page of unparseable entries', () => {
+    const result = zohoListPage(page(full('soon')), SINCE);
+    expect(result.exhausted).toBe(false);
+    expect(result.recent).toEqual([]);
+  });
+});
+
 describe('Zoho Mail sync helpers', () => {
   it('keeps the sync copies identical to the server parsers', () => {
     for (const body of ACCOUNTS) expect(syncPickZohoAccount(body)).toEqual(pickZohoAccount(body));
@@ -141,6 +192,7 @@ describe('Zoho Mail sync helpers', () => {
           { messageId: '', receivedTime: '1791363800000' },
           { messageId: '1779', receivedTime: 'soon' },
           { messageId: '1780', receivedTime: '' },
+          { messageId: 1709887058769100001, receivedTime: '1709887053409' },
           'nope'
         ]
       })
@@ -161,6 +213,26 @@ describe('Zoho Mail sync helpers', () => {
       }
     ]);
     expect(zohoListEntries({})).toEqual([]);
+  });
+
+  it('decodes entities in the list summary', () => {
+    expect(
+      zohoListEntries({
+        data: [
+          {
+            messageId: '1',
+            receivedTime: '1791363600000',
+            summary: '&lt;ada@northwind.test&gt; Friday works'
+          }
+        ]
+      })[0]?.summary
+    ).toBe('<ada@northwind.test> Friday works');
+  });
+
+  it('bounds the HTML fallback', () => {
+    const html = `<p>${'a'.repeat(MAX_BODY_CHARS * 10)}</p><p>MARKER-AFTER-BOUND</p>`;
+    const raw = `From: x@northwind.test\nContent-Type: text/html\n\n${html}`;
+    expect(parseMimeMessage(raw).text).not.toContain('MARKER-AFTER-BOUND');
   });
 
   it('finds the raw MIME in every original-message shape', () => {

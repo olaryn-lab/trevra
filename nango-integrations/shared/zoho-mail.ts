@@ -5,7 +5,7 @@
  * src/server/email/zoho-mail.ts; src/server/email/zoho-sync-helpers.test.ts
  * holds the copies identical.
  */
-import { headerValue, htmlToText, type MailHeader } from './inbound-email.js';
+import { MAX_BODY_CHARS, headerValue, htmlToText, type MailHeader } from './inbound-email.js';
 
 export const ZOHO_LIST_PAGE_SIZE = 100;
 /** Inbox entries listed per run before the oldest-first read. */
@@ -17,6 +17,10 @@ export const ZOHO_LIST_CEILING = 1000;
 export const ZOHO_MAX_MESSAGES_PER_RUN = 100;
 /** The messages/view `sortorder` value that lists newest first (smoke step S5). */
 export const ZOHO_LIST_NEWEST_FIRST = 'false';
+/** Received-time slack below sinceMs before the newest-first listing may stop: Zoho's sortBy=date key is unverified (smoke S5). */
+export const ZOHO_SORT_SLACK_MS = 60 * 60 * 1000;
+/** Hard bound on list requests per run, whatever Zoho returns. */
+export const ZOHO_LIST_MAX_PAGES = ZOHO_LIST_CEILING / ZOHO_LIST_PAGE_SIZE + 1;
 const MIME_MAX_DEPTH = 5;
 
 export type ZohoAccount = { accountId: string; address: string };
@@ -128,10 +132,26 @@ export function zohoListEntries(body: unknown): ZohoListEntry[] {
           ? entry['fromAddress'].trim()
           : null,
       subject: typeof entry['subject'] === 'string' ? entry['subject'] : null,
-      summary: typeof entry['summary'] === 'string' ? entry['summary'].trim() : ''
+      summary: typeof entry['summary'] === 'string' ? htmlToText(entry['summary']) : ''
     });
   }
   return entries;
+}
+
+/** One messages/view page: the entries received at or after sinceMs, and whether listing may stop. */
+export function zohoListPage(
+  body: unknown,
+  sinceMs: number
+): { recent: ZohoListEntry[]; exhausted: boolean } {
+  const raw = dataOf(body);
+  const rawCount = Array.isArray(raw) ? raw.length : 0;
+  const entries = zohoListEntries(body);
+  const recent = entries.filter((entry) => entry.receivedMs >= sinceMs);
+  const exhausted =
+    rawCount < ZOHO_LIST_PAGE_SIZE ||
+    (entries.length > 0 &&
+      entries.every((entry) => entry.receivedMs < sinceMs - ZOHO_SORT_SLACK_MS));
+  return { recent, exhausted };
 }
 
 /** The raw RFC 5322 message from originalmessage: a string body, data, or data.content. */
@@ -213,5 +233,5 @@ export function parseMimeMessage(raw: string): { headers: MailHeader[]; text: st
   const plain = findPart(raw, 'text/plain', 0);
   if (plain !== null) return { headers, text: plain.trim() };
   const html = findPart(raw, 'text/html', 0);
-  return { headers, text: html !== null ? htmlToText(html) : '' };
+  return { headers, text: html !== null ? htmlToText(html.slice(0, MAX_BODY_CHARS * 10)) : '' };
 }
