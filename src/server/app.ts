@@ -91,6 +91,12 @@ import {
 } from './watch/store.js';
 import { runBrandWatch } from './watch/service.js';
 import { unsupportedWatchPlatformReason } from './watch/skill.js';
+import { registerCitationIntake } from './watch/citation-intake.js';
+import {
+  AI_ANSWER_PLATFORM,
+  citationSourceView,
+  connectCitationSource
+} from './watch/citations.js';
 import { handleMcpHttpRequest, rejectMcpNonPost } from './mcp-http.js';
 import {
   decidePlaybookApproval,
@@ -1010,6 +1016,8 @@ export function createApp(db: Db) {
   // Register it before the global JSON parser; the route derives the workspace
   // from its encrypted Capture Source credential, never from request-body data.
   registerLeadCaptureIntake(app, db);
+  // Same raw-body rule: the citation sampler signs exact bytes.
+  registerCitationIntake(app, db);
 
   // Observed provider webhooks (Stripe now; Cal.com in Phase B) verify exact
   // raw bytes too, so they register before the JSON parser. The URL's endpoint
@@ -4630,6 +4638,46 @@ export function createApp(db: Db) {
     }
   });
 
+  app.get('/api/watches/:id/citation-source', async (req: AuthedRequest, res, next) => {
+    try {
+      const watch = await getWatch(db, req.auth!.workspaceId, String(req.params.id));
+      if (!watch) return res.status(404).json({ error: 'Watch not found' });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json({ citationSource: await citationSourceView(db, req.auth!.workspaceId, watch.id) });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  // Owner-only: connecting creates a signing secret, like any capture source.
+  app.put(
+    '/api/watches/:id/citation-source',
+    ownerOnly('connect AI-answer citation samples'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const watch = await getWatch(db, req.auth!.workspaceId, String(req.params.id));
+        if (!watch) return res.status(404).json({ error: 'Watch not found' });
+        const input = z
+          .object({ ownedDomains: z.array(z.string().trim().min(1).max(253)).min(1).max(20) })
+          .strict()
+          .parse(req.body ?? {});
+        const connected = await connectCitationSource(db, {
+          workspaceId: req.auth!.workspaceId,
+          actorUserId: req.auth!.userId,
+          watch,
+          ownedDomains: input.ownedDomains
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(connected.created ? 201 : 200).json({
+          citationSource: await citationSourceView(db, req.auth!.workspaceId, watch.id),
+          secret: connected.secret
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
   /**
    * Promote a mention into gtm.thread-reply.
    *
@@ -4651,6 +4699,11 @@ export function createApp(db: Db) {
       );
       if (!mention || mention.watchId !== watch.id) {
         res.status(404).json({ error: 'Mention not found' });
+        return;
+      }
+      // A citation sample has no thread to answer and no text to draft from.
+      if (mention.platform === AI_ANSWER_PLATFORM) {
+        res.status(409).json({ error: 'AI-answer citations are tracked, not replied to.' });
         return;
       }
       // Without this, two clicks on the same mention (or a retried request)

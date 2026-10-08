@@ -33,6 +33,7 @@ import { hostedExecutionMode, hostedSeatFilter } from '../server/linkedin/hosted
 import { runDueResearchSources } from '../server/research/service.js';
 import { runDueBrandWatches } from '../server/watch/service.js';
 import { runQueuedEnrichmentRuns } from '../server/enrichment/runs.js';
+import { pruneCitationSamples } from '../server/watch/citations.js';
 import { refreshDueEmailDeliverability } from '../server/email/sender-deliverability.js';
 import { registerEmailComplianceProvider } from '../server/email/compliance.js';
 import { senderComplianceProvider } from '../server/compliance/provider.js';
@@ -133,7 +134,8 @@ async function cycle(): Promise<void> {
       runReadyPlaybooks(db),
       runDueAgentSchedules(db),
       runDueResearchSources(db),
-      runDueBrandWatches(db)
+      runDueBrandWatches(db),
+      pruneCitationSamples(db)
     ]);
   } catch (error) {
     console.error('Worker control-plane cycle failed', error);

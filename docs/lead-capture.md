@@ -154,3 +154,46 @@ Trevra stores:
 - append-only GTM events about the capture.
 
 The landing/runtime continues to own edge concerns such as origin checks, honeypots, bot/rate protection and UI validation. Capture does not make Trevra a website backend or generic event platform.
+
+## 9. AI-answer citation samples
+
+A brand watch can receive content-free samples of whether AI engines cite your own site. In **Research**, open a watch, expand **AI-answer citations**, list the domains you own and copy the one-time secret. Connecting creates a capture source of kind `ai_citations` that is bound to that watch. It does not appear under **Setup → Lead capture**, and lead intake refuses its secret with `403`.
+
+```text
+POST /api/intake/v1/citations
+```
+
+The headers and the signature recipe are identical to sections 2 and 4. The body is strict JSON. Unknown fields, including any answer or prompt text, are rejected with `400`:
+
+```json
+{
+  "sampleId": "beseam-2026-10-06-chatgpt-0007",
+  "engine": "chatgpt",
+  "promptRef": "id:best-gtm-ledger",
+  "answeredAt": "2026-10-06T08:00:00.000Z",
+  "brandCited": true,
+  "citedUrls": ["https://trevra.com/pricing"],
+  "position": 2
+}
+```
+
+- `engine` is one of `chatgpt`, `google_ai_mode`, `gemini`, `perplexity`, `copilot`, `claude` or `google_search`.
+- `promptRef` is `id:<your label>` or `sha256:<hex of the prompt text>`. Trevra never receives the prompt itself.
+- `citedUrls` may only name the domains you connected, or their subdomains. Query strings and fragments are dropped before storage.
+- A sample with `brandCited: false` carries no `citedUrls` and no `position`.
+
+Trevra compares each sample with the latest earlier sample for the same engine and prompt. A first or regained citation appears in the watch as **Citation gained**, and a drop appears as **Citation lost**. A repeat or a continued absence changes no mention. A sample older than one already recorded is stored as `stale` and changes nothing.
+
+| Status | Meaning                                                                   |
+| ------ | ------------------------------------------------------------------------- |
+| `200`  | identical retry already recorded                                          |
+| `202`  | new sample recorded                                                       |
+| `400`  | invalid sample, unknown field or a URL outside your domains               |
+| `401`  | invalid/stale signature or disabled source                                |
+| `403`  | the source is a lead-capture source, not a citation source                |
+| `404`  | capture source not found                                                  |
+| `409`  | key or `sampleId` reused with different bytes, or the source has no watch |
+| `413`  | request body too large                                                    |
+| `429`  | source rate limit reached                                                 |
+
+Samples are kept for 13 months. Deleting the watch deletes its samples, and its citation source is removed within the hour.
