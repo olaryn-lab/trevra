@@ -147,8 +147,10 @@ interface RunState {
   capHit: boolean;
   touched: Set<string>;
   resolved: Map<string, ResolvedActor | null>;
-  /** Repository owner (lower-cased) to its own website domain; null when it has none or the read failed. */
+  /** Repository owner (lower-cased) to its own website domain; null when it has none. A failed read is never cached. */
   ownerDomains: Map<string, string | null>;
+  /** Repositories whose events this run held because the owner's profile could not be read. */
+  ownerUnreadable: Set<string>;
   overBudget: () => boolean;
 }
 
@@ -205,6 +207,10 @@ function capReached(run: RunState): boolean {
     run.lookups >= MAX_PROFILE_LOOKUPS_PER_RUN
   );
 }
+
+/** The repository's last_error while a failed owner read holds its new events. */
+export const OWNER_UNREADABLE_ERROR =
+  "Could not read the owner's profile on GitHub; new events are held until it can be read";
 
 function minutesFrom(now: Date, minutes: number): Date {
   return new Date(now.getTime() + minutes * 60_000);
@@ -592,9 +598,19 @@ async function processEvent(
     run.lookups += 1;
     try {
       ownDomain = await readOwnerDomain(client, repo.owner);
-    } catch {
-      // Unknown is not "none": defer like a spent lookup budget, cache nothing,
-      // and let a later run read the owner again. The poll does not fail.
+    } catch (error) {
+      // The run-level conditions keep their own outcome (rate_limited,
+      // needs_reauth, budget deferral) through processListing and pollClaimed.
+      if (
+        error instanceof GitHubRateLimitedError ||
+        error instanceof GitHubConnectionRevokedError ||
+        error instanceof PollBudgetSpentError
+      ) {
+        throw error;
+      }
+      // Anything else: unknown is not "none". Defer like a spent lookup budget,
+      // cache nothing, and name the hold on the repository (pollClaimed).
+      run.ownerUnreadable.add(repo.id);
       return 'defer';
     }
     run.ownerDomains.set(ownerKey, ownDomain);
@@ -947,6 +963,7 @@ async function pollClaimed(
     touched: new Set(),
     resolved: new Map(),
     ownerDomains: new Map(),
+    ownerUnreadable: new Set(),
     overBudget
   };
   /** Out of time before starting: release untouched, still due next tick. */
@@ -965,15 +982,18 @@ async function pollClaimed(
     const summary = emptyPollSummary();
     try {
       await pollRepository(db, workspaceId, repo, client, run, now, progress, summary);
+      // Held events are a failure the founder must see, not a quiet "ok";
+      // the next poll that reads the owner clears it like any other error.
+      const held = run.ownerUnreadable.has(repo.id);
       await settle(repo.id, {
         ...progress,
-        status: 'ok',
-        lastError: null,
+        status: held ? 'error' : 'ok',
+        lastError: held ? OWNER_UNREADABLE_ERROR : null,
         rateLimitedUntil: null,
         lastPolledAt: now,
         lastSummary: summary,
         addUnresolved: summary.unresolved,
-        nextPollAt: minutesFrom(now, POLL_INTERVAL_MINUTES)
+        nextPollAt: minutesFrom(now, held ? ERROR_RETRY_MINUTES : POLL_INTERVAL_MINUTES)
       });
       result.polled += 1;
     } catch (error) {

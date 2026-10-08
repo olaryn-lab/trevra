@@ -9,6 +9,7 @@ import {
   MAX_STARGAZERS_LISTABLE,
   MAX_STAR_PAGES,
   NOT_FOUND_RETRY_HOURS,
+  OWNER_UNREADABLE_ERROR,
   POLL_INTERVAL_MINUTES,
   pollWorkspaceRepositories
 } from './poll.js';
@@ -618,27 +619,71 @@ describe('pollWorkspaceRepositories', () => {
           ? { status: 502, data: { message: 'Bad Gateway' }, headers: {} }
           : ok({ login: 'lemoncrow-lab', name: 'LemonCrow', blog: 'https://lemoncrow.dev' })
     });
-    await poll(fakeGitHub(routes));
-    // Failing open would have made the teammate a lead. Nothing is written and
-    // the cursor stays put, and the poll itself still succeeds.
-    expect(await accountByDomain(WORKSPACE_ID, 'lemoncrow.dev')).toBeUndefined();
-    expect(await accountByDomain(WORKSPACE_ID, 'newco.dev')).toBeUndefined();
-    expect(await repoRow()).toMatchObject({
-      status: 'ok',
-      lastError: null,
-      starsCursor: null,
-      lastSummary: { stars: 0, created: 0, deferred: 2 }
-    });
+    // Failing open would have made the teammate a lead. Nothing is written,
+    // the cursor stays put, and the held events are named on the repository.
+    for (const hour of [0, 1]) {
+      await poll(fakeGitHub(routes), new Date(T0.getTime() + hour * HOUR));
+      expect(await accountByDomain(WORKSPACE_ID, 'lemoncrow.dev')).toBeUndefined();
+      expect(await accountByDomain(WORKSPACE_ID, 'newco.dev')).toBeUndefined();
+      expect(await repoRow()).toMatchObject({
+        status: 'error',
+        lastError: OWNER_UNREADABLE_ERROR,
+        starsCursor: null,
+        nextPollAt: new Date(
+          T0.getTime() + hour * HOUR + ERROR_RETRY_MINUTES * 60_000
+        ).toISOString(),
+        lastSummary: { stars: 0, created: 0, deferred: 2 }
+      });
+    }
 
     ownerDown = false;
-    await poll(fakeGitHub(routes), new Date(T0.getTime() + POLL_INTERVAL_MINUTES * 60_000));
+    await poll(fakeGitHub(routes), new Date(T0.getTime() + 2 * HOUR));
     expect(await accountByDomain(WORKSPACE_ID, 'lemoncrow.dev')).toBeUndefined();
     expect(await accountByDomain(WORKSPACE_ID, 'newco.dev')).toMatchObject({ source: 'github' });
     expect(await repoRow()).toMatchObject({
       status: 'ok',
+      lastError: null,
       starsCursor: '2026-10-05T10:00:00.000Z',
       lastSummary: { stars: 2, created: 1, deferred: 0 }
     });
+  });
+
+  it('stops at the rate limit when the owner read is the call that hits it', async () => {
+    const github = fakeGitHub(
+      lemoncrowRoutes({
+        // The only event is the last listing's last one, so no later call
+        // could trip the client's rate-limit latch instead.
+        [REPO_PATH]: () => ok({ stargazers_count: 0, forks_count: 0 }),
+        [`${REPO_PATH}/stargazers`]: () => ok([]),
+        [`${REPO_PATH}/forks`]: () => ok([]),
+        [`${REPO_PATH}/issues`]: () =>
+          ok([
+            {
+              number: 9,
+              html_url: `https://github.com/${REPO}/issues/9`,
+              created_at: '2026-10-05T13:20:00Z',
+              author_association: 'NONE',
+              user: user('sam')
+            }
+          ]),
+        '/orgs/lemoncrow-lab': () => ({
+          status: 403,
+          data: { message: 'API rate limit exceeded' },
+          headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(RESET_EPOCH) }
+        })
+      })
+    );
+    const result = await poll(github);
+    const resetAt = new Date(RESET_EPOCH * 1000).toISOString();
+    expect(github.calls.at(-1)?.endpoint).toBe('/orgs/lemoncrow-lab');
+    expect(result.rateLimitedUntil).toBe(resetAt);
+    expect(await repoRow()).toMatchObject({
+      status: 'rate_limited',
+      lastError: null,
+      rateLimitedUntil: resetAt,
+      issuesCursor: null
+    });
+    expect(await accountByDomain(WORKSPACE_ID, 'newco.dev')).toBeUndefined();
   });
 
   it('marks the connection for reconnecting when GitHub rejects the token', async () => {
