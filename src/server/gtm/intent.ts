@@ -423,14 +423,21 @@ function normalizeIntent(raw: unknown): GtmIntent {
         ...parsed.audience,
         ...(parsed.audience.domains
           ? {
-              domains: uniqueSorted(parsed.audience.domains, (value) =>
-                value
+              domains: uniqueSorted(parsed.audience.domains, (value) => {
+                const loose = value
                   .trim()
                   .toLowerCase()
                   .replace(/^https?:\/\//, '')
                   .replace(/^www\./, '')
-                  .replace(/\/.*$/, '')
-              )
+                  .replace(/\/.*$/, '');
+                // Paid enrichment searches by host, so `acme.com.`, `acme.com:443`
+                // and `https://acme.com?utm=x` must be one domain (one charge).
+                // An entry the canonicaliser rejects keeps its loose form and is
+                // blocked as enrichment_invalid_domains. Other objectives keep the
+                // loose form so their existing plan hashes do not change.
+                if (parsed.objective !== 'enrich_contacts') return loose;
+                return normalizeAccountDomain(value) ?? loose;
+              })
             }
           : {}),
         ...(parsed.audience.countries
