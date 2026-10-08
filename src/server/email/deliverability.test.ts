@@ -534,4 +534,104 @@ describe('email deliverability evaluation', () => {
     expect(emailDomainOf('Founder@Acme.TEST')).toBe('acme.test');
     expect(emailDomainOf('not-an-address')).toBeNull();
   });
+
+  const ZOHO_SPF = {
+    'zohomail.com': ['v=spf1 ip4:204.141.32.0/23 ~all'],
+    'one.zoho.com': ['v=spf1 ip4:136.143.188.0/24 ~all']
+  };
+
+  it('passes a Zoho Mail domain with include:zohomail.com and the owner selector', async () => {
+    const resolver = fakeResolver({
+      ...ZOHO_SPF,
+      'acme.test': ['v=spf1 include:zohomail.com ~all'],
+      'zmail._domainkey.acme.test': [DKIM],
+      '_dmarc.acme.test': ['v=DMARC1; p=quarantine']
+    });
+    const result = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'zoho', dkimSelector: 'zmail' },
+      resolver
+    );
+    expect(result.status).toBe('pass');
+    expect(result.provider).toBe('zoho');
+    expect(result.dkim).toMatchObject({ status: 'pass', selector: 'zmail' });
+    expect(result.spf.detail).toContain('zohomail.com');
+  });
+
+  it('accepts include:one.zoho.com for Zoho and names both includes when neither is present', async () => {
+    const passing = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'zoho', dkimSelector: 'zmail' },
+      fakeResolver({
+        ...ZOHO_SPF,
+        'acme.test': ['v=spf1 include:one.zoho.com -all'],
+        'zmail._domainkey.acme.test': [DKIM],
+        '_dmarc.acme.test': ['v=DMARC1; p=none']
+      })
+    );
+    expect(passing.status).toBe('pass');
+
+    const failing = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'zoho', dkimSelector: 'zmail' },
+      fakeResolver({
+        ...GOOGLE_SPF,
+        'acme.test': ['v=spf1 include:_spf.google.com ~all'],
+        'zmail._domainkey.acme.test': [DKIM],
+        '_dmarc.acme.test': ['v=DMARC1; p=none']
+      })
+    );
+    expect(failing.blockers.map((blocker) => blocker.code)).toEqual([
+      'email_spf_provider_not_authorized'
+    ]);
+    expect(failing.blockers[0]!.message).toContain('zohomail.com or one.zoho.com');
+    expect(failing.blockers[0]!.message).toContain('include:zohomail.com');
+  });
+
+  it('blocks a Zoho domain with no owner selector without guessing selectors', async () => {
+    const resolver = fakeResolver({
+      ...ZOHO_SPF,
+      'acme.test': ['v=spf1 include:zohomail.com ~all'],
+      '_dmarc.acme.test': ['v=DMARC1; p=none']
+    });
+    const result = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'zoho' },
+      resolver
+    );
+    expect(result.status).toBe('fail');
+    expect(result.blockers.map((blocker) => blocker.code)).toEqual(['email_dkim_selector_missing']);
+    expect(result.dkim).toMatchObject({ status: 'fail', selector: null });
+    expect(resolver.calls.some((name) => name.includes('._domainkey.'))).toBe(false);
+  });
+
+  it('tries the owner selector before the provider defaults', async () => {
+    const resolver = fakeResolver(
+      googleDomain({
+        'google._domainkey.acme.test': new Error('should not be needed'),
+        'custom2026._domainkey.acme.test': [DKIM]
+      })
+    );
+    const result = await evaluateDeliverability(
+      { domain: 'acme.test', provider: 'google', dkimSelector: 'custom2026' },
+      resolver
+    );
+    expect(result.dkim).toMatchObject({ status: 'pass', selector: 'custom2026' });
+    expect(resolver.calls.filter((name) => name.includes('._domainkey.'))).toEqual([
+      'custom2026._domainkey.acme.test'
+    ]);
+  });
+
+  it('treats Zoho free mailboxes as consumer mailboxes', async () => {
+    const resolver = fakeResolver({});
+    const result = await evaluateDeliverability(
+      { domain: 'zohomail.com', provider: 'zoho' },
+      resolver
+    );
+    expect(result.spf.status).toBe('provider_managed');
+    expect(resolver.calls).toEqual([]);
+  });
+
+  it('maps zoho-mail and nothing else to zoho', () => {
+    expect(mailProviderFor('zoho-mail')).toBe('zoho');
+    expect(mailProviderFor('Zoho-Mail ')).toBe('zoho');
+    expect(mailProviderFor('zoho')).toBeNull();
+    expect(mailProviderFor('zoho-crm')).toBeNull();
+  });
 });

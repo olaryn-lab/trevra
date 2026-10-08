@@ -1,5 +1,5 @@
 /** Mail providers Trevra can send through, keyed by their DNS footprint. */
-export type MailProvider = 'google' | 'microsoft';
+export type MailProvider = 'google' | 'microsoft' | 'zoho';
 
 /** One blocker or warning, shaped like a GTM plan blocker. */
 export interface EmailChannelIssue {

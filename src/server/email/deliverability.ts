@@ -46,6 +46,9 @@ export function mailProviderFor(provider: string): MailProvider | null {
   const value = provider.trim().toLowerCase();
   if (value === 'gmail' || value === 'google-mail') return 'google';
   if (value === 'microsoft' || value === 'outlook') return 'microsoft';
+  // Nango's built-in Zoho Mail provider; `zoho` alone is the generic Zoho
+  // OAuth provider (CRM, Books, ...) and is not a mailbox.
+  if (value === 'zoho-mail') return 'zoho';
   return null;
 }
 
@@ -69,18 +72,33 @@ const SPF_LOOKUP_LIMIT = 10;
 // RFC 7208 section 4.6.4: more than two lookups that return NXDOMAIN or no answer is a permerror.
 const SPF_VOID_LOOKUP_LIMIT = 2;
 const SPF_LOOKUP_MECHANISMS = new Set(['include', 'a', 'mx', 'ptr', 'exists']);
-const PROVIDER_SPF_INCLUDE: Record<MailProvider, string> = {
-  google: '_spf.google.com',
-  microsoft: 'spf.protection.outlook.com'
+/**
+ * Zoho documents two SPF includes: zohomail.com (Zoho Mail) and one.zoho.com
+ * (Zoho One / Workplace bundles). Either authorizes Zoho's outbound servers.
+ * Extended only from the per-data-centre evidence recorded by the Phase G
+ * smoke test (Task 1, S6) -- never from guesses.
+ */
+// The per-data-centre includes are unverified until the Phase G smoke test.
+export const ZOHO_SPF_INCLUDES: readonly string[] = ['zohomail.com', 'one.zoho.com'];
+const PROVIDER_SPF_INCLUDES: Record<MailProvider, readonly string[]> = {
+  google: ['_spf.google.com'],
+  microsoft: ['spf.protection.outlook.com'],
+  zoho: ZOHO_SPF_INCLUDES
 };
 const PROVIDER_LABEL: Record<MailProvider, string> = {
   google: 'Google Workspace',
-  microsoft: 'Microsoft 365'
+  microsoft: 'Microsoft 365',
+  zoho: 'Zoho Mail'
 };
-// lc-debt: default selectors only (Google "google", Microsoft 365 "selector1"/"selector2"); a custom DKIM selector reads as missing. Upgrade path: an owner-set selector stored per sending domain.
-const DKIM_SELECTORS: Record<MailProvider, string[]> = {
+/**
+ * Provider default selectors, tried after the owner-set selector stored in
+ * email_dkim_selectors. Zoho has none: its admin console asks the founder to
+ * name the selector, so without the owner's answer there is nothing to check.
+ */
+const DKIM_SELECTORS: Record<MailProvider, readonly string[]> = {
   google: ['google'],
-  microsoft: ['selector1', 'selector2']
+  microsoft: ['selector1', 'selector2'],
+  zoho: []
 };
 const CONSUMER_MAILBOX_DOMAINS = new Set([
   'gmail.com',
@@ -88,7 +106,9 @@ const CONSUMER_MAILBOX_DOMAINS = new Set([
   'outlook.com',
   'hotmail.com',
   'live.com',
-  'msn.com'
+  'msn.com',
+  'zoho.com',
+  'zohomail.com'
 ]);
 
 function issue(code: string, message: string): EmailChannelIssue {
@@ -123,7 +143,7 @@ type SpfWalk =
 async function walkSpf(
   resolver: DnsResolver,
   domain: string,
-  target: string,
+  targets: ReadonlySet<string>,
   state: { lookups: number; voids: number },
   ancestors: ReadonlySet<string>
 ): Promise<SpfWalk> {
@@ -232,7 +252,7 @@ async function walkSpf(
     if (!value) return invalid(`SPF ${mechanism} at ${domain} names no domain.`);
     // Macro targets (%{...}) cannot be evaluated statically; they never count as authorizing.
     if (value.includes('%')) continue;
-    const nested = await walkSpf(resolver, value, target, state, path);
+    const nested = await walkSpf(resolver, value, targets, state, path);
     if (nested.result === 'unknown') return nested;
     if (nested.result === 'missing') {
       if (nested.void) state.voids += 1;
@@ -240,7 +260,7 @@ async function walkSpf(
       return invalid(`SPF for ${domain} includes ${value}, which publishes no SPF record.`);
     }
     if (nested.result === 'invalid') return { result: 'invalid', detail: nested.detail, record };
-    if ((isRedirect || qualifier === '+') && (value === target || nested.authorized)) {
+    if ((isRedirect || qualifier === '+') && (targets.has(value) || nested.authorized)) {
       authorized = true;
     }
   }
@@ -294,10 +314,13 @@ async function evaluateSpf(
   domain: string,
   provider: MailProvider
 ): Promise<Evaluated> {
-  const target = PROVIDER_SPF_INCLUDE[provider];
+  const includes = PROVIDER_SPF_INCLUDES[provider];
+  // The include Trevra tells the founder to add; any listed include authorizes.
+  const target = includes[0]!;
+  const named = includes.join(' or ');
   const label = PROVIDER_LABEL[provider];
   const state = { lookups: 0, voids: 0 };
-  const walk = await walkSpf(resolver, domain, target, state, new Set());
+  const walk = await walkSpf(resolver, domain, new Set(includes), state, new Set());
   if (walk.result === 'unknown') {
     return {
       check: { status: 'unknown', detail: walk.detail, record: null, lookups: state.lookups },
@@ -328,13 +351,13 @@ async function evaluateSpf(
     return {
       check: {
         status: 'fail',
-        detail: `SPF does not authorize ${target}.`,
+        detail: `SPF does not authorize ${named}.`,
         record: walk.record,
         lookups: state.lookups
       },
       blocker: issue(
         'email_spf_provider_not_authorized',
-        `The SPF record for ${domain} does not include ${target}, so mail sent through ${label} fails SPF. Add "include:${target}" before the final "all".`
+        `The SPF record for ${domain} does not include ${named}, so mail sent through ${label} fails SPF. Add "include:${target}" before the final "all".`
       )
     };
   }
@@ -378,9 +401,30 @@ function hasDkimKey(record: string): boolean {
 async function evaluateDkim(
   resolver: DnsResolver,
   domain: string,
-  provider: MailProvider
+  provider: MailProvider,
+  ownerSelector: string | null
 ): Promise<Evaluated> {
-  const selectors = DKIM_SELECTORS[provider];
+  const selectors = [
+    ...new Set(
+      [ownerSelector, ...DKIM_SELECTORS[provider]].filter((value): value is string =>
+        Boolean(value)
+      )
+    )
+  ];
+  if (selectors.length === 0) {
+    return {
+      check: {
+        status: 'fail',
+        detail: 'No DKIM selector is set for this sending domain.',
+        record: null,
+        selector: null
+      },
+      blocker: issue(
+        'email_dkim_selector_missing',
+        `${PROVIDER_LABEL[provider]} signs mail with a DKIM selector you named when you turned DKIM on. Enter that selector for ${domain} under Email in Workspace settings so Trevra can check it.`
+      )
+    };
+  }
   let failure: string | null = null;
   for (const selector of selectors) {
     const lookup = await lookupTxt(resolver, `${selector}._domainkey.${domain}`);
@@ -521,7 +565,7 @@ async function evaluateDmarc(resolver: DnsResolver, domain: string): Promise<Eva
 }
 
 export async function evaluateDeliverability(
-  input: { domain: string; provider: MailProvider },
+  input: { domain: string; provider: MailProvider; dkimSelector?: string | null },
   resolver: DnsResolver = defaultDnsResolver()
 ): Promise<DeliverabilityEvaluation> {
   const domain = normalizeSenderDomain(input.domain);
@@ -549,7 +593,7 @@ export async function evaluateDeliverability(
   }
   const [spf, dkim, dmarc] = await Promise.all([
     evaluateSpf(resolver, domain, input.provider),
-    evaluateDkim(resolver, domain, input.provider),
+    evaluateDkim(resolver, domain, input.provider, input.dkimSelector ?? null),
     evaluateDmarc(resolver, domain)
   ]);
   const blockers = [spf.blocker, dkim.blocker, dmarc.blocker].filter(
