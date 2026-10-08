@@ -33,13 +33,17 @@ function message(overrides: Partial<Extract<CanonicalRecord, { kind: 'message' }
   };
 }
 
-async function insertConnection(id: string, provider: 'zoho-mail' | 'gmail'): Promise<void> {
+async function insertConnection(
+  id: string,
+  provider: 'zoho-mail' | 'gmail',
+  status: 'connected' | 'disconnected' = 'connected'
+): Promise<void> {
   await db
     .prepare(
       `INSERT INTO connections
        (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,
         mailbox_address,created_at,updated_at)
-       VALUES (?,?,?,?,?,NULL,'connected',0,'founder@acme.test',?,?)`
+       VALUES (?,?,?,?,?,NULL,?,0,'founder@acme.test',?,?)`
     )
     .run(
       id,
@@ -47,6 +51,7 @@ async function insertConnection(id: string, provider: 'zoho-mail' | 'gmail'): Pr
       provider,
       `trevra-${provider}`,
       `${id}-external`,
+      status,
       NOW.toISOString(),
       NOW.toISOString()
     );
@@ -58,14 +63,15 @@ async function sentOutreach(input: {
   provider: string;
   recipient: string;
   status?: string;
+  internetMessageId?: string;
 }) {
   const status = input.status ?? 'sent';
   await db
     .prepare(
       `INSERT INTO gtm_deliveries
        (id,workspace_id,channel,connection_id,purpose,recipient,source_type,source_id,idempotency_key,
-        status,provider,external_ref,started_at,sent_at)
-       VALUES (?,?,'email',?,'outreach',?,'email_outreach',?,?,?,?,?,?::timestamptz,?::timestamptz)`
+        status,provider,external_ref,internet_message_id,started_at,sent_at)
+       VALUES (?,?,'email',?,'outreach',?,'email_outreach',?,?,?,?,?,?,?::timestamptz,?::timestamptz)`
     )
     .run(
       input.id,
@@ -77,9 +83,19 @@ async function sentOutreach(input: {
       status,
       input.provider,
       `ref-${input.id}`,
+      input.internetMessageId ?? null,
       NOW.toISOString(),
       status === 'sent' ? NOW.toISOString() : null
     );
+}
+
+async function storedCount(id: string): Promise<number> {
+  const row = await db
+    .prepare(
+      'SELECT COUNT(*)::int AS n FROM conversation_messages WHERE workspace_id=? AND external_ref=?'
+    )
+    .get<{ n: number }>(WORKSPACE, id);
+  return row?.n ?? 0;
 }
 
 async function outcomeKind(id: string): Promise<string | undefined> {
@@ -240,5 +256,113 @@ describe('Zoho Mail inbound replies', () => {
     );
     expect(await outcomeKind('zoho-quoted')).toBe('reply');
     expect(await suppressed('maya@northwind.test')).toBeFalsy();
+  });
+
+  it('suppresses on an unthreaded unsubscribe after an uncertain Zoho send', async () => {
+    await sentOutreach({
+      id: 'del_00000000000000a7',
+      connectionId: ZOHO,
+      provider: 'zoho-mail',
+      recipient: 'maya@northwind.test',
+      status: 'uncertain'
+    });
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'zoho-mail',
+      ZOHO,
+      message({ id: 'zoho-uncertain' })
+    );
+    expect(await suppressed('maya@northwind.test')).toMatchObject({
+      source: 'email_reply_unsubscribe',
+      sourceRef: 'zoho-uncertain'
+    });
+  });
+
+  it('suppresses on Zoho outreach sent through an earlier connection of the same mailbox', async () => {
+    await insertConnection('conn_zoho_inbound_old', 'zoho-mail', 'disconnected');
+    await sentOutreach({
+      id: 'del_00000000000000a8',
+      connectionId: 'conn_zoho_inbound_old',
+      provider: 'zoho-mail',
+      recipient: 'maya@northwind.test'
+    });
+    await ingestCanonicalRecord(
+      db,
+      WORKSPACE,
+      'zoho-mail',
+      ZOHO,
+      message({ id: 'zoho-reconnected' })
+    );
+    expect(await suppressed('maya@northwind.test')).toMatchObject({
+      source: 'email_reply_unsubscribe',
+      sourceRef: 'zoho-reconnected'
+    });
+  });
+
+  describe('a threaded reply from an address not on record', () => {
+    const ALIAS = 'team@northwind.test';
+    const MESSAGE_ID = '<zoho-outreach-1@acme.test>';
+
+    beforeEach(async () => {
+      await sentOutreach({
+        id: 'del_00000000000000b1',
+        connectionId: ZOHO,
+        provider: 'zoho-mail',
+        recipient: 'maya@northwind.test',
+        internetMessageId: MESSAGE_ID
+      });
+    });
+
+    it('suppresses the threaded delivery recipient on an unsubscribe and stores nothing', async () => {
+      await ingestCanonicalRecord(
+        db,
+        WORKSPACE,
+        'zoho-mail',
+        ZOHO,
+        message({ id: 'zoho-stranger-stop', personEmail: ALIAS, replyToMessageIds: [MESSAGE_ID] })
+      );
+      expect(await suppressed('maya@northwind.test')).toMatchObject({
+        source: 'email_reply_unsubscribe',
+        sourceRef: 'zoho-stranger-stop',
+        personId
+      });
+      expect(await suppressed(ALIAS)).toBeFalsy();
+      expect(await storedCount('zoho-stranger-stop')).toBe(0);
+    });
+
+    it('ignores a normal reply without suppressing', async () => {
+      await ingestCanonicalRecord(
+        db,
+        WORKSPACE,
+        'zoho-mail',
+        ZOHO,
+        message({
+          id: 'zoho-stranger-reply',
+          personEmail: ALIAS,
+          body: 'Friday works.',
+          replyToMessageIds: [MESSAGE_ID]
+        })
+      );
+      expect(await suppressed('maya@northwind.test')).toBeFalsy();
+      expect(await storedCount('zoho-stranger-reply')).toBe(0);
+    });
+
+    it('does not read a quoted reply-to-unsubscribe footer as an opt-out', async () => {
+      await ingestCanonicalRecord(
+        db,
+        WORKSPACE,
+        'zoho-mail',
+        ZOHO,
+        message({
+          id: 'zoho-stranger-quoted',
+          personEmail: ALIAS,
+          body: `${ADDRESS_LINE}\n${OUTREACH_REPLY_OPT_OUT_SENTENCE}`,
+          replyToMessageIds: [MESSAGE_ID]
+        })
+      );
+      expect(await suppressed('maya@northwind.test')).toBeFalsy();
+      expect(await storedCount('zoho-stranger-quoted')).toBe(0);
+    });
   });
 });

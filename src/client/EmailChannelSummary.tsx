@@ -54,6 +54,10 @@ export function EmailChannelSummary({
     onSaveDkimSelector(connectionId, value || null);
   }
 
+  const inboundMailbox = channel.mailboxes.find(
+    (mailbox) => mailbox.connectionId === channel.inbound?.connectionId
+  );
+
   return (
     <div className="email-channel">
       {channel.mailboxes.length === 0 ? (
@@ -124,9 +128,15 @@ export function EmailChannelSummary({
                     >
                       <Field
                         label="DKIM selector"
-                        hint={`From your mail provider's DKIM settings. Trevra checks <selector>._domainkey.${domain}. Leave empty to use the provider's standard selectors.`}
+                        hint={
+                          mailbox.provider === 'zoho-mail'
+                            ? `Zoho Mail has no standard selector; enter the one from your Zoho Mail admin console. Trevra checks <selector>._domainkey.${domain}.`
+                            : `From your mail provider's DKIM settings. Trevra checks <selector>._domainkey.${domain}. Leave empty to use the provider's standard selectors.`
+                        }
                       >
                         <Input
+                          // Remount after a save so the field shows the stored selector.
+                          key={mailbox.dkimSelector ?? ''}
                           name="dkimSelector"
                           defaultValue={mailbox.dkimSelector ?? ''}
                           placeholder="zmail"
@@ -172,9 +182,17 @@ export function EmailChannelSummary({
           {busy === 'recheck' ? 'Checking…' : 'Re-check DNS'}
         </Button>
         {isOwner && channel.inbound && (
-          <Button variant="ghost" disabled={busy !== null} onClick={onStopInbound}>
-            {busy === 'stop' ? 'Stopping…' : 'Stop reading mail'}
-          </Button>
+          <>
+            <Button variant="ghost" disabled={busy !== null} onClick={onStopInbound}>
+              {busy === 'stop' ? 'Stopping…' : 'Stop reading mail'}
+            </Button>
+            {inboundMailbox?.unsubscribeMode === 'footer_and_reply' && (
+              <p className="email-channel-note">
+                Zoho Mail opt-outs arrive as replies. While Trevra is not reading this mailbox,
+                unsubscribe replies are not recorded.
+              </p>
+            )}
+          </>
         )}
       </div>
     </div>

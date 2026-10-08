@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { MAX_BODY_CHARS, headerValue } from '../../../nango-integrations/shared/inbound-email.js';
+import {
+  MAX_BODY_CHARS,
+  OVERLAP_MS,
+  headerValue
+} from '../../../nango-integrations/shared/inbound-email.js';
 import {
   ZOHO_LIST_CEILING,
   ZOHO_LIST_PAGE_SIZE,
@@ -11,7 +15,8 @@ import {
   parseZohoHeaders as syncParseZohoHeaders,
   pickZohoAccount as syncPickZohoAccount,
   pickZohoFolderId as syncPickZohoFolderId,
-  zohoListEntries
+  zohoListEntries,
+  zohoNextCheckpoint
 } from '../../../nango-integrations/shared/zoho-mail.js';
 import { parseZohoHeaders, pickZohoAccount, pickZohoFolderId } from './zoho-mail.js';
 
@@ -267,5 +272,36 @@ describe('Zoho Mail sync helpers', () => {
     expect(parseMimeMessage(nestedMultipart(3)).text).toBe('deep text');
     expect(parseMimeMessage(nestedMultipart(7)).text).toBe('');
     expect(parseMimeMessage('Content-Type: multipart/mixed\n\n--x\n\nno boundary').text).toBe('');
+  });
+});
+
+describe('zohoNextCheckpoint', () => {
+  const startedAt = Date.parse('2026-10-07T09:00:00.000Z');
+
+  it('rewinds a finished run to OVERLAP_MS before it started', () => {
+    const sinceMs = startedAt - 24 * 60 * 60 * 1000;
+    expect(
+      zohoNextCheckpoint({ finished: true, sinceMs, startedAt, lastMs: startedAt - 1000 })
+    ).toBe(startedAt - OVERLAP_MS);
+  });
+
+  it('never moves a finished run before its own checkpoint', () => {
+    const sinceMs = startedAt - 60 * 1000;
+    expect(zohoNextCheckpoint({ finished: true, sinceMs, startedAt, lastMs: sinceMs })).toBe(
+      sinceMs
+    );
+  });
+
+  it('resumes a truncated run one second before the newest message read', () => {
+    const sinceMs = startedAt - 24 * 60 * 60 * 1000;
+    const lastMs = sinceMs + 10 * 60 * 1000;
+    expect(zohoNextCheckpoint({ finished: false, sinceMs, startedAt, lastMs })).toBe(lastMs - 1000);
+  });
+
+  it('resumes an empty truncated run one second before its checkpoint', () => {
+    const sinceMs = startedAt - 24 * 60 * 60 * 1000;
+    expect(zohoNextCheckpoint({ finished: false, sinceMs, startedAt, lastMs: sinceMs })).toBe(
+      sinceMs - 1000
+    );
   });
 });

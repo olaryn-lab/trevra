@@ -5,7 +5,13 @@
  * src/server/email/zoho-mail.ts; src/server/email/zoho-sync-helpers.test.ts
  * holds the copies identical.
  */
-import { MAX_BODY_CHARS, headerValue, htmlToText, type MailHeader } from './inbound-email.js';
+import {
+  MAX_BODY_CHARS,
+  OVERLAP_MS,
+  headerValue,
+  htmlToText,
+  type MailHeader
+} from './inbound-email.js';
 
 export const ZOHO_LIST_PAGE_SIZE = 100;
 /** Inbox entries listed per run before the oldest-first read. */
@@ -33,6 +39,22 @@ export type ZohoListEntry = {
 };
 
 const ADDRESS = /^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/;
+
+/**
+ * The checkpoint a run ends on. A finished run rewinds to OVERLAP_MS before it
+ * started (never behind its own checkpoint) to catch late-indexed mail; a
+ * truncated run resumes one second before the newest message it read.
+ */
+export function zohoNextCheckpoint(input: {
+  finished: boolean;
+  sinceMs: number;
+  startedAt: number;
+  lastMs: number;
+}): number {
+  return input.finished
+    ? Math.max(input.sinceMs, input.startedAt - OVERLAP_MS)
+    : input.lastMs - 1000;
+}
 
 function dataOf(body: unknown): unknown {
   return body && typeof body === 'object' && 'data' in body

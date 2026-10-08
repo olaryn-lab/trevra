@@ -141,11 +141,11 @@ export async function decideInboundMailboxRecord(
     replyTo.length > 0
       ? await db
           .prepare(
-            `SELECT id,source_type FROM gtm_deliveries
+            `SELECT id,source_type,recipient FROM gtm_deliveries
              WHERE workspace_id=? AND channel='email' AND internet_message_id = ANY(?::text[])
              ORDER BY started_at DESC LIMIT 1`
           )
-          .get<{ id: string; source_type: string }>(workspaceId, replyTo)
+          .get<{ id: string; source_type: string; recipient: string | null }>(workspaceId, replyTo)
       : undefined;
   // Campaign replies belong to the campaign reply poller
   // (readConnectedEmailThreadEvents), which also moves the campaign member;
@@ -166,34 +166,48 @@ export async function decideInboundMailboxRecord(
        ) found ORDER BY precedence LIMIT 1`
     )
     .get<{ id: string }>(workspaceId, sender, workspaceId, sender);
-  if (!person) return ignore('unknown_sender');
-
-  let outcomeKind = classifyVerifiedInboundEmail({
-    subject: record.subject,
-    body: record.body,
-    autoSubmitted: record.autoSubmitted ?? null
-  });
-  if (outcomeKind === 'unsubscribe') {
-    // Trevra's own opt-out wording and footer say "unsubscribe"; a client that
-    // quotes them without '>' prefixes must not turn a normal reply into one.
-    outcomeKind = classifyVerifiedInboundEmail({
-      subject: record.subject,
-      body: await withoutKnownOptOutText(db, workspaceId, record.body),
-      autoSubmitted: record.autoSubmitted ?? null
-    });
+  if (!person) {
+    // An alias, forwarding or shared address replying to Trevra's own email.
+    // Its content is never stored, but an opt-out still stops mail to the
+    // address the threaded delivery went to (Zoho's only opt-out is a reply).
+    const recipient = threaded?.recipient?.trim().toLowerCase();
+    if (recipient && (await classifyReply(db, workspaceId, record)) === 'unsubscribe') {
+      await createSuppression(
+        db,
+        {
+          workspaceId,
+          channel: 'email',
+          email: recipient,
+          reason: 'Recipient asked to stop in a reply',
+          source: 'email_reply_unsubscribe',
+          sourceRef: record.id,
+          actorType: 'system'
+        },
+        now
+      );
+      return ignore('unsubscribe_applied');
+    }
+    return ignore('unknown_sender');
   }
+
+  const outcomeKind = await classifyReply(db, workspaceId, record);
   // A reply that threads to Trevra's own email is verified intent. Zoho Mail
   // outreach cannot always be threaded (its Message-ID read-back may fail and
   // clients drop In-Reply-To), and its only opt-out is "reply unsubscribe", so
-  // an unthreaded unsubscribe also counts when this same mailbox sent the
-  // Person Zoho outreach (unsubscribe-policy.ts).
+  // an unthreaded unsubscribe also counts when this mailbox address sent the
+  // Person Zoho outreach (unsubscribe-policy.ts) — over any connection that
+  // held the address, and including sends whose provider result is uncertain.
   const optOutDelivery =
     outcomeKind === 'unsubscribe' && !threaded
       ? await db
           .prepare(
             `SELECT d.id FROM gtm_deliveries d
-             WHERE d.workspace_id=? AND d.channel='email' AND d.purpose='outreach' AND d.status='sent'
-               AND d.provider='zoho-mail' AND d.connection_id=?
+             WHERE d.workspace_id=? AND d.channel='email' AND d.purpose='outreach'
+               AND d.status IN ('sent','uncertain') AND d.provider='zoho-mail'
+               AND d.connection_id IN (
+                 SELECT c.id FROM connections c
+                 WHERE c.workspace_id=? AND c.provider='zoho-mail' AND LOWER(c.mailbox_address)=?
+               )
                AND LOWER(d.recipient) IN (
                  SELECT email_normalized FROM contacts
                  WHERE workspace_id=? AND id=? AND email_normalized IS NOT NULL
@@ -203,11 +217,12 @@ export async function decideInboundMailboxRecord(
                  UNION
                  SELECT ?::text
                )
-             ORDER BY d.sent_at DESC LIMIT 1`
+             ORDER BY COALESCE(d.sent_at,d.started_at) DESC LIMIT 1`
           )
           .get<{ id: string }>(
             workspaceId,
-            connectionId,
+            workspaceId,
+            mailbox.address,
             workspaceId,
             person.id,
             workspaceId,
@@ -237,4 +252,24 @@ export async function decideInboundMailboxRecord(
     outcomeKind,
     threadedDeliveryId: threaded?.id ?? null
   };
+}
+
+async function classifyReply(
+  db: Db,
+  workspaceId: string,
+  record: InboundMailboxRecord
+): Promise<VerifiedEmailOutcome> {
+  const outcomeKind = classifyVerifiedInboundEmail({
+    subject: record.subject,
+    body: record.body,
+    autoSubmitted: record.autoSubmitted ?? null
+  });
+  if (outcomeKind !== 'unsubscribe') return outcomeKind;
+  // Trevra's own opt-out wording and footer say "unsubscribe"; a client that
+  // quotes them without '>' prefixes must not turn a normal reply into one.
+  return classifyVerifiedInboundEmail({
+    subject: record.subject,
+    body: await withoutKnownOptOutText(db, workspaceId, record.body),
+    autoSubmitted: record.autoSubmitted ?? null
+  });
 }

@@ -8,7 +8,7 @@ import { listSendingMailboxes, resolveMailboxAddress } from './mailbox-address.j
 import { getSenderDeliverability } from './sender-deliverability.js';
 import { outreachUnsubscribeModeFor } from './unsubscribe-policy.js';
 import { unsubscribeConfigured } from './unsubscribe.js';
-import { ZOHO_OUTREACH_DAILY_CAP } from './zoho-mail.js';
+import { outreachDailyCap } from '../email-deliveries.js';
 import type {
   EmailChannelStatus,
   EmailInboundMailboxState,
@@ -162,7 +162,11 @@ export async function getEmailChannelStatus(
         deliverability,
         dkimSelector: domain ? await readDkimSelector(db, workspaceId, domain) : null,
         unsubscribeMode: outreachUnsubscribeModeFor(mailbox.providerKey),
-        dailyCap: mailbox.providerKey === 'zoho' ? ZOHO_OUTREACH_DAILY_CAP : null
+        // The cap sends are held to: the operator's limit, never above Zoho's ceiling.
+        dailyCap:
+          mailbox.providerKey === 'zoho'
+            ? await outreachDailyCap(db, { workspaceId, connectionId: mailbox.connectionId })
+            : null
       };
     })
   );

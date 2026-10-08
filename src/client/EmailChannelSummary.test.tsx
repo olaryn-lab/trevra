@@ -250,6 +250,29 @@ describe('EmailChannelSummary', () => {
     expect(markup).toContain('value="custom2026"');
   });
 
+  it('tells a Zoho Mail owner the DKIM selector is required, and only Zoho Mail', () => {
+    const zohoHint =
+      'Zoho Mail has no standard selector; enter the one from your Zoho Mail admin console.';
+    const zoho = render(channel({ mailboxes: [ZOHO] }));
+    expect(zoho).toContain(zohoHint);
+    expect(zoho).not.toContain('Leave empty to use the provider');
+    const gmail = render(channel());
+    expect(gmail).not.toContain(zohoHint);
+    expect(gmail).toContain('Leave empty to use the provider&#x27;s standard selectors.');
+  });
+
+  it('warns beside Stop reading mail that a Zoho inbound mailbox records opt-outs only while read', () => {
+    const note = 'Zoho Mail opt-outs arrive as replies.';
+    const zoho = render(
+      channel({ mailboxes: [ZOHO], inbound: { ...inbound('syncing'), connectionId: 'conn_zoho' } })
+    );
+    expect(zoho).toContain('Stop reading mail');
+    expect(zoho).toContain(
+      `${note} While Trevra is not reading this mailbox, unsubscribe replies are not recorded.`
+    );
+    expect(render(channel({ inbound: inbound('syncing') }))).not.toContain(note);
+  });
+
   it('shows progress while a DKIM selector saves and disables the other controls', () => {
     const markup = render(channel(), { busy: 'dkim:conn_mail_1' });
     expect(markup).toContain('Saving…');

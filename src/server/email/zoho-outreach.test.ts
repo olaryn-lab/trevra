@@ -162,7 +162,19 @@ describe('Zoho Mail outreach plans', () => {
     );
     const send = plan.steps.find((step) => step.kind === 'send');
     expect(send?.detail).toContain('reply "unsubscribe"');
-    expect(send?.detail).toContain(String(ZOHO_OUTREACH_DAILY_CAP));
+    expect(send?.detail).toContain(`at most ${ZOHO_OUTREACH_DAILY_CAP} a day`);
+  });
+
+  it('plans with the effective daily cap when the operator limit is lower', async () => {
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_mailbox_settings (workspace_id,connection_id,daily_limit)
+         VALUES (?,?,5)`
+      )
+      .run(WORKSPACE, CONNECTION);
+    const plan = await compileGtmIntent(db, WORKSPACE, emailIntent());
+    const send = plan.steps.find((step) => step.kind === 'send');
+    expect(send?.detail).toContain('at most 5 a day');
   });
 
   it('still requires one-click unsubscribe for a Gmail sender', async () => {

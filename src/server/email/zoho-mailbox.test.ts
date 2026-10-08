@@ -175,6 +175,18 @@ describe('Zoho Mail mailbox identity', () => {
     ]);
   });
 
+  it('reports the effective Zoho daily cap when the operator limit is lower', async () => {
+    await insertConnection('conn_zoho', 'zoho-mail', 'founder@acme.test');
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_mailbox_settings (workspace_id,connection_id,daily_limit)
+         VALUES (?,'conn_zoho',5)`
+      )
+      .run(WORKSPACE);
+    const status = await getEmailChannelStatus(db, WORKSPACE, { resolver: noDns, now: NOW });
+    expect(status.mailboxes.map(({ dailyCap }) => dailyCap)).toEqual([5]);
+  });
+
   describe('unbound send fallback', () => {
     const unbound = {
       type: 'email_draft',

@@ -35,7 +35,9 @@ const ZOHO_OUTREACH = {
   deliverySourceType: 'email_outreach',
   deliverySourceId: 'eo_zoho_send_1',
   unsubscribeMode: 'footer_and_reply',
-  requireListUnsubscribe: false
+  requireListUnsubscribe: false,
+  // execution.ts passes the approved metadata through unchanged.
+  intent: 'email-outreach'
 };
 // An approved Zoho outreach body ends with the reply-to-unsubscribe footer line.
 const BODY = `Hi Maya,\n\nWould you be open to a short conversation?\n\n${OUTREACH_REPLY_OPT_OUT_SENTENCE}`;
@@ -226,6 +228,21 @@ describe('Zoho Mail outreach send', () => {
       status: 409,
       message: 'Reply-to-unsubscribe is allowed only for approved email outreach; nothing was sent.'
     });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(nangoMock.get).not.toHaveBeenCalled();
+    expect(await deliveries()).toEqual([]);
+  });
+
+  it('refuses reply-to-unsubscribe on email_outreach whose approval is not the outreach intent, before any delivery row', async () => {
+    zohoProvider();
+    const { intent: _intent, ...withoutIntent } = ZOHO_OUTREACH;
+    for (const payload of [withoutIntent, { ...ZOHO_OUTREACH, intent: 'skill-draft' }]) {
+      await expect(send({ payload })).rejects.toMatchObject({
+        status: 409,
+        message:
+          'Reply-to-unsubscribe is allowed only for approved email outreach; nothing was sent.'
+      });
+    }
     expect(nangoMock.post).not.toHaveBeenCalled();
     expect(nangoMock.get).not.toHaveBeenCalled();
     expect(await deliveries()).toEqual([]);

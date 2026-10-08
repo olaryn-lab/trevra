@@ -19,7 +19,7 @@ import {
 } from '../email/outreach.js';
 import type { PreparedEmailOutreachResult } from '../email/types.js';
 import { footerForUnsubscribeMode } from '../email/unsubscribe-policy.js';
-import { ZOHO_OUTREACH_DAILY_CAP } from '../email/zoho-mail.js';
+import { outreachDailyCap } from '../email-deliveries.js';
 import {
   DEFAULT_LINKEDIN_OUTREACH_WORKFLOW_NAME,
   prepareOutreach,
@@ -605,6 +605,11 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
     });
   }
   const sender = readiness.sender;
+  // The cap sends are actually held to, so the plan never promises more.
+  const zohoDailyCap =
+    sender?.unsubscribeMode === 'footer_and_reply'
+      ? await outreachDailyCap(db, { workspaceId, connectionId: sender.connectionId })
+      : null;
   const listLabel = readiness.listName ?? 'the selected People list';
   return finalizePlan({
     objective: 'prepare_outreach',
@@ -641,7 +646,7 @@ async function emailOutreachPlan(db: Db, workspaceId: string, intent: GtmIntent)
         title: 'Send after approval',
         detail:
           sender?.unsubscribeMode === 'footer_and_reply'
-            ? `Each approved email leaves from ${sender.address} through Zoho Mail, at most ${ZOHO_OUTREACH_DAILY_CAP} a day, and ends with your footer asking the recipient to reply "unsubscribe" to opt out.`
+            ? `Each approved email leaves from ${sender.address} through Zoho Mail, at most ${zohoDailyCap} a day, and ends with your footer asking the recipient to reply "unsubscribe" to opt out.`
             : 'Each approved email leaves from the approved mailbox with a one-click unsubscribe link.',
         externalEffect: true
       }

@@ -4,7 +4,6 @@ import {
   BACKFILL_MS,
   INBOUND_ADDRESS_METADATA_KEY,
   INBOUND_EMAIL_MESSAGE_MODEL,
-  OVERLAP_MS,
   buildInboundRecord,
   headerValue,
   normalizeAddress,
@@ -24,6 +23,7 @@ import {
   pickZohoAccount,
   pickZohoFolderId,
   zohoListPage,
+  zohoNextCheckpoint,
   type ZohoListEntry
 } from '../../shared/zoho-mail.js';
 
@@ -163,7 +163,7 @@ export default createSync({
     }
     const finished = queue.length === listed.length && !more;
     await nango.saveCheckpoint({
-      sinceMs: finished ? Math.max(sinceMs, startedAt - OVERLAP_MS) : lastMs - 1000
+      sinceMs: zohoNextCheckpoint({ finished, sinceMs, startedAt, lastMs })
     });
   }
 });

@@ -734,7 +734,10 @@ export async function executeConnectedAction(
   });
   // Reply-to-unsubscribe is reachable only from approved email outreach, never
   // from a campaign, skill or legacy send that claims the mode in its payload.
-  if (unsubscribeMode === 'footer_and_reply' && sourceType !== 'email_outreach') {
+  if (
+    unsubscribeMode === 'footer_and_reply' &&
+    (sourceType !== 'email_outreach' || structuredPayload.intent !== 'email-outreach')
+  ) {
     throw new UnsubscribePolicyError(
       'Reply-to-unsubscribe is allowed only for approved email outreach; nothing was sent.'
     );
