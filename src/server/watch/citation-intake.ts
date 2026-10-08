@@ -1,16 +1,8 @@
 import express, { type Express, type Request, type Response } from 'express';
 import type { Db } from '../db.js';
-import { createCaptureSourceLimiter } from '../lead-capture/http.js';
+import { authenticateCaptureRequest, createCaptureSourceLimiter } from '../lead-capture/http.js';
+import { MAX_CAPTURE_BODY_BYTES } from '../lead-capture/signature.js';
 import {
-  captureHeaderProblem,
-  captureSignatureMatches,
-  MAX_CAPTURE_BODY_BYTES,
-  rawCaptureBody,
-  readCaptureHeaders
-} from '../lead-capture/signature.js';
-import {
-  getCaptureSourceById,
-  readCaptureSourceSigningSecrets,
   recordCaptureSourceAccepted,
   recordCaptureSourceRejected
 } from '../lead-capture/sources.js';
@@ -26,30 +18,18 @@ export const CITATION_INTAKE_PATH = '/api/intake/v1/citations';
 
 /**
  * The AI-answer twin of lead intake. Same headers, same signing recipe, same
- * check order up to the signature; then the source must be a citation source
- * linked to a brand watch. The workspace and the watch both come from the
- * authenticated source, never from the body.
+ * authentication front (authenticateCaptureRequest); then the source must be a
+ * citation source linked to a brand watch. The workspace and the watch both
+ * come from the authenticated source, never from the body.
  */
 async function handleCitation(db: Db, req: Request, res: Response): Promise<void> {
-  const headers = readCaptureHeaders(req.headers);
-  const source = headers.sourceId ? await getCaptureSourceById(db, headers.sourceId) : null;
-  if (!source) {
-    res.status(404).json({ error: 'Capture source not found' });
-    return;
-  }
+  const authenticated = await authenticateCaptureRequest(db, req, res);
+  if (!authenticated) return;
+  const { source, headers, rawBody } = authenticated;
   const reject = async (status: number, message: string) => {
     await recordCaptureSourceRejected(db, source.id);
     res.status(status).json({ error: message });
   };
-  if (source.status !== 'active') return void (await reject(401, 'Capture source is disabled'));
-  const problem = captureHeaderProblem(headers, Math.floor(Date.now() / 1000));
-  if (problem) return void (await reject(problem.status, problem.error));
-
-  const rawBody = rawCaptureBody(req.body);
-  const secrets = await readCaptureSourceSigningSecrets(db, source);
-  if (secrets.length === 0) return void (await reject(401, 'Capture source has no usable secret'));
-  if (!captureSignatureMatches(secrets, headers, rawBody))
-    return void (await reject(401, 'Invalid capture signature'));
   if (source.kind !== CITATION_SOURCE_KIND)
     return void (await reject(
       403,

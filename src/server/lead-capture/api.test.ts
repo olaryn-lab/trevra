@@ -291,7 +291,8 @@ describe('lead capture API surface', () => {
       .prepare('SELECT accepted_count,rejected_count FROM capture_sources WHERE id=?')
       .get<{ accepted_count: number; rejected_count: number }>(source.id);
     expect(Number(counts?.accepted_count)).toBe(0);
-    expect(Number(counts?.rejected_count)).toBe(2);
+    // Only the authenticated 403 counts; the unsigned probe is not the source's.
+    expect(Number(counts?.rejected_count)).toBe(1);
     const contact = await db
       .prepare('SELECT id FROM contacts WHERE workspace_id=? AND email_normalized=?')
       .get(WORKSPACE_ID, 'citation-probe@capture-api.test');

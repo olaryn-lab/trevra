@@ -122,18 +122,19 @@ On transport failure or `429`/`5xx`, retry with the **same idempotency key and e
 
 ## 6. Status codes
 
-| Status | Meaning                                     |
-| ------ | ------------------------------------------- |
-| `200`  | identical retry already accepted            |
-| `202`  | new submission accepted                     |
-| `400`  | invalid GTM payload/idempotency input       |
-| `401`  | invalid/stale signature or disabled source  |
-| `403`  | source is an AI-answer citation source      |
-| `404`  | Capture Source not found                    |
-| `409`  | idempotency key reused with different bytes |
-| `413`  | request body too large                      |
-| `429`  | source rate limit reached                   |
-| `5xx`  | temporary Trevra failure; retry safely      |
+| Status | Meaning                                                                                                                                      |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `200`  | identical retry already accepted                                                                                                             |
+| `202`  | new submission accepted                                                                                                                      |
+| `400`  | invalid GTM payload/idempotency input                                                                                                        |
+| `401`  | invalid or stale signature or timestamp; also an unknown, disabled or secretless source, answered identically as `Invalid capture signature` |
+| `403`  | source is an AI-answer citation source                                                                                                       |
+| `409`  | idempotency key reused with different bytes                                                                                                  |
+| `413`  | request body too large                                                                                                                       |
+| `429`  | rate limit reached for this caller and source                                                                                                |
+| `5xx`  | temporary Trevra failure; retry safely                                                                                                       |
+
+A source's rejected count records only deliveries that carried a valid signature and were still refused (`400`, `403`, `409`). Unsigned or wrongly signed requests never change it.
 
 ## 7. Secret rotation and revocation
 
@@ -189,12 +190,11 @@ Trevra compares each sample with the latest earlier sample for the same engine a
 | `200`  | identical retry already recorded                                                                                                                                                                                            |
 | `202`  | new sample recorded                                                                                                                                                                                                         |
 | `400`  | invalid sample, unknown field, a URL outside your domains, `answeredAt` more than 5 minutes ahead or older than 13 months, or a missing/invalid `X-Trevra-Idempotency-Key` (`A valid X-Trevra-Idempotency-Key is required`) |
-| `401`  | invalid/stale signature or timestamp, disabled source, or `Capture source has no usable secret`                                                                                                                             |
+| `401`  | invalid or stale signature or timestamp; also an unknown, disabled or secretless source, answered identically as `Invalid capture signature`                                                                                |
 | `403`  | the source is a lead-capture source, not a citation source                                                                                                                                                                  |
-| `404`  | capture source not found                                                                                                                                                                                                    |
 | `409`  | key or `sampleId` reused with different bytes, or the source has no watch                                                                                                                                                   |
 | `413`  | request body too large                                                                                                                                                                                                      |
-| `429`  | source rate limit reached                                                                                                                                                                                                   |
+| `429`  | rate limit reached for this caller and source                                                                                                                                                                               |
 
 Samples are kept for 13 months. Deleting the watch deletes its samples, and its citation source is removed within the hour.
 

@@ -1,7 +1,12 @@
 import express, { type Express, type Request, type Response } from 'express';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import type { Db } from '../db.js';
-import { CITATION_SOURCE_KIND, inboundSubmissionSchema, LeadCaptureError } from './types.js';
+import {
+  CITATION_SOURCE_KIND,
+  inboundSubmissionSchema,
+  LeadCaptureError,
+  type CaptureSourceRecord
+} from './types.js';
 import {
   getCaptureSourceById,
   readCaptureSourceSigningSecrets,
@@ -17,29 +22,52 @@ import {
   captureSignatureMatches,
   MAX_CAPTURE_BODY_BYTES,
   rawCaptureBody,
-  readCaptureHeaders
+  readCaptureHeaders,
+  type CaptureHeaders
 } from './signature.js';
 
-async function handleIntake(db: Db, req: Request, res: Response): Promise<void> {
+/**
+ * The shared front of both public intakes (this one and watch/citation-intake.ts).
+ *
+ * Header problems need no source, so they are answered first and say nothing
+ * about one. After that an unknown source, a disabled source, a source with no
+ * usable secret and a bad signature are the same 401 with the same body, so an
+ * unsigned caller cannot learn whether a source exists or is enabled. None of
+ * them counts as a rejection: rejected_count is the source's own record of
+ * authenticated-but-refused deliveries, not something anyone can inflate.
+ *
+ * Answers the request and returns null when the caller is not authenticated.
+ */
+export async function authenticateCaptureRequest(
+  db: Db,
+  req: Request,
+  res: Response
+): Promise<{ source: CaptureSourceRecord; headers: CaptureHeaders; rawBody: Buffer } | null> {
   const headers = readCaptureHeaders(req.headers);
-  const source = headers.sourceId ? await getCaptureSourceById(db, headers.sourceId) : null;
-  if (!source) {
-    res.status(404).json({ error: 'Capture source not found' });
-    return;
+  const problem = captureHeaderProblem(headers, Math.floor(Date.now() / 1000));
+  if (problem) {
+    res.status(problem.status).json({ error: problem.error });
+    return null;
   }
+  const source = headers.sourceId ? await getCaptureSourceById(db, headers.sourceId) : null;
+  const rawBody = rawCaptureBody(req.body);
+  const secrets =
+    source && source.status === 'active' ? await readCaptureSourceSigningSecrets(db, source) : [];
+  if (!source || !captureSignatureMatches(secrets, headers, rawBody)) {
+    res.status(401).json({ error: 'Invalid capture signature' });
+    return null;
+  }
+  return { source, headers, rawBody };
+}
+
+async function handleIntake(db: Db, req: Request, res: Response): Promise<void> {
+  const authenticated = await authenticateCaptureRequest(db, req, res);
+  if (!authenticated) return;
+  const { source, headers, rawBody } = authenticated;
   const reject = async (status: number, message: string) => {
     await recordCaptureSourceRejected(db, source.id);
     res.status(status).json({ error: message });
   };
-  if (source.status !== 'active') return void (await reject(401, 'Capture source is disabled'));
-  const problem = captureHeaderProblem(headers, Math.floor(Date.now() / 1000));
-  if (problem) return void (await reject(problem.status, problem.error));
-
-  const rawBody = rawCaptureBody(req.body);
-  const secrets = await readCaptureSourceSigningSecrets(db, source);
-  if (secrets.length === 0) return void (await reject(401, 'Capture source has no usable secret'));
-  if (!captureSignatureMatches(secrets, headers, rawBody))
-    return void (await reject(401, 'Invalid capture signature'));
   // Checked after the signature, so an unsigned probe cannot learn a source's
   // kind. A citation secret proves who signed; it does not make this the
   // endpoint the secret was issued for.
@@ -114,10 +142,11 @@ export function createCaptureSourceLimiter() {
     limit: 120,
     standardHeaders: true,
     legacyHeaders: false,
-    // Unknown/missing sources intentionally share one bucket. Once a source ID
-    // is present it becomes the quota key, so IPv6 address normalisation never
-    // enters this limiter and one source cannot spend another source's quota.
-    keyGenerator: (req) => String(req.headers['x-trevra-source'] ?? 'unknown'),
+    // Keyed by caller address AND claimed source: the source header is caller
+    // supplied, so keying on it alone let anyone exhaust a real source's quota
+    // by sending its ID. One source still never spends another's quota.
+    keyGenerator: (req) =>
+      `${ipKeyGenerator(req.ip ?? '')}:${String(req.headers['x-trevra-source'] ?? 'unknown')}`,
     message: {
       error: 'Capture source has made too many requests. Retry with the same idempotency key.'
     }

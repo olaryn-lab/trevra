@@ -6,7 +6,7 @@ import { auth as betterAuth, closeAuthDatabase, migrateAuthDatabase } from '../a
 import { createApp } from '../app.js';
 import { openDatabase, type Db } from '../db.js';
 import { MAX_CAPTURE_BODY_BYTES } from '../lead-capture/signature.js';
-import { createCaptureSource } from '../lead-capture/sources.js';
+import { createCaptureSource, setCaptureSourceStatus } from '../lead-capture/sources.js';
 import { CITATION_SOURCE_KIND } from '../lead-capture/types.js';
 import { createWatch, type BrandWatch } from './store.js';
 
@@ -236,13 +236,58 @@ describe('AI-answer citation intake', () => {
       'citation-api-badsig',
       sampleBody()
     ).expect(401);
-    await signedRequest(
+    const missing = await signedRequest(
       CITATIONS,
       'cap_missing',
       secret,
       'citation-api-missing',
       sampleBody()
-    ).expect(404);
+    ).expect(401);
+    expect(missing.body).toEqual({ error: 'Invalid capture signature' });
+  });
+
+  it('answers an unknown and a disabled source like a bad signature, uncounted', async () => {
+    const disabled = await createCaptureSource(db, {
+      workspaceId: WORKSPACE_ID,
+      actorUserId: USER_ID,
+      name: 'Retired AI answers',
+      kind: CITATION_SOURCE_KIND
+    });
+    await setCaptureSourceStatus(db, {
+      workspaceId: WORKSPACE_ID,
+      sourceId: disabled.source.id,
+      status: 'disabled',
+      actorUserId: USER_ID
+    });
+    const counts = async () =>
+      (
+        await db
+          .prepare('SELECT id,rejected_count FROM capture_sources WHERE workspace_id=? ORDER BY id')
+          .all<{ id: string; rejected_count: number }>(WORKSPACE_ID)
+      ).map((row) => `${row.id}:${Number(row.rejected_count)}`);
+    const before = await counts();
+    const responses = [
+      await signedRequest(CITATIONS, 'cap_missing', secret, 'citation-api-unknown', sampleBody()),
+      await signedRequest(
+        CITATIONS,
+        disabled.source.id,
+        disabled.secret,
+        'citation-api-disabled',
+        sampleBody()
+      ),
+      await signedRequest(
+        CITATIONS,
+        sourceId,
+        'trv_capture_wrong',
+        'citation-api-badsig2',
+        sampleBody()
+      )
+    ];
+    for (const response of responses) {
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ error: 'Invalid capture signature' });
+    }
+    expect(await counts()).toEqual(before);
   });
 });
 

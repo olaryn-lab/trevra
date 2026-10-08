@@ -3,7 +3,7 @@ import express, { type Express } from 'express';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
-import { registerLeadCaptureIntake } from './http.js';
+import { createCaptureSourceLimiter, registerLeadCaptureIntake } from './http.js';
 import {
   createCaptureSource,
   rotateCaptureSourceSecret,
@@ -640,20 +640,56 @@ describe('generic lead capture', () => {
     process.env.TREVRA_SECRETS_KEY = nextKey;
   });
 
-  it('rejects an unknown source without creating data', async () => {
+  it('limits each caller per claimed source, so a stranger cannot spend a source quota', async () => {
+    const limited = express();
+    limited.set('trust proxy', 1);
+    limited.post('/limited', createCaptureSourceLimiter(), (_req, res) => {
+      res.sendStatus(204);
+    });
+    const send = (ip: string) =>
+      request(limited).post('/limited').set('X-Forwarded-For', ip).set('X-Trevra-Source', 'cap_x');
+    let last = 0;
+    for (let sent = 0; sent < 121; sent += 1) last = (await send('203.0.113.7')).status;
+    expect(last).toBe(429);
+    expect((await send('198.51.100.9')).status).toBe(204);
+  });
+
+  it('answers an unknown, a disabled and a wrongly signed source identically, uncounted', async () => {
     const body = { kind: 'contact_message', person: { email: 'unknown@example.com' } };
-    const raw = JSON.stringify(body);
-    const timestamp = Math.floor(Date.now() / 1000);
-    const key = 'idem-unknown-001';
-    const response = await request(app)
-      .post('/api/intake/v1/submissions')
-      .set('Content-Type', 'application/json')
-      .set('X-Trevra-Source', 'cap_missing')
-      .set('X-Trevra-Timestamp', String(timestamp))
-      .set('X-Trevra-Idempotency-Key', key)
-      .set('X-Trevra-Signature', `sha256=${sign(sourceSecret, timestamp, key, raw)}`)
-      .send(raw)
-      .expect(404);
-    expect(response.body.error).toContain('not found');
+    const disabled = await createCaptureSource(db, {
+      workspaceId: WORKSPACE_A,
+      actorUserId: USER_A,
+      name: 'Retired form',
+      kind: 'website'
+    });
+    await setCaptureSourceStatus(db, {
+      workspaceId: WORKSPACE_A,
+      sourceId: disabled.source.id,
+      status: 'disabled',
+      actorUserId: USER_A
+    });
+    const counts = async () =>
+      (
+        await db
+          .prepare('SELECT id,rejected_count FROM capture_sources WHERE workspace_id=? ORDER BY id')
+          .all<{ id: string; rejected_count: number }>(WORKSPACE_A)
+      ).map((row) => `${row.id}:${Number(row.rejected_count)}`);
+    const before = await counts();
+
+    const now = Math.floor(Date.now() / 1000);
+    const unknown = await intake(sourceSecret, 'idem-unknown-001', body, now, 'cap_missing');
+    const off = await intake(disabled.secret, 'idem-disabled-002', body, now, disabled.source.id);
+    const badSignature = await intake('trv_capture_wrong', 'idem-badsig-001', body, now);
+    for (const response of [unknown, off, badSignature]) {
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ error: 'Invalid capture signature' });
+    }
+    expect(await counts()).toEqual(before);
+    const submissions = await db
+      .prepare(
+        'SELECT id FROM inbound_submissions WHERE workspace_id=? AND idempotency_key IN (?,?,?)'
+      )
+      .all(WORKSPACE_A, 'idem-unknown-001', 'idem-disabled-002', 'idem-badsig-001');
+    expect(submissions).toHaveLength(0);
   });
 });
