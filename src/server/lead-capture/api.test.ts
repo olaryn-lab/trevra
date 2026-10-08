@@ -268,10 +268,30 @@ describe('lead capture API surface', () => {
       kind: 'demo_request',
       person: { email: 'citation-probe@capture-api.test' }
     });
+    // The kind gate runs only after a valid signature, so an unsigned probe
+    // cannot learn that this is a citation source.
+    const unsigned = await signedRequest(
+      source.id,
+      'trv_capture_wrong_secret',
+      'api-citation-probe-000',
+      raw
+    ).expect(401);
+    expect(unsigned.body.error).toBe('Invalid capture signature');
     const response = await signedRequest(source.id, secret, 'api-citation-probe-001', raw).expect(
       403
     );
     expect(response.body.error).toBe('This capture source only accepts AI-answer citation samples');
+    const submissions = await db
+      .prepare(
+        'SELECT id FROM inbound_submissions WHERE workspace_id=? AND capture_source_id=? AND idempotency_key IN (?,?)'
+      )
+      .all(WORKSPACE_ID, source.id, 'api-citation-probe-000', 'api-citation-probe-001');
+    expect(submissions).toHaveLength(0);
+    const counts = await db
+      .prepare('SELECT accepted_count,rejected_count FROM capture_sources WHERE id=?')
+      .get<{ accepted_count: number; rejected_count: number }>(source.id);
+    expect(Number(counts?.accepted_count)).toBe(0);
+    expect(Number(counts?.rejected_count)).toBe(2);
     const contact = await db
       .prepare('SELECT id FROM contacts WHERE workspace_id=? AND email_normalized=?')
       .get(WORKSPACE_ID, 'citation-probe@capture-api.test');
