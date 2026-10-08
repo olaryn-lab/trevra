@@ -113,7 +113,11 @@ async function handleIntake(db: Db, req: Request, res: Response): Promise<void> 
           occurredAt: new Date(result.submission.occurredAt ?? result.submission.receivedAt)
         });
       } catch (error) {
-        console.error('milestone recording failed', error);
+        // Name and code only: a pg error's message and detail can carry an email.
+        console.error('milestone recording failed', {
+          name: error instanceof Error ? error.name : 'Error',
+          code: (error as { code?: unknown } | null)?.code
+        });
         res
           .status(503)
           .json({ error: 'Milestone recording failed. Retry with the same idempotency key.' });

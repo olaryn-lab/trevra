@@ -351,10 +351,20 @@ describe('signed intake', () => {
       person: { email: 'ada@acme-milestone.example' },
       company: { domain: 'acme-milestone.example' }
     };
-    vi.spyOn(console, 'error').mockImplementation(() => undefined);
-    vi.mocked(recordProductMilestone).mockRejectedValueOnce(new Error('boom'));
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    // A pg error's message and detail can carry the person's email.
+    vi.mocked(recordProductMilestone).mockRejectedValueOnce(
+      Object.assign(new Error('Key (email)=(ada@acme-milestone.example) already exists'), {
+        code: '23505',
+        detail: 'ada@acme-milestone.example'
+      })
+    );
     const failed = await intake('milestone-retry-0001', body);
     expect(failed.status).toBe(503);
+    expect(logged).toHaveBeenCalledWith('milestone recording failed', {
+      name: 'Error',
+      code: '23505'
+    });
     expect(
       await count('SELECT COUNT(*)::int AS n FROM product_milestones WHERE workspace_id=?', WS)
     ).toBe(0);
