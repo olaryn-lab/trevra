@@ -4,6 +4,7 @@ import {
   approveLabel,
   formatCredits,
   inferredContactTitle,
+  keyEntryHint,
   keyStatusLine,
   parseCreditCap,
   personOptionLabel,
@@ -80,6 +81,14 @@ describe('plan cost copy', () => {
     });
   });
 
+  it('explains why Save is off while a too-short key is typed', () => {
+    const base = 'Stored encrypted. Trevra never shows it again.';
+    expect(keyEntryHint('')).toBe(base);
+    expect(keyEntryHint('   ')).toBe(base);
+    expect(keyEntryHint('abc')).toBe(`${base} Save unlocks once the key is at least 8 characters.`);
+    expect(keyEntryHint('abcdefgh')).toBe(base);
+  });
+
   it('describes key and usage state', () => {
     expect(keyStatusLine(settings)).toBe('Hunter key saved and accepted on 2026-10-06.');
     expect(keyStatusLine({ ...settings, keyStatus: 'missing' })).toBe('No Hunter key saved.');
@@ -124,6 +133,10 @@ describe('plan cost copy', () => {
     expect(runStatusLabel('failed')).toBe('Failed');
     expect(runCompaniesLine(run)).toBe('2 of 3 companies');
     expect(runCompaniesLine({ ...run, domainsDone: 0, domainCount: 1 })).toBe('0 of 1 company');
+    expect(runCompaniesLine({ ...run, domainsDone: 3, skippedDomains: 3 })).toBe(
+      '3 of 3 companies · 3 skipped'
+    );
+    expect(runCompaniesLine({ ...run, skippedDomains: 1 })).toBe('2 of 3 companies · 1 skipped');
     expect(runContactsLine(run)).toBe('4 contacts saved');
     expect(runContactsLine({ ...run, contactsSaved: 1 })).toBe('1 contact saved');
     expect(runCreditsLine(run)).toBe('5.5 of 9 credits');

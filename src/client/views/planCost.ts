@@ -36,6 +36,18 @@ export function approveLabel(cost: GtmPlanCost | undefined, preparing: boolean):
   return cost ? `Approve · up to ${formatCredits(cost.estimatedCredits)}` : 'Prepare this';
 }
 
+/** Shorter than this is never a Hunter key; Save stays off below it. */
+export const MIN_HUNTER_KEY_LENGTH = 8;
+
+/** The key field's hint; says why Save is still off once something has been typed. */
+export function keyEntryHint(typed: string): string {
+  const base = 'Stored encrypted. Trevra never shows it again.';
+  const length = typed.trim().length;
+  return length > 0 && length < MIN_HUNTER_KEY_LENGTH
+    ? `${base} Save unlocks once the key is at least ${MIN_HUNTER_KEY_LENGTH} characters.`
+    : base;
+}
+
 export function keyStatusLine(settings: EnrichmentSettings): string {
   switch (settings.keyStatus) {
     case 'missing':
@@ -68,8 +80,12 @@ export function runStatusLabel(status: EnrichmentRunView['status']): string {
   return RUN_STATUS_LABELS[status];
 }
 
-export function runCompaniesLine(run: Pick<EnrichmentRunView, 'domainsDone' | 'domainCount'>) {
-  return `${run.domainsDone} of ${run.domainCount} ${run.domainCount === 1 ? 'company' : 'companies'}`;
+/** "N skipped" only when N > 0, so a run Hunter rejected wholesale never reads as finished work. */
+export function runCompaniesLine(
+  run: Pick<EnrichmentRunView, 'domainsDone' | 'domainCount' | 'skippedDomains'>
+): string {
+  const done = `${run.domainsDone} of ${run.domainCount} ${run.domainCount === 1 ? 'company' : 'companies'}`;
+  return run.skippedDomains > 0 ? `${done} · ${run.skippedDomains} skipped` : done;
 }
 
 export function runContactsLine(run: Pick<EnrichmentRunView, 'contactsSaved'>): string {
