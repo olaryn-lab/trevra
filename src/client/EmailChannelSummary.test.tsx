@@ -74,6 +74,7 @@ function render(
       onUseForInbound={noop}
       onStopInbound={noop}
       onRecheck={noop}
+      onSaveDkimSelector={noop}
     />
   );
 }
@@ -138,7 +139,7 @@ describe('EmailChannelSummary', () => {
 
   it('tells a workspace without a mailbox how to start and disables the DNS check', () => {
     const markup = render(channel({ mailboxes: [] }));
-    expect(markup).toContain('Connect Gmail or Microsoft 365');
+    expect(markup).toContain('Connect Gmail, Microsoft 365 or Zoho Mail');
     expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Re-check DNS<\/button>/);
   });
 
@@ -200,5 +201,59 @@ describe('EmailChannelSummary', () => {
     expect(stop).toMatch(/<button[^>]*disabled=""[^>]*>Re-check DNS/);
     const inboundBusy = render(channel(), { busy: 'inbound:conn_mail_1' });
     expect(inboundBusy).toMatch(/<button[^>]*disabled=""[^>]*>Re-check DNS/);
+  });
+
+  const ZOHO: EmailChannelStatus['mailboxes'][number] = {
+    ...MAILBOX,
+    connectionId: 'conn_zoho',
+    provider: 'zoho-mail',
+    providerKey: 'zoho',
+    unsubscribeMode: 'footer_and_reply',
+    dailyCap: 50,
+    deliverability: deliverability({
+      provider: 'zoho',
+      status: 'fail',
+      dkim: { status: 'fail', detail: 'No DKIM selector is set for this domain.', record: null },
+      blockers: [
+        {
+          code: 'email_dkim_selector_missing',
+          message: 'Enter the DKIM selector from your Zoho Mail admin console.',
+          actionHref: '/setup/workspace'
+        }
+      ]
+    })
+  };
+
+  it('explains reply-to-unsubscribe and the daily cap for a Zoho Mail sender', () => {
+    const markup = render(channel({ mailboxes: [ZOHO] }));
+    expect(markup).toContain('Zoho Mail');
+    expect(markup).toContain('Zoho Mail cannot add one-click unsubscribe.');
+    expect(markup).toContain('at most 50 a day');
+    expect(render(channel())).not.toContain('Zoho Mail cannot add one-click unsubscribe.');
+  });
+
+  it('opens the DKIM selector form when the check needs one, for the owner only', () => {
+    const owner = render(channel({ mailboxes: [ZOHO] }));
+    expect(owner).toContain('<details class="email-channel-dkim" open="">');
+    expect(owner).toContain('<span class="ui-field-label">DKIM selector</span>');
+    expect(owner).toMatch(/<input[^>]*name="dkimSelector"/);
+    expect(owner).toMatch(/<button[^>]*type="submit"[^>]*>Save selector<\/button>/);
+    expect(render(channel({ mailboxes: [ZOHO] }), { isOwner: false })).not.toContain(
+      'dkimSelector'
+    );
+  });
+
+  it('keeps the DKIM selector form closed when DKIM passes and shows the stored selector', () => {
+    const markup = render(channel({ mailboxes: [{ ...MAILBOX, dkimSelector: 'custom2026' }] }));
+    expect(markup).toContain('<details class="email-channel-dkim">');
+    expect(markup).toContain('DKIM selector: custom2026');
+    expect(markup).toContain('value="custom2026"');
+  });
+
+  it('shows progress while a DKIM selector saves and disables the other controls', () => {
+    const markup = render(channel(), { busy: 'dkim:conn_mail_1' });
+    expect(markup).toContain('Saving…');
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Re-check DNS/);
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Use for inbound mail/);
   });
 });

@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Mail } from 'lucide-react';
 import type { EmailChannelStatus } from '../server/email/types';
-import { chooseInboundMailbox, getEmailChannel, recheckEmailDns, stopInboundMailbox } from './api';
+import {
+  chooseInboundMailbox,
+  getEmailChannel,
+  recheckEmailDns,
+  saveDkimSelector,
+  stopInboundMailbox
+} from './api';
 import { useIsWorkspaceOwner } from './auth-client';
 import { EmailChannelSummary, type EmailChannelBusy } from './EmailChannelSummary';
 import { Panel } from './ui/layout';
@@ -50,7 +56,7 @@ export function EmailChannelPanel({ setToast }: { setToast: (message: string) =>
     <Panel
       title="Email"
       icon={<Mail size={18} />}
-      description="Sending-domain checks, one-click unsubscribe, and the one mailbox Trevra reads."
+      description="Sending-domain checks, unsubscribe, and the one mailbox Trevra reads."
     >
       {problem && (
         <div className="error-banner" role="alert">
@@ -73,6 +79,13 @@ export function EmailChannelPanel({ setToast }: { setToast: (message: string) =>
             void run('stop', stopInboundMailbox, 'Trevra stopped reading the mailbox')
           }
           onRecheck={() => void run('recheck', recheckEmailDns, 'DNS checked again')}
+          onSaveDkimSelector={(connectionId, selector) =>
+            void run(
+              `dkim:${connectionId}`,
+              () => saveDkimSelector(connectionId, selector),
+              selector ? 'DKIM selector saved and DNS checked again' : 'DKIM selector cleared'
+            )
+          }
         />
       ) : problem ? null : (
         <p className="empty-copy">Checking your mailboxes…</p>

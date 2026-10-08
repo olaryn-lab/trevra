@@ -1,9 +1,10 @@
+import type { FormEvent } from 'react';
 import type { EmailChannelStatus, StoredDeliverability } from '../server/email/types';
-import { Button } from './ui/primitives';
+import { Button, Field, Input } from './ui/primitives';
 import { prettyProvider } from './views/format';
 
 /** Which control is waiting on the server; every control is disabled meanwhile. */
-export type EmailChannelBusy = 'recheck' | 'stop' | `inbound:${string}` | null;
+export type EmailChannelBusy = 'recheck' | 'stop' | `inbound:${string}` | `dkim:${string}` | null;
 
 function deliverabilityBadge(deliverability: StoredDeliverability | null): {
   label: string;
@@ -35,7 +36,8 @@ export function EmailChannelSummary({
   busy,
   onUseForInbound,
   onStopInbound,
-  onRecheck
+  onRecheck,
+  onSaveDkimSelector
 }: {
   channel: EmailChannelStatus;
   isOwner: boolean;
@@ -43,12 +45,20 @@ export function EmailChannelSummary({
   onUseForInbound: (connectionId: string) => void;
   onStopInbound: () => void;
   onRecheck: () => void;
+  onSaveDkimSelector: (connectionId: string, selector: string | null) => void;
 }) {
+  function saveSelector(event: FormEvent<HTMLFormElement>, connectionId: string) {
+    event.preventDefault();
+    const value = String(new FormData(event.currentTarget).get('dkimSelector') ?? '').trim();
+    // Empty clears the selector and returns to the provider's standard ones.
+    onSaveDkimSelector(connectionId, value || null);
+  }
+
   return (
     <div className="email-channel">
       {channel.mailboxes.length === 0 ? (
         <p className="empty-copy">
-          Connect Gmail or Microsoft 365 above to send outreach email and read replies.
+          Connect Gmail, Microsoft 365 or Zoho Mail above to send outreach email and read replies.
         </p>
       ) : (
         <ul className="email-channel-mailboxes">
@@ -63,6 +73,10 @@ export function EmailChannelSummary({
               mailbox.deliverability?.status === 'unknown' && issues.length === 0
                 ? mailbox.deliverability.spf.detail
                 : null;
+            const domain = mailbox.address?.split('@')[1] ?? null;
+            const needsSelector = (mailbox.deliverability?.blockers ?? []).some(
+              (issue) => issue.code === 'email_dkim_selector_missing'
+            );
             return (
               <li key={mailbox.connectionId}>
                 <div className="email-channel-mailbox-head">
@@ -87,6 +101,47 @@ export function EmailChannelSummary({
                   </ul>
                 )}
                 {pendingDetail && <p className="email-channel-pending">{pendingDetail}</p>}
+                {mailbox.unsubscribeMode === 'footer_and_reply' && (
+                  <p className="email-channel-note">
+                    Zoho Mail cannot add one-click unsubscribe. Outreach from this mailbox ends with
+                    your footer asking people to reply “unsubscribe”
+                    {mailbox.dailyCap !== null
+                      ? `, and sends at most ${mailbox.dailyCap} a day`
+                      : ''}
+                    .
+                  </p>
+                )}
+                {isOwner && domain && (
+                  <details className="email-channel-dkim" open={needsSelector}>
+                    <summary>
+                      {mailbox.dkimSelector
+                        ? `DKIM selector: ${mailbox.dkimSelector}`
+                        : 'DKIM selector'}
+                    </summary>
+                    <form
+                      className="email-channel-dkim-form"
+                      onSubmit={(event) => saveSelector(event, mailbox.connectionId)}
+                    >
+                      <Field
+                        label="DKIM selector"
+                        hint={`From your mail provider's DKIM settings. Trevra checks <selector>._domainkey.${domain}. Leave empty to use the provider's standard selectors.`}
+                      >
+                        <Input
+                          name="dkimSelector"
+                          defaultValue={mailbox.dkimSelector ?? ''}
+                          placeholder="zmail"
+                          autoComplete="off"
+                          spellCheck={false}
+                          maxLength={200}
+                          disabled={busy !== null}
+                        />
+                      </Field>
+                      <Button type="submit" disabled={busy !== null}>
+                        {busy === `dkim:${mailbox.connectionId}` ? 'Saving…' : 'Save selector'}
+                      </Button>
+                    </form>
+                  </details>
+                )}
                 {isOwner && !isInbound && (
                   <Button
                     disabled={busy !== null}

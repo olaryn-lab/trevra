@@ -9,7 +9,8 @@ const SKIP_LABELS: Array<[EmailOutreachSkipReason, string]> = [
   ['do_not_contact', 'marked do-not-contact'],
   ['suppressed', 'unsubscribed or suppressed'],
   ['already_contacted', 'already emailed'],
-  ['already_pending', 'already waiting for approval']
+  ['already_pending', 'already waiting for approval'],
+  ['daily_cap', "over today's Zoho Mail sending limit"]
 ];
 
 /** One sentence that accounts for every Person an email preparation skipped. */

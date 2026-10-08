@@ -12888,6 +12888,33 @@ button:disabled {
   flex-wrap: wrap;
   gap: 8px;
 }
+.email-channel-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--t-text-xs);
+}
+.email-channel-dkim {
+  width: 100%;
+}
+.email-channel-dkim > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--t-tap);
+  color: var(--muted);
+  font-size: var(--t-text-xs);
+  font-weight: var(--t-w-strong);
+  cursor: pointer;
+}
+.email-channel-dkim-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+.email-channel-dkim-form .ui-field {
+  flex: 1 1 220px;
+  min-width: 0;
+}
 /* Opportunity-lite: fixed GTM stages, not a configurable CRM pipeline. */
 .opportunity-create {
   display: grid;

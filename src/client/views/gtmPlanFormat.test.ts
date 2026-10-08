@@ -18,6 +18,16 @@ describe('emailSkipSummary', () => {
       'Skipped 4: 2 without an email address, 1 unsubscribed or suppressed, 1 already emailed.'
     );
   });
+
+  it('names the Zoho Mail daily cap', () => {
+    expect(
+      emailSkipSummary([
+        { contactId: 'a', reason: 'daily_cap' },
+        { contactId: 'b', reason: 'already_pending' },
+        { contactId: 'c', reason: 'daily_cap' }
+      ])
+    ).toBe("Skipped 3: 1 already waiting for approval, 2 over today's Zoho Mail sending limit.");
+  });
 });
 
 describe('planIssues', () => {

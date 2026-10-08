@@ -610,6 +610,17 @@ export async function recheckEmailDns(): Promise<EmailChannelStatus> {
   return result.channel;
 }
 
+export async function saveDkimSelector(
+  connectionId: string,
+  selector: string | null
+): Promise<EmailChannelStatus> {
+  const result = await request<{ channel: EmailChannelStatus }>('/api/email/dkim-selector', {
+    method: 'PUT',
+    body: JSON.stringify({ connectionId, selector })
+  });
+  return result.channel;
+}
+
 export async function getConversations(limit = 100): Promise<ConversationSummary[]> {
   const result = await request<{ conversations: ConversationSummary[] }>(
     `/api/conversations?limit=${encodeURIComponent(String(limit))}`
