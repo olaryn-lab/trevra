@@ -152,12 +152,58 @@ export function decodePartData(data: string, headers: readonly MailHeader[] = []
   return Buffer.from(data, 'base64url').toString(latin1 ? 'latin1' : 'utf8');
 }
 
+const BLOCK_CLOSE: Record<string, RegExp> = {
+  style: /<\/style>/gi,
+  script: /<\/script>/gi,
+  head: /<\/head>/gi
+};
+
+/**
+ * Same result as `.replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, '')`
+ * in linear time. That regex rescans to the end of the input for every opener
+ * that never closes. Here a tag name whose close is missing after one opener
+ * is never searched again: no later opener of that name can close either.
+ */
+function stripBlocks(html: string): string {
+  const opener = /<(style|script|head)/gi;
+  const unclosed = new Set<string>();
+  let text = '';
+  let kept = 0;
+  let openerEnd = -1;
+  let match: RegExpExecArray | null;
+  while ((match = opener.exec(html)) !== null) {
+    const name = (match[1] ?? '').toLowerCase();
+    const close = BLOCK_CLOSE[name];
+    if (!close || unclosed.has(name)) continue;
+    const from = match.index + match[0].length;
+    if (openerEnd < from) openerEnd = html.indexOf('>', from);
+    if (openerEnd === -1) break;
+    close.lastIndex = openerEnd + 1;
+    const end = close.exec(html);
+    if (!end) {
+      unclosed.add(name);
+      continue;
+    }
+    text += html.slice(kept, match.index);
+    kept = end.index + end[0].length;
+    opener.lastIndex = kept;
+  }
+  return text + html.slice(kept);
+}
+
+/** `.replace(/<[^>]+>/g, '')` without its quadratic rescan of a tail that has no `>`. */
+function stripTags(html: string): string {
+  const last = html.lastIndexOf('>');
+  return html.slice(0, last + 1).replace(/<[^>]+>/g, '') + html.slice(last + 1);
+}
+
 export function htmlToText(html: string): string {
-  return html
-    .replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, '')
-    .replace(/<br\s*\/?>/gi, '\n')
-    .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
-    .replace(/<[^>]+>/g, '')
+  html = html.slice(0, MAX_BODY_CHARS * 10);
+  return stripTags(
+    stripBlocks(html)
+      .replace(/<br\s*\/?>/gi, '\n')
+      .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
+  )
     .replace(/&nbsp;/gi, ' ')
     .replace(/&lt;/gi, '<')
     .replace(/&gt;/gi, '>')

@@ -99,6 +99,67 @@ describe('inbound-messages sync helpers', () => {
     expect(htmlToText('1 &lt; 2 &nbsp;&quot;ok&quot;')).toBe('1 < 2  "ok"');
   });
 
+  it('converts hostile html in linear time', () => {
+    let started = performance.now();
+    // 1MB of unclosed openers; the 200KB cap cuts the last one to '<st'.
+    expect(htmlToText('<style>'.repeat(150_000))).toBe('<st');
+    expect(performance.now() - started).toBeLessThan(500);
+    started = performance.now();
+    expect(htmlToText('<'.repeat(60_000))).toBe('<'.repeat(60_000));
+    expect(performance.now() - started).toBeLessThan(500);
+  });
+
+  it('matches the original regex conversion on random markup up to the cap', () => {
+    const reference = (html: string) =>
+      html
+        .replace(/<(style|script|head)[^>]*>[\s\S]*?<\/\1>/gi, '')
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/(p|div|li|tr|h[1-6])>/gi, '\n')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&nbsp;/gi, ' ')
+        .replace(/&lt;/gi, '<')
+        .replace(/&gt;/gi, '>')
+        .replace(/&quot;/gi, '"')
+        .replace(/&#39;/gi, "'")
+        .replace(/&amp;/gi, '&')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    const fragments = [
+      '<style>',
+      '</style>',
+      '<STYLE type="x">',
+      '</Style>',
+      '<script>',
+      '</script>',
+      '<head>',
+      '<header>',
+      '</head>',
+      '</header>',
+      '<',
+      '>',
+      '<>',
+      'a',
+      ' ',
+      '\n',
+      '<p>',
+      '</p>',
+      '<br/>',
+      '&amp;',
+      '&lt;',
+      'İ'
+    ];
+    let seed = 7;
+    const next = () => (seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648);
+    for (let sample = 0; sample < 3_000; sample += 1) {
+      let html = '';
+      const length = next() % 40;
+      for (let index = 0; index < length; index += 1) html += fragments[next() % fragments.length];
+      expect(htmlToText(html)).toBe(reference(html));
+    }
+    const long = `<p>${'x'.repeat(MAX_BODY_CHARS * 10)}</p><style>a</style>`;
+    expect(htmlToText(long)).toBe(reference(long.slice(0, MAX_BODY_CHARS * 10)));
+  });
+
   it('passes Auto-Submitted values through', () => {
     const record = buildInboundRecord({
       ...base,
