@@ -1,7 +1,7 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
 import type { InboundMilestone } from './api';
-import { MilestoneSection } from './inbound-milestones';
+import { MilestoneSection, milestoneKindsPhrase } from './inbound-milestones';
 import { AttributionTables } from './inbound-attribution';
 
 const milestone: InboundMilestone = {
@@ -29,13 +29,31 @@ describe('inbound milestones and attribution', () => {
     expect(html).toContain('Acme');
     expect(html).toContain('paid');
     expect(html).toContain('Stripe');
-    expect(html).toContain('2026-10-06');
+    // Relative wording in the row; the absolute day stays on hover.
+    expect(html).toContain('dateTime="2026-10-06T09:00:00.000Z"');
+    expect(html).toContain('title="2026-10-06"');
   });
 
   it('explains how to send milestones when there are none', () => {
     const html = renderToStaticMarkup(<MilestoneSection milestones={[]} />);
     expect(html).toContain('No milestones yet');
-    expect(html).toContain('usage_threshold_crossed');
+    expect(html).toContain('crossed a usage threshold');
+    expect(html).toContain('Setup → Lead capture');
+    // Founder copy names outcomes, never the machine kind codes.
+    expect(html).not.toContain('usage_threshold_crossed');
+    expect(html).not.toContain('<code>');
+    expect(milestoneKindsPhrase()).toBe(
+      'signed up, activated, connected an integration, crossed a usage threshold, paid, upgraded, or cancelled'
+    );
+  });
+
+  it('says it is loading, not empty, until the first read settles', () => {
+    const html = renderToStaticMarkup(<MilestoneSection milestones={null} />);
+    expect(html).toContain('Loading milestones…');
+    expect(html).not.toContain('No milestones yet');
+    const failed = renderToStaticMarkup(<MilestoneSection milestones={null} error="Nope." />);
+    expect(failed).toContain('Nope.');
+    expect(failed).not.toContain('Loading milestones…');
   });
 
   it('says a failed milestone read failed, with a retry, instead of claiming none', () => {

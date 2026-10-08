@@ -198,6 +198,9 @@ export function AccountsScreen({
   const [showAddMore, setShowAddMore] = useState(false);
   /** '' shows every account; 'github' only the ones GitHub activity created. */
   const [originFilter, setOriginFilter] = useState<'' | 'github'>('');
+  // The filter `accounts` was read under. While it differs from `originFilter`
+  // the list belongs to another filter and must not be shown under this one.
+  const [loadedFilter, setLoadedFilter] = useState<'' | 'github'>('');
 
   const loadSeq = useRef(0);
 
@@ -211,6 +214,7 @@ export function AccountsScreen({
       ]);
       if (seq !== loadSeq.current) return;
       setAccounts(ranked);
+      setLoadedFilter(originFilter);
       setObservationProviders(providerHealth);
       setError('');
     } catch (err) {
@@ -429,15 +433,24 @@ export function AccountsScreen({
     }
   };
 
+  const stale = loadedFilter !== originFilter;
+  const shownAccounts = stale ? [] : accounts;
+
   return (
     <div className="page-stack">
-      {error && <div className="error-banner">{error}</div>}
+      {error && (
+        <div className="error-banner" role="alert">
+          {error}
+        </div>
+      )}
 
       {(accounts.length > 0 || originFilter !== '') && (
         <section className="page-panel">
           <div className="section-heading">
             <div>
-              <h3 aria-level={2}>{plural(accounts.length, 'account')}, highest score first</h3>
+              <h3 aria-level={2}>
+                {stale ? 'Accounts' : `${plural(accounts.length, 'account')}, highest score first`}
+              </h3>
               <p>Scores use the signals shown under each account. Evidence links to the source.</p>
             </div>
             <div className="acc-heading-actions">
@@ -473,7 +486,7 @@ export function AccountsScreen({
           </div>
 
           <div className="acc-list">
-            {accounts.map((row) => (
+            {shownAccounts.map((row) => (
               <AccountRow
                 key={row.account.id}
                 row={row}
@@ -487,7 +500,8 @@ export function AccountsScreen({
               />
             ))}
           </div>
-          {accounts.length === 0 && (
+          {stale && loading && <p className="acc-filter-empty">Loading accounts…</p>}
+          {!stale && !loading && !error && accounts.length === 0 && (
             <p className="acc-filter-empty">
               No accounts have been created from GitHub activity yet.
             </p>

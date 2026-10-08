@@ -1,6 +1,13 @@
 import type { InboundMilestone } from './api';
-import { GTM_MILESTONE_KINDS } from '../shared/milestones';
+import { GTM_MILESTONE_KINDS, MILESTONE_LABELS } from '../shared/milestones';
+import { relativeTime } from './LinkedInScreen';
 import { Button } from './ui/primitives';
+
+/** The closed milestone vocabulary in founder words, never the machine kind codes. */
+export function milestoneKindsPhrase(): string {
+  const labels = GTM_MILESTONE_KINDS.map((kind) => MILESTONE_LABELS[kind]);
+  return `${labels.slice(0, -1).join(', ')}, or ${labels[labels.length - 1]}`;
+}
 
 /** A failed read is said out loud with a retry, never shown as an empty state. */
 export function SectionLoadError({ message, onRetry }: { message: string; onRetry?: () => void }) {
@@ -10,7 +17,7 @@ export function SectionLoadError({ message, onRetry }: { message: string; onRetr
         {message}
       </div>
       {onRetry && (
-        <div className="capture-actions">
+        <div className="capture-row-actions">
           <Button onClick={onRetry}>Try again</Button>
         </div>
       )}
@@ -28,7 +35,8 @@ export function MilestoneSection({
   error = '',
   onRetry
 }: {
-  milestones: InboundMilestone[];
+  /** Null while the first read is in flight: neither empty nor failed. */
+  milestones: InboundMilestone[] | null;
   error?: string;
   onRetry?: () => void;
 }) {
@@ -42,19 +50,14 @@ export function MilestoneSection({
       </div>
       {error ? (
         <SectionLoadError message={error} onRetry={onRetry} />
+      ) : milestones === null ? (
+        <p className="li-hint">Loading milestones…</p>
       ) : milestones.length === 0 ? (
         <div className="empty-state">
           <h4>No milestones yet</h4>
           <p>
-            Send one of{' '}
-            {GTM_MILESTONE_KINDS.map((kind, index) => (
-              <span key={kind}>
-                {index > 0 && ', '}
-                <code>{kind}</code>
-              </span>
-            ))}{' '}
-            as the <code>kind</code> through a capture source, or connect Stripe in Setup → Lead
-            capture.
+            They appear when your product reports that a customer {milestoneKindsPhrase()}, or when
+            you connect Stripe in Setup → Lead capture.
           </p>
         </div>
       ) : (
@@ -70,7 +73,9 @@ export function MilestoneSection({
               <span>{milestone.label}</span>
               <small>
                 {milestone.sourceType === 'stripe_event' ? 'Stripe' : 'Your product'} ·{' '}
-                <time dateTime={milestone.occurredAt}>{milestone.occurredAt.slice(0, 10)}</time>
+                <time dateTime={milestone.occurredAt} title={milestone.occurredAt.slice(0, 10)}>
+                  {relativeTime(milestone.occurredAt)}
+                </time>
               </small>
             </li>
           ))}

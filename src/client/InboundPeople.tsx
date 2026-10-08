@@ -143,7 +143,8 @@ export function InboundPeople({
   const [busy, setBusy] = useState('');
   const [loading, setLoading] = useState(true);
   const [problem, setProblem] = useState('');
-  const [milestones, setMilestones] = useState<InboundMilestone[]>([]);
+  // Null until the first read settles: loading is not "No milestones yet".
+  const [milestones, setMilestones] = useState<InboundMilestone[] | null>(null);
   const [milestonesError, setMilestonesError] = useState('');
   const [attribution, setAttribution] = useState<InboundAttributionSummary | null>(null);
   const [attributionError, setAttributionError] = useState('');
@@ -373,7 +374,11 @@ export function InboundPeople({
             Refresh
           </button>
         </div>
-        {problem && <div className="error-box">{problem}</div>}
+        {problem && (
+          <div className="error-banner" role="alert">
+            {problem}
+          </div>
+        )}
         {!loading && decisionSubmissions.length === 0 && (
           <div className="empty-state">
             <Inbox size={26} />
