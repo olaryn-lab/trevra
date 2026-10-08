@@ -54,6 +54,8 @@ describe('outreach unsubscribe policy', () => {
     ['gmail', 'outreach', false, 'footer_and_reply', /only for Zoho Mail/],
     ['microsoft', 'outreach', true, 'footer_and_reply', /only for Zoho Mail/],
     ['gmail', 'outreach', false, 'list_unsubscribe_headers', /was not approved with it/],
+    ['zoho', 'outreach', false, 'footer_and_reply', /only for Zoho Mail/],
+    ['smtp', 'outreach', false, 'footer_and_reply', /only for Zoho Mail/],
     // Zoho Mail: the one exception, and only for outreach approved in footer_and_reply.
     ['zoho-mail', 'outreach', false, 'footer_and_reply', null],
     ['zoho-mail', 'outreach', true, 'list_unsubscribe_headers', /cannot send the one-click/],

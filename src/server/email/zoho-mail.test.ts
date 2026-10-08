@@ -36,6 +36,8 @@ describe('Zoho Mail response parsing', () => {
     expect(pickZohoAccount({ data: [{ ...ACCOUNT, accountId: 1000000001 }] })?.accountId).toBe(
       '1000000001'
     );
+    // A Zoho long id that lost precision as a JS number must yield no account, never a wrong id.
+    expect(pickZohoAccount({ data: [{ ...ACCOUNT, accountId: 2 ** 53 + 2 }] })).toBeNull();
     expect(
       pickZohoAccount({
         data: [{ ...ACCOUNT, primaryEmailAddress: undefined, mailboxAddress: 'a@acme.test' }]
@@ -159,6 +161,24 @@ describe('Zoho Mail calls', () => {
     ).resolves.toEqual({ messageId: null });
   });
 
+  it('propagates a failed send instead of reporting an unknown message id', async () => {
+    const { client } = fakeNango(
+      async () => ({ data: {} }),
+      async () => {
+        throw Object.assign(new Error('HTTP 500'), { status: 500 });
+      }
+    );
+    await expect(
+      sendZohoMessage(client, CONNECTION, {
+        accountId: '1',
+        fromAddress: 'a@acme.test',
+        toAddress: 'b@prospect.test',
+        subject: 's',
+        content: 'c'
+      })
+    ).rejects.toMatchObject({ status: 500 });
+  });
+
   it('reads the sent Message-ID back from the Sent folder header', async () => {
     const { nango, client } = fakeNango(async ({ endpoint }) => {
       if (endpoint === '/api/accounts/1000000001/folders') {
@@ -173,6 +193,12 @@ describe('Zoho Mail calls', () => {
       readZohoSentMessageId(client, CONNECTION, { accountId: '1000000001', messageId: '1777' })
     ).resolves.toBe('<zoho-1777@mx.zoho.test>');
     expect(nango.get).toHaveBeenCalledTimes(2);
+    expect(nango.get).toHaveBeenCalledWith({
+      endpoint: '/api/accounts/1000000001/folders',
+      providerConfigKey: 'trevra-zoho-mail',
+      connectionId: 'zoho-external',
+      retries: 0
+    });
   });
 
   it('returns null, never throws, when the read-back fails, finds no folder or never answers', async () => {
