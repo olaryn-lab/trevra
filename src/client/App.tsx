@@ -82,6 +82,7 @@ import { SenderIdentityPanel } from './SenderIdentityPanel';
 import { TeamSettingsView } from './TeamScreen';
 import { EmailChannelPanel } from './EmailChannelPanel';
 import { LeadCaptureSetup } from './LeadCaptureSetup';
+import { EnrichmentSetup } from './EnrichmentSetup';
 import { BillingSettings } from './BillingSettings';
 import { GitHubReposPanel } from './GitHubReposPanel';
 import { ResearchView } from './views/ResearchView';
@@ -603,6 +604,7 @@ function SetupView({
           <EmailChannelPanel setToast={setToast} />
           <SenderIdentityPanel setToast={setToast} isOwner={isOwner} />
           <LimitsView setToast={setToast} />
+          <EnrichmentSetup setToast={setToast} />
           <LinkedInExclusions setToast={setToast} />
           <TeamSettingsView
             route={route}

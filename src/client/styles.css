@@ -12798,13 +12798,41 @@ button:disabled {
   border-radius: var(--t-r-md);
   background: var(--t-amber-bg);
 }
-.gtm-plan-warnings {
+.gtm-plan-warnings,
+.gtm-plan-cost {
   display: grid;
   gap: 8px;
   padding: 10px;
   border: 1px solid var(--t-line);
   border-radius: var(--t-r-md);
   background: var(--t-surface-2);
+}
+.gtm-plan-cost span,
+.gtm-plan-cost a {
+  font-size: var(--t-text-xs);
+}
+.gtm-plan-cost span {
+  color: var(--t-muted);
+}
+.enrichment-setup {
+  display: grid;
+  gap: 14px;
+}
+.enrichment-setup-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 10px;
+}
+.enrichment-setup-status {
+  margin: 0;
+  color: var(--t-muted);
+  font-size: var(--t-text-xs);
+}
+@media (max-width: 640px) {
+  .enrichment-setup-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .gtm-plan-result {
   padding-top: 12px;

@@ -69,6 +69,9 @@ import type {
 } from '../server/content/public-reports';
 import type { PreparedOutreachResult } from '../server/outreach/prepare';
 import type { GtmIntent, GtmPlan, PreparedGtmPlanResult } from '../server/gtm/intent';
+import type { EnrichmentSettings, EnrichmentUsage } from '../server/enrichment/settings';
+export type { GtmPlanCost } from '../server/gtm/intent';
+export type { EnrichmentSettings, EnrichmentUsage } from '../server/enrichment/settings';
 import type { EmailChannelStatus } from '../server/email/types';
 import type { ConversationMessage, ConversationSummary } from '../server/conversations';
 import type { LinkedInActionKind, LinkedInActionStatus } from '../server/linkedin/actions';
@@ -579,6 +582,37 @@ export async function prepareCompiledGtmPlan(
   return request('/api/gtm/prepare', {
     method: 'POST',
     body: JSON.stringify({ plan, planHash: plan.planHash, idempotencyKey })
+  });
+}
+
+export async function getEnrichment(): Promise<{
+  settings: EnrichmentSettings;
+  usage: EnrichmentUsage;
+}> {
+  return request('/api/enrichment');
+}
+
+export async function saveHunterKey(apiKey: string): Promise<EnrichmentSettings> {
+  const result = await request<{ settings: EnrichmentSettings }>('/api/enrichment/key', {
+    method: 'PUT',
+    body: JSON.stringify({ apiKey })
+  });
+  return result.settings;
+}
+
+export async function deleteHunterKey(): Promise<EnrichmentSettings> {
+  const result = await request<{ settings: EnrichmentSettings }>('/api/enrichment/key', {
+    method: 'DELETE'
+  });
+  return result.settings;
+}
+
+export async function saveEnrichmentCap(
+  monthlyCreditCap: number
+): Promise<{ settings: EnrichmentSettings; usage: EnrichmentUsage }> {
+  return request('/api/enrichment/cap', {
+    method: 'PUT',
+    body: JSON.stringify({ monthlyCreditCap })
   });
 }
 

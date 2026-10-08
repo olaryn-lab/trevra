@@ -23,7 +23,8 @@ import {
 import { errorMessage, useOutreachRefresh, useSeatLimits } from '../LinkedInSafety';
 import { DEFAULT_WINDOW_DAYS, LinkedInFunnel } from '../LinkedInAnalyticsScreen';
 import { ConfidenceTag, WindowPicker } from '../LinkedInViz';
-import { Button, Select } from '../ui/primitives';
+import { Button, Field, Input, Select, SwitchField, Textarea } from '../ui/primitives';
+import { approveLabel, planCostLines } from './planCost';
 import { emailSkipSummary, planIssues } from './gtmPlanFormat';
 import { ACTIVATION_STEPS, nextActivationStep, type ActivationSignals } from './activation';
 import { LinkedInHandoffCard } from './LinkedInHandoffCard';
@@ -950,14 +951,20 @@ function TodayAttention({
 }
 
 type PlannerObjective =
-  'find_accounts' | 'research_accounts' | 'prepare_outreach' | 'watch_accounts' | 'capture_inbound';
+  | 'find_accounts'
+  | 'research_accounts'
+  | 'prepare_outreach'
+  | 'watch_accounts'
+  | 'capture_inbound'
+  | 'enrich_contacts';
 
 const PLANNER_OBJECTIVES: ReadonlyArray<{ value: PlannerObjective; label: string }> = [
   { value: 'find_accounts', label: 'Find prospects' },
   { value: 'research_accounts', label: 'Research accounts' },
   { value: 'prepare_outreach', label: 'Prepare outreach' },
   { value: 'watch_accounts', label: 'Watch accounts' },
-  { value: 'capture_inbound', label: 'Capture inbound' }
+  { value: 'capture_inbound', label: 'Capture inbound' },
+  { value: 'enrich_contacts', label: 'Find contacts (Hunter)' }
 ];
 
 function plannerPrepareKey(): string {
@@ -987,6 +994,8 @@ function PlanWork({
   const [audience, setAudience] = useState('');
   const [quantity, setQuantity] = useState(25);
   const [accountDomains, setAccountDomains] = useState('');
+  const [emailsPerDomain, setEmailsPerDomain] = useState(3);
+  const [includeUnverified, setIncludeUnverified] = useState(false);
   const [captureName, setCaptureName] = useState('Website');
   const [captureKind, setCaptureKind] = useState<
     'website' | 'form' | 'signup' | 'partner' | 'integration'
@@ -1061,13 +1070,19 @@ function PlanWork({
                   },
                   timing: { recurring: true }
                 }
-              : {
-                  objective,
-                  audience: {
-                    ...(audience.trim() ? { description: audience.trim() } : {}),
-                    quantity
+              : objective === 'enrich_contacts'
+                ? {
+                    objective,
+                    audience: { domains: plannerDomains(accountDomains) },
+                    enrichment: { emailsPerDomain, includeUnverified }
                   }
-                };
+                : {
+                    objective,
+                    audience: {
+                      ...(audience.trim() ? { description: audience.trim() } : {}),
+                      quantity
+                    }
+                  };
       const next = await planGtmIntent(intent);
       setPlan(next);
       setPrepareKey(plannerPrepareKey());
@@ -1229,6 +1244,46 @@ function PlanWork({
                   />
                 </label>
               </>
+            ) : objective === 'enrich_contacts' ? (
+              <>
+                <Field label="Company domains" hint="One per line. Up to 100 per run.">
+                  <Textarea
+                    value={accountDomains}
+                    onChange={(event) => {
+                      setAccountDomains(event.target.value);
+                      resetPlan();
+                    }}
+                    placeholder={'acme.com\nnorthstar.ai'}
+                    rows={4}
+                  />
+                </Field>
+                <Field
+                  label="Contacts per company"
+                  hint="Each one found costs up to 1.5 Hunter credits."
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={10}
+                    value={emailsPerDomain}
+                    onChange={(event) => {
+                      setEmailsPerDomain(
+                        Math.max(1, Math.min(10, Number(event.target.value) || 1))
+                      );
+                      resetPlan();
+                    }}
+                  />
+                </Field>
+                <SwitchField
+                  label="Also save unverified emails"
+                  description="Off by default. Accept-all or unknown addresses are saved marked unverified."
+                  checked={includeUnverified}
+                  onChange={(event) => {
+                    setIncludeUnverified(event.target.checked);
+                    resetPlan();
+                  }}
+                />
+              </>
             ) : (
               <>
                 <label>
@@ -1292,6 +1347,18 @@ function PlanWork({
                 ))}
               </ol>
 
+              {plan.cost && (
+                <div className="gtm-plan-cost">
+                  <strong>Hunter credits</strong>
+                  {planCostLines(plan.cost).map((line) => (
+                    <span key={line}>{line}</span>
+                  ))}
+                  <a href={plan.cost.pricingUrl} target="_blank" rel="noreferrer">
+                    Hunter pricing
+                  </a>
+                </div>
+              )}
+
               {plan.blockers.length > 0 && (
                 <div className="gtm-plan-blockers">
                   <strong>
@@ -1338,7 +1405,7 @@ function PlanWork({
                     disabled={preparing}
                     onClick={() => void prepare()}
                   >
-                    {preparing ? 'Preparing…' : 'Prepare this'}
+                    {approveLabel(plan.cost, preparing)}
                   </button>
                 ) : plan.blockers.length === 0 ? (
                   <button
