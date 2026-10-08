@@ -1496,6 +1496,56 @@ h1 {
 .research-mention-panel {
   min-width: 0;
 }
+.research-citation-setup {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 0 10px 10px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-md);
+  background: var(--t-surface-2);
+}
+.research-citation-setup:not([open]) {
+  padding-bottom: 0;
+}
+.research-citation-setup summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--t-tap);
+  cursor: pointer;
+  font-size: var(--t-text-xs);
+}
+.research-citation-status {
+  margin: 0;
+  color: var(--t-muted);
+  font-size: var(--t-text-xs);
+}
+.research-citation-form {
+  display: grid;
+  gap: 10px;
+}
+.research-citation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.research-citation-facts {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 0;
+  font-size: var(--t-text-xs);
+}
+.research-citation-facts dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.research-citation-secret {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
 .research-brief-panel .client-card-large {
   grid-template-columns: auto minmax(0, 1fr);
 }

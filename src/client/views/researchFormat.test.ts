@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import type { FeedThread } from '../api';
-import { ageLabel, chipPoints, factsLine, sentimentChip, whyChips } from './researchFormat';
+import {
+  ageLabel,
+  chipPoints,
+  citationChip,
+  citationSourceStatus,
+  factsLine,
+  platformLabel,
+  sentimentChip,
+  whyChips
+} from './researchFormat';
 
 const NOW = new Date('2026-08-19T12:00:00.000Z');
 
@@ -160,5 +169,44 @@ describe('sentimentChip', () => {
 
   it('falls back to the label when there is no span', () => {
     expect(sentimentChip({ sentimentLabel: 'neutral', sentimentSpan: '' }).text).toBe('Neutral');
+  });
+});
+
+describe('citationChip', () => {
+  it('labels gained and lost AI-answer citations and leaves other platforms to sentiment', () => {
+    expect(
+      citationChip({
+        platform: 'ai_answer',
+        metadata: { change: 'gained', engineLabel: 'ChatGPT', position: 2 }
+      })
+    ).toEqual({ tone: 'is-positive', text: 'Citation gained · ChatGPT · position 2' });
+    expect(
+      citationChip({
+        platform: 'ai_answer',
+        metadata: { change: 'lost', engineLabel: 'Perplexity', position: null }
+      })
+    ).toEqual({ tone: 'is-negative', text: 'Citation lost · Perplexity' });
+    expect(citationChip({ platform: 'ai_answer', metadata: {} })).toEqual({
+      tone: 'is-neutral',
+      text: 'AI answer · an AI engine'
+    });
+    expect(citationChip({ platform: 'hackernews', metadata: { change: 'gained' } })).toBeNull();
+    expect(platformLabel('ai_answer')).toBe('AI answer');
+  });
+});
+
+describe('citationSourceStatus', () => {
+  it('says plainly when no delivery has arrived, when one did, and when the source is off', () => {
+    const base = { status: 'active', latestAnsweredAt: null, acceptedCount: 0 };
+    expect(citationSourceStatus(base, NOW)).toBe('Connected. No sample received yet.');
+    expect(
+      citationSourceStatus(
+        { ...base, latestAnsweredAt: '2026-08-19T09:00:00.000Z', acceptedCount: 4 },
+        NOW
+      )
+    ).toBe('Latest sample answered 3h ago · 4 deliveries accepted.');
+    expect(citationSourceStatus({ ...base, status: 'disabled' }, NOW)).toBe(
+      'Disabled. New samples are refused.'
+    );
   });
 });

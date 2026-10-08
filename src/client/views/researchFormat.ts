@@ -8,7 +8,8 @@ const PLATFORM_LABELS: Record<string, string> = {
   devto: 'Dev.to',
   lobsters: 'Lobsters',
   mastodon: 'Mastodon',
-  stackoverflow: 'Stack Overflow'
+  stackoverflow: 'Stack Overflow',
+  ai_answer: 'AI answer'
 };
 
 export function platformLabel(platform: string): string {
@@ -168,4 +169,45 @@ export function trendHeadline(points: readonly WatchTrendPoint[]): string {
   );
   const average = total === 0 ? 0 : scoreSum / total;
   return `+${positive} / ${neutral} / -${negative} · avg ${average.toFixed(2)}`;
+}
+
+/**
+ * The chip for an AI-answer citation mention, or null for every other
+ * platform so the caller falls back to `sentimentChip`. A citation has no
+ * sentiment; what matters is whether the engine started or stopped citing
+ * the founder's site.
+ */
+export function citationChip(mention: {
+  platform: string;
+  metadata: Record<string, unknown>;
+}): { tone: string; text: string } | null {
+  if (mention.platform !== 'ai_answer') return null;
+  const engine =
+    typeof mention.metadata.engineLabel === 'string'
+      ? mention.metadata.engineLabel
+      : 'an AI engine';
+  if (mention.metadata.change === 'gained') {
+    const position =
+      typeof mention.metadata.position === 'number'
+        ? ` · position ${mention.metadata.position}`
+        : '';
+    return { tone: 'is-positive', text: `Citation gained · ${engine}${position}` };
+  }
+  if (mention.metadata.change === 'lost') {
+    return { tone: 'is-negative', text: `Citation lost · ${engine}` };
+  }
+  return { tone: 'is-neutral', text: `AI answer · ${engine}` };
+}
+
+/**
+ * One line under the citation setup: is anything arriving? The count is
+ * accepted deliveries (an identical retry counts again), never distinct samples.
+ */
+export function citationSourceStatus(
+  source: { status: string; latestAnsweredAt: string | null; acceptedCount: number },
+  now: Date
+): string {
+  if (source.status !== 'active') return 'Disabled. New samples are refused.';
+  if (!source.latestAnsweredAt) return 'Connected. No sample received yet.';
+  return `Latest sample answered ${elapsed(source.latestAnsweredAt, now)} ago · ${source.acceptedCount} deliveries accepted.`;
 }

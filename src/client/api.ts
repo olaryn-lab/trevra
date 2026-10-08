@@ -72,6 +72,8 @@ import type { GtmIntent, GtmPlan, PreparedGtmPlanResult } from '../server/gtm/in
 import type { EnrichmentSettings, EnrichmentUsage } from '../server/enrichment/settings';
 export type { GtmPlanCost } from '../server/gtm/intent';
 export type { EnrichmentSettings, EnrichmentUsage } from '../server/enrichment/settings';
+import type { CitationSourceView } from '../server/watch/citations';
+export type CitationSourceSummary = CitationSourceView;
 import type { EmailChannelStatus } from '../server/email/types';
 import type { ConversationMessage, ConversationSummary } from '../server/conversations';
 import type { LinkedInActionKind, LinkedInActionStatus } from '../server/linkedin/actions';
@@ -1087,6 +1089,23 @@ export async function getWatchTrend(id: string, days = 30): Promise<WatchTrendPo
     `/api/watches/${id}/trend?days=${days}`
   );
   return result.points ?? [];
+}
+
+export async function getCitationSource(watchId: string): Promise<CitationSourceSummary | null> {
+  const result = await request<{ citationSource: CitationSourceSummary | null }>(
+    `/api/watches/${encodeURIComponent(watchId)}/citation-source`
+  );
+  return result.citationSource;
+}
+
+export async function connectCitationSource(
+  watchId: string,
+  ownedDomains: string[]
+): Promise<{ citationSource: CitationSourceSummary | null; secret: string | null }> {
+  return request(`/api/watches/${encodeURIComponent(watchId)}/citation-source`, {
+    method: 'PUT',
+    body: JSON.stringify({ ownedDomains })
+  });
 }
 
 export async function draftMentionReply(

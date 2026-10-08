@@ -70,12 +70,14 @@ import { ResearchScreen } from '../ResearchScreen';
 import { EvidenceList } from './inspector';
 import {
   chipPoints,
+  citationChip,
   factsLine,
   platformLabel,
   sentimentChip,
   trendHeadline,
   whyChips
 } from './researchFormat';
+import { CitationSourceSetup } from './CitationSourceSetup';
 import { useDialog } from '../ui/dialog';
 import { Field, Input } from '../ui/primitives';
 import { useActiveSeatKey } from '../LinkedInActiveAccount';
@@ -2209,11 +2211,12 @@ export function ResearchView({
                 </div>
               )}
             </div>
+            <CitationSourceSetup watchId={selectedWatch} setToast={setToast} />
             <div className="client-table">
               {mentionsLoaded &&
                 !mentionsError &&
                 mentions.map((mention) => {
-                  const chip = sentimentChip(mention);
+                  const chip = citationChip(mention) ?? sentimentChip(mention);
                   return (
                     <article className="client-card-large" key={mention.id}>
                       <div className="client-avatar large">
@@ -2229,7 +2232,9 @@ export function ResearchView({
                           {chip.text}
                         </span>
                       </div>
-                      {mention.promotedRunId ? (
+                      {mention.platform === 'ai_answer' ? (
+                        <span className="client-status">Tracked, not replied to</span>
+                      ) : mention.promotedRunId ? (
                         <span className="client-status">Promoted to a reply run</span>
                       ) : (
                         <button type="button" onClick={() => setDraftingMention(mention)}>
