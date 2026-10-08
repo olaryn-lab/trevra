@@ -184,16 +184,16 @@ The headers and the signature recipe are identical to sections 2 and 4. The body
 
 Trevra compares each sample with the latest earlier sample for the same engine and prompt. A first or regained citation appears in the watch as **Citation gained**, and a drop appears as **Citation lost**. A repeat or a continued absence changes no mention. A sample older than one already recorded is stored as `stale` and changes nothing.
 
-| Status | Meaning                                                                   |
-| ------ | ------------------------------------------------------------------------- |
-| `200`  | identical retry already recorded                                          |
-| `202`  | new sample recorded                                                       |
-| `400`  | invalid sample, unknown field or a URL outside your domains               |
-| `401`  | invalid/stale signature or disabled source                                |
-| `403`  | the source is a lead-capture source, not a citation source                |
-| `404`  | capture source not found                                                  |
-| `409`  | key or `sampleId` reused with different bytes, or the source has no watch |
-| `413`  | request body too large                                                    |
-| `429`  | source rate limit reached                                                 |
+| Status | Meaning                                                                                                                                                                                                                     |
+| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `200`  | identical retry already recorded                                                                                                                                                                                            |
+| `202`  | new sample recorded                                                                                                                                                                                                         |
+| `400`  | invalid sample, unknown field, a URL outside your domains, `answeredAt` more than 5 minutes ahead or older than 13 months, or a missing/invalid `X-Trevra-Idempotency-Key` (`A valid X-Trevra-Idempotency-Key is required`) |
+| `401`  | invalid/stale signature or timestamp, disabled source, or `Capture source has no usable secret`                                                                                                                             |
+| `403`  | the source is a lead-capture source, not a citation source                                                                                                                                                                  |
+| `404`  | capture source not found                                                                                                                                                                                                    |
+| `409`  | key or `sampleId` reused with different bytes, or the source has no watch                                                                                                                                                   |
+| `413`  | request body too large                                                                                                                                                                                                      |
+| `429`  | source rate limit reached                                                                                                                                                                                                   |
 
 Samples are kept for 13 months. Deleting the watch deletes its samples, and its citation source is removed within the hour.

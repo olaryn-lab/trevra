@@ -164,6 +164,55 @@ describe('AI-answer citations', () => {
     expect((changed as LeadCaptureError).status).toBe(409);
   });
 
+  it('replays an accepted sample after ownedDomains narrows, but still validates new ones', async () => {
+    await connectCitationSource(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        actorUserId: USER,
+        watch,
+        ownedDomains: ['a.example', 'b.example']
+      },
+      NOW
+    );
+    const wide = (
+      await connectCitationSource(
+        db,
+        {
+          workspaceId: WORKSPACE,
+          actorUserId: USER,
+          watch,
+          ownedDomains: ['a.example', 'b.example']
+        },
+        NOW
+      )
+    ).link;
+    const value = sample({ citedUrls: ['https://a.example/x'] });
+    const hash = createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    const send = (l: CitationSourceLink, v: CitationSample, key: string, h: string) =>
+      recordCitationSample(db, { link: l, idempotencyKey: key, payloadHash: h, sample: v }, NOW);
+    const first = await send(wide, value, 'narrow-key', hash);
+    const narrowed = (
+      await connectCitationSource(
+        db,
+        { workspaceId: WORKSPACE, actorUserId: USER, watch, ownedDomains: ['b.example'] },
+        NOW
+      )
+    ).link;
+    const replay = await send(narrowed, value, 'narrow-key', hash);
+    expect(replay).toMatchObject({ duplicate: true, change: first.change });
+    expect(replay.mention?.id).toBe(first.mention?.id);
+    const fresh = sample({ sampleId: 'beseam-new', citedUrls: ['https://a.example/y'] });
+    const error = await send(
+      narrowed,
+      fresh,
+      'narrow-new',
+      createHash('sha256').update(JSON.stringify(fresh)).digest('hex')
+    ).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(LeadCaptureError);
+    expect((error as LeadCaptureError).status).toBe(400);
+  });
+
   it('rejects lookalike and foreign cited URLs', async () => {
     for (const url of [
       'https://trevra.com.evil.io/pricing',

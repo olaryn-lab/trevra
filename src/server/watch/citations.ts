@@ -361,19 +361,6 @@ export async function recordCitationSample(
   now: Date = new Date()
 ): Promise<{ change: CitationChange; mention: WatchMention | null; duplicate: boolean }> {
   const { link, sample } = input;
-  if (new Date(sample.answeredAt).getTime() > now.getTime() + FUTURE_SKEW_MS)
-    throw new LeadCaptureError('answeredAt is in the future', 400);
-  const oldest = await db
-    .prepare(`SELECT (?::timestamptz < ?::timestamptz - make_interval(months => ?)) AS too_old`)
-    .get<{ too_old: boolean }>(sample.answeredAt, now.toISOString(), RETENTION_MONTHS);
-  if (oldest?.too_old)
-    throw new LeadCaptureError('answeredAt is older than the retention window', 400);
-  if (sample.citedUrls.some((url) => !citedUrlWithinOwnedDomains(url, link.ownedDomains)))
-    throw new LeadCaptureError(
-      'citedUrls may only contain http(s) URLs on the domains connected to this watch',
-      400
-    );
-  const citedUrls = [...new Set(sample.citedUrls.map(sanitizeCitedUrl))];
   const at = now.toISOString();
 
   const outcome = await db.transaction(async (tx) => {
@@ -402,6 +389,22 @@ export async function recordCitationSample(
         );
       return { change: replay.change, mentionId: replay.mention_id, duplicate: true };
     }
+
+    // Validated only for a NEW sample: a retry of an accepted sample must replay
+    // even if the owner has since narrowed ownedDomains or the window has passed.
+    if (new Date(sample.answeredAt).getTime() > now.getTime() + FUTURE_SKEW_MS)
+      throw new LeadCaptureError('answeredAt is in the future', 400);
+    const oldest = await tx
+      .prepare(`SELECT (?::timestamptz < ?::timestamptz - make_interval(months => ?)) AS too_old`)
+      .get<{ too_old: boolean }>(sample.answeredAt, now.toISOString(), RETENTION_MONTHS);
+    if (oldest?.too_old)
+      throw new LeadCaptureError('answeredAt is older than the retention window', 400);
+    if (sample.citedUrls.some((url) => !citedUrlWithinOwnedDomains(url, link.ownedDomains)))
+      throw new LeadCaptureError(
+        'citedUrls may only contain http(s) URLs on the domains connected to this watch',
+        400
+      );
+    const citedUrls = [...new Set(sample.citedUrls.map(sanitizeCitedUrl))];
 
     const latest = await tx
       .prepare(

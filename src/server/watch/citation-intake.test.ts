@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes } from 'node:crypto';
 import type { Express } from 'express';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
+import { auth as betterAuth, closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { createApp } from '../app.js';
 import { openDatabase, type Db } from '../db.js';
 import { MAX_CAPTURE_BODY_BYTES } from '../lead-capture/signature.js';
@@ -237,5 +237,81 @@ describe('AI-answer citation intake', () => {
       'citation-api-missing',
       sampleBody()
     ).expect(404);
+  });
+});
+
+let signUpSeq = 0;
+
+async function signUp(label: string) {
+  signUpSeq += 1;
+  const agent = request.agent(app);
+  const email = `${label}-${Date.now()}-${signUpSeq}@citation-api.test`;
+  const response = await agent
+    .post('/api/auth/sign-up/email')
+    .send({ email, password: 'correct-horse-battery-staple', name: label })
+    .expect(200);
+  const auth = (await agent.get('/api/auth/session').expect(200)).body.auth as {
+    userId: string;
+    workspaceId: string;
+  };
+  return { agent, userId: response.body.user.id as string, auth };
+}
+
+describe('citation source route guards', () => {
+  it('lets a member read but not connect a citation source', async () => {
+    const owner = await signUp('citation-owner');
+    const member = await signUp('citation-member');
+    await betterAuth.api.addMember({
+      body: { userId: member.userId, organizationId: owner.auth.workspaceId, role: 'member' }
+    });
+    await member.agent
+      .post('/api/auth/organization/set-active')
+      .send({ organizationId: owner.auth.workspaceId })
+      .expect(200);
+    const ownedWatch = await createWatch(
+      db,
+      owner.auth.workspaceId,
+      { name: 'Member guard', keywords: ['guard'], platforms: ['hackernews'], cadence: 'daily' },
+      new Date()
+    );
+    const denied = await member.agent
+      .put(`/api/watches/${ownedWatch.id}/citation-source`)
+      .send({ ownedDomains: ['trevra.com'] })
+      .expect(403);
+    expect(denied.body.error).toBe(
+      'Only the workspace owner can connect AI-answer citation samples'
+    );
+    const links = await db
+      .prepare('SELECT COUNT(*) AS count FROM brand_watch_citation_sources WHERE watch_id=?')
+      .get<{ count: string }>(ownedWatch.id);
+    expect(Number(links?.count)).toBe(0);
+    await member.agent.get(`/api/watches/${ownedWatch.id}/citation-source`).expect(200);
+
+    // Another workspace's owner sees this watch as missing and creates no link.
+    const stranger = await signUp('citation-stranger');
+    const read = await stranger.agent
+      .get(`/api/watches/${ownedWatch.id}/citation-source`)
+      .expect(404);
+    expect(read.body.error).toBe('Watch not found');
+    const write = await stranger.agent
+      .put(`/api/watches/${ownedWatch.id}/citation-source`)
+      .send({ ownedDomains: ['trevra.com'] })
+      .expect(404);
+    expect(write.body.error).toBe('Watch not found');
+    expect(write.body.secret).toBeUndefined();
+    const after = await db
+      .prepare('SELECT COUNT(*) AS count FROM brand_watch_citation_sources WHERE watch_id=?')
+      .get<{ count: string }>(ownedWatch.id);
+    expect(Number(after?.count)).toBe(0);
+  });
+
+  it('answers 404 for a watch that does not exist', async () => {
+    const read = await authed().get('/api/watches/watch_missing/citation-source').expect(404);
+    expect(read.body.error).toBe('Watch not found');
+    const write = await authed()
+      .put('/api/watches/watch_missing/citation-source')
+      .send({ ownedDomains: ['trevra.com'] })
+      .expect(404);
+    expect(write.body.error).toBe('Watch not found');
   });
 });
