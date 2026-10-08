@@ -146,6 +146,89 @@ describe('Hunter adapter', () => {
     }
   });
 
+  it('records the raw charge when Hunter returns more emails than the limit', async () => {
+    const emails = Array.from({ length: 5 }, (_, i) => ({ value: `p${i}@acme.com`, sources: [] }));
+    const { fetchImpl } = stubFetch([{ status: 200, body: { data: { emails } } }]);
+    const result = await createHunterProvider(KEY, { fetchImpl }).domainSearch('acme.com', {
+      limit: 3
+    });
+    expect(result.candidates).toHaveLength(3);
+    expect(result.credits).toBe(5);
+  });
+
+  it('never drops the charge for malformed entries or a missing emails array', async () => {
+    const { fetchImpl } = stubFetch([
+      {
+        status: 200,
+        body: {
+          data: {
+            emails: [
+              { value: 'good@acme.com' },
+              { value: 'bad@acme.com', confidence: '94' },
+              { value: '   ' }
+            ]
+          }
+        }
+      },
+      { status: 200, body: { data: {} } }
+    ]);
+    const provider = createHunterProvider(KEY, { fetchImpl });
+    const first = await provider.domainSearch('acme.com', { limit: 5 });
+    expect(first.candidates.map((c) => c.email)).toEqual(['good@acme.com']);
+    expect(first.credits).toBe(3);
+    expect(await provider.domainSearch('acme.com', { limit: 5 })).toEqual({
+      candidates: [],
+      credits: 0
+    });
+  });
+
+  it('keeps the charge when a poll fails after a 202, but throws on the first call', async () => {
+    const sleep = vi.fn(async () => undefined);
+    for (const later of [{ status: 429 }, { status: 503 }, new TypeError('fetch failed')]) {
+      const { fetchImpl } = stubFetch([{ status: 202 }, later]);
+      expect(
+        await createHunterProvider(KEY, { fetchImpl, sleep }).verifyEmail('a@acme.com')
+      ).toEqual({ status: 'unknown', credits: 0.5 });
+    }
+    const { fetchImpl } = stubFetch([{ status: 429 }]);
+    await expect(
+      createHunterProvider(KEY, { fetchImpl, sleep }).verifyEmail('a@acme.com')
+    ).rejects.toMatchObject({ code: 'quota_exhausted' });
+  });
+
+  it('passes an abort signal on every call and maps abort/timeout to unavailable', async () => {
+    const signals: unknown[] = [];
+    const ok = vi.fn(async (_input: unknown, init?: RequestInit) => {
+      signals.push(init?.signal);
+      return new Response('{}', { status: 200 });
+    });
+    await createHunterProvider(KEY, { fetchImpl: ok as unknown as typeof fetch }).checkKey();
+    expect(signals[0]).toBeInstanceOf(AbortSignal);
+    for (const name of ['AbortError', 'TimeoutError']) {
+      const failing = vi.fn(async () => {
+        throw new DOMException('timed out', name);
+      });
+      await expect(
+        createHunterProvider(KEY, { fetchImpl: failing as unknown as typeof fetch }).checkKey()
+      ).rejects.toMatchObject({ code: 'unavailable' });
+    }
+  });
+
+  it('rejects a non-finite limit before any request', async () => {
+    const { fetchImpl, calls } = stubFetch([]);
+    await expect(
+      createHunterProvider(KEY, { fetchImpl }).domainSearch('acme.com', { limit: Number.NaN })
+    ).rejects.toMatchObject({ code: 'rejected' });
+    expect(calls).toHaveLength(0);
+  });
+
+  it('does not sleep after the final pending poll', async () => {
+    const sleep = vi.fn(async () => undefined);
+    const { fetchImpl } = stubFetch([{ status: 202 }, { status: 202 }, { status: 202 }]);
+    await createHunterProvider(KEY, { fetchImpl, sleep }).verifyEmail('a@acme.com');
+    expect(sleep).toHaveBeenCalledTimes(2);
+  });
+
   it('estimates the worst case: one credit per email plus half a credit to verify it', () => {
     expect(estimateEnrichmentCredits({ domains: 2, emailsPerDomain: 3 })).toEqual({
       searchCredits: 6,

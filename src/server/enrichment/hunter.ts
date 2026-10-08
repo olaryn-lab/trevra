@@ -3,6 +3,7 @@ import {
   EnrichmentProviderError,
   HUNTER_CREDIT_PRICE,
   type ContactEnrichmentProvider,
+  type EnrichmentCandidate,
   type EmailVerificationStatus
 } from './provider.js';
 
@@ -47,7 +48,7 @@ const VERIFICATION_STATUSES: readonly EmailVerificationStatus[] = [
 
 const hunterEmailSchema = z
   .object({
-    value: z.string().min(3),
+    value: z.string(),
     confidence: z.number().nullable().optional(),
     first_name: z.string().nullable().optional(),
     last_name: z.string().nullable().optional(),
@@ -58,12 +59,28 @@ const hunterEmailSchema = z
       .optional()
   })
   .passthrough();
-const domainSearchSchema = z
-  .object({ data: z.object({ emails: z.array(hunterEmailSchema) }).passthrough() })
-  .passthrough();
 const verifierSchema = z
   .object({ data: z.object({ status: z.string().nullable().optional() }).passthrough() })
   .passthrough();
+const EMAIL_SHAPE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function isPublicPage(uri: string): boolean {
+  try {
+    const { protocol } = new URL(uri.trim());
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/** Raw entries Hunter returned (what it charged for); [] when the body has no emails array. */
+function rawEmailEntries(body: unknown): unknown[] {
+  if (typeof body !== 'object' || body === null) return [];
+  const data = (body as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return [];
+  const emails = (data as { emails?: unknown }).emails;
+  return Array.isArray(emails) ? emails : [];
+}
 
 export interface HunterProviderOptions {
   fetchImpl?: typeof fetch;
@@ -121,42 +138,61 @@ export function createHunterProvider(
     },
 
     async domainSearch(domain, { limit }) {
-      const { body } = await call('/domain-search', {
-        domain,
-        limit: String(Math.max(1, Math.min(Math.trunc(limit), 100))),
-        type: 'personal'
-      });
-      const parsed = domainSearchSchema.safeParse(body);
-      // 'rejected', not 'unavailable': a retry would pay again for a body we
-      // still could not read.
-      if (!parsed.success)
+      if (!Number.isFinite(limit))
         throw new EnrichmentProviderError(
-          'Hunter returned an unreadable domain search.',
+          'Hunter domain search needs a numeric limit.',
           'rejected'
         );
-      const emails = parsed.data.data.emails;
-      return {
-        credits: emails.length * HUNTER_CREDIT_PRICE.perEmailFound,
-        candidates: emails.map((entry) => ({
-          email: entry.value.trim().toLowerCase(),
+      const cap = Math.max(1, Math.min(Math.trunc(limit), 100));
+      const { body } = await call('/domain-search', {
+        domain,
+        limit: String(cap),
+        type: 'personal'
+      });
+      // Hunter charged for every entry it returned, so credits come from the raw
+      // count and a malformed entry is dropped, never allowed to lose the charge.
+      const raw = rawEmailEntries(body);
+      const candidates: EnrichmentCandidate[] = [];
+      for (const item of raw) {
+        const parsed = hunterEmailSchema.safeParse(item);
+        if (!parsed.success) continue;
+        const entry = parsed.data;
+        const email = entry.value.trim().toLowerCase();
+        if (!EMAIL_SHAPE.test(email)) continue;
+        candidates.push({
+          email,
           firstName: entry.first_name?.trim() || null,
           lastName: entry.last_name?.trim() || null,
           position: entry.position?.trim() || null,
           sourceUri:
             (entry.sources ?? [])
               .map((source) => source.uri ?? '')
-              .find((uri) => /^https?:\/\//i.test(uri)) ?? null,
+              .find((uri) => isPublicPage(uri))
+              ?.trim() ?? null,
           providerConfidence: entry.confidence ?? null
-        }))
-      };
+        });
+        if (candidates.length >= cap) break;
+      }
+      return { credits: raw.length * HUNTER_CREDIT_PRICE.perEmailFound, candidates };
     },
 
     async verifyEmail(email) {
       const charge = HUNTER_CREDIT_PRICE.perVerification;
+      let pending = false;
       for (let attempt = 0; attempt < VERIFY_POLLS; attempt += 1) {
-        const { status, body } = await call('/email-verifier', { email }, [222, 451]);
+        let reply: { status: number; body: unknown };
+        try {
+          reply = await call('/email-verifier', { email }, [222, 451]);
+        } catch (error) {
+          // Once Hunter accepted the verification (202) it may complete and
+          // charge; a later poll failure must not lose that charge.
+          if (pending) return { status: 'unknown', credits: charge };
+          throw error;
+        }
+        const { status, body } = reply;
         if (status === 202) {
-          await sleep(VERIFY_POLL_DELAY_MS);
+          pending = true;
+          if (attempt < VERIFY_POLLS - 1) await sleep(VERIFY_POLL_DELAY_MS);
           continue;
         }
         if (status === 451) return { status: 'claimed', credits: charge };
