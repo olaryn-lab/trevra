@@ -86,6 +86,7 @@ import { EnrichmentSetup } from './EnrichmentSetup';
 import { BillingSettings } from './BillingSettings';
 import { GitHubReposPanel } from './GitHubReposPanel';
 import { ResearchView } from './views/ResearchView';
+import { hostedRunBlocker } from './views/hostedRun';
 import { trackEvent, trackPageView } from './analytics';
 import { ConfirmDrawer, useDialog } from './ui/dialog';
 import { ActionRow, FormGrid, FormSection, OwnerOnlyNote } from './ui/forms';
@@ -1721,25 +1722,17 @@ function HostedAgentPanel({
   const byokReady = Boolean(config && secret);
   const cliReady = Boolean(cliSetup.config && cliSetup.riskAccepted && cliSetup.tokenStored);
 
-  const runBlocker = dirtyCap
-    ? 'Save the spending limit first — a run uses what is stored, not what is typed.'
-    : modelAccessDirty
-      ? 'Save model access first — a run uses what is stored, not what is typed.'
-      : !byokReady && !cliReady
-        ? isOwner
-          ? 'Configure model access before starting a hosted run.'
-          : 'The workspace owner has to configure model access before a hosted run can start.'
-        : !budget.enabled
-          ? isOwner
-            ? 'Turn on model spending before starting a hosted run.'
-            : 'The workspace owner has to turn on model spending before a hosted run can start.'
-          : capReached
-            ? `This month’s ${usd(budget.monthlyCapCents)} is used up. ${isOwner ? 'Raise the limit to run again.' : 'The workspace owner can raise the limit.'}`
-            : !agentId
-              ? 'Choose an active Agent first.'
-              : !goal.trim()
-                ? 'Write the job you want this Agent to do.'
-                : null;
+  const runBlocker = hostedRunBlocker({
+    role,
+    dirtyCap,
+    modelAccessDirty,
+    modelAccessMissing: !byokReady && !cliReady,
+    spendingEnabled: budget.enabled,
+    capReached,
+    monthlyCapCents: budget.monthlyCapCents,
+    agentId,
+    goal
+  });
 
   const modelAccessCanSave =
     modelAccessDirty &&
