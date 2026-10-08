@@ -2579,25 +2579,31 @@ export function createApp(db: Db) {
     }
   });
 
-  app.put('/api/agent-setup/config', async (req: AuthedRequest, res, next) => {
-    try {
-      const input = agentConfigSchema.parse(req.body ?? {});
-      const config = await putWorkspaceAgentConfig(db, {
-        workspaceId: req.auth!.workspaceId,
-        baseUrl: input.baseUrl,
-        model: input.model,
-        label: input.label
-      });
-      res.json({ config });
-    } catch (error) {
-      // The store owns the endpoint policy (HTTPS, public host, the loopback
-      // escape hatch), so its rejections are operator input errors, not faults.
-      if (error instanceof Error && AGENT_CONFIG_INPUT_ERROR.test(error.message)) {
-        return res.status(400).json({ error: error.message });
+  // Owner-only: the endpoint decides where the workspace's model key and
+  // prompts are sent.
+  app.put(
+    '/api/agent-setup/config',
+    ownerOnly("change this workspace's model endpoint"),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = agentConfigSchema.parse(req.body ?? {});
+        const config = await putWorkspaceAgentConfig(db, {
+          workspaceId: req.auth!.workspaceId,
+          baseUrl: input.baseUrl,
+          model: input.model,
+          label: input.label
+        });
+        res.json({ config });
+      } catch (error) {
+        // The store owns the endpoint policy (HTTPS, public host, the loopback
+        // escape hatch), so its rejections are operator input errors, not faults.
+        if (error instanceof Error && AGENT_CONFIG_INPUT_ERROR.test(error.message)) {
+          return res.status(400).json({ error: error.message });
+        }
+        next(error);
       }
-      next(error);
     }
-  });
+  );
 
   // Rate-limited with the same limiter as the auth routes: writing a provider
   // credential is a credential endpoint, whatever the session already proves.
@@ -2636,19 +2642,23 @@ export function createApp(db: Db) {
     }
   );
 
-  app.delete('/api/agent-setup/key', async (req: AuthedRequest, res, next) => {
-    try {
-      const deleted = await deleteWorkspaceSecret(
-        db,
-        req.auth!.workspaceId,
-        'model_api_key',
-        req.auth!.userId
-      );
-      res.json({ deleted });
-    } catch (error) {
-      next(error);
+  app.delete(
+    '/api/agent-setup/key',
+    ownerOnly("remove this workspace's model API key"),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const deleted = await deleteWorkspaceSecret(
+          db,
+          req.auth!.workspaceId,
+          'model_api_key',
+          req.auth!.userId
+        );
+        res.json({ deleted });
+      } catch (error) {
+        next(error);
+      }
     }
-  });
+  );
 
   // Hunter bring-your-own-key enrichment (terms and custody: enrichment/hunter.ts).
   // Rules: owner-only writes (key and cap), a write-only key, no reveal route,
@@ -2842,19 +2852,23 @@ export function createApp(db: Db) {
     }
   );
 
-  app.delete('/api/agent-setup/cli-token', async (req: AuthedRequest, res, next) => {
-    try {
-      const deleted = await deleteWorkspaceSecret(
-        db,
-        req.auth!.workspaceId,
-        'cli_oauth_token',
-        req.auth!.userId
-      );
-      res.json({ deleted });
-    } catch (error) {
-      next(error);
+  app.delete(
+    '/api/agent-setup/cli-token',
+    ownerOnly("remove this workspace's CLI subscription token"),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const deleted = await deleteWorkspaceSecret(
+          db,
+          req.auth!.workspaceId,
+          'cli_oauth_token',
+          req.auth!.userId
+        );
+        res.json({ deleted });
+      } catch (error) {
+        next(error);
+      }
     }
-  });
+  );
 
   // Its own isolated write, deliberately -- see the doc comment on
   // `setWorkspaceCliRiskAccepted`. `accepted: true` 400s when there is no CLI

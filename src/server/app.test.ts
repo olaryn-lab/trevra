@@ -1352,6 +1352,12 @@ describe('owner-only acts', () => {
       .put('/api/agent-setup/cli-token')
       .send({ token: 'nope-1234567890' })
       .expect(403);
+    await member.agent.delete('/api/agent-setup/key').expect(403);
+    await member.agent.delete('/api/agent-setup/cli-token').expect(403);
+    await member.agent
+      .put('/api/agent-setup/config')
+      .send({ baseUrl: 'https://models.example.com/v1', model: 'm' })
+      .expect(403);
     await member.agent.put('/api/agent-setup/cli-risk-accept').send({ accepted: true }).expect(403);
     await member.agent
       .put('/api/agent-setup/budget')
