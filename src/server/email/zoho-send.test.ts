@@ -19,6 +19,7 @@ vi.mock('@nangohq/node', () => ({
 
 import { openDatabase, type Db } from '../db.js';
 import { executeConnectedAction } from '../integration-service.js';
+import { OUTREACH_REPLY_OPT_OUT_SENTENCE } from './unsubscribe-policy.js';
 
 const WORKSPACE = 'ws_email_zoho_send';
 const ZOHO = 'conn_email_zoho_send';
@@ -36,6 +37,8 @@ const ZOHO_OUTREACH = {
   unsubscribeMode: 'footer_and_reply',
   requireListUnsubscribe: false
 };
+// An approved Zoho outreach body ends with the reply-to-unsubscribe footer line.
+const BODY = `Hi Maya,\n\nWould you be open to a short conversation?\n\n${OUTREACH_REPLY_OPT_OUT_SENTENCE}`;
 let db: Db;
 
 function zohoProvider(
@@ -66,15 +69,21 @@ function zohoProvider(
 }
 
 function send(
-  overrides: { connectionId?: string; payload?: Record<string, unknown>; key?: string } = {}
+  overrides: {
+    connectionId?: string;
+    payload?: Record<string, unknown>;
+    key?: string;
+    body?: string;
+    bound?: boolean;
+  } = {}
 ) {
   return executeConnectedAction(db, WORKSPACE, {
     type: 'email_draft',
     connection_id: overrides.connectionId ?? ZOHO,
-    require_connection_id: true,
+    ...(overrides.bound === false ? {} : { require_connection_id: true }),
     recipient: 'maya@prospect.test',
     subject: 'Quick question, Maya',
-    body: 'Hi Maya,\n\nWould you be open to a short conversation?',
+    body: overrides.body ?? BODY,
     structured_payload_json: JSON.stringify(overrides.payload ?? ZOHO_OUTREACH),
     payload_hash: overrides.key ?? 'zoho-send-key-0001'
   });
@@ -141,7 +150,7 @@ describe('Zoho Mail outreach send', () => {
         fromAddress: 'founder@acme.test',
         toAddress: 'maya@prospect.test',
         subject: 'Quick question, Maya',
-        content: 'Hi Maya,\n\nWould you be open to a short conversation?',
+        content: BODY,
         mailFormat: 'plaintext',
         encoding: 'UTF-8'
       }
@@ -289,5 +298,71 @@ describe('Zoho Mail outreach send', () => {
       send({ payload: { ...ZOHO_OUTREACH, threaded: true, threadExternalRef: 'zoho-earlier' } })
     ).rejects.toMatchObject({ status: 409 });
     expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
+  it('refuses an HTML-only or a follow-up-only Zoho send, leaving a failed delivery', async () => {
+    zohoProvider();
+    await expect(
+      send({
+        key: 'zoho-send-key-0005',
+        payload: { ...ZOHO_OUTREACH, deliverySourceId: 'eo_zoho_send_5', htmlBody: '<p>x</p>' }
+      })
+    ).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/threading or HTML/) });
+    await expect(
+      send({
+        key: 'zoho-send-key-0006',
+        payload: {
+          ...ZOHO_OUTREACH,
+          deliverySourceId: 'eo_zoho_send_6',
+          threaded: true,
+          threadIdempotencyKey: 'k'
+        }
+      })
+    ).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/threading or HTML/) });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect((await deliveries()).map((row) => row.status)).toEqual(['failed', 'failed']);
+  });
+
+  it('refuses a Zoho send not bound to the mailbox by approval, before any delivery row', async () => {
+    zohoProvider();
+    await expect(send({ bound: false })).rejects.toMatchObject({
+      status: 409,
+      message: 'Zoho Mail sends only outreach bound to it by approval; nothing was sent.'
+    });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(nangoMock.get).not.toHaveBeenCalled();
+    expect(await deliveries()).toEqual([]);
+  });
+
+  it('refuses a Zoho body that does not end with the reply-to-unsubscribe line, before any delivery row', async () => {
+    zohoProvider();
+    await expect(
+      send({ body: 'Hi Maya,\n\nWould you be open to a short conversation?' })
+    ).rejects.toMatchObject({
+      status: 409,
+      message:
+        'This Zoho Mail outreach does not end with the reply-to-unsubscribe line; nothing was sent. Prepare it again.'
+    });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(nangoMock.get).not.toHaveBeenCalled();
+    expect(await deliveries()).toEqual([]);
+  });
+
+  it('records a send that returns no messageId with a zoho_ ref, no Message-ID and no read-back', async () => {
+    zohoProvider({
+      send: async () => ({ data: { status: { code: 200 }, data: {} }, headers: {} })
+    });
+    const result = await send();
+    expect(result).toEqual({ provider: 'zoho-mail', externalRef: expect.stringMatching(/^zoho_/) });
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    // Only the pre-send account read; no Sent-folder or header read-back.
+    expect(nangoMock.get.mock.calls.map((call) => call[0].endpoint)).toEqual(['/api/accounts']);
+    expect(await deliveries()).toEqual([
+      expect.objectContaining({
+        status: 'sent',
+        external_ref: result.externalRef,
+        internet_message_id: null
+      })
+    ]);
   });
 });

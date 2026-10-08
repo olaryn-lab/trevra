@@ -30,6 +30,7 @@ import {
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
 import { mailProviderFor } from './email/deliverability.js';
 import {
+  OUTREACH_REPLY_OPT_OUT_SENTENCE,
   UnsubscribePolicyError,
   assertUnsubscribeModeAllowed,
   parseOutreachUnsubscribeMode
@@ -737,6 +738,24 @@ export async function executeConnectedAction(
     throw new UnsubscribePolicyError(
       'Reply-to-unsubscribe is allowed only for approved email outreach; nothing was sent.'
     );
+  }
+  if (mailProviderFor(provider) === 'zoho') {
+    // Defence in depth: the unbound fallback never picks Zoho, and a Zoho email
+    // must carry the opt-out line its footer_and_reply approval promised.
+    if (action.require_connection_id !== true) {
+      throw new ZohoMailError(
+        'Zoho Mail sends only outreach bound to it by approval; nothing was sent.'
+      );
+    }
+    if (
+      !String(action.body ?? '')
+        .trimEnd()
+        .endsWith(OUTREACH_REPLY_OPT_OUT_SENTENCE)
+    ) {
+      throw new ZohoMailError(
+        'This Zoho Mail outreach does not end with the reply-to-unsubscribe line; nothing was sent. Prepare it again.'
+      );
+    }
   }
   const localConnectionId = String(connection.id);
   const claimed = await claimEmailDelivery(db, {
