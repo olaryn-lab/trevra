@@ -76,7 +76,7 @@ The Turnstile widget adds the `cf-turnstile-response` field that the Worker veri
 | Signs `<timestamp>.<key>.<body>` and posts; the key is derived from the single-use Turnstile token                                                                                     |                                 |
 | Retries once on a network error, `429` or `5xx`, with the same key and bytes                                                                                                           | `502`                           |
 | Trevra answers `400`/`413`                                                                                                                                                             | `400`                           |
-| Trevra answers `401`/`403`/`404`: wrong source ID or secret                                                                                                                            | `502`, no retry                 |
+| Trevra answers `401`/`403`: wrong, unknown or disabled source ID, or wrong secret (all one `401`), or a citation source posting leads                                                  | `502`, no retry                 |
 | Trevra answers `409`: the idempotency key was reused with different bytes                                                                                                              | `502`, no retry                 |
 | Trevra answers a redirect (`3xx`): the base URL is wrong; the signed body is never re-sent to another host                                                                             | `502`, no retry                 |
 
