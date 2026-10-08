@@ -24,7 +24,7 @@ import { errorMessage, useOutreachRefresh, useSeatLimits } from '../LinkedInSafe
 import { DEFAULT_WINDOW_DAYS, LinkedInFunnel } from '../LinkedInAnalyticsScreen';
 import { ConfidenceTag, WindowPicker } from '../LinkedInViz';
 import { Button, Field, Input, Select, SwitchField, Textarea } from '../ui/primitives';
-import { approveLabel, planCostLines } from './planCost';
+import { approveLabel, formatCredits, planCostLines } from './planCost';
 import { emailSkipSummary, planIssues } from './gtmPlanFormat';
 import { ACTIVATION_STEPS, nextActivationStep, type ActivationSignals } from './activation';
 import { LinkedInHandoffCard } from './LinkedInHandoffCard';
@@ -971,6 +971,9 @@ function plannerPrepareKey(): string {
   const uuid = globalThis.crypto?.randomUUID?.();
   return `gtm-plan-${uuid ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
 }
+function clampEmailsPerDomain(value: string): number {
+  return Math.max(1, Math.min(10, Math.trunc(Number(value)) || 1));
+}
 function plannerDomains(value: string): string[] {
   return [
     ...new Set(
@@ -994,7 +997,7 @@ function PlanWork({
   const [audience, setAudience] = useState('');
   const [quantity, setQuantity] = useState(25);
   const [accountDomains, setAccountDomains] = useState('');
-  const [emailsPerDomain, setEmailsPerDomain] = useState(3);
+  const [emailsPerDomain, setEmailsPerDomain] = useState('3');
   const [includeUnverified, setIncludeUnverified] = useState(false);
   const [captureName, setCaptureName] = useState('Website');
   const [captureKind, setCaptureKind] = useState<
@@ -1074,7 +1077,10 @@ function PlanWork({
                 ? {
                     objective,
                     audience: { domains: plannerDomains(accountDomains) },
-                    enrichment: { emailsPerDomain, includeUnverified }
+                    enrichment: {
+                      emailsPerDomain: clampEmailsPerDomain(emailsPerDomain),
+                      includeUnverified
+                    }
                   }
                 : {
                     objective,
@@ -1267,11 +1273,10 @@ function PlanWork({
                     max={10}
                     value={emailsPerDomain}
                     onChange={(event) => {
-                      setEmailsPerDomain(
-                        Math.max(1, Math.min(10, Number(event.target.value) || 1))
-                      );
+                      setEmailsPerDomain(event.target.value);
                       resetPlan();
                     }}
+                    onBlur={() => setEmailsPerDomain(String(clampEmailsPerDomain(emailsPerDomain)))}
                   />
                 </Field>
                 <SwitchField
@@ -1471,9 +1476,10 @@ function PlanWork({
                       <span>
                         Approved. Hunter enrichment for {prepared.result.run.domainCount}{' '}
                         {prepared.result.run.domainCount === 1 ? 'company' : 'companies'} is queued
-                        with an approved estimate of {prepared.result.run.estimatedCredits} credits.
-                        Once it reaches that estimate, it stops before its next call. Saved contacts
-                        appear on their Account.
+                        with an approved estimate of{' '}
+                        {formatCredits(prepared.result.run.estimatedCredits)}. Once it reaches that
+                        estimate, it stops before its next call. Saved contacts appear on their
+                        Account.
                       </span>
                       <Button variant="primary" onClick={() => onNavigate(prepared.next.href)}>
                         Review accounts <ChevronRight size={15} />

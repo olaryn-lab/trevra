@@ -8,14 +8,21 @@ import {
   type EnrichmentSettings,
   type EnrichmentUsage
 } from './api';
-import { useIsWorkspaceOwner } from './auth-client';
+import { authClient, useIsWorkspaceOwner } from './auth-client';
 import { errorMessage } from './LinkedInSafety';
 import { Panel } from './ui/layout';
+import { ConfirmDrawer } from './ui/dialog';
 import { Button, Field, Input } from './ui/primitives';
-import { keyStatusLine, usageLine } from './views/planCost';
+import { keyStatusLine, parseCreditCap, usageLine } from './views/planCost';
 
 export function EnrichmentSetup({ setToast }: { setToast: (message: string) => void }) {
   const isOwner = useIsWorkspaceOwner();
+  // useIsWorkspaceOwner is false while the member read is pending; hold both
+  // the owner controls and the member line until it resolves.
+  const { isPending: orgPending } = authClient.useActiveOrganization();
+  const { isPending: memberPending } = authClient.useActiveMember();
+  const roleKnown = !orgPending && !memberPending;
+  const [confirmRemove, setConfirmRemove] = useState(false);
   const [settings, setSettings] = useState<EnrichmentSettings | null>(null);
   const [usage, setUsage] = useState<EnrichmentUsage | null>(null);
   const [apiKey, setApiKey] = useState('');
@@ -64,15 +71,17 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
       setProblem(errorMessage(error, 'The Hunter key could not be removed.'));
     } finally {
       setBusy('');
+      setConfirmRemove(false);
     }
   };
 
   const saveCap = async () => {
-    const value = Number(cap);
-    if (!Number.isFinite(value)) {
-      setProblem('Enter a number of credits.');
+    const parsed = parseCreditCap(cap);
+    if (!parsed.ok) {
+      setProblem(parsed.message);
       return;
     }
+    const value = parsed.value;
     setBusy('cap');
     setProblem('');
     try {
@@ -124,7 +133,11 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
                   {busy === 'key' ? 'Checking…' : 'Save key'}
                 </Button>
                 {settings.keyStatus !== 'missing' && (
-                  <Button variant="danger" disabled={busy !== ''} onClick={() => void removeKey()}>
+                  <Button
+                    variant="danger"
+                    disabled={busy !== ''}
+                    onClick={() => setConfirmRemove(true)}
+                  >
                     {busy === 'remove' ? 'Removing…' : 'Remove key'}
                   </Button>
                 )}
@@ -152,15 +165,37 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
                 </Button>
               </div>
             </>
-          ) : (
+          ) : roleKnown ? (
             <p className="enrichment-setup-status">
               Only the workspace owner can change the key or the cap.
             </p>
-          )}
+          ) : null}
         </div>
       ) : !problem ? (
         <p className="enrichment-setup-status">Loading…</p>
       ) : null}
+      {confirmRemove && (
+        <ConfirmDrawer
+          title="Remove the Hunter key?"
+          tone="danger"
+          body={
+            <>
+              <p>
+                Trevra deletes its encrypted copy of the key. Queued and running enrichment runs
+                stop, and no new run can start until you save a key again.
+              </p>
+              <p>
+                <strong>This does not revoke the key at Hunter.</strong> If it may have leaked,
+                revoke it there as well.
+              </p>
+            </>
+          }
+          confirmLabel="Remove key"
+          busy={busy === 'remove'}
+          onCancel={() => setConfirmRemove(false)}
+          onConfirm={() => void removeKey()}
+        />
+      )}
     </Panel>
   );
 }

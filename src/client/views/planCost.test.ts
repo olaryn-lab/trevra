@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { EnrichmentSettings, GtmPlanCost } from '../api';
-import { approveLabel, formatCredits, keyStatusLine, planCostLines, usageLine } from './planCost';
+import {
+  approveLabel,
+  formatCredits,
+  keyStatusLine,
+  parseCreditCap,
+  planCostLines,
+  usageLine
+} from './planCost';
 
 const cost: GtmPlanCost = {
   provider: 'hunter',
@@ -34,9 +41,12 @@ describe('plan cost copy', () => {
   it('states the worst case, the month so far and what remains', () => {
     expect(planCostLines(cost)).toEqual([
       'Up to 9 credits: 6 credits to search 2 domains (3 per domain) and 3 credits to verify.',
-      'This month: 4.5 credits used or reserved of a 20 credits cap.',
+      'This month: 4.5 credits used or reserved of your 20-credit monthly cap.',
       '6.5 credits would remain under the cap.'
     ]);
+    expect(planCostLines({ ...cost, monthlyCap: 1 })[1]).toBe(
+      'This month: 4.5 credits used or reserved of your 1-credit monthly cap.'
+    );
     expect(planCostLines({ ...cost, remainingAfter: -4 })[2]).toBe(
       'This exceeds the cap by 4 credits.'
     );
@@ -46,6 +56,22 @@ describe('plan cost copy', () => {
     expect(approveLabel(cost, false)).toBe('Approve · up to 9 credits');
     expect(approveLabel(undefined, false)).toBe('Prepare this');
     expect(approveLabel(cost, true)).toBe('Preparing…');
+  });
+
+  it('validates the monthly cap before it reaches the server', () => {
+    expect(parseCreditCap('20')).toEqual({ ok: true, value: 20 });
+    expect(parseCreditCap(' 0.5 ')).toEqual({ ok: true, value: 0.5 });
+    expect(parseCreditCap('0')).toEqual({ ok: true, value: 0 });
+    expect(parseCreditCap('100000')).toEqual({ ok: true, value: 100000 });
+    expect(parseCreditCap('')).toEqual({ ok: false, message: 'Enter a number of credits.' });
+    expect(parseCreditCap('   ')).toEqual({ ok: false, message: 'Enter a number of credits.' });
+    expect(parseCreditCap('abc').ok).toBe(false);
+    expect(parseCreditCap('-1').ok).toBe(false);
+    expect(parseCreditCap('100000.5').ok).toBe(false);
+    expect(parseCreditCap('1.3')).toEqual({
+      ok: false,
+      message: 'Use whole or half credits, such as 20 or 20.5.'
+    });
   });
 
   it('describes key and usage state', () => {
