@@ -114,7 +114,7 @@ External writes use Trevra's prepared-action / exact-payload approval boundary. 
 
 Current prepared execution action types are:
 
-- `email.send` — send through a connected Gmail or Microsoft 365 mailbox. When the approved metadata names `connectionId` and `senderAddress`, the email leaves only from that connection. It must also still verify as that address with the provider; otherwise nothing is sent and the action answers 409. Outreach email approved with `requireListUnsubscribe: true` carries RFC 8058 `List-Unsubscribe` and `List-Unsubscribe-Post` headers, or it is not sent. Outreach email is also refused (409) when it carries no mailbox binding, or does not end with the workspace compliance footer.
+- `email.send` — send through a connected Gmail, Microsoft 365 or Zoho Mail mailbox. When the approved metadata names `connectionId` and `senderAddress`, the email leaves only from that connection. It must also still verify as that address with the provider; otherwise nothing is sent and the action answers 409. Outreach email approved with `requireListUnsubscribe: true` carries RFC 8058 `List-Unsubscribe` and `List-Unsubscribe-Post` headers, or it is not sent. Outreach email is also refused (409) when it carries no mailbox binding, or does not end with the workspace compliance footer for its approved `unsubscribeMode`. Zoho Mail sends only bound, approved outreach whose `unsubscribeMode` is `footer_and_reply`, as plain text with no thread, at most 50 a day per mailbox (429 beyond that); Gmail and Microsoft 365 refuse `footer_and_reply`.
 - `community.reply` — publish a governed reply through a supported GTM community channel.
 - `crm.log-activity` — append a GTM activity to a connected CRM record.
 - `buffer.create-draft` — create an unscheduled Buffer draft only after exact-payload founder approval. The mutation always uses Buffer's draft mode and never supplies a publish time.
@@ -136,13 +136,13 @@ Records that cannot be read (an unsupported model, or a calendar event in a shap
 
 ## Inbound mailbox sync (`inbound-messages`)
 
-The read-only `inbound-messages` sync (model `InboundEmailMessage`) runs on the `trevra-gmail` and `trevra-microsoft` integrations from `nango-integrations/`. Trevra starts it when a workspace designates its inbound mailbox, and it emits canonical `message` records with `mailboxAddress` set. A record with that model but no `mailboxAddress` is skipped, never ingested. The sync drops list and bulk mail and mail sent from the mailbox itself; Trevra re-checks every record server-side and keeps only senders it already knows.
+The read-only `inbound-messages` sync (model `InboundEmailMessage`) runs on the `trevra-gmail`, `trevra-microsoft` and `trevra-zoho-mail` integrations from `nango-integrations/`. Trevra starts it when a workspace designates its inbound mailbox, and it emits canonical `message` records with `mailboxAddress` set. A record with that model but no `mailboxAddress` is skipped, never ingested. The sync drops list and bulk mail and mail sent from the mailbox itself; Trevra re-checks every record server-side and keeps only senders it already knows.
 
 Nango's self-hosted record store retains synced message records, including message bodies, until the connection is deleted. Trevra's own tables never store strangers' mail.
 
 ### Trevra-owned Nango functions
 
-The inbound-mailbox syncs are Trevra code in `nango-integrations/`, in Nango's zero-YAML layout. Each folder name equals a Nango integration id (`trevra-gmail`, `trevra-microsoft`). If `NANGO_GMAIL_INTEGRATION` or `NANGO_MICROSOFT_INTEGRATION` names a different integration, rename the folder to match.
+The inbound-mailbox syncs are Trevra code in `nango-integrations/`, in Nango's zero-YAML layout. Each folder name equals a Nango integration id (`trevra-gmail`, `trevra-microsoft`, `trevra-zoho-mail`). If `NANGO_GMAIL_INTEGRATION`, `NANGO_MICROSOFT_INTEGRATION` or `NANGO_ZOHO_MAIL_INTEGRATION` names a different integration, rename the folder to match.
 
 Deploy them to each Nango environment, and again whenever they change:
 
@@ -156,6 +156,18 @@ npx nango deploy prod
 The syncs do not start on their own. Trevra starts the sync for one mailbox when an owner chooses it as the inbound mailbox in Workspace settings. It pauses that sync when the owner stops reading mail.
 
 If Nango cannot start the sync, Workspace settings shows the mailbox as unavailable and nothing is read. That happens when the syncs are not deployed, or on a Nango plan without syncs.
+
+## Zoho Mail
+
+Zoho Mail connects through Nango's built-in `zoho-mail` provider (OAuth2). The connection's `extension` (`com`, `eu`, `in`, `com.au`, `com.cn` or `jp`) picks the data centre. Trevra stores no password and has no SMTP path. Create the Nango integration `trevra-zoho-mail` (or set `NANGO_ZOHO_MAIL_INTEGRATION`) with exactly these scopes: `ZohoMail.accounts.READ,ZohoMail.messages.CREATE,ZohoMail.messages.READ,ZohoMail.folders.READ`.
+
+- **Identity.** `GET /api/accounts` must list exactly one `ZOHO_ACCOUNT`. Its `primaryEmailAddress` (else `mailboxAddress`) is the mailbox address. Two accounts, or none, is refused rather than guessed.
+- **Send.** `POST /api/accounts/{accountId}/messages` with `{fromAddress, toAddress, subject, content, mailFormat: 'plaintext', encoding: 'UTF-8'}` and no proxy retries. Trevra re-reads the account before every send and refuses (409) when it no longer matches the approved `senderAddress`. Afterwards it reads the sent message's `Message-ID` from the Sent folder header, best effort and bounded, so a reply can thread to the delivery.
+- **Opt-out.** Zoho's API cannot set `List-Unsubscribe`. Zoho outreach is approved with `unsubscribeMode: 'footer_and_reply'` and ends with the compliance footer, whose opt-out sentence is replaced by a "reply unsubscribe" sentence. A reply classified as unsubscribe suppresses the Person when it threads to the delivery, or, unthreaded, when this same Zoho mailbox sent that Person outreach.
+- **Daily cap.** At most 50 outreach emails per Zoho mailbox in any 24 hours, the lower of that and the mailbox's `daily_limit`. Preparation skips the excess as `daily_cap`, counting waiting approvals. The send refuses with 429.
+- **DNS.** SPF must include Zoho's sender (`zohomail.com` or `one.zoho.com`, plus the data-centre includes recorded at rollout). DKIM has no standard Zoho selector: the owner enters the selector from the Zoho Mail admin console in Workspace settings, stored per sending domain in `email_dkim_selectors`.
+- **Inbound.** The `inbound-messages` sync lists the Inbox (`/messages/view`, newest first, stopping only when a whole page is over an hour older than the checkpoint), then reads each new message oldest first through `/messages/{id}/originalmessage`, falling back to the folder header and list summary. Records have no `externalUrl`.
+- **Not supported.** Replies from Conversations through Zoho (refused with 409), HTML outreach, campaign email steps, and drafts.
 
 ## Inbound website lead capture
 

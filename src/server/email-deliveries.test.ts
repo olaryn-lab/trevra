@@ -251,6 +251,32 @@ describe('shared email delivery claim', () => {
     await expect(assertEmailDeliveryCapacity(db, zohoCapacity, now)).resolves.toBeUndefined();
   });
 
+  it('applies no Zoho ceiling to a Gmail mailbox, only the operator limit clamped to 500', async () => {
+    const now = new Date().toISOString();
+    await db
+      .prepare(
+        `INSERT INTO connections
+           (id,workspace_id,provider,provider_config_key,external_connection_id,status,is_demo,created_at,updated_at)
+           VALUES ('conn_gmail_cap',?,'gmail','trevra-gmail','gmail-cap-mailbox','connected',0,?,?)`
+      )
+      .run(WORKSPACE, now, now);
+    const setLimit = async (limit: number): Promise<void> => {
+      await db
+        .prepare(
+          `INSERT INTO linkedin_campaign_mailbox_settings
+             (workspace_id,connection_id,daily_limit,timezone,working_days_json,work_start_minute,work_end_minute,created_at,updated_at)
+             VALUES (?,'conn_gmail_cap',?,'UTC','[0,1,2,3,4,5,6]'::jsonb,0,1440,?,?)
+             ON CONFLICT (workspace_id,connection_id) DO UPDATE SET daily_limit=EXCLUDED.daily_limit`
+        )
+        .run(WORKSPACE, limit, now, now);
+    };
+    const scope = { workspaceId: WORKSPACE, connectionId: 'conn_gmail_cap' };
+    await setLimit(200);
+    expect(await outreachDailyCap(db, scope)).toBe(200);
+    await setLimit(900);
+    expect(await outreachDailyCap(db, scope)).toBe(500);
+  });
+
   it('keeps the default cap for a mailbox with no setting', async () => {
     expect(await outreachDailyCap(db, { workspaceId: WORKSPACE, connectionId: null })).toBe(
       DEFAULT_OUTREACH_DAILY_CAP
