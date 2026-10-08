@@ -17,6 +17,10 @@ npx wrangler secret put TURNSTILE_SECRET_KEY
 npx wrangler deploy
 ```
 
+Set `REDIRECT_URL` (a thank-you page on your site) too: without it, a plain HTML form post leaves the visitor looking at raw JSON.
+
+Do not serve the form page with `Referrer-Policy: no-referrer`: browsers then send `Origin: null` and the Worker refuses the post with `403`.
+
 `TURNSTILE_HOSTNAMES` is optional. When it is unset or blank, the Worker requires the Turnstile token to have been issued on the hostname of `ALLOWED_ORIGIN`; the hostname check is never switched off. Set it only when the widget runs on more than one hostname, for example `www.example.com,example.com`.
 
 ## 3. Point your form at it
@@ -72,7 +76,9 @@ The Turnstile widget adds the `cf-turnstile-response` field that the Worker veri
 | Signs `<timestamp>.<key>.<body>` and posts; the key is derived from the single-use Turnstile token                                                                                     |                                 |
 | Retries once on a network error, `429` or `5xx`, with the same key and bytes                                                                                                           | `502`                           |
 | Trevra answers `400`/`413`                                                                                                                                                             | `400`                           |
-| Trevra answers `401`/`403`/`404`/`409`: wrong source ID or secret                                                                                                                      | `502`, no retry                 |
+| Trevra answers `401`/`403`/`404`: wrong source ID or secret                                                                                                                            | `502`, no retry                 |
+| Trevra answers `409`: the idempotency key was reused with different bytes                                                                                                              | `502`, no retry                 |
+| Trevra answers a redirect (`3xx`): the base URL is wrong; the signed body is never re-sent to another host                                                                             | `502`, no retry                 |
 
 On success it returns `{"ok":true}`, or a `303` to `REDIRECT_URL` when set.
 
@@ -82,4 +88,4 @@ Tally and Formbricks cannot post to Trevra directly: neither can sign with a Tre
 
 ## Testing
 
-Cloudflare's test secret `1x0000000000000000000000000000000AA` always passes and `2x0000000000000000000000000000000AA` always fails. In this repository, `npx vitest run examples/capture-worker` checks the Worker's signature with Trevra's own verifier.
+Cloudflare's test secret `1x0000000000000000000000000000000AA` passes the check but reports a test-mode hostname (`localhost` in Cloudflare's sample), so a deployed test needs `TURNSTILE_HOSTNAMES` set to that hostname. The secret `2x0000000000000000000000000000000AA` always fails. In this repository, `npx vitest run examples/capture-worker` checks the Worker's signature with Trevra's own verifier.

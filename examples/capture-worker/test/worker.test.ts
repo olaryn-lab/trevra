@@ -164,6 +164,10 @@ describe('capture worker', () => {
     );
     expect(junk.page).toEqual({ url: 'https://acme.test/demo' });
 
+    // A foreign Referer with no page_url is not stored either.
+    const foreignReferer = await postedBody({}, { referer: 'https://evil.test/phish' });
+    expect(foreignReferer).not.toHaveProperty('page');
+
     const absent = await postedBody({}, { referer: 'https://acme.test/' });
     expect(absent.page).toEqual({ url: 'https://acme.test/' });
   });
@@ -260,6 +264,20 @@ describe('capture worker', () => {
       deps(recovering.fetchImpl)
     );
     expect(recovered.status).toBe(200);
+  });
+
+  it('treats a redirect from Trevra as a non-retryable 502 and never follows it', async () => {
+    const redirecting = stubFetch([302, 202]);
+    const response = await handleCapture(
+      formRequest({ email: EMAIL, 'cf-turnstile-response': TOKEN }),
+      env,
+      deps(redirecting.fetchImpl)
+    );
+    expect(response.status).toBe(502);
+    const posts = redirecting.calls.filter((call) => call.url === ENDPOINT);
+    expect(posts).toHaveLength(1);
+    expect(posts[0].init.redirect).toBe('manual');
+    expect(posts[0].init.signal).toBeInstanceOf(AbortSignal);
   });
 
   it('maps a rejected payload to 400 and a misconfigured source to 502 without retrying', async () => {

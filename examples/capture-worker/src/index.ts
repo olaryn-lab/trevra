@@ -29,6 +29,7 @@ const UTM_FIELDS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const TICKED = new Set(['on', 'true', '1']);
 const MAX_ATTEMPTS = 2;
+const FETCH_TIMEOUT_MS = 10_000;
 
 function field(form: FormData, name: string, max: number): string | undefined {
   const value = form.get(name);
@@ -56,7 +57,8 @@ function originAndPath(raw: string | null | undefined): URL | null {
 export function pageUrlFor(form: FormData, request: Request, env: Env): string | null {
   const claimed = originAndPath(field(form, 'page_url', 2048));
   const url = claimed && claimed.origin === env.ALLOWED_ORIGIN ? claimed : null;
-  const chosen = url ?? originAndPath(request.headers.get('referer'));
+  const referer = originAndPath(request.headers.get('referer'));
+  const chosen = url ?? (referer && referer.origin === env.ALLOWED_ORIGIN ? referer : null);
   return chosen ? `${chosen.origin}${chosen.pathname}`.slice(0, 2048) : null;
 }
 
@@ -186,8 +188,16 @@ export async function handleCapture(
     });
     let status = 0;
     try {
-      status = (await deps.fetch(endpoint, { method: 'POST', headers: { ...headers }, body }))
-        .status;
+      // The signed body must never follow a redirect to another host.
+      status = (
+        await deps.fetch(endpoint, {
+          method: 'POST',
+          headers: { ...headers },
+          body,
+          redirect: 'manual',
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)
+        })
+      ).status;
     } catch {
       status = 0;
     }
@@ -197,6 +207,7 @@ export async function handleCapture(
     // Only a network failure, 429 or 5xx is worth one more try. 401/403/404/409
     // mean the Worker's source id or secret is wrong: retrying cannot fix that,
     // and the visitor cannot either.
+    // A 3xx is a misconfigured base URL: not retryable either.
     const retryable = status === 0 || status === 429 || status >= 500;
     if (!retryable) break;
   }

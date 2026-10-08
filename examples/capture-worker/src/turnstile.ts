@@ -28,7 +28,11 @@ export async function verifyTurnstile(input: {
 
   let outcome: { success?: unknown; hostname?: unknown; 'error-codes'?: unknown };
   try {
-    const response = await input.fetchImpl(SITEVERIFY_URL, { method: 'POST', body: form });
+    const response = await input.fetchImpl(SITEVERIFY_URL, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(10_000)
+    });
     outcome = (await response.json()) as typeof outcome;
   } catch {
     return { success: false, errorCodes: ['siteverify-unreachable'], hostname: null };
