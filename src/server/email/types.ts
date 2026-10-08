@@ -83,3 +83,10 @@ export interface PreparedEmailOutreachResult {
   truncated: boolean;
   duplicate: boolean;
 }
+
+/**
+ * How an outreach email carries its opt-out. See src/server/email/unsubscribe-policy.ts:
+ * Gmail and Microsoft 365 always use RFC 8058 headers; Zoho Mail alone uses the
+ * footer's reply-to-unsubscribe line.
+ */
+export type OutreachUnsubscribeMode = 'list_unsubscribe_headers' | 'footer_and_reply';
