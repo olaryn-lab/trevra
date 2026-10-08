@@ -1,8 +1,7 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
 import express, { type Express, type Request, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
 import type { Db } from '../db.js';
-import { inboundSubmissionSchema, LeadCaptureError } from './types.js';
+import { CITATION_SOURCE_KIND, inboundSubmissionSchema, LeadCaptureError } from './types.js';
 import {
   getCaptureSourceById,
   readCaptureSourceSigningSecrets,
@@ -13,27 +12,17 @@ import { acceptInboundSubmission, payloadHash } from './submissions.js';
 import { accountForPerson } from '../person-identities.js';
 import { isMilestoneKind } from './milestones.js';
 import { recordProductMilestone } from './milestone-recorder.js';
-
-const MAX_BODY_BYTES = 128 * 1024;
-const MAX_CLOCK_SKEW_SECONDS = 5 * 60;
-const IDEMPOTENCY_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$/;
-
-function equalHex(left: string, right: string): boolean {
-  if (!/^[a-f0-9]+$/i.test(left) || !/^[a-f0-9]+$/i.test(right)) return false;
-  const a = Buffer.from(left, 'hex');
-  const b = Buffer.from(right, 'hex');
-  return a.length > 0 && a.length === b.length && timingSafeEqual(a, b);
-}
+import {
+  captureHeaderProblem,
+  captureSignatureMatches,
+  MAX_CAPTURE_BODY_BYTES,
+  rawCaptureBody,
+  readCaptureHeaders
+} from './signature.js';
 
 async function handleIntake(db: Db, req: Request, res: Response): Promise<void> {
-  const sourceId = String(req.headers['x-trevra-source'] ?? '').trim();
-  const timestampRaw = String(req.headers['x-trevra-timestamp'] ?? '').trim();
-  const idempotencyKey = String(req.headers['x-trevra-idempotency-key'] ?? '').trim();
-  const signature = String(req.headers['x-trevra-signature'] ?? '')
-    .trim()
-    .replace(/^sha256=/i, '');
-
-  const source = sourceId ? await getCaptureSourceById(db, sourceId) : null;
+  const headers = readCaptureHeaders(req.headers);
+  const source = headers.sourceId ? await getCaptureSourceById(db, headers.sourceId) : null;
   if (!source) {
     res.status(404).json({ error: 'Capture source not found' });
     return;
@@ -43,27 +32,19 @@ async function handleIntake(db: Db, req: Request, res: Response): Promise<void> 
     res.status(status).json({ error: message });
   };
   if (source.status !== 'active') return void (await reject(401, 'Capture source is disabled'));
-  if (!IDEMPOTENCY_RE.test(idempotencyKey))
-    return void (await reject(400, 'A valid X-Trevra-Idempotency-Key is required'));
-  const timestamp = Number(timestampRaw);
-  if (!Number.isInteger(timestamp)) return void (await reject(401, 'Invalid capture timestamp'));
-  const nowSeconds = Math.floor(Date.now() / 1000);
-  if (Math.abs(nowSeconds - timestamp) > MAX_CLOCK_SKEW_SECONDS)
-    return void (await reject(401, 'Capture timestamp is outside the replay window'));
+  const problem = captureHeaderProblem(headers, Math.floor(Date.now() / 1000));
+  if (problem) return void (await reject(problem.status, problem.error));
 
-  const rawBody = Buffer.isBuffer(req.body)
-    ? req.body
-    : Buffer.from(String(req.body ?? ''), 'utf8');
+  const rawBody = rawCaptureBody(req.body);
   const secrets = await readCaptureSourceSigningSecrets(db, source);
   if (secrets.length === 0) return void (await reject(401, 'Capture source has no usable secret'));
-  const signed = Buffer.concat([
-    Buffer.from(`${timestampRaw}.${idempotencyKey}.`, 'utf8'),
-    rawBody
-  ]);
-  const valid = secrets.some((secret) =>
-    equalHex(signature, createHmac('sha256', secret).update(signed).digest('hex'))
-  );
-  if (!valid) return void (await reject(401, 'Invalid capture signature'));
+  if (!captureSignatureMatches(secrets, headers, rawBody))
+    return void (await reject(401, 'Invalid capture signature'));
+  // Checked after the signature, so an unsigned probe cannot learn a source's
+  // kind. A citation secret proves who signed; it does not make this the
+  // endpoint the secret was issued for.
+  if (source.kind === CITATION_SOURCE_KIND)
+    return void (await reject(403, 'This capture source only accepts AI-answer citation samples'));
 
   let parsed: unknown;
   try {
@@ -81,7 +62,7 @@ async function handleIntake(db: Db, req: Request, res: Response): Promise<void> 
   try {
     const result = await acceptInboundSubmission(db, {
       source,
-      idempotencyKey,
+      idempotencyKey: headers.idempotencyKey,
       body: validated.data,
       payloadHash: payloadHash(rawBody)
     });
@@ -127,8 +108,8 @@ async function handleIntake(db: Db, req: Request, res: Response): Promise<void> 
   }
 }
 
-export function registerLeadCaptureIntake(app: Express, db: Db): void {
-  const limiter = rateLimit({
+export function createCaptureSourceLimiter() {
+  return rateLimit({
     windowMs: 60_000,
     limit: 120,
     standardHeaders: true,
@@ -141,21 +122,27 @@ export function registerLeadCaptureIntake(app: Express, db: Db): void {
       error: 'Capture source has made too many requests. Retry with the same idempotency key.'
     }
   });
+}
 
+export function isEntityTooLarge(error: unknown): boolean {
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'type' in error &&
+    (error as { type?: string }).type === 'entity.too.large'
+  );
+}
+
+export function registerLeadCaptureIntake(app: Express, db: Db): void {
   app.post(
     '/api/intake/v1/submissions',
-    limiter,
-    express.raw({ type: 'application/json', limit: MAX_BODY_BYTES }),
+    createCaptureSourceLimiter(),
+    express.raw({ type: 'application/json', limit: MAX_CAPTURE_BODY_BYTES }),
     async (req, res, next) => {
       try {
         await handleIntake(db, req, res);
       } catch (error) {
-        if (
-          error &&
-          typeof error === 'object' &&
-          'type' in error &&
-          (error as { type?: string }).type === 'entity.too.large'
-        ) {
+        if (isEntityTooLarge(error)) {
           res.status(413).json({ error: 'Capture payload is too large' });
           return;
         }

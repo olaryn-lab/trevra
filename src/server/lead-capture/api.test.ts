@@ -5,6 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { auth as betterAuth, closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { createApp } from '../app.js';
 import { openDatabase, type Db } from '../db.js';
+import { createCaptureSource } from './sources.js';
+import { CITATION_SOURCE_KIND } from './types.js';
 
 let db: Db;
 let app: Express;
@@ -253,5 +255,28 @@ describe('lead capture API surface', () => {
       message: 'x'.repeat(140 * 1024)
     });
     await signedRequest(sourceId, secret, 'api-huge-001', raw).expect(413);
+  });
+
+  it('a citation source secret cannot post lead submissions', async () => {
+    const { source, secret } = await createCaptureSource(db, {
+      workspaceId: WORKSPACE_ID,
+      actorUserId: USER_ID,
+      name: 'AI answers',
+      kind: CITATION_SOURCE_KIND
+    });
+    const raw = JSON.stringify({
+      kind: 'demo_request',
+      person: { email: 'citation-probe@capture-api.test' }
+    });
+    const response = await signedRequest(source.id, secret, 'api-citation-probe-001', raw).expect(
+      403
+    );
+    expect(response.body.error).toBe('This capture source only accepts AI-answer citation samples');
+    const contact = await db
+      .prepare('SELECT id FROM contacts WHERE workspace_id=? AND email_normalized=?')
+      .get(WORKSPACE_ID, 'citation-probe@capture-api.test');
+    expect(contact).toBeUndefined();
+    const listed = await authed().get('/api/capture-sources').expect(200);
+    expect(listed.body.sources.map((entry: { id: string }) => entry.id)).not.toContain(source.id);
   });
 });

@@ -128,6 +128,7 @@ On transport failure or `429`/`5xx`, retry with the **same idempotency key and e
 | `202`  | new submission accepted                     |
 | `400`  | invalid GTM payload/idempotency input       |
 | `401`  | invalid/stale signature or disabled source  |
+| `403`  | source is an AI-answer citation source      |
 | `404`  | Capture Source not found                    |
 | `409`  | idempotency key reused with different bytes |
 | `413`  | request body too large                      |

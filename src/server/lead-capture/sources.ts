@@ -7,7 +7,8 @@ import {
   secretsConfigured,
   type SecretContext
 } from '../secrets/crypto.js';
-import type { CaptureSourceKind, CaptureSourceRecord } from './types.js';
+import type { CaptureSourceRecord, CaptureSourceRecordKind } from './types.js';
+import { CITATION_SOURCE_KIND } from './types.js';
 import { LeadCaptureError } from './types.js';
 
 const SECRET_PREFIX = 'trv_capture_';
@@ -32,7 +33,7 @@ function toSource(row: Record<string, unknown>): CaptureSourceRecord {
     workspaceId: String(row.workspace_id),
     name: String(row.name),
     key: String(row.key),
-    kind: String(row.kind) as CaptureSourceKind,
+    kind: String(row.kind) as CaptureSourceRecordKind,
     status: String(row.status) as 'active' | 'disabled',
     lastSeenAt: row.last_seen_at ? new Date(String(row.last_seen_at)).toISOString() : null,
     acceptedCount: Number(row.accepted_count ?? 0),
@@ -120,7 +121,7 @@ export async function createCaptureSource(
     workspaceId: string;
     actorUserId: string;
     name: string;
-    kind: CaptureSourceKind;
+    kind: CaptureSourceRecordKind;
     preparationKey?: string | null;
     preparationHash?: string | null;
   },
@@ -227,9 +228,14 @@ export async function listCaptureSources(
   db: Db,
   workspaceId: string
 ): Promise<CaptureSourceRecord[]> {
+  // Citation sources belong to a brand watch and are managed from Research;
+  // listing them here would offer a lead-capture recipe for a secret that
+  // lead intake refuses.
   const rows = await db
-    .prepare('SELECT * FROM capture_sources WHERE workspace_id=? ORDER BY created_at DESC')
-    .all<Record<string, unknown>>(workspaceId);
+    .prepare(
+      'SELECT * FROM capture_sources WHERE workspace_id=? AND kind <> ? ORDER BY created_at DESC'
+    )
+    .all<Record<string, unknown>>(workspaceId, CITATION_SOURCE_KIND);
   return rows.map(toSource);
 }
 

@@ -9,6 +9,13 @@ export const CAPTURE_SOURCE_KINDS = [
   'integration'
 ] as const;
 export type CaptureSourceKind = (typeof CAPTURE_SOURCE_KINDS)[number];
+/**
+ * Server-created only, never offered by `captureSourceCreateSchema`: one per
+ * brand watch, created by `connectCitationSource` (watch/citations.ts). Its
+ * secret signs AI-answer citation samples and is refused by lead intake.
+ */
+export const CITATION_SOURCE_KIND = 'ai_citations' as const;
+export type CaptureSourceRecordKind = CaptureSourceKind | typeof CITATION_SOURCE_KIND;
 
 export const captureSourceCreateSchema = z
   .object({
@@ -134,7 +141,7 @@ export interface CaptureSourceRecord {
   workspaceId: string;
   name: string;
   key: string;
-  kind: CaptureSourceKind;
+  kind: CaptureSourceRecordKind;
   status: 'active' | 'disabled';
   lastSeenAt: string | null;
   acceptedCount: number;
