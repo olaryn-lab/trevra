@@ -2642,8 +2642,8 @@ export function createApp(db: Db) {
   });
 
   // Hunter bring-your-own-key enrichment (terms and custody: enrichment/hunter.ts).
-  // Same disciplines as the model key above: owner-only writes, a write-only
-  // key, no reveal route, Cache-Control: no-store. The key is checked against
+  // Rules: owner-only writes (key and cap), a write-only key, no reveal route,
+  // Cache-Control: no-store on every response. The key is checked against
   // Hunter's free /account endpoint BEFORE it is sealed, so a typo never sits
   // in custody looking valid.
   app.get('/api/enrichment', async (req: AuthedRequest, res, next) => {
@@ -2681,27 +2681,41 @@ export function createApp(db: Db) {
         try {
           await createHunterProvider(input.apiKey).checkKey();
         } catch (error) {
-          if (error instanceof EnrichmentProviderError && error.code === 'key_invalid') {
+          if (!(error instanceof EnrichmentProviderError)) throw error;
+          // Fixed messages only: never quote the key or Hunter's response.
+          if (error.code === 'key_invalid') {
             return res
               .status(400)
               .json({ error: 'Hunter rejected this API key. Nothing was saved.' });
           }
-          if (error instanceof EnrichmentProviderError) {
-            return res.status(502).json({
+          if (error.code === 'quota_exhausted') {
+            return res.status(400).json({
               error:
-                'Hunter could not confirm this key right now. Nothing was saved; try again shortly.'
+                'This Hunter account has no credits left this billing period. Nothing was saved.'
             });
           }
-          throw error;
+          if (error.code === 'rejected') {
+            return res
+              .status(400)
+              .json({ error: 'Hunter refused the key check. Nothing was saved.' });
+          }
+          // 'unavailable' | 'rate_limited': transient, worth a retry.
+          return res.status(502).json({
+            error:
+              'Hunter could not confirm this key right now. Nothing was saved; try again shortly.'
+          });
         }
-        await putWorkspaceSecret(db, {
-          workspaceId: req.auth!.workspaceId,
-          kind: 'hunter_api_key',
-          plaintext: input.apiKey,
-          label: input.label,
-          actorUserId: req.auth!.userId
+        // One step: a sealed key never sits in custody without its 'valid' status.
+        await db.transaction(async (tx) => {
+          await putWorkspaceSecret(tx, {
+            workspaceId: req.auth!.workspaceId,
+            kind: 'hunter_api_key',
+            plaintext: input.apiKey,
+            label: input.label,
+            actorUserId: req.auth!.userId
+          });
+          await setEnrichmentKeyStatus(tx, req.auth!.workspaceId, 'valid', new Date());
         });
-        await setEnrichmentKeyStatus(db, req.auth!.workspaceId, 'valid', new Date());
         res.setHeader('Cache-Control', 'no-store');
         res.json({ settings: await getEnrichmentSettings(db, req.auth!.workspaceId) });
       } catch (error) {
@@ -2743,6 +2757,7 @@ export function createApp(db: Db) {
           req.auth!.userId,
           new Date()
         );
+        res.setHeader('Cache-Control', 'no-store');
         res.json({ settings, usage: await enrichmentUsage(db, req.auth!.workspaceId, new Date()) });
       } catch (error) {
         if (error instanceof EnrichmentError) {

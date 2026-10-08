@@ -134,10 +134,72 @@ describe('enrichment API', () => {
     hunterAnswers(401);
     const response = await authed().put('/api/enrichment/key').send({ apiKey: KEY }).expect(400);
     expect(response.body.error).toBe('Hunter rejected this API key. Nothing was saved.');
-    const stored = await db
-      .prepare("SELECT id FROM workspace_secrets WHERE workspace_id=? AND kind='hunter_api_key'")
-      .get(WORKSPACE_ID);
-    expect(stored).toBeUndefined();
+    expect(await storedKeyId()).toBeUndefined();
+  });
+
+  it('refuses a key whose Hunter account has no credits left and saves nothing', async () => {
+    hunterAnswers(429);
+    const response = await authed().put('/api/enrichment/key').send({ apiKey: KEY }).expect(400);
+    expect(response.body.error).toBe(
+      'This Hunter account has no credits left this billing period. Nothing was saved.'
+    );
+    expect(await storedKeyId()).toBeUndefined();
+  });
+
+  it('answers 400 when Hunter refuses the key check for another reason', async () => {
+    hunterAnswers(400);
+    const response = await authed().put('/api/enrichment/key').send({ apiKey: KEY }).expect(400);
+    expect(response.body.error).toBe('Hunter refused the key check. Nothing was saved.');
+    expect(await storedKeyId()).toBeUndefined();
+  });
+
+  it('answers 502 and saves nothing when Hunter is down or unreachable', async () => {
+    hunterAnswers(503);
+    const down = await authed().put('/api/enrichment/key').send({ apiKey: KEY }).expect(502);
+    expect(down.body.error).toBe(
+      'Hunter could not confirm this key right now. Nothing was saved; try again shortly.'
+    );
+    vi.spyOn(globalThis, 'fetch').mockImplementationOnce(async () => {
+      throw new TypeError('fetch failed');
+    });
+    await authed().put('/api/enrichment/key').send({ apiKey: KEY }).expect(502);
+    expect(await storedKeyId()).toBeUndefined();
+  });
+
+  it('refuses to store a key when the server has no secrets key', async () => {
+    const previous = process.env.TREVRA_SECRETS_KEY;
+    delete process.env.TREVRA_SECRETS_KEY;
+    try {
+      const spy = vi.spyOn(globalThis, 'fetch');
+      const response = await authed().put('/api/enrichment/key').send({ apiKey: KEY }).expect(400);
+      expect(response.body.error).toMatch(/no TREVRA_SECRETS_KEY configured/);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      process.env.TREVRA_SECRETS_KEY = previous;
+    }
+    expect(await storedKeyId()).toBeUndefined();
+  });
+
+  it('seals the key and marks it valid in one transaction', async () => {
+    // Make the key-status write fail for this workspace only: the sealed key
+    // must roll back with it, never sit in custody without a status.
+    await db.exec(`
+      CREATE OR REPLACE FUNCTION enrichment_api_test_fail() RETURNS trigger AS $$
+      BEGIN RAISE EXCEPTION 'enrichment_api_test_fail'; END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER enrichment_api_test_fail BEFORE INSERT OR UPDATE ON enrichment_settings
+        FOR EACH ROW WHEN (NEW.workspace_id = '${WORKSPACE_ID}')
+        EXECUTE FUNCTION enrichment_api_test_fail();
+    `);
+    try {
+      hunterAnswers(200);
+      await authed().put('/api/enrichment/key').send({ apiKey: KEY }).expect(500);
+    } finally {
+      await db.exec(`
+        DROP TRIGGER IF EXISTS enrichment_api_test_fail ON enrichment_settings;
+        DROP FUNCTION IF EXISTS enrichment_api_test_fail();
+      `);
+    }
+    expect(await storedKeyId()).toBeUndefined();
   });
 
   it('removes the key and reports it missing', async () => {
@@ -152,8 +214,17 @@ describe('enrichment API', () => {
       .put('/api/enrichment/cap')
       .send({ monthlyCreditCap: 25.5 })
       .expect(200);
+    expect(saved.headers['cache-control']).toBe('no-store');
     expect(saved.body.settings.monthlyCreditCap).toBe(25.5);
     expect(saved.body.usage.usedCredits).toBe(0);
     await authed().put('/api/enrichment/cap').send({ monthlyCreditCap: 0.3 }).expect(400);
+    await authed().put('/api/enrichment/cap').send({ monthlyCreditCap: '10' }).expect(400);
+    await authed().put('/api/enrichment/cap').send({ monthlyCreditCap: -1 }).expect(400);
   });
 });
+
+async function storedKeyId(): Promise<unknown> {
+  return db
+    .prepare("SELECT id FROM workspace_secrets WHERE workspace_id=? AND kind='hunter_api_key'")
+    .get(WORKSPACE_ID);
+}
