@@ -112,6 +112,7 @@ describe('plan cost copy', () => {
       domainsDone: 2,
       domainCount: 3,
       contactsSaved: 4,
+      skippedDomains: 0,
       creditsSpent: 5.5,
       estimatedCredits: 9,
       createdAt: '2026-10-06T09:00:00.000Z',

@@ -239,6 +239,8 @@ export interface EnrichmentRunView {
   domainsDone: number;
   domainCount: number;
   contactsSaved: number;
+  /** Domains Hunter refused (uncharged) that the run skipped. */
+  skippedDomains: number;
   creditsSpent: number;
   estimatedCredits: number;
   createdAt: string;
@@ -288,6 +290,7 @@ export async function listEnrichmentRuns(
       domainsDone: progress.doneDomains,
       domainCount: Number(row.domain_count),
       contactsSaved: progress.saved,
+      skippedDomains: progress.skippedDomains ?? 0,
       creditsSpent: roundCredits(Number(row.spent)),
       estimatedCredits: Number(row.estimated_credits),
       createdAt: new Date(String(row.created_at)).toISOString(),

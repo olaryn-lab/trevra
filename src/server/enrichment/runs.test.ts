@@ -1176,11 +1176,19 @@ describe('enrichment runs', () => {
         domainsDone: 1,
         domainCount: 2,
         contactsSaved: 1,
+        skippedDomains: 0,
         creditsSpent: 1.5,
         estimatedCredits: 3,
         createdAt: NOW.toISOString(),
         finishedAt: NOW.toISOString()
       }
     ]);
+    await db
+      .prepare(
+        `UPDATE enrichment_runs SET progress_json = progress_json || '{"skippedDomains": 2}'::jsonb
+         WHERE workspace_id=? AND id=?`
+      )
+      .run(WORKSPACE, run.id);
+    expect((await listEnrichmentRuns(db, WORKSPACE))[0]?.skippedDomains).toBe(2);
   });
 });
