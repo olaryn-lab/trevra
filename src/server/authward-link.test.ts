@@ -69,6 +69,7 @@ async function begin(sessionCookie = cookie) {
     .set('Origin', origin)
     .expect(200);
   authorization = new URL(response.body.url);
+  expect(authorization.searchParams.get('resource')).toBe('https://api.usetrevra.com');
   return authorization;
 }
 function finish(sessionCookie = cookie, state = authorization.searchParams.get('state')!) {
