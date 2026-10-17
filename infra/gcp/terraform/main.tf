@@ -11,6 +11,13 @@ locals {
     "sqladmin.googleapis.com"
   ])
 
+  isolated_authward_environment = {
+    AUTHWARD_ISOLATED_ENABLED            = tostring(var.authward_isolated_enabled)
+    AUTHWARD_ACCOUNT_MIGRATION_ENABLED   = tostring(var.authward_account_migration_enabled)
+    AUTHWARD_ISOLATED_HOSTED_LOGIN_READY = tostring(var.authward_isolated_hosted_login_ready)
+    AUTHWARD_ISOLATED_RESOURCE_SCOPES    = var.authward_isolated_resource_scopes
+  }
+
   billing_environment = var.billing_client_secret != "" ? {
     BILLING_BASE_URL  = var.billing_base_url
     BILLING_CLIENT_ID = var.billing_client_id
@@ -229,6 +236,16 @@ resource "google_secret_manager_secret_iam_member" "runtime" {
   member    = "serviceAccount:${google_service_account.cloud_run.email}"
 }
 
+# The independently provisioned credential is referenced by name only.
+# Never put its plaintext in tfvars or Terraform state.
+resource "google_secret_manager_secret_iam_member" "isolated_authward_runtime" {
+  count     = var.authward_isolated_client_secret_name != "" ? 1 : 0
+  project   = var.project_id
+  secret_id = var.authward_isolated_client_secret_name
+  role      = "roles/secretmanager.secretAccessor"
+  member    = "serviceAccount:${google_service_account.cloud_run.email}"
+}
+
 resource "google_cloud_run_v2_service" "trevra" {
   project             = var.project_id
   name                = var.service_name
@@ -309,6 +326,25 @@ resource "google_cloud_run_v2_service" "trevra" {
       env {
         name  = "AUTHWARD_CLIENT_ID"
         value = var.authward_client_id
+      }
+      dynamic "env" {
+        for_each = local.isolated_authward_environment
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+      dynamic "env" {
+        for_each = var.authward_isolated_client_secret_name != "" ? [1] : []
+        content {
+          name = "AUTHWARD_ISOLATED_CLIENT_SECRET"
+          value_source {
+            secret_key_ref {
+              secret  = var.authward_isolated_client_secret_name
+              version = "latest"
+            }
+          }
+        }
       }
       dynamic "env" {
         for_each = local.billing_environment
@@ -443,6 +479,7 @@ resource "google_cloud_run_v2_service" "trevra" {
     google_project_service.required,
     google_project_iam_member.cloud_sql_client,
     google_secret_manager_secret_iam_member.runtime,
+    google_secret_manager_secret_iam_member.isolated_authward_runtime,
     google_secret_manager_secret_version.application,
     google_sql_database.trevra,
     google_sql_user.trevra
@@ -534,6 +571,25 @@ resource "google_cloud_run_v2_service" "trevra_worker" {
       }
 
       dynamic "env" {
+        for_each = local.isolated_authward_environment
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+      dynamic "env" {
+        for_each = var.authward_isolated_client_secret_name != "" ? [1] : []
+        content {
+          name = "AUTHWARD_ISOLATED_CLIENT_SECRET"
+          value_source {
+            secret_key_ref {
+              secret  = var.authward_isolated_client_secret_name
+              version = "latest"
+            }
+          }
+        }
+      }
+      dynamic "env" {
         for_each = local.billing_environment
         content {
           name  = env.key
@@ -582,6 +638,7 @@ resource "google_cloud_run_v2_service" "trevra_worker" {
     google_project_service.required,
     google_project_iam_member.cloud_sql_client,
     google_secret_manager_secret_iam_member.runtime,
+    google_secret_manager_secret_iam_member.isolated_authward_runtime,
     google_secret_manager_secret_version.application,
     google_sql_database.trevra,
     google_sql_user.trevra
