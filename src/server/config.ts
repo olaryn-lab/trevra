@@ -1,3 +1,4 @@
+import { authwardAuthority } from './authward-config.js';
 import { z } from 'zod';
 import { browserProviderSettings } from './browser/provider.js';
 import { configuredHttpObservationProviders } from './observations/providers/http.js';
@@ -169,6 +170,7 @@ export function redditWorkerConfig(
 }
 
 export function validateEnvironment(env: NodeJS.ProcessEnv = process.env): RuntimeConfig {
+  authwardAuthority(env);
   const production = env.NODE_ENV === 'production';
   const base = z
     .object({
