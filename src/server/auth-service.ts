@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { authwardAuthority, isolatedSubject } from './authward-config.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import pg from 'pg';
 import { APIError, betterAuth } from 'better-auth';
@@ -41,9 +42,12 @@ const trustedOrigins = (process.env.APP_ORIGIN ?? 'http://localhost:43173,http:/
   .map((item) => item.trim())
   .filter(Boolean);
 
-const authwardIssuer = process.env.AUTHWARD_ISSUER?.trim().replace(/\/$/, '');
-const authwardClientId = process.env.AUTHWARD_CLIENT_ID?.trim();
-const authwardClientSecret = process.env.AUTHWARD_CLIENT_SECRET?.trim();
+const authority = authwardAuthority();
+const {
+  issuer: authwardIssuer,
+  clientId: authwardClientId,
+  clientSecret: authwardClientSecret
+} = authority;
 const authwardConfigured = Boolean(authwardIssuer || authwardClientId || authwardClientSecret);
 if (authwardConfigured && !(authwardIssuer && authwardClientId && authwardClientSecret)) {
   throw new Error(
@@ -69,6 +73,10 @@ const fallbackAuthwardCapabilities: AuthwardCapabilities = {
 export async function getAuthwardCapabilities(): Promise<AuthwardCapabilities> {
   if (!authwardAuthEnabled || !authwardIssuer || !authwardClientId) {
     return { magicLink: false, emailPassword: false, socialProviders: [] };
+  }
+  if (authority.isolated) {
+    // The hosted authorization UI owns passkeys, social and email challenges.
+    return { magicLink: false, emailPassword: false, socialProviders: ['authward'] };
   }
   try {
     const response = await fetch(
@@ -101,6 +109,7 @@ export async function beginAuthwardMagicLink(
   if (!authwardAuthEnabled || !authwardIssuer || !authwardClientId) {
     throw new Error('Authward is available only for hosted Trevra');
   }
+  if (authority.isolated) throw new Error('Use Authward hosted login for isolated magic links');
   return auth.api.signInWithOAuth2({
     body: {
       providerId: 'authward',
@@ -163,9 +172,17 @@ const authwardProvider = genericOAuth({
             discoveryUrl: `${authwardIssuer}/.well-known/openid-configuration`,
             issuer: authwardIssuer,
             requireIssuerValidation: true,
-            scopes: ['openid', 'profile', 'email', 'offline_access', 'trevra:access'],
+            scopes: authority.scopes,
+            ...(authority.isolated
+              ? {
+                  mapProfileToUser: (profile: Record<string, unknown>) => ({
+                    id: isolatedSubject(authwardIssuer, profile)
+                  })
+                }
+              : {}),
             pkce: true,
             authorizationUrlParams: (ctx) => {
+              if (authority.isolated) return { resource: 'https://api.usetrevra.com' };
               const data = ctx.body.additionalData;
               const upstreamProvider = data?.upstreamProvider;
               const authMethod = data?.authMethod;
@@ -374,6 +391,8 @@ export const auth = betterAuth({
     maxPasswordLength: 128,
     autoSignIn: true
   },
+  account: { accountLinking: { disableImplicitLinking: true } },
+  onAPIError: { errorURL: `${baseURL}/login` },
   session: {
     expiresIn: 60 * 60 * 24 * 7,
     updateAge: 60 * 60 * 24
@@ -587,7 +606,21 @@ export async function buildAuthwardEndSessionUrl(
   const idToken = result.rows[0]?.idToken;
   if (!idToken) return null;
 
-  const url = new URL(`${authwardIssuer}/api/auth/oauth2/end-session`);
+  // Realm logout must use its advertised endpoint, never the legacy root path.
+  let endpoint = `${authwardIssuer}/api/auth/oauth2/end-session`;
+  if (authority.isolated) {
+    const response = await fetch(`${authwardIssuer}/.well-known/openid-configuration`, {
+      signal: AbortSignal.timeout(1500)
+    });
+    if (!response.ok) return null;
+    const metadata = (await response.json()) as { issuer?: string; end_session_endpoint?: string };
+    if (metadata.issuer !== authwardIssuer || !metadata.end_session_endpoint) return null;
+    const candidate = new URL(metadata.end_session_endpoint);
+    if (candidate.origin !== new URL(authwardIssuer).origin || candidate.protocol !== 'https:')
+      return null;
+    endpoint = candidate.toString();
+  }
+  const url = new URL(endpoint);
   url.searchParams.set('id_token_hint', idToken);
   url.searchParams.set('client_id', authwardClientId);
   url.searchParams.set('post_logout_redirect_uri', `${baseURL}/`);
