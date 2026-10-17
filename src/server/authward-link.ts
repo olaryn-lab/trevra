@@ -126,6 +126,9 @@ export function mountAuthwardLink(
         redirect_uri: redirectURI,
         response_type: 'code',
         scope: 'openid',
+        // Authward requires the exact resource of this identity realm. A
+        // missing resource is rejected even for identity-only linking.
+        resource: 'https://api.usetrevra.com',
         state,
         nonce,
         code_challenge: challenge,
