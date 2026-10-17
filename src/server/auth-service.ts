@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { migrationAuthority, mountAuthwardLink } from './authward-link.js';
+import type { Express, RequestHandler } from 'express';
 import { authwardAuthority, isolatedSubject } from './authward-config.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import pg from 'pg';
@@ -180,6 +182,7 @@ const authwardProvider = genericOAuth({
                   })
                 }
               : {}),
+            disableSignUp: authority.isolated,
             pkce: true,
             authorizationUrlParams: (ctx) => {
               if (authority.isolated) return { resource: 'https://api.usetrevra.com' };
@@ -391,7 +394,7 @@ export const auth = betterAuth({
     maxPasswordLength: 128,
     autoSignIn: true
   },
-  account: { accountLinking: { disableImplicitLinking: true } },
+  account: { accountLinking: { enabled: false, disableImplicitLinking: true } },
   onAPIError: { errorURL: `${baseURL}/login` },
   session: {
     expiresIn: 60 * 60 * 24 * 7,
@@ -892,4 +895,19 @@ async function createDefaultAutomationRules(
       'INSERT INTO automation_rules (id,workspace_id,recommendation_type,mode,min_confidence,delay_minutes,enabled,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)'
     )
     .run(id('rule'), workspaceId, 'stale_proposal', 'prepare', 0.85, 0, 1, now, now);
+}
+
+// Validate migration configuration at startup, even while legacy login remains default.
+const linkAuthority = migrationAuthority();
+export function mountAccountMigration(app: Express, db: Db, limiter: RequestHandler) {
+  mountAuthwardLink(app, db, {
+    authority: linkAuthority,
+    baseURL,
+    limiter,
+    session: async (req) =>
+      auth.api.getSession({
+        headers: fromNodeHeaders(req.headers),
+        query: { disableCookieCache: true }
+      })
+  });
 }

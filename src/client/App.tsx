@@ -1,3 +1,4 @@
+import { AccountMigration } from './AccountMigration';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -589,6 +590,7 @@ function SetupView({
         <BillingSettings />
       ) : onWorkspace ? (
         <PageGrid columns={2} className="workspace-reference-grid">
+          <AccountMigration />
           <ConnectionsView
             data={data}
             reload={reload}
