@@ -20,8 +20,7 @@ existing deployment secret system; do not place them in this document or SQL.
 Register exactly `<BETTER_AUTH_URL origin>/api/auth/isolated-link/finish` as an
 additional isolated-client redirect URI. It must be the same public origin as the
 UI. The existing generic sign-in callback is a separate redirect registration.
-The dedicated flow requests `openid` only, no refresh token or resource access.
-Confirm that the isolated client permits this identity-only authorization request.
+The dedicated flow requests `openid` only (no refresh token or product access scope) **with the exact `https://api.usetrevra.com` resource parameter required by the isolated authorization server**. The client is confidential and uses S256 PKCE.
 Keep migrations forward-only; migration 138 creates two application tables and
 never updates commercial data. Better Auth creates its existing auth schema as
 before. Enabling isolated default login is a separate, manually controlled rollout.
@@ -68,7 +67,7 @@ why this implementation does not wrap `/oauth2/link`.
 ## Validation and remaining acceptance blockers
 
 Completed locally: TypeScript; Vite client build; server TypeScript compile;
-23 config/JWT tests including real Ed25519 verification and negative claims/signature
+31 config/JWT/PostgreSQL linking tests including real Ed25519 verification and negative claims/signature
 cases. Mechanical UI detector reported no findings. No feature CSS was added;
 the control inherits shared primitives and existing panel composition.
 
@@ -80,7 +79,7 @@ Required before acceptance:
   Better Auth cookies, unchanged workspace/user/membership rows, successful
   linking with a different email, session swaps, revocation, expiry, CSRF,
   token rejection, conflicting subject ownership, rollback, and concurrent replay.
-  These DB-backed claims have not yet been demonstrated by an executed test run.
+  The targeted PostgreSQL/HTTP suite completed successfully on disposable local PostgreSQL; production browser flows remain unverified.
 - Execute live staging acceptance with two distinct issuer identities, checking
   fresh hosted passkey/social/magic-link challenges, S256 support, EdDSA JWKS,
   nonce/auth_time behavior, exact redirect registration, identity-only scope,

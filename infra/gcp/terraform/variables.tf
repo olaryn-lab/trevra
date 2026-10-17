@@ -63,6 +63,41 @@ variable "authward_client_id" {
   default     = "trevra-web"
 }
 
+variable "authward_isolated_enabled" {
+  description = "Switch Trevra hosted sign-in to the isolated authority after explicit acceptance."
+  type        = bool
+  default     = false
+}
+
+variable "authward_account_migration_enabled" {
+  description = "Enable dual-proof linking while legacy login remains the default."
+  type        = bool
+  default     = false
+}
+
+variable "authward_isolated_hosted_login_ready" {
+  description = "Operator attestation that hosted realm login and callbacks passed acceptance."
+  type        = bool
+  default     = false
+}
+
+variable "authward_isolated_resource_scopes" {
+  description = "Registered Trevra resource-specific scopes."
+  type        = string
+  default     = "trevra:access"
+}
+
+variable "authward_isolated_client_secret_name" {
+  description = "Existing Secret Manager secret ID containing the separate confidential client credential, never plaintext in Terraform state."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.authward_isolated_client_secret_name == "" || can(regex("^[a-zA-Z][a-zA-Z0-9_-]{1,254}$", var.authward_isolated_client_secret_name))
+    error_message = "The isolated client secret name must be a Secret Manager secret ID."
+  }
+}
+
 variable "authward_client_secret" {
   description = "Authward confidential server-web client secret. Cloud Run receives it from Secret Manager and token exchange uses it together with PKCE."
   type        = string
