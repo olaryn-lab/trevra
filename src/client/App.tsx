@@ -74,6 +74,7 @@ import {
   type WorkspaceErasurePreview
 } from './api';
 import { authClient, useIsWorkspaceOwner } from './auth-client';
+import { INTERACTION_EXPIRED_MESSAGE, resolveAuthError, sessionStorageOrNull } from './auth-error';
 import { ActiveLinkedInAccountName } from './LinkedInActiveAccount';
 import { reloadOutreach } from './LinkedInSafety';
 import { LinkedInAccounts } from './LinkedInAccounts';
@@ -624,6 +625,22 @@ function SetupView({
     </div>
   );
 }
+
+/**
+ * The one way the sign-in screen begins an Authward authorization: Better
+ * Auth's generic OAuth start (fresh state + PKCE), which sends the browser to
+ * Authward and back through `/api/auth/oauth2/callback/authward`. The social
+ * buttons pass their upstream provider; the `interaction_expired` restart
+ * passes none.
+ */
+function startAuthwardSignIn(upstreamProvider?: string) {
+  return authClient.signIn.oauth2({
+    providerId: 'authward',
+    callbackURL: `${window.location.origin}/loop`,
+    ...(upstreamProvider ? { additionalData: { upstreamProvider } } : {})
+  });
+}
+
 function AuthScreen({
   onAuthenticated,
   onBack
@@ -678,13 +695,12 @@ function AuthScreen({
       params.delete('error');
       cleanAuthQuery = true;
     }
-    const providerError = params.get('auth_error');
-    if (providerError) {
-      setAuthError(
-        providerError === 'google_not_configured'
-          ? 'Google sign-in is not configured for this Authward environment.'
-          : 'That sign-in provider is not available in this environment.'
-      );
+    let restartSignIn = false;
+    const authErrorCode = params.get('auth_error');
+    if (authErrorCode) {
+      const outcome = resolveAuthError(authErrorCode, sessionStorageOrNull());
+      if (outcome.kind === 'restart') restartSignIn = true;
+      else setAuthError(outcome.message);
       params.delete('auth_error');
       cleanAuthQuery = true;
     }
@@ -696,6 +712,18 @@ function AuthScreen({
         `${window.location.pathname}${query ? `?${query}` : ''}`
       );
     }
+    if (restartSignIn) {
+      // The authorization request behind a late sign-in link expired at
+      // Authward: start a fresh one (see auth-error.ts for the loop guard).
+      setBusy(true);
+      const showExpired = () => {
+        setAuthError(INTERACTION_EXPIRED_MESSAGE);
+        setBusy(false);
+      };
+      void startAuthwardSignIn().then((result) => {
+        if (result?.error) showExpired();
+      }, showExpired);
+    }
   }, []);
 
   const signInWithSocialProvider = async (provider: string) => {
@@ -703,11 +731,7 @@ function AuthScreen({
     setAuthError('');
     if (provider === 'google') trackEvent('google_auth_started');
     try {
-      const result = await authClient.signIn.oauth2({
-        providerId: 'authward',
-        callbackURL: `${window.location.origin}/loop`,
-        additionalData: { upstreamProvider: provider }
-      });
+      const result = await startAuthwardSignIn(provider);
       if (result?.error) {
         setAuthError(result.error.message ?? `${provider} sign-in failed`);
         setSocialBusy(null);
