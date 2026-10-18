@@ -127,7 +127,7 @@ REMOTE_UNLOCK
 trap release_lock EXIT
 
 echo "==> syncing single-micro compose files"
-scp -q "${HERE}/compose.micro-app.yml" "${HERE}/compose.micro-db.yml" "${REMOTE}:${APP_DIR}/"
+scp -q "${HERE}/compose.micro-app.yml" "${HERE}/compose.micro-db.yml" "${HERE}/pull-ghcr-image.sh" "${REMOTE}:${APP_DIR}/"
 
 echo "==> ensuring postgres is running from the attached data volume"
 ssh "$REMOTE" "cd ${APP_DIR} && DB_BIND_IP='${PRIVATE_IP}' docker compose --env-file .env.oracle -f compose.micro-db.yml up -d --no-recreate"
@@ -148,10 +148,16 @@ BACKUP="/mnt/data/backups/trevra-predeploy-$(date -u +%Y%m%dT%H%M%SZ).dump"
 ssh "$REMOTE" "sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/data/backups && cd ${APP_DIR} && DB_BIND_IP='${PRIVATE_IP}' docker compose --env-file .env.oracle -f compose.micro-db.yml exec -T postgres pg_dump -U trevra -d trevra -Fc > '${BACKUP}' && chmod 600 '${BACKUP}' && DB_BIND_IP='${PRIVATE_IP}' docker compose --env-file .env.oracle -f compose.micro-db.yml exec -T postgres pg_restore -l < '${BACKUP}' >/dev/null && find /mnt/data/backups -type f -name 'trevra-predeploy-*.dump' -mtime +14 -delete"
 
 if [ "${TREVRA_SKIP_PULL:-false}" = true ]; then
-  ssh "$REMOTE" "docker image inspect 'ghcr.io/leanchain/trevra:${TAG}' >/dev/null"
+  ssh "$REMOTE" "docker image inspect 'ghcr.io/olaryn-lab/trevra:${TAG}' >/dev/null"
 else
-  echo "==> pulling ghcr.io/leanchain/trevra:${TAG}"
-  ssh "$REMOTE" "cd ${APP_DIR} && TREVRA_IMAGE_TAG='${TAG}' docker compose --env-file .env.oracle -f compose.micro-app.yml pull"
+  echo "==> pulling ghcr.io/olaryn-lab/trevra:${TAG}"
+  if [ -n "${GHCR_PULL_TOKEN:-}" ]; then
+    # Use a short-lived packages:read token on stdin, not in Oracle's env file.
+    printf '%s\n' "$GHCR_PULL_TOKEN" | ssh "$REMOTE" \
+      bash "${APP_DIR}/pull-ghcr-image.sh" "${APP_DIR}" "${TAG}" "${GHCR_PULL_USER:-github-actions}"
+  else
+    ssh "$REMOTE" "cd ${APP_DIR} && TREVRA_IMAGE_TAG='${TAG}' docker compose --env-file .env.oracle -f compose.micro-app.yml pull"
+  fi
 fi
 
 # The 1 GB host cannot safely run the old worker plus the migration process at

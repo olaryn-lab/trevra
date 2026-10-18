@@ -46,7 +46,7 @@ list opens only SSH.
 ## Images
 
 `.github/workflows/image.yml` builds a multi-arch manifest (amd64 + arm64) on
-native runners and publishes it to `ghcr.io/leanchain/trevra`. Nothing is built
+native runners and publishes it to `ghcr.io/olaryn-lab/trevra`. Nothing is built
 on the instance — an E2.1.Micro has 1 GB of RAM and cannot run `tsc` + `vite`,
 and the same tag works whether the box turns out to be A1 (arm64) or E2 (amd64).
 

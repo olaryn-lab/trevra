@@ -75,14 +75,20 @@ fi
 echo "==> syncing compose files"
 scp -q "${REPO_ROOT}/infra/oracle/compose.oracle.yml" \
        "${REPO_ROOT}/infra/oracle/compose.oracle.nango.yml" \
+       "${REPO_ROOT}/infra/oracle/pull-ghcr-image.sh" \
        "${REMOTE}:${APP_DIR}/"
 
 if [ "${TREVRA_SKIP_PULL:-false}" = "true" ]; then
-  echo "==> using preloaded ghcr.io/leanchain/trevra:${TAG}"
-  ssh "$REMOTE" "docker image inspect 'ghcr.io/leanchain/trevra:${TAG}' >/dev/null"
+  echo "==> using preloaded ghcr.io/olaryn-lab/trevra:${TAG}"
+  ssh "$REMOTE" "docker image inspect 'ghcr.io/olaryn-lab/trevra:${TAG}' >/dev/null"
 else
-  echo "==> pulling ghcr.io/leanchain/trevra:${TAG}"
-  ssh "$REMOTE" "cd ${APP_DIR} && TREVRA_IMAGE_TAG='${TAG}' docker compose --env-file .env.oracle -f compose.oracle.yml pull"
+  echo "==> pulling ghcr.io/olaryn-lab/trevra:${TAG}"
+  if [ -n "${GHCR_PULL_TOKEN:-}" ]; then
+    printf '%s\n' "$GHCR_PULL_TOKEN" | ssh "$REMOTE" \
+      bash "${APP_DIR}/pull-ghcr-image.sh" "${APP_DIR}" "${TAG}" "${GHCR_PULL_USER:-github-actions}" compose.oracle.yml
+  else
+    ssh "$REMOTE" "cd ${APP_DIR} && TREVRA_IMAGE_TAG='${TAG}' docker compose --env-file .env.oracle -f compose.oracle.yml pull"
+  fi
 fi
 
 # Snapshot the attached-volume database before a schema change.

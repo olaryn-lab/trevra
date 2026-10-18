@@ -131,6 +131,13 @@ jobs:
           install -m 700 -d "$RUNNER_TEMP/ssh"
           printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/oracle"
           chmod 600 "$RUNNER_TEMP/ssh/oracle"
+      - name: Authenticate with GHCR for private package reads
+        if: steps.fresh.outputs.current == 'true'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
       - name: Verify immutable image exists
         if: steps.fresh.outputs.current == 'true'
         env:
@@ -195,6 +202,8 @@ jobs:
           DEPLOY_TOPOLOGY: ${{ vars.ORACLE_DEPLOY_TOPOLOGY || 'split-micro' }}
           SHA: ${{ needs.prepare.outputs.sha }}
           COMPANION_VERSION: ${{ steps.companion.outputs.version }}
+          GHCR_PULL_USER: ${{ github.actor }}
+          GHCR_PULL_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           case "$DEPLOY_TOPOLOGY" in
