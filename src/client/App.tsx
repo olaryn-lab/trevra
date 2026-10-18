@@ -637,6 +637,7 @@ function startAuthwardSignIn(upstreamProvider?: string) {
   return authClient.signIn.oauth2({
     providerId: 'authward',
     callbackURL: `${window.location.origin}/loop`,
+    errorCallbackURL: `${window.location.origin}/login`,
     ...(upstreamProvider ? { additionalData: { upstreamProvider } } : {})
   });
 }
@@ -686,22 +687,28 @@ function AuthScreen({
       cleanAuthQuery = true;
     }
     const magicError = params.get('error');
-    if (magicError) {
+    if (params.has('error')) {
       setAuthError(
         magicError === 'INVALID_TOKEN'
           ? 'That sign-in link is invalid, expired, or has already been used. Request a new one.'
-          : 'That sign-in link could not be used. Request a new one.'
+          : magicError === 'oauth_code_verification_failed' || magicError === 'invalid_client'
+            ? 'Sign-in is temporarily unavailable. Please try again later.'
+            : 'We could not complete your sign-in. Please try again.'
       );
       params.delete('error');
       cleanAuthQuery = true;
     }
     let restartSignIn = false;
     const authErrorCode = params.get('auth_error');
-    if (authErrorCode) {
-      const outcome = resolveAuthError(authErrorCode, sessionStorageOrNull());
+    if (params.has('auth_error')) {
+      const outcome = resolveAuthError(authErrorCode ?? '', sessionStorageOrNull());
       if (outcome.kind === 'restart') restartSignIn = true;
       else setAuthError(outcome.message);
       params.delete('auth_error');
+      cleanAuthQuery = true;
+    }
+    if (params.has('error_description')) {
+      params.delete('error_description');
       cleanAuthQuery = true;
     }
     if (cleanAuthQuery) {
@@ -733,11 +740,11 @@ function AuthScreen({
     try {
       const result = await startAuthwardSignIn(provider);
       if (result?.error) {
-        setAuthError(result.error.message ?? `${provider} sign-in failed`);
+        setAuthError('Sign-in is temporarily unavailable. Please try again later.');
         setSocialBusy(null);
       }
-    } catch (error) {
-      setAuthError(error instanceof Error ? error.message : `${provider} sign-in failed`);
+    } catch {
+      setAuthError('Sign-in is temporarily unavailable. Please try again later.');
       setSocialBusy(null);
     }
   };
@@ -749,13 +756,13 @@ function AuthScreen({
     try {
       const normalizedEmail = email.trim();
       if (!authwardEnabled) {
-        setAuthError('Email sign-in requires Authward on this deployment.');
+        setAuthError('Email sign-in is temporarily unavailable.');
         return;
       }
       await startAuthwardMagicLink(normalizedEmail);
       setMagicLinkSentTo(normalizedEmail);
-    } catch (error) {
-      setAuthError(error instanceof Error ? error.message : 'Unable to send the sign-in link');
+    } catch {
+      setAuthError('Could not send a sign-in link. Please try again.');
     } finally {
       setBusy(false);
     }
@@ -985,7 +992,14 @@ function AuthScreen({
                 </label>
               </>
             )}
-            {authError && <div className="error-banner">{authError}</div>}
+            {authError && (
+              <div className="error-banner" role="alert">
+                {authError}{' '}
+                <button type="button" className="auth-text-button" onClick={() => setAuthError('')}>
+                  Try again
+                </button>
+              </div>
+            )}
             {emailPasswordEnabled && (
               <button
                 className="primary-button auth-submit"

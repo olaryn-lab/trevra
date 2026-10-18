@@ -82,11 +82,11 @@ describe('auth_error on the sign-in screen', () => {
 
     expect(message('google_not_configured')).toEqual({
       kind: 'message',
-      message: 'Google sign-in is not configured for this Authward environment.'
+      message: 'Google sign-in is temporarily unavailable. Try another method.'
     });
     expect(message('github_not_allowed')).toEqual({
       kind: 'message',
-      message: 'That sign-in provider is not available in this environment.'
+      message: 'That sign-in provider is temporarily unavailable. Try another method.'
     });
     for (const code of ['state_mismatch', 'EXPIRED_TOKEN', 'session', 'some_future_error']) {
       expect(message(code)).toEqual({
@@ -94,6 +94,18 @@ describe('auth_error on the sign-in screen', () => {
         message: "Sign-in couldn't be completed. Please try again."
       });
     }
+    expect(message('invalid_client')).toEqual({
+      kind: 'message',
+      message: 'Sign-in is temporarily unavailable. Please try again later.'
+    });
+    expect(message('invalid_grant')).toEqual({
+      kind: 'message',
+      message: 'This sign-in link has expired. Request a new one.'
+    });
+    expect(message('<script>alert(1)</script>')).toEqual({
+      kind: 'message',
+      message: "Sign-in couldn't be completed. Please try again."
+    });
     // Only interaction_expired may claim the restart marker.
     expect(values.size).toBe(0);
   });

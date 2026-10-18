@@ -22,9 +22,9 @@ export const INTERACTION_RESTART_WINDOW_MS = 2 * 60 * 1000;
 
 export const INTERACTION_EXPIRED_MESSAGE = 'Your sign-in link expired. Sign in again to continue.';
 export const GOOGLE_NOT_CONFIGURED_MESSAGE =
-  'Google sign-in is not configured for this Authward environment.';
+  'Google sign-in is temporarily unavailable. Try another method.';
 export const PROVIDER_UNAVAILABLE_MESSAGE =
-  'That sign-in provider is not available in this environment.';
+  'That sign-in provider is temporarily unavailable. Try another method.';
 export const GENERIC_AUTH_ERROR_MESSAGE = "Sign-in couldn't be completed. Please try again.";
 
 export type RestartMarkerStorage = Pick<Storage, 'getItem' | 'setItem'>;
@@ -34,6 +34,9 @@ export type AuthErrorOutcome = { kind: 'restart' } | { kind: 'message'; message:
 export function authErrorMessage(code: string): string {
   if (code === 'google_not_configured') return GOOGLE_NOT_CONFIGURED_MESSAGE;
   if (code === 'interaction_expired') return INTERACTION_EXPIRED_MESSAGE;
+  if (code === 'invalid_client')
+    return 'Sign-in is temporarily unavailable. Please try again later.';
+  if (code === 'invalid_grant') return 'This sign-in link has expired. Request a new one.';
   // Authward's `<provider>_not_configured` / `<provider>_not_allowed`.
   if (/^[a-z0-9-]+_not_(configured|allowed)$/.test(code)) return PROVIDER_UNAVAILABLE_MESSAGE;
   return GENERIC_AUTH_ERROR_MESSAGE;

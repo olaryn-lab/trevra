@@ -17,6 +17,7 @@ import {
   smtpConfigured
 } from './email.js';
 import { recordMarketingEvent } from './public-site.js';
+import { exchangeAuthwardCode } from './authward-token.js';
 
 const { Pool } = pg;
 const production = process.env.NODE_ENV === 'production';
@@ -116,6 +117,7 @@ export async function beginAuthwardMagicLink(
     body: {
       providerId: 'authward',
       callbackURL: baseURL + '/loop',
+      errorCallbackURL: baseURL + '/login',
       additionalData: {
         authMethod: 'magic_link',
         loginHint: email,
@@ -205,6 +207,8 @@ const authwardProvider = genericOAuth({
               };
             },
             tokenUrlParams: { resource: 'https://api.usetrevra.com' },
+            getToken: (data) =>
+              exchangeAuthwardCode(authwardIssuer, authwardClientId, authwardClientSecret, data),
             redirectURI: `${baseURL}/api/auth/oauth2/callback/authward`
           }
         ]
