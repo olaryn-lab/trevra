@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createAccount } from '../accounts/store.js';
 import { runAutomationCycle } from '../automation-service.js';
 import { openDatabase, type Db } from '../db.js';
@@ -13,6 +13,8 @@ const WORKSPACE = 'ws_content_builder';
 const NOW = new Date('2026-09-12T12:00:00.000Z');
 
 beforeEach(async () => {
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(NOW);
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   await db.prepare('DELETE FROM workspaces WHERE id=?').run(WORKSPACE);
   await db
@@ -23,6 +25,7 @@ beforeEach(async () => {
 afterEach(async () => {
   await db.prepare('DELETE FROM workspaces WHERE id=?').run(WORKSPACE);
   await db.close();
+  vi.useRealTimers();
 });
 
 async function seedAccount(signalCount = 2) {

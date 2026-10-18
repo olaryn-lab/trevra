@@ -63,7 +63,8 @@
     "helmet": "^8.3.0",
     "lucide-react": "^0.468.0",
     "multer": "^2.2.0",
-    "nodemailer": "^9.0.5",
+    "nodemailer": "^10.1.6",
+    "oauth4webapi": "^3.8.6",
     "openai": "^6.48.0",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
@@ -73,8 +74,7 @@
     "sharp": "^0.35.4",
     "ws": "^8.21.3",
     "zod": "^3.25.76",
-    "zod-to-json-schema": "^3.25.2",
-    "oauth4webapi": "^3.8.6"
+    "zod-to-json-schema": "^3.25.2"
   },
   "devDependencies": {
     "@testcontainers/postgresql": "^12.0.4",
@@ -103,6 +103,6 @@
   },
   "overrides": {
     "@hono/node-server": "^2.0.5",
-    "brace-expansion": "5.0.9"
+    "brace-expansion": "5.0.12"
   }
 }
