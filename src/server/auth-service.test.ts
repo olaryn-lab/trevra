@@ -48,6 +48,17 @@ describe('Authward confidential client authentication', () => {
   });
 });
 
+describe('hosted OAuth callback failures', () => {
+  it.each(['access_denied', 'invalid_grant'])('redirects %s to the Trevra login', async (code) => {
+    const app = createApp(await freshDb());
+    const response = await request(app).get(`/api/auth/oauth2/callback/authward?error=${code}`);
+    expect(response.status).toBe(302);
+    const destination = new URL(response.headers.location, 'http://localhost');
+    expect(destination.pathname).toBe('/login');
+    expect(destination.searchParams.get('error')).toBe(code);
+  });
+});
+
 let db: Db | undefined;
 
 beforeAll(async () => migrateAuthDatabase());
