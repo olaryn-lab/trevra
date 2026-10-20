@@ -251,6 +251,14 @@ import {
 } from './secrets/reddit.js';
 import { getRedditAccount } from './reddit/account.js';
 import { RedditApiError } from './reddit/errors.js';
+import {
+  prepareRedditComment,
+  getRedditCommentReview,
+  listRedditComments,
+  approveRedditComment,
+  executeRedditComment,
+  listRedditCommentEvents
+} from './reddit/comment-actions.js';
 import { REDDIT_SORTS, MAX_READ_LIMIT as REDDIT_MAX_READ_LIMIT } from './reddit/driver.js';
 import {
   commentOnRedditThread,
@@ -8406,44 +8414,97 @@ export function createApp(db: Db) {
   );
 
   /**
-   * Post one comment, in one thread, right now.
-   *
-   * NO QUEUE AND NO APPROVAL STEP, because there is no Reddit pacing engine to
-   * hand it to: the operator is the pacing engine, and they wrote the words.
-   * When a queue arrives this route becomes the thing that files a row instead
-   * of the thing that clicks.
-   *
-   * AN `unknown` OUTCOME IS RETURNED, NOT RETRIED. Once the button is pressed
-   * the comment may exist; a retry posts it twice, and a duplicate comment
-   * cannot be un-posted. The operator gets the sentence and checks the thread.
+   * Preparing a comment is NOT publication. The previous POST endpoint
+   * performed an unapproved browser write; it now files an idempotent,
+   * canonical, immutable draft and returns its policy state.
    */
   app.post(
     '/api/reddit/comment',
     redditRoute(async (req, res) => {
       const input = redditCommentSchema.parse(req.body ?? {});
-      const config = assertRedditWorkerOn();
-
-      const outcome = await commentOnRedditThread(db, config, {
-        workspaceId: req.auth!.workspaceId,
-        threadUrl: input.url,
-        body: input.body,
-        now: new Date()
-      });
-      if (outcome.ok) {
-        res.json({
-          posted: true,
-          url: outcome.result.externalRef ?? input.url,
-          detail: outcome.result.detail ?? null
-        });
-        return;
+      try {
+        const comment = await prepareRedditComment(db, req.auth!.workspaceId, input);
+        res.status(201).json({ prepared: true, posted: comment.status === 'posted', comment });
+      } catch (error) {
+        throw new RedditApiError(
+          error instanceof Error ? error.message : 'Could not prepare comment.',
+          400
+        );
       }
-      // 409 rather than 500 for every one of them: a locked thread, a rate limit
-      // and a dead session are things to go and deal with, not faults.
-      res.status(409).json({
-        posted: false,
-        failureKind: outcome.result?.failureKind ?? null,
-        error: outcome.blocked
-      });
+    })
+  );
+  app.get(
+    '/api/reddit/comments',
+    redditRoute(async (req, res) => {
+      res.json({ comments: await listRedditComments(db, req.auth!.workspaceId) });
+    })
+  );
+  app.get(
+    '/api/reddit/comments/:id',
+    redditRoute(async (req, res) => {
+      const comment = await getRedditCommentReview(
+        db,
+        req.auth!.workspaceId,
+        String(req.params.id)
+      );
+      if (!comment) throw new RedditApiError('Comment not found.', 404);
+      res.json({ comment });
+    })
+  );
+  app.get(
+    '/api/reddit/comments/:id/audit',
+    redditRoute(async (req, res) => {
+      const commentId = String(req.params.id);
+      if (!(await getRedditCommentReview(db, req.auth!.workspaceId, commentId)))
+        throw new RedditApiError('Comment not found.', 404);
+      res.json({ events: await listRedditCommentEvents(db, req.auth!.workspaceId, commentId) });
+    })
+  );
+  app.post(
+    '/api/reddit/comments/:id/approve',
+    redditRoute(async (req, res) => {
+      if (req.auth!.role !== 'owner')
+        throw new RedditApiError('Only the workspace owner can approve a Reddit comment.', 403);
+      const contentHash = z
+        .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .parse(req.body ?? {}).contentHash;
+      const commentId = String(req.params.id);
+      if (!(await getRedditCommentReview(db, req.auth!.workspaceId, commentId)))
+        throw new RedditApiError('Comment not found.', 404);
+      try {
+        res.json({
+          comment: await approveRedditComment(
+            db,
+            req.auth!.workspaceId,
+            commentId,
+            contentHash,
+            req.auth!.userId
+          )
+        });
+      } catch (error) {
+        throw new RedditApiError(error instanceof Error ? error.message : 'Approval failed.', 409);
+      }
+    })
+  );
+  app.post(
+    '/api/reddit/comments/:id/execute',
+    redditRoute(async (req, res) => {
+      if (req.auth!.role !== 'owner')
+        throw new RedditApiError('Only the workspace owner can post a Reddit comment.', 403);
+      const commentId = String(req.params.id);
+      if (!(await getRedditCommentReview(db, req.auth!.workspaceId, commentId)))
+        throw new RedditApiError('Comment not found.', 404);
+      const config = assertRedditWorkerOn();
+      const result = await executeRedditComment(db, req.auth!.workspaceId, commentId, (payload) =>
+        commentOnRedditThread(db, config, {
+          workspaceId: req.auth!.workspaceId,
+          threadUrl: payload.threadUrl,
+          body: payload.body,
+          now: new Date()
+        })
+      );
+      res.status(result.posted ? 200 : 409).json(result);
     })
   );
 

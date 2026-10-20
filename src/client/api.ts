@@ -4168,6 +4168,53 @@ export interface RedditAccountResponse {
   worker: RedditWorkerStatus;
 }
 
+export type RedditCommentStatus = 'prepared' | 'executing' | 'posted' | 'failed' | 'unknown';
+export interface RedditCommentReview {
+  id: string;
+  threadUrl: string;
+  body: string;
+  contentHash: string;
+  status: RedditCommentStatus;
+  approved: boolean;
+  approvedBy: string | null;
+  externalRef: string | null;
+  failureKind: string | null;
+  detail: string | null;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function prepareRedditCommentAction(input: {
+  url: string;
+  body: string;
+}): Promise<RedditCommentReview> {
+  return (
+    await request<{ comment: RedditCommentReview }>('/api/reddit/comment', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    })
+  ).comment;
+}
+export async function listRedditCommentActions(): Promise<RedditCommentReview[]> {
+  return (await request<{ comments: RedditCommentReview[] }>('/api/reddit/comments')).comments;
+}
+export async function approveRedditCommentAction(
+  id: string,
+  contentHash: string
+): Promise<RedditCommentReview> {
+  return (
+    await request<{ comment: RedditCommentReview }>(
+      `/api/reddit/comments/${encodeURIComponent(id)}/approve`,
+      { method: 'POST', body: JSON.stringify({ contentHash }) }
+    )
+  ).comment;
+}
+export async function executeRedditCommentAction(id: string): Promise<{
+  posted: boolean;
+  status: RedditCommentStatus;
+  externalRef: string | null;
+  reason: string | null;
+}> {
+  return request(`/api/reddit/comments/${encodeURIComponent(id)}/execute`, { method: 'POST' });
+}
 export async function getRedditAccount(): Promise<RedditAccountResponse> {
   return request('/api/reddit/account');
 }
