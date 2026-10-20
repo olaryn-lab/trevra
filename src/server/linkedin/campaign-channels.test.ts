@@ -390,6 +390,31 @@ describe('campaign channel executor', () => {
         })
       })
     ).rejects.toThrow('no longer matches the exact approved preview');
+    await expect(
+      executeConnectedAction(db, WORKSPACE, {
+        type: 'email_draft',
+        connection_id: 'conn_campaign_live',
+        require_connection_id: true,
+        recipient: review.recipient,
+        subject: review.subject,
+        body: review.body + '\n\n' + review.footer,
+        payload_hash: 'forged-html-envelope',
+        structured_payload_json: JSON.stringify({
+          deliverySourceType: 'campaign_email',
+          deliverySourceId: review.actionId,
+          approvalContentHash: review.contentHash,
+          contactId: person!.contact_id,
+          personId: person!.person_id,
+          senderAddress: review.sender,
+          tracking: review.tracking,
+          threaded: review.threaded,
+          htmlBody: '<b>Unapproved HTML payload</b>',
+          deliveryPurpose: 'outreach',
+          requireListUnsubscribe: true,
+          unsubscribeMode: 'list_unsubscribe_headers'
+        })
+      })
+    ).rejects.toThrow('Unapproved campaign HTML');
     expect(nangoMock.post).not.toHaveBeenCalled();
   });
 

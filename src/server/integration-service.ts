@@ -30,6 +30,11 @@ import {
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
 import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from './email/compliance.js';
 import { campaignEmailPolicyGate } from './linkedin/campaign-email-approval.js';
+import {
+  campaignTrackableUrls,
+  renderCampaignHtmlWithFooter
+} from './linkedin/campaign-email-html.js';
+import { publicEmailOrigin } from './email/public-origin.js';
 import { mailProviderFor } from './email/deliverability.js';
 import {
   OUTREACH_REPLY_OPT_OUT_SENTENCE,
@@ -792,6 +797,59 @@ export async function executeConnectedAction(
         'workspace',
         'The outbound campaign email no longer matches the exact approved preview; nothing sent.'
       );
+    // The HTML part is also external content. Recreate it from the immutable
+    // lead copy and persisted per-action tracking tokens, rather than trusting
+    // a caller's HTML string after the human reviewed only the plain message.
+    if (reviewed.tracking === 'off') {
+      if (structuredPayload.htmlBody)
+        throw new CampaignEmailSendRefusal(
+          'workspace',
+          'Unapproved campaign HTML was supplied while tracking is off.'
+        );
+    } else {
+      const origin = publicEmailOrigin();
+      const tokenRow = await db
+        .prepare(
+          'SELECT tracking_token FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND id=?'
+        )
+        .get<{ tracking_token: string | null }>(workspaceId, reviewed.actionId);
+      if (!origin || !tokenRow?.tracking_token)
+        throw new CampaignEmailSendRefusal(
+          'workspace',
+          'Campaign tracking configuration changed; nothing sent.'
+        );
+      const rows = await db
+        .prepare(
+          'SELECT token,target_url FROM linkedin_campaign_email_tracking_links WHERE workspace_id=? AND channel_action_id=?'
+        )
+        .all<{ token: string; target_url: string }>(workspaceId, reviewed.actionId);
+      const links = new Map<string, string>();
+      for (const row of rows)
+        links.set(
+          row.target_url,
+          `${origin}/t/e/${encodeURIComponent(tokenRow.tracking_token)}/c/${encodeURIComponent(row.token)}`
+        );
+      if (
+        reviewed.tracking === 'opens_clicks' &&
+        campaignTrackableUrls(reviewed.body).some((target) => !links.has(target))
+      )
+        throw new CampaignEmailSendRefusal(
+          'workspace',
+          'A required campaign tracking link was not prepared.'
+        );
+      const expected = renderCampaignHtmlWithFooter(
+        reviewed.body,
+        reviewed.footer,
+        origin,
+        tokenRow.tracking_token,
+        links
+      );
+      if (structuredPayload.htmlBody !== expected)
+        throw new CampaignEmailSendRefusal(
+          'workspace',
+          'Campaign HTML was altered after exact-message approval; nothing sent.'
+        );
+    }
     const actualAddress = String(connection.mailbox_address ?? '')
       .trim()
       .toLowerCase();

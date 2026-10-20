@@ -20,6 +20,11 @@ import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-ad
 import { getSenderDeliverability } from '../email/sender-deliverability.js';
 import { unsubscribeConfigured } from '../email/unsubscribe.js';
 import { campaignEmailPolicyGate } from './campaign-email-approval.js';
+import {
+  campaignTrackableUrls,
+  escapeCampaignHtml,
+  renderCampaignTrackedContent
+} from './campaign-email-html.js';
 import { assertNotSuppressed, SuppressionError } from '../suppressions.js';
 export type CampaignChannelKind = 'email' | 'find_email';
 export type CampaignChannelStatus =
@@ -69,32 +74,6 @@ function sha(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
-function trackableUrls(body: string): string[] {
-  const found = body.match(/https?:\/\/[^\s<>"']+/gi) ?? [];
-  return [
-    ...new Set(
-      found
-        .map((value) => value.replace(/[),.;!?]+$/g, ''))
-        .filter((value) => {
-          try {
-            return ['http:', 'https:'].includes(new URL(value).protocol);
-          } catch {
-            return false;
-          }
-        })
-    )
-  ];
-}
-
 async function trackedHtmlBody(
   db: Db,
   row: ChannelRow,
@@ -135,7 +114,7 @@ async function trackedHtmlBody(
 
   const replacements = new Map<string, string>();
   if (policy === 'opens_clicks') {
-    for (const target of trackableUrls(body)) {
+    for (const target of campaignTrackableUrls(body)) {
       let link = await db
         .prepare(
           `SELECT token FROM linkedin_campaign_email_tracking_links
@@ -164,15 +143,7 @@ async function trackedHtmlBody(
     }
   }
 
-  let escaped = escapeHtml(body);
-  for (const [target, tracked] of replacements) {
-    escaped = escaped.replaceAll(
-      escapeHtml(target),
-      `<a href="${escapeHtml(tracked)}">${escapeHtml(target)}</a>`
-    );
-  }
-  escaped = escaped.replaceAll('\n', '<br>');
-  return `${escaped}<img src="${origin}/t/e/${encodeURIComponent(token)}/open.gif" width="1" height="1" alt="" style="display:none" />`;
+  return renderCampaignTrackedContent(body, origin, token, replacements);
 }
 
 async function claimNext(db: Db, workspaceId: string, now: Date): Promise<ChannelRow | null> {
@@ -480,7 +451,7 @@ async function executeEmail(
   // legally required privacy-policy/opt-out footer into a tracking redirect.
   const trackedBody = await trackedHtmlBody(db, row, body, tracking, now);
   const htmlBody = trackedBody
-    ? `${trackedBody}<br><br>${escapeHtml(sender.footer).replaceAll('\n', '<br>')}`
+    ? `${trackedBody}<br><br>${escapeCampaignHtml(sender.footer).replaceAll('\n', '<br>')}`
     : null;
   const prior = threaded
     ? await db
