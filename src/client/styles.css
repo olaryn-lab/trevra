@@ -14140,3 +14140,85 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
+
+/* Shared Olaryn login contract: centered, product-branded, compact method list.
+   Hide the old split-screen marketing pitch on the authentication route only. */
+.auth-shell-centered {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 100dvh;
+}
+.auth-shell-centered > .auth-story {
+  display: none;
+}
+.auth-shell-centered .auth-panel {
+  min-height: 100dvh;
+  place-items: center;
+  padding: clamp(16px, 3vh, 32px) 16px;
+}
+.auth-shell-centered .auth-card {
+  width: min(100%, 448px);
+  max-width: 448px;
+  border-radius: 16px;
+  padding: 30px 28px 26px;
+  box-shadow: none;
+}
+.auth-signin-brand {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 10px;
+  font-weight: 600;
+  font-size: 15px;
+}
+.auth-signin-brand svg {
+  width: 24px;
+  height: 24px;
+}
+.auth-shell-centered .auth-card h2 {
+  margin: 28px 0 10px;
+  text-align: center;
+  font-size: clamp(24px, 5vw, 28px);
+}
+.auth-shell-centered .auth-card > p {
+  text-align: center;
+  font-size: 14px;
+  margin-bottom: 26px;
+}
+.auth-shell-centered .google-auth-button {
+  min-height: 48px;
+  margin-bottom: 9px;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 550;
+  background: var(--t-field);
+}
+.auth-shell-centered .google-auth-button:first-of-type {
+  background: var(--ink);
+  color: var(--t-bg);
+  border-color: var(--ink);
+}
+.auth-shell-centered .auth-email-fields {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  margin-bottom: 12px;
+}
+.auth-shell-centered .auth-email-fields .auth-submit {
+  margin-top: 4px;
+}
+.auth-shell-centered .auth-legal-links {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}
+@media (max-width: 560px) {
+  .auth-shell-centered .auth-panel {
+    min-height: 100dvh;
+    padding: 12px;
+  }
+  .auth-shell-centered .auth-card {
+    padding: 24px 18px;
+  }
+  .auth-shell-centered .auth-card h2 {
+    margin-top: 23px;
+  }
+}

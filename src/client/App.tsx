@@ -659,6 +659,7 @@ function AuthScreen({
   const [authwardEnabled, setAuthwardEnabled] = useState(false);
   const [socialProviders, setSocialProviders] = useState<string[]>([]);
   const [magicLinkEnabled, setMagicLinkEnabled] = useState(false);
+  const [showEmail, setShowEmail] = useState(false);
   const [magicLinkSentTo, setMagicLinkSentTo] = useState<string | null>(null);
   const [emailPasswordEnabled, setEmailPasswordEnabled] = useState(false);
 
@@ -798,7 +799,7 @@ function AuthScreen({
 
   return (
     <main className="marketing-runtime">
-      <div className="auth-shell">
+      <div className="auth-shell auth-shell-centered">
         <section className="auth-story">
           <a
             className="brand auth-brand"
@@ -834,9 +835,10 @@ function AuthScreen({
         </section>
         <section className="auth-panel" id="get-started">
           <div className="auth-card">
-            <span className="auth-icon">
-              <ShieldCheck />
-            </span>
+            <div className="auth-signin-brand">
+              <BrandMark />
+              <span>Trevra</span>
+            </div>
             <h2>
               {magicLinkSentTo
                 ? 'Check your email'
@@ -850,9 +852,9 @@ function AuthScreen({
               {magicLinkSentTo
                 ? 'A secure sign-in link is on its way.'
                 : magicLinkEnabled
-                  ? 'Enter your email and we’ll send you a secure sign-in link.'
+                  ? 'Sign in to your workspace.'
                   : mode === 'signin'
-                    ? 'Continue to your workspace.'
+                    ? 'Sign in to your workspace.'
                     : 'Create a Trevra workspace.'}
             </p>
             {socialProviders.length > 0 &&
@@ -886,13 +888,6 @@ function AuthScreen({
                   </button>
                 );
               })}
-            {socialProviders.length > 0 &&
-              !magicLinkSentTo &&
-              (magicLinkEnabled || emailPasswordEnabled) && (
-                <div className="auth-divider">
-                  <span>or</span>
-                </div>
-              )}
             {magicLinkEnabled &&
               (magicLinkSentTo ? (
                 <div className="auth-email-sent" role="status" aria-live="polite">
@@ -927,32 +922,51 @@ function AuthScreen({
                   </button>
                 </div>
               ) : (
-                <>
-                  <label>
-                    Email
-                    <input
-                      type="email"
-                      autoComplete="email"
-                      value={email}
-                      onChange={(event) => {
-                        setEmail(event.target.value);
-                        setMagicLinkSentTo(null);
-                      }}
-                      placeholder="you@company.com"
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' && email.trim()) void sendMagicLink();
-                      }}
-                    />
-                  </label>
+                <div className="auth-expandable-email">
                   <button
-                    className="primary-button auth-submit"
-                    disabled={busy || socialBusy !== null || !email.trim()}
-                    onClick={() => void sendMagicLink()}
+                    type="button"
+                    className="google-auth-button"
+                    aria-expanded={showEmail}
+                    aria-controls="trevra-email-form"
+                    onClick={() => setShowEmail((value) => !value)}
+                    disabled={busy || socialBusy !== null}
                   >
-                    {busy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
+                    <Mail size={17} />
                     Continue with email
                   </button>
-                </>
+                  {showEmail && (
+                    <div id="trevra-email-form" className="auth-email-fields">
+                      <label>
+                        Email
+                        <input
+                          type="email"
+                          autoComplete="email"
+                          value={email}
+                          onChange={(event) => {
+                            setEmail(event.target.value);
+                            setMagicLinkSentTo(null);
+                          }}
+                          placeholder="you@company.com"
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' && email.trim()) void sendMagicLink();
+                          }}
+                        />
+                      </label>
+                      <button
+                        className="primary-button auth-submit"
+                        disabled={busy || socialBusy !== null || !email.trim()}
+                        onClick={() => void sendMagicLink()}
+                      >
+                        {busy ? (
+                          <LoaderCircle className="spin" size={16} />
+                        ) : (
+                          <ShieldCheck size={16} />
+                        )}
+                        Email me a sign-in link
+                      </button>
+                    </div>
+                  )}
+                </div>
               ))}
             {emailPasswordEnabled && (
               <>
