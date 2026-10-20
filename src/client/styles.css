@@ -14222,3 +14222,27 @@ button:disabled {
     margin-top: 23px;
   }
 }
+
+/* The login page owns its theme switch, independent of the authenticated app
+   header. It scrolls with genuinely tall content instead of overlaying it. */
+.auth-shell-centered {
+  position: relative;
+}
+.auth-login-theme {
+  position: absolute;
+  top: 12px;
+  right: max(12px, env(safe-area-inset-right));
+  z-index: 3;
+}
+.auth-login-theme .theme-toggle {
+  width: 40px;
+  height: 40px;
+}
+@media (max-height: 650px) {
+  .auth-shell-centered .auth-panel {
+    padding-block: 12px;
+  }
+  .auth-shell-centered .auth-card {
+    padding-block: 20px;
+  }
+}
