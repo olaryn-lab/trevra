@@ -246,6 +246,13 @@ describe('no screen is addressed by a hash', () => {
    * Routes are paths -- `href="/outreach/inbox"` -- and the click interceptor
    * in ui/route.ts keeps them from reloading the page.
    */
+  it('links the analytics safety explanation to a live workspace-settings route', () => {
+    const source = readFileSync(join(CLIENT_DIR, 'LinkedInAnalyticsScreen.tsx'), 'utf8');
+    expect(source).toContain('href="/setup/workspace"');
+    expect(source).not.toContain('href="/outreach/safety"');
+    expect(isAppPath('/setup/workspace')).toBe(true);
+  });
+
   it('has no `#/` route literal anywhere in src/client', () => {
     expect(offenders(/#\//)).toEqual([]);
   });

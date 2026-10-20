@@ -142,6 +142,8 @@ Task IDs are permanent. Each status requires evidence; baseline findings below a
 
 | 2026-10-20 | 022,024,026 | Combined-name CSV import accepts an exact Name/Full Name column as an alternative to first+last, keeps explicit columns authoritative, rejects incomplete rows, preserves custom Title/Location, avoids incorrect Location→Country inference. UI offers an explicit Sales Navigator-style mapping preset for user-authorized CSV uploads (NOT search/scraping), labels new lists `sales_navigator` without requiring a source URL; source-search URLs remain strictly checked when present. Targeted tests: 44/44 importer, 3/3 preset, 27/27 Postgres list, 16/16 authenticated API (90/90); includes hostile source-ref checks and canonical Person dedup. Remaining: arbitrary export schema variations, profile enrichment, lead sourcing, full manual QA. | IMPLEMENTED; CAPABILITY PARTIAL |
 
+| 2026-10-20 | 011,022,024,026 | `de3d6c1`: CSV intake and authorized Sales Navigator-style mapping, 90/90 targeted tests and full `npm run check` exit 0 (PostgreSQL/Vitest + client/server build). The existing SBOM dependency-validation failure is swallowed by the build; SBOM not regenerated. Fixed the stale analytics `/outreach/safety` destination to live `/setup/workspace`, with a route regression. Full Dripify parity and provider-operation smoke tests remain open. | INTAKE VERIFIED IN TESTS; DEPLOY NOT DONE |
+
 ## Handoff checklist
 
 - [ ] Each task has a real status, owning commit, acceptance-test evidence and remaining blockers.
