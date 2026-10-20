@@ -15,7 +15,7 @@ import {
   canonicalMeetingSchema,
   type CanonicalMeeting
 } from './meetings/types.js';
-import { assertNotSuppressed } from './suppressions.js';
+import { assertNotSuppressed, SuppressionError } from './suppressions.js';
 import {
   assertEmailDeliveryCapacity,
   claimEmailDelivery,
@@ -28,6 +28,7 @@ import {
   type VerifiedEmailOutcome
 } from './email-outcomes.js';
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
+import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from './email/compliance.js';
 import { mailProviderFor } from './email/deliverability.js';
 import {
   OUTREACH_REPLY_OPT_OUT_SENTENCE,
@@ -644,6 +645,16 @@ export async function disconnectIntegration(
     .run(workspaceId, localConnectionId);
 }
 
+/** A pre-provider campaign-email refusal with a known, non-unknown outcome. */
+export class CampaignEmailSendRefusal extends Error {
+  constructor(
+    public readonly scope: 'recipient' | 'workspace',
+    message: string
+  ) {
+    super(message);
+  }
+}
+
 export async function executeConnectedAction(
   db: Db,
   workspaceId: string,
@@ -655,10 +666,54 @@ export async function executeConnectedAction(
   }
   const recipient = String(action.recipient ?? '').trim();
   if (!recipient) throw new Error('Email action requires recipient.');
-  // This is the last shared boundary before Gmail/Microsoft side effects. Every
-  // email path reaches this function, so a campaign, playbook, agent, or legacy
-  // recommendation cannot route around a workspace suppression.
-  await assertNotSuppressed(db, workspaceId, { channel: 'email', email: recipient });
+  const structuredPayload = JSON.parse(String(action.structured_payload_json ?? '{}')) as Record<
+    string,
+    unknown
+  >;
+  const campaignSend = structuredPayload.deliverySourceType === 'campaign_email';
+  if (campaignSend) {
+    // Even after the campaign worker's checks, contact state can change during
+    // mailbox/DNS checks. Re-read it at the shared provider boundary.
+    const contactId =
+      typeof structuredPayload.contactId === 'string' ? structuredPayload.contactId : '';
+    const personId =
+      typeof structuredPayload.personId === 'string' ? structuredPayload.personId : '';
+    if (!contactId || !personId)
+      throw new CampaignEmailSendRefusal(
+        'recipient',
+        'Campaign email has no bound Person and contact identity.'
+      );
+    const contact = await db
+      .prepare(
+        'SELECT person_id,email,do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?'
+      )
+      .get<{ person_id: string | null; email: string | null; do_not_contact: boolean }>(
+        workspaceId,
+        contactId
+      );
+    if (
+      !contact ||
+      contact.do_not_contact ||
+      contact.person_id !== personId ||
+      contact.email?.trim().toLowerCase() !== recipient.toLowerCase()
+    )
+      throw new CampaignEmailSendRefusal(
+        'recipient',
+        'Campaign recipient identity or reachability changed; nothing sent.'
+      );
+    try {
+      await assertNotSuppressed(db, workspaceId, { channel: 'email', email: recipient, personId });
+    } catch (error) {
+      if (!(error instanceof SuppressionError)) throw error;
+      throw new CampaignEmailSendRefusal(
+        'recipient',
+        'Campaign recipient is suppressed; nothing sent.'
+      );
+    }
+  } else {
+    // Every legacy, reply and playbook path still reaches the email suppression.
+    await assertNotSuppressed(db, workspaceId, { channel: 'email', email: recipient });
+  }
 
   // A required (approval-bound) connection must still be the live, provider-
   // verified mailbox; re-authorization clears mailbox_address.
@@ -709,16 +764,31 @@ export async function executeConnectedAction(
   const provider = String(connection.provider);
   const providerConfigKey = String(connection.provider_config_key);
   const connectionId = String(connection.external_connection_id);
-  const structuredPayload = JSON.parse(String(action.structured_payload_json ?? '{}')) as Record<
-    string,
-    unknown
-  >;
   const idempotencyKey = String(action.payload_hash ?? '').trim();
   if (!idempotencyKey) throw new Error('Email action requires an idempotency key.');
   const purpose =
     structuredPayload.deliveryPurpose === 'reply' || structuredPayload.deliveryPurpose === 'other'
       ? structuredPayload.deliveryPurpose
       : ('outreach' as const);
+  if (campaignSend) {
+    const actualAddress = String(connection.mailbox_address ?? '')
+      .trim()
+      .toLowerCase();
+    const approvedAddress =
+      typeof structuredPayload.senderAddress === 'string'
+        ? structuredPayload.senderAddress.trim().toLowerCase()
+        : '';
+    if (
+      action.require_connection_id !== true ||
+      !actualAddress ||
+      !approvedAddress ||
+      actualAddress !== approvedAddress
+    )
+      throw new CampaignEmailSendRefusal(
+        'workspace',
+        'The selected campaign mailbox identity changed; nothing sent.'
+      );
+  }
   const sourceType =
     typeof structuredPayload.deliverySourceType === 'string' &&
     structuredPayload.deliverySourceType.trim()
@@ -731,6 +801,29 @@ export async function executeConnectedAction(
       : idempotencyKey;
   const requireListUnsubscribe = structuredPayload.requireListUnsubscribe === true;
   const unsubscribeMode = parseOutreachUnsubscribeMode(structuredPayload.unsubscribeMode);
+  if (campaignSend) {
+    if (
+      purpose !== 'outreach' ||
+      !requireListUnsubscribe ||
+      unsubscribeMode !== 'list_unsubscribe_headers'
+    )
+      throw new CampaignEmailSendRefusal(
+        'workspace',
+        'Campaign outreach must include RFC8058 one-click unsubscribe headers; nothing sent.'
+      );
+    const footer = (await emailComplianceProvider().footer(db, workspaceId))?.trim() ?? '';
+    if (
+      !footer ||
+      !footer.endsWith(OUTREACH_OPT_OUT_SENTENCE) ||
+      !String(action.body ?? '')
+        .trimEnd()
+        .endsWith(footer)
+    )
+      throw new CampaignEmailSendRefusal(
+        'workspace',
+        'The campaign compliance footer changed or is missing; nothing sent.'
+      );
+  }
   // The one provider-aware unsubscribe decision (src/server/email/unsubscribe-policy.ts),
   // enforced before any delivery row so a refusal leaves nothing to retry.
   assertUnsubscribeModeAllowed({

@@ -223,7 +223,7 @@ describe('Zoho Mail outreach send', () => {
   it('refuses reply-to-unsubscribe on a Zoho send that is not approved email outreach, before any delivery row', async () => {
     zohoProvider();
     await expect(
-      send({ payload: { ...ZOHO_OUTREACH, deliverySourceType: 'campaign_email' } })
+      send({ payload: { ...ZOHO_OUTREACH, deliverySourceType: 'skill_draft' } })
     ).rejects.toMatchObject({
       status: 409,
       message: 'Reply-to-unsubscribe is allowed only for approved email outreach; nothing was sent.'

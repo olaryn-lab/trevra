@@ -1,7 +1,30 @@
 import { createServer, type Server } from 'node:http';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const nangoMock = vi.hoisted(() => ({
+  post: vi.fn(async (_request: Record<string, unknown>) => ({
+    data: { id: 'gmail-parity-provider-id', threadId: 'thread-parity' },
+    headers: {}
+  })),
+  get: vi.fn(async (_request: Record<string, unknown>) => ({
+    data: { payload: { headers: [{ name: 'Message-ID', value: '<gmail-parity@example.test>' }] } },
+    headers: {}
+  }))
+}));
+vi.mock('@nangohq/node', () => ({
+  Nango: class {
+    post = nangoMock.post;
+    get = nangoMock.get;
+  }
+}));
 import { openDatabase, type Db } from '../db.js';
 import { findSuppression } from '../suppressions.js';
+import { executeConnectedAction } from '../integration-service.js';
+import {
+  OUTREACH_OPT_OUT_SENTENCE,
+  registerEmailComplianceProvider,
+  resetEmailComplianceProvider
+} from '../email/compliance.js';
 import { createLeadList, importLeadCsv } from './lead-lists.js';
 import {
   campaignMemberTimeline,
@@ -54,6 +77,9 @@ beforeEach(async () => {
       .run(WORKSPACE)
       .catch(() => undefined);
   }
+  await db.prepare('DELETE FROM email_inbound_mailboxes WHERE workspace_id=?').run(WORKSPACE);
+  await db.prepare('DELETE FROM email_deliverability_checks WHERE workspace_id=?').run(WORKSPACE);
+  await db.prepare('DELETE FROM connections WHERE workspace_id=?').run(WORKSPACE);
   await upsertSeat(
     db,
     WORKSPACE,
@@ -62,7 +88,50 @@ beforeEach(async () => {
   );
 });
 
-afterEach(async () => db?.close());
+afterEach(async () => {
+  resetEmailComplianceProvider();
+  vi.unstubAllEnvs();
+  nangoMock.post.mockClear();
+  nangoMock.get.mockClear();
+  await db?.close();
+});
+
+async function seedReadyMailbox(): Promise<void> {
+  vi.stubEnv('NANGO_API_KEY', 'local-test-nango-key');
+  vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
+  vi.stubEnv('TREVRA_SECRETS_KEY', 'campaign-parity-test-secret-not-production');
+  registerEmailComplianceProvider({
+    footer: async () =>
+      `Acme Labs, 1 Market Street\nPrivacy policy: https://acme.test/privacy\n${OUTREACH_OPT_OUT_SENTENCE}`,
+    blockers: async () => []
+  });
+  await db
+    .prepare(
+      `INSERT INTO connections
+     (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,
+      mailbox_address,created_at,updated_at)
+     VALUES ('conn_campaign_live',?,'gmail','trevra-gmail','sender-live','Founder',
+             'connected',0,'founder@acme.test',?::timestamptz,?::timestamptz)`
+    )
+    .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+  await db
+    .prepare(
+      `INSERT INTO email_inbound_mailboxes
+     (workspace_id,connection_id,address,sync_status,designated_at,updated_at)
+     VALUES (?,'conn_campaign_live','founder@acme.test','syncing',?::timestamptz,?::timestamptz)`
+    )
+    .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+  const pass = JSON.stringify({ status: 'pass', detail: 'valid', record: null });
+  await db
+    .prepare(
+      `INSERT INTO email_deliverability_checks
+     (workspace_id,domain,provider,status,spf_json,dkim_json,dmarc_json,blockers_json,warnings_json,
+      checked_at,expires_at)
+     VALUES (?,'acme.test','google','pass',?::jsonb,?::jsonb,?::jsonb,'[]'::jsonb,'[]'::jsonb,
+             ?::timestamptz,'2099-01-01T00:00:00Z'::timestamptz)`
+    )
+    .run(WORKSPACE, pass, pass, pass, NOW.toISOString());
+}
 
 async function campaignFor(
   steps: Parameters<typeof saveWorkflow>[1]['steps'],
@@ -654,7 +723,7 @@ describe('campaign channel executor', () => {
     ).toEqual({ status: 'planned' });
   });
 
-  it('builds opaque tracking tokens and click mappings before an opted-in email is sent', async () => {
+  it('sends a compliant campaign email only from its verified mailbox and stamps RFC8058 headers', async () => {
     const campaignId = await campaignFor(
       [
         {
@@ -674,13 +743,7 @@ describe('campaign channel executor', () => {
     );
     await runManagedCampaigns(db, WORKSPACE, NOW);
     const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
-    await db
-      .prepare(
-        `INSERT INTO connections
-         (id,workspace_id,provider,provider_config_key,external_connection_id,display_name,status,is_demo,created_at,updated_at)
-         VALUES ('conn_demo_track',?,'gmail','trevra-gmail','demo-track','demo@example.com','connected',1,?::timestamptz,?::timestamptz)`
-      )
-      .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+    await seedReadyMailbox();
     await db
       .prepare(
         `UPDATE linkedin_campaign_members SET status='waiting',current_step_id='email-live',step_index=0,next_eligible_at=?::timestamptz
@@ -711,6 +774,16 @@ describe('campaign channel executor', () => {
         NOW.toISOString()
       );
 
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_channel_actions SET connection_id='conn_campaign_live' WHERE id='licha_track_send'"
+      )
+      .run();
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_channel_actions SET connection_id='conn_campaign_live' WHERE id='licha_track_send'"
+      )
+      .run();
     const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
     expect(run.sent).toBe(1);
     const action = await db
@@ -720,7 +793,22 @@ describe('campaign channel executor', () => {
       .get<{ status: string; tracking_token: string | null; connection_id: string | null }>();
     expect(action?.status).toBe('sent');
     expect(action?.tracking_token).toMatch(/^lietrk_/);
-    expect(action?.connection_id).toBe('conn_demo_track');
+    expect(action?.connection_id).toBe('conn_campaign_live');
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    const request = nangoMock.post.mock.calls[0]![0] as Record<string, any>;
+    expect(request.connectionId).toBe('sender-live');
+    const mime = Buffer.from(String(request.data.raw), 'base64url').toString('utf8');
+    expect(mime).toContain('List-Unsubscribe:');
+    expect(mime).toContain('List-Unsubscribe-Post: List-Unsubscribe=One-Click');
+    expect(mime).toContain('Privacy policy:');
+    expect(mime).toContain(OUTREACH_OPT_OUT_SENTENCE);
+    const footerLinks = await db
+      .prepare(
+        "SELECT target_url FROM linkedin_campaign_email_tracking_links WHERE workspace_id=? AND channel_action_id='licha_track_send'"
+      )
+      .all<{ target_url: string }>(WORKSPACE);
+    expect(footerLinks.map((entry) => entry.target_url)).not.toContain('https://acme.test/privacy');
+    expect(mime).toContain('https://acme.test/privacy');
     const link = await db
       .prepare(
         `SELECT token,target_url FROM linkedin_campaign_email_tracking_links WHERE workspace_id=? AND channel_action_id='licha_track_send'`
@@ -728,6 +816,215 @@ describe('campaign channel executor', () => {
       .get<{ token: string; target_url: string }>(WORKSPACE);
     expect(link?.token).toMatch(/^lietl_/);
     expect(link?.target_url).toBe('https://example.com/demo');
+  });
+
+  it('rechecks do-not-contact at the shared provider boundary after the campaign preflight', async () => {
+    await seedReadyMailbox();
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Smith,Acme,maya@example.com,https://linkedin.com/in/provider-race\n'
+    );
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    const contact = await db
+      .prepare('SELECT person_id FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
+      .get<{ person_id: string | null }>(WORKSPACE, member.contactId);
+    expect(contact?.person_id).toBeTruthy();
+    // Reproduce a stale claim: the campaign earlier approved a Person, who opted out
+    // before the shared Gmail/Microsoft execution boundary.
+    await db
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=? AND id=?'
+      )
+      .run(WORKSPACE, member.contactId);
+    await expect(
+      executeConnectedAction(db, WORKSPACE, {
+        type: 'email_draft',
+        connection_id: 'conn_campaign_live',
+        require_connection_id: true,
+        recipient: 'maya@example.com',
+        subject: 'Hello',
+        body: 'Hi Maya',
+        payload_hash: 'provider-race-no-send',
+        structured_payload_json: JSON.stringify({
+          deliverySourceType: 'campaign_email',
+          deliverySourceId: 'licha_race',
+          deliveryPurpose: 'outreach',
+          requireListUnsubscribe: true,
+          unsubscribeMode: 'list_unsubscribe_headers',
+          senderAddress: 'founder@acme.test',
+          personId: contact!.person_id,
+          contactId: member.contactId
+        })
+      })
+    ).rejects.toThrow('recipient identity or reachability changed');
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(
+      await db
+        .prepare('SELECT COUNT(*)::int AS total FROM gtm_deliveries WHERE workspace_id=?')
+        .get<{ total: number }>(WORKSPACE)
+    ).toEqual({ total: 0 });
+  });
+
+  it('defers a campaign email without a verified mailbox; no provider call, tracking or failure attribution', async () => {
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Smith,Acme,maya@example.com,https://linkedin.com/in/maya-unready\n'
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    await seedReadyMailbox(); // Never choose this valid live mailbox without campaign assignment.
+    await db
+      .prepare(
+        `UPDATE linkedin_campaign_members SET status='waiting',current_step_id='email-step',
+       step_index=0,next_eligible_at=?::timestamptz WHERE workspace_id=? AND id=?`
+      )
+      .run(NOW.toISOString(), WORKSPACE, member.id);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+       (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,created_at,updated_at)
+       VALUES ('licha_unready',?,?,?,?,?,'email','planned',?::timestamptz,?::jsonb,'unready-key',?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'email-step',
+        NOW.toISOString(),
+        JSON.stringify({
+          recipient: 'maya@example.com',
+          subject: 'Hello',
+          body: 'https://example.com',
+          tracking: 'opens_clicks'
+        }),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
+    expect(run).toMatchObject({ claimed: 1, sent: 0, failed: 0, unknown: 0 });
+    const deferred = await db
+      .prepare(
+        "SELECT status,last_error,tracking_token FROM linkedin_campaign_channel_actions WHERE id='licha_unready'"
+      )
+      .get<{ status: string; last_error: string | null; tracking_token: string | null }>();
+    expect(deferred).toMatchObject({ status: 'planned', tracking_token: null });
+    expect(deferred?.last_error).toContain('sending mailbox');
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect((await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.currentStepId).toBe(
+      'email-step'
+    );
+    expect((await runCampaignChannelActions(db, WORKSPACE, NOW)).claimed).toBe(0);
+  });
+
+  it.each([
+    ['no inbound reply sync', 'Replies are not syncing'],
+    ['DNS failed', 'Sender SPF, DKIM and DMARC must all pass'],
+    ['missing legal footer', 'compliance footer are required'],
+    ['no unsubscribe origin', 'one-click unsubscribe']
+  ])('defers pre-send for %s without external effects', async (scenario, detail) => {
+    await seedReadyMailbox();
+    if (scenario === 'no inbound reply sync')
+      await db
+        .prepare(
+          "UPDATE email_inbound_mailboxes SET sync_status='unavailable' WHERE workspace_id=?"
+        )
+        .run(WORKSPACE);
+    if (scenario === 'DNS failed')
+      await db
+        .prepare("UPDATE email_deliverability_checks SET status='fail' WHERE workspace_id=?")
+        .run(WORKSPACE);
+    if (scenario === 'missing legal footer') resetEmailComplianceProvider();
+    if (scenario === 'no unsubscribe origin') vi.stubEnv('TREVRA_SECRETS_KEY', '');
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Smith,Acme,maya@example.com,https://linkedin.com/in/maya-config-' +
+        scenario.replaceAll(' ', '-') +
+        '\n'
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_members SET status='waiting',current_step_id='email-live',step_index=0 WHERE workspace_id=? AND id=?"
+      )
+      .run(WORKSPACE, member.id);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+      (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,created_at,updated_at)
+      VALUES ('licha_config',?,?,?,?,?,'email','planned',?::timestamptz,?::jsonb,'config-key',?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'email-live',
+        NOW.toISOString(),
+        JSON.stringify({
+          recipient: 'maya@example.com',
+          subject: 'Hey',
+          body: 'Hi Maya',
+          tracking: 'opens_clicks'
+        }),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_channel_actions SET connection_id='conn_campaign_live' WHERE id='licha_config'"
+      )
+      .run();
+    const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
+    expect(run).toMatchObject({ claimed: 1, sent: 0, failed: 0, unknown: 0 });
+    const state = await db
+      .prepare(
+        "SELECT status,last_error,tracking_token FROM linkedin_campaign_channel_actions WHERE id='licha_config'"
+      )
+      .get<{ status: string; last_error: string | null; tracking_token: string | null }>();
+    expect(state).toMatchObject({ status: 'planned', tracking_token: null });
+    expect(state?.last_error).toContain(detail);
+    expect(nangoMock.post).not.toHaveBeenCalled();
   });
 
   it('refuses campaign cold email with no recorded lawful basis before any tracking exists', async () => {
@@ -792,13 +1089,13 @@ describe('campaign channel executor', () => {
       );
 
     const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
-    expect(run).toMatchObject({ sent: 0, failed: 1, unknown: 0 });
+    expect(run).toMatchObject({ sent: 0, failed: 0, unknown: 0 });
     const action = await db
       .prepare(
         `SELECT status,last_error,tracking_token FROM linkedin_campaign_channel_actions WHERE id='licha_basis_send'`
       )
       .get<{ status: string; last_error: string | null; tracking_token: string | null }>();
-    expect(action?.status).toBe('failed');
+    expect(action?.status).toBe('skipped');
     expect(action?.last_error).toContain('Lawful basis missing for cold email');
     expect(action?.last_error).toContain('recipient in DE');
     expect(action?.last_error).toContain('Not legal advice; verify with counsel.');
@@ -811,8 +1108,8 @@ describe('campaign channel executor', () => {
       .all<{ token: string }>(WORKSPACE);
     expect(links).toEqual([]);
     const after = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
-    expect(after.branchState['external:email_success']).toBe(false);
-    expect(after.currentStepId).toBe('end');
+    expect(after.status).toBe('excluded');
+    expect(after.branchState['external:email_success']).toBeUndefined();
   });
 
   it('refuses to send or track a campaign email when its lead was marked do-not-contact', async () => {
@@ -868,14 +1165,15 @@ describe('campaign channel executor', () => {
         NOW.toISOString()
       );
     const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
-    expect(run).toMatchObject({ sent: 0, failed: 1, unknown: 0 });
+    expect(run).toMatchObject({ sent: 0, failed: 0, unknown: 0 });
     const refused = await db
       .prepare(
         "SELECT status,last_error,tracking_token FROM linkedin_campaign_channel_actions WHERE id='licha_dnc'"
       )
       .get<{ status: string; last_error: string | null; tracking_token: string | null }>();
-    expect(refused?.status).toBe('failed');
+    expect(refused?.status).toBe('skipped');
     expect(refused?.last_error).toContain('do-not-contact');
+    expect((await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.status).toBe('excluded');
     expect(refused?.tracking_token).toBeNull();
   });
 

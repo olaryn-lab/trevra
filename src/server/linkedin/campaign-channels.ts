@@ -3,13 +3,23 @@ import { id, type Db } from '../db.js';
 import { createSuppression } from '../suppressions.js';
 import { emailEventBranchKeys, type CampaignEmailEventKind } from './email-event-kind.js';
 import { projectCampaignEmailDelivery, projectCampaignEmailReply } from '../conversations.js';
-import { executeConnectedAction, readConnectedEmailThreadEvents } from '../integration-service.js';
+import {
+  CampaignEmailSendRefusal,
+  executeConnectedAction,
+  readConnectedEmailThreadEvents
+} from '../integration-service.js';
 import { evaluateEmailLawfulBasis } from '../compliance/lawful-basis.js';
 import { JURISDICTION_RULES_DISCLAIMER } from '../compliance/jurisdiction-rules.js';
 import { campaignSnapshotSteps } from './managed-campaigns.js';
 import { delayMilliseconds } from './workflows.js';
 import { filterExcluded } from './exclusions.js';
 import { publicEmailOrigin } from '../email/public-origin.js';
+import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from '../email/compliance.js';
+import { emailDomainOf } from '../email/deliverability.js';
+import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-address.js';
+import { getSenderDeliverability } from '../email/sender-deliverability.js';
+import { unsubscribeConfigured } from '../email/unsubscribe.js';
+import { assertNotSuppressed, SuppressionError } from '../suppressions.js';
 export type CampaignChannelKind = 'email' | 'find_email';
 export type CampaignChannelStatus =
   'planned' | 'claimed' | 'sent' | 'failed' | 'unknown' | 'skipped';
@@ -195,26 +205,6 @@ async function claimNext(db: Db, workspaceId: string, now: Date): Promise<Channe
   );
 }
 
-async function ensureEmailConnectionId(db: Db, row: ChannelRow, now: Date): Promise<void> {
-  if (row.kind !== 'email' || row.connection_id) return;
-  const connection = await db
-    .prepare(
-      `SELECT id FROM connections
-       WHERE workspace_id=? AND status='connected'
-         AND provider IN ('gmail','google-mail','microsoft','outlook')
-       ORDER BY is_demo ASC,updated_at DESC LIMIT 1`
-    )
-    .get<{ id: string }>(row.workspace_id);
-  if (!connection) return;
-  await db
-    .prepare(
-      `UPDATE linkedin_campaign_channel_actions SET connection_id=?,updated_at=?::timestamptz
-       WHERE workspace_id=? AND id=? AND connection_id IS NULL`
-    )
-    .run(connection.id, now.toISOString(), row.workspace_id, row.id);
-  row.connection_id = connection.id;
-}
-
 async function mailboxMaySend(
   db: Db,
   workspaceId: string,
@@ -288,6 +278,131 @@ async function mailboxMaySend(
   return { allowed: true, nextAt: null };
 }
 
+/** An expected workspace setup problem never becomes an unknown provider outcome. */
+class CampaignEmailSetupHold extends Error {}
+class CampaignEmailRecipientBlocked extends Error {}
+
+/**
+ * Final workspace-level safety boundary for sequenced emails.
+ * No connection fallbacks, demo credentials, unverified sender identities,
+ * unsynced replies, unknown DNS or missing RFC 8058 capability.
+ * Checked on every attempt before writing tracking links or touching a provider.
+ */
+async function campaignEmailSenderReady(
+  db: Db,
+  workspaceId: string,
+  connectionId: string | null,
+  now: Date
+): Promise<{ address: string; footer: string }> {
+  if (!connectionId)
+    throw new CampaignEmailSetupHold(
+      'Connect and select a sending mailbox before campaign email can run.'
+    );
+  const mailbox = (await listSendingMailboxes(db, workspaceId)).find(
+    (candidate) => candidate.connectionId === connectionId
+  );
+  if (!mailbox)
+    throw new CampaignEmailSetupHold(
+      'The selected campaign mailbox is not an active, verified live connection.'
+    );
+  // Zoho REST cannot supply RFC 8058 headers; it must use the dedicated
+  // approval-bound reply-unsubscribe adapter, not this Gmail/Graph path.
+  if (mailbox.providerKey === 'zoho')
+    throw new CampaignEmailSetupHold(
+      'Zoho campaign email is unavailable until reply-unsubscribe approval is supported.'
+    );
+  const address = await resolveMailboxAddress(db, workspaceId, mailbox);
+  const domain = address ? emailDomainOf(address) : null;
+  if (!address || !domain)
+    throw new CampaignEmailSetupHold(
+      'Cannot verify the selected mailbox sender address. Reconnect the mailbox.'
+    );
+  const inbound = await db
+    .prepare('SELECT connection_id,sync_status FROM email_inbound_mailboxes WHERE workspace_id=?')
+    .get<{ connection_id: string; sync_status: string }>(workspaceId);
+  if (inbound?.connection_id !== mailbox.connectionId || inbound.sync_status !== 'syncing')
+    throw new CampaignEmailSetupHold('Replies are not syncing from the selected sending mailbox.');
+  if (!unsubscribeConfigured())
+    throw new CampaignEmailSetupHold(
+      'Configure HTTPS TREVRA_PUBLIC_API_URL and TREVRA_SECRETS_KEY for one-click unsubscribe.'
+    );
+  const deliverability = await getSenderDeliverability(
+    db,
+    workspaceId,
+    { domain, provider: mailbox.providerKey, markOutreach: true },
+    { now }
+  );
+  if (deliverability.status !== 'pass')
+    throw new CampaignEmailSetupHold(
+      'Sender SPF, DKIM and DMARC must all pass before campaign email can run.'
+    );
+  const footer = (await emailComplianceProvider().footer(db, workspaceId))?.trim() ?? '';
+  if (!footer || !footer.endsWith(OUTREACH_OPT_OUT_SENTENCE))
+    throw new CampaignEmailSetupHold(
+      'Sender postal address, privacy policy and opt-out compliance footer are required.'
+    );
+  return { address, footer };
+}
+
+async function holdCampaignEmailSetup(
+  db: Db,
+  row: ChannelRow,
+  error: CampaignEmailSetupHold,
+  now: Date
+) {
+  const next = new Date(now.getTime() + 60 * 60_000);
+  await db
+    .prepare(
+      `UPDATE linkedin_campaign_channel_actions
+     SET status='planned', claimed_at=NULL, planned_for=?::timestamptz,
+         last_error=?, updated_at=?::timestamptz
+     WHERE workspace_id=? AND id=? AND status='claimed'`
+    )
+    .run(next.toISOString(), error.message, now.toISOString(), row.workspace_id, row.id);
+}
+
+/** A recipient-level pre-send refusal is terminal, never an unknown side effect. */
+async function skipBlockedCampaignRecipient(
+  db: Db,
+  row: ChannelRow,
+  error: CampaignEmailRecipientBlocked,
+  now: Date
+): Promise<void> {
+  const when = now.toISOString();
+  await db.transaction(async (tx) => {
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+       SET status='skipped', claimed_at=NULL, outcome_known=TRUE,
+           last_error=?, updated_at=?::timestamptz
+       WHERE workspace_id=? AND id=? AND status='claimed'`
+      )
+      .run(error.message, when, row.workspace_id, row.id);
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_members
+       SET status='excluded', exclusion_reason=?, next_eligible_at=NULL,
+           ended_at=?::timestamptz, updated_at=?::timestamptz
+       WHERE workspace_id=? AND id=? AND status IN ('active','waiting','manual','pending')`
+      )
+      .run(error.message, when, when, row.workspace_id, row.member_id);
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+       SET status='skipped',claimed_at=NULL,updated_at=?::timestamptz
+       WHERE workspace_id=? AND member_id=? AND status='planned'`
+      )
+      .run(when, row.workspace_id, row.member_id);
+    await tx
+      .prepare(
+        `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL
+       WHERE workspace_id=? AND campaign_member_id=? AND status IN ('planned','held')
+         AND claimed_at IS NULL`
+      )
+      .run(row.workspace_id, row.member_id);
+  });
+}
+
 async function executeEmail(
   db: Db,
   row: ChannelRow,
@@ -313,14 +428,34 @@ async function executeEmail(
       do_not_contact: boolean;
     }>(row.workspace_id, row.contact_id);
   if (!lead || lead.do_not_contact)
-    throw new Error(
+    throw new CampaignEmailRecipientBlocked(
       'Campaign email recipient is missing or marked do-not-contact; nothing was sent.'
     );
   if (lead.profile_url) {
     const blacklist = await filterExcluded(db, row.workspace_id, [lead.profile_url]);
     if (blacklist.excluded.length > 0)
-      throw new Error('Recipient is on the Never contact list; nothing was sent.');
+      throw new CampaignEmailRecipientBlocked(
+        'Recipient is on the Never contact list; nothing was sent.'
+      );
   }
+  // Suppressions are workspace-wide and may match the canonical Person,
+  // not merely the email address on this campaign's lead contact.
+  try {
+    await assertNotSuppressed(db, row.workspace_id, {
+      channel: 'email',
+      email: recipient,
+      personId: lead.person_id ?? undefined
+    });
+  } catch (error) {
+    if (!(error instanceof SuppressionError)) throw error;
+    throw new CampaignEmailRecipientBlocked(
+      'Campaign email recipient is suppressed; nothing was sent.'
+    );
+  }
+  if (!lead.person_id)
+    throw new CampaignEmailRecipientBlocked(
+      'Campaign email requires a resolved Person identity; nothing was sent.'
+    );
   const lawfulBasis = await evaluateEmailLawfulBasis(db, row.workspace_id, {
     email: recipient,
     personId: lead?.person_id ?? null,
@@ -328,15 +463,22 @@ async function executeEmail(
     purpose: 'outreach'
   });
   if (lawfulBasis.status === 'missing')
-    throw new Error(
+    throw new CampaignEmailRecipientBlocked(
       `Lawful basis missing for cold email: ${lawfulBasis.reason} ${JURISDICTION_RULES_DISCLAIMER}`
     );
+  const sender = await campaignEmailSenderReady(db, row.workspace_id, row.connection_id, now);
+  const bodyWithFooter = `${body}\n\n${sender.footer}`;
   const threaded = payload.threaded === true;
   const tracking =
     payload.tracking === 'opens' || payload.tracking === 'opens_clicks'
       ? payload.tracking
       : ('off' as const);
-  const htmlBody = await trackedHtmlBody(db, row, body, tracking, now);
+  // Only user-authored content may be click-tracked. Never rewrite the
+  // legally required privacy-policy/opt-out footer into a tracking redirect.
+  const trackedBody = await trackedHtmlBody(db, row, body, tracking, now);
+  const htmlBody = trackedBody
+    ? `${trackedBody}<br><br>${escapeHtml(sender.footer).replaceAll('\n', '<br>')}`
+    : null;
   const prior = threaded
     ? await db
         .prepare(
@@ -356,16 +498,22 @@ async function executeEmail(
     : undefined;
   return executeConnectedAction(db, row.workspace_id, {
     type: 'email_draft',
-    connection_id: row.connection_id ?? payload.connectionId ?? undefined,
+    connection_id: row.connection_id,
+    require_connection_id: true,
     recipient,
     subject,
-    body,
+    body: bodyWithFooter,
     structured_payload_json: JSON.stringify({
       threaded,
       threadExternalRef: prior?.external_ref ?? null,
       threadIdempotencyKey: prior?.idempotency_key ?? null,
       tracking: payload.tracking ?? 'off',
       deliveryPurpose: 'outreach',
+      requireListUnsubscribe: true,
+      unsubscribeMode: 'list_unsubscribe_headers',
+      senderAddress: sender.address,
+      personId: lead.person_id,
+      contactId: row.contact_id,
       deliverySourceType: 'campaign_email',
       deliverySourceId: row.id,
       campaignId: row.campaign_id,
@@ -714,10 +862,9 @@ export async function runCampaignChannelActions(
     const payload = objectOf(row.payload_json);
     try {
       if (row.kind === 'email') {
-        // Pin the fallback mailbox onto the action before pacing/sending so the
-        // provider thread can be polled later for replies/bounces and retries
-        // cannot drift to a different mailbox.
-        await ensureEmailConnectionId(db, row, now);
+        // The planner pins the selected sending mailbox. Do not silently pick
+        // a different sender on retry or after a campaign configuration edit.
+        // An absent binding remains held by campaignEmailSenderReady.
         const mailbox = await mailboxMaySend(db, workspaceId, row.connection_id, now);
         if (!mailbox.allowed) {
           await db
@@ -760,6 +907,27 @@ export async function runCampaignChannelActions(
       }
       result.sent += 1;
     } catch (error) {
+      if (error instanceof CampaignEmailSendRefusal && row.kind === 'email') {
+        if (error.scope === 'recipient') {
+          await skipBlockedCampaignRecipient(
+            db,
+            row,
+            new CampaignEmailRecipientBlocked(error.message),
+            now
+          );
+        } else {
+          await holdCampaignEmailSetup(db, row, new CampaignEmailSetupHold(error.message), now);
+        }
+        continue;
+      }
+      if (error instanceof CampaignEmailRecipientBlocked && row.kind === 'email') {
+        await skipBlockedCampaignRecipient(db, row, error, now);
+        continue;
+      }
+      if (error instanceof CampaignEmailSetupHold && row.kind === 'email') {
+        await holdCampaignEmailSetup(db, row, error, now);
+        continue;
+      }
       const status = await settleFailure(db, row, error, now);
       if (status === 'failed') result.failed += 1;
       else result.unknown += 1;

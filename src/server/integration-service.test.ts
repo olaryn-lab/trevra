@@ -816,43 +816,26 @@ describe('connected mailbox threading', () => {
     ).toEqual({ status: 'sent', internet_message_id: '<gmail-readback-hang-key@trevra.app>' });
   }, 10_000);
 
-  it('keeps the pre-Phase-D path for outreach not approved with one-click unsubscribe', async () => {
+  it('blocks legacy campaign email without Person binding, consent-safe header and verified sender', async () => {
     vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
     vi.stubEnv('TREVRA_SECRETS_KEY', 'legacy-path-secrets-key');
     const ms = await mailbox('microsoft');
-    nangoMock.post
-      .mockResolvedValueOnce({ data: { id: 'ms-campaign' }, headers: {} })
-      .mockResolvedValueOnce({ data: {}, headers: {} });
-
-    await executeConnectedAction(ms.database, ms.workspaceId, {
-      type: 'email_draft',
-      connection_id: ms.connectionId,
-      recipient: 'lead@example.test',
-      subject: 'Campaign step',
-      body: 'Hello from the campaign',
-      structured_payload_json: JSON.stringify({
-        deliveryPurpose: 'outreach',
-        deliverySourceType: 'campaign_email',
-        deliverySourceId: 'lcca_legacy_path'
-      }),
-      payload_hash: 'ms-campaign-legacy-key'
-    });
-
-    expect(nangoMock.post.mock.calls[0]?.[0]).toEqual({
-      endpoint: '/v1.0/me/messages',
-      providerConfigKey: 'trevra-microsoft',
-      connectionId: 'microsoft-external',
-      retries: 0,
-      data: {
+    await expect(
+      executeConnectedAction(ms.database, ms.workspaceId, {
+        type: 'email_draft',
+        connection_id: ms.connectionId,
+        recipient: 'lead@example.test',
         subject: 'Campaign step',
-        body: { contentType: 'Text', content: 'Hello from the campaign' },
-        toRecipients: [{ emailAddress: { address: 'lead@example.test' } }],
-        internetMessageHeaders: [
-          { name: 'x-trevra-idempotency-key', value: 'ms-campaign-legacy-key' }
-        ]
-      }
-    });
-    expect(JSON.stringify(nangoMock.post.mock.calls)).not.toContain('List-Unsubscribe');
+        body: 'Hello from the campaign',
+        structured_payload_json: JSON.stringify({
+          deliveryPurpose: 'outreach',
+          deliverySourceType: 'campaign_email',
+          deliverySourceId: 'lcca_legacy_path'
+        }),
+        payload_hash: 'ms-campaign-legacy-key'
+      })
+    ).rejects.toThrow('Campaign email has no bound Person and contact identity');
+    expect(nangoMock.post).not.toHaveBeenCalled();
   });
 
   it('adds no List-Unsubscribe header to Gmail outreach not approved with it', async () => {
