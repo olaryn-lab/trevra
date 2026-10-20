@@ -42,6 +42,7 @@ import { errorMessage, reloadOutreach, useOutreachRefresh } from './LinkedInSafe
 import { relativeTime } from './LinkedInScreen';
 import { DELAY_CHOICES, plannedForFrom, queueWaitCopy, type ScheduleMode } from './LinkedInTiming';
 import { useWorkspaceMembers } from './TeamScreen';
+import { mergeInboxSearchPage } from './inboxSearchPages';
 import { ConfidenceTag } from './LinkedInViz';
 import { Select } from './ui/primitives';
 import { plural } from './ui/plural';
@@ -472,7 +473,7 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
       if (listToken.current !== token) return;
       if (serverSearch) {
         setSearchHasMore(next.length === THREAD_PAGE);
-        setThreads((current) => (searchPage ? [...current, ...next] : next));
+        setThreads((current) => mergeInboxSearchPage(current, next, searchPage));
       } else {
         setSearchHasMore(false);
         setThreads(next);
