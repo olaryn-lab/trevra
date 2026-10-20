@@ -2309,14 +2309,28 @@ export interface LinkedInLeadCsvPreview {
   headers: string[];
   mapping: Partial<
     Record<
-      'firstName' | 'lastName' | 'company' | 'email' | 'phone' | 'country' | 'profileUrl',
+      | 'firstName'
+      | 'lastName'
+      | 'company'
+      | 'email'
+      | 'phone'
+      | 'country'
+      | 'profileUrl'
+      | 'fullName',
       string
     >
   >;
   /** Which mapped fields automatch guessed by similarity rather than an exact heading match. Absent entries were exact (or came from an explicit override). */
   mappingConfidence?: Partial<
     Record<
-      'firstName' | 'lastName' | 'company' | 'email' | 'phone' | 'country' | 'profileUrl',
+      | 'firstName'
+      | 'lastName'
+      | 'company'
+      | 'email'
+      | 'phone'
+      | 'country'
+      | 'profileUrl'
+      | 'fullName',
       'exact' | 'guessed'
     >
   >;

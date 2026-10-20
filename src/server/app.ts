@@ -10125,7 +10125,8 @@ const linkedinLeadFieldMappingSchema = z
     email: z.string().min(1).optional(),
     phone: z.string().min(1).optional(),
     country: z.string().min(1).optional(),
-    profileUrl: z.string().min(1).optional()
+    profileUrl: z.string().min(1).optional(),
+    fullName: z.string().min(1).optional()
   })
   .strict();
 

@@ -244,9 +244,13 @@ export async function createLeadList(
   if (!name) throw new Error('Lead list name is required.');
   const sourceKind = input.sourceKind ?? 'csv';
   const sourceRef =
-    sourceKind === 'linkedin_search' || sourceKind === 'sales_navigator'
+    sourceKind === 'linkedin_search'
       ? assertLeadSourceUrl(sourceKind, input.sourceRef ?? '')
-      : input.sourceRef?.trim() || null;
+      : sourceKind === 'sales_navigator'
+        ? input.sourceRef?.trim()
+          ? assertLeadSourceUrl(sourceKind, input.sourceRef)
+          : null // A manually uploaded Sales Navigator-style CSV has no search URL.
+        : input.sourceRef?.trim() || null;
   const timestamp = now.toISOString();
   const listId = id('lilst');
   const seatKey = input.seatKey ?? OWNER_SEAT_KEY;

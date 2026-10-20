@@ -131,6 +131,56 @@ describe('LinkedIn manager HTTP surface', () => {
     expect(count?.total ?? 0).toBe(0);
   });
 
+  it('previews and imports a full-name Sales Navigator-style CSV with a mapped Person, without scraping', async () => {
+    const csv = Buffer.from(
+      [
+        'Name,Current Company,Profile URL,Email Address',
+        'Maya Chen,Acme,https://linkedin.com/in/maya-export-api/,maya-export@acme.test'
+      ].join('\n')
+    );
+    const mapping = {
+      fullName: 'Name',
+      company: 'Current Company',
+      profileUrl: 'Profile URL',
+      email: 'Email Address'
+    };
+    const preview = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists/preview')
+        .field('mapping', JSON.stringify(mapping))
+        .attach('file', csv, { filename: 'sales.csv', contentType: 'text/csv' })
+        .expect(200)
+    ).body;
+    expect(preview).toMatchObject({
+      acceptedCount: 1,
+      mapping,
+      accepted: [expect.objectContaining({ firstName: 'Maya', lastName: 'Chen', company: 'Acme' })]
+    });
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Sales CSV', sourceKind: 'sales_navigator' })
+        .expect(201)
+    ).body.list;
+    const imported = (
+      await as(tokenA)
+        .post(`/api/linkedin/manager/lead-lists/${list.id}/import`)
+        .field('mapping', JSON.stringify(mapping))
+        .attach('file', csv, { filename: 'sales.csv', contentType: 'text/csv' })
+        .expect(201)
+    ).body;
+    expect(imported).toMatchObject({ inserted: 1, rejected: [] });
+    const other = (
+      await as(tokenB).get(`/api/linkedin/manager/lead-lists/${list.id}/contacts`).expect(404)
+    ).body;
+    expect(other).toBeDefined();
+    const own = (
+      await as(tokenA).get(`/api/linkedin/manager/lead-lists/${list.id}/contacts`).expect(200)
+    ).body;
+    expect(JSON.stringify(own)).toContain('Maya');
+    expect(JSON.stringify(own)).toContain('Chen');
+  });
+
   it('supports strict reusable workflow CRUD and rejects unsupported variables', async () => {
     const valid = {
       name: 'Founder flow',

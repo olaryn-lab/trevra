@@ -29,6 +29,7 @@ import type {
   LinkedInLeadList
 } from '../server/linkedin/lead-lists';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
+import { salesNavigatorCsvMapping } from './leadCsvPresets';
 import { errorMessage } from './LinkedInSafety';
 import { ActionMenu } from './ui/action-menu';
 import { Select } from './ui/primitives';
@@ -63,6 +64,7 @@ type ImportReport = Awaited<ReturnType<typeof importLinkedInManagerLeadCsv>> & {
 const FIELDS: ReadonlyArray<{ field: LeadField; label: string; required: boolean }> = [
   { field: 'firstName', label: 'First name', required: true },
   { field: 'lastName', label: 'Last name', required: true },
+  { field: 'fullName', label: 'Full name (alternative)', required: false },
   { field: 'company', label: 'Company', required: true },
   { field: 'email', label: 'Email', required: false },
   { field: 'phone', label: 'Phone', required: false },
@@ -227,6 +229,7 @@ export function LinkedInManagerLeadConfig({
   /** What the automatch chose on its own, kept so a change can be named as one. */
   const [autoMapping, setAutoMapping] = useState<FieldMapping>({});
   const [overrides, setOverrides] = useState<FieldMapping>({});
+  const [salesNavigatorPreset, setSalesNavigatorPreset] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState<'' | 'preview' | 'import'>('');
   const [report, setReport] = useState<{
@@ -339,7 +342,13 @@ export function LinkedInManagerLeadConfig({
   );
 
   const missingRequired = useMemo(
-    () => FIELDS.filter((entry) => entry.required && !chosenHeader(entry.field)),
+    () =>
+      FIELDS.filter(
+        (entry) =>
+          entry.required &&
+          !chosenHeader(entry.field) &&
+          !(chosenHeader('fullName') && (entry.field === 'firstName' || entry.field === 'lastName'))
+      ),
     [chosenHeader]
   );
 
@@ -361,7 +370,7 @@ export function LinkedInManagerLeadConfig({
       setPreview(null);
       const message = errorMessage(err, 'Unable to read that CSV.');
       // "Could not map required field" is not a fault to report twice: the
-      // mapper below already shows which three columns are still unanswered.
+      // mapper below already shows which identity columns are still unanswered.
       setError(/Could not map required field/i.test(message) ? '' : message);
     } finally {
       if (previewToken.current === token) setBusy('');
@@ -382,6 +391,7 @@ export function LinkedInManagerLeadConfig({
       setPreview(null);
       setAutoMapping({});
       setOverrides({});
+      setSalesNavigatorPreset(false);
       setSample(null);
       // Compact mode has no destination picker, so the list name has to come
       // from somewhere other than an operator typing it first -- the file's
@@ -411,14 +421,25 @@ export function LinkedInManagerLeadConfig({
     setOverrides(next);
     if (!file) return;
     const mapping = mappingToSend(next);
-    // A mapping missing one of the three the server insists on would come back
-    // as an error, not a preview. It is a half-finished form, so it waits.
-    if (REQUIRED_FIELDS.every((required) => mapping[required]))
+    // A mapping without a company and a usable name source would come back as
+    // an error, not a preview. It is a half-finished form, so it waits.
+    if (
+      mapping.company &&
+      (mapping.fullName || REQUIRED_FIELDS.every((required) => mapping[required]))
+    )
       void runPreview(file, mapping, false);
     else {
       setPreview(null);
       setError('');
     }
+  };
+
+  const applySalesNavigatorPreset = () => {
+    if (!file || !headers.length) return;
+    const mapping = salesNavigatorCsvMapping(headers);
+    setOverrides(mapping);
+    setSalesNavigatorPreset(true);
+    void runPreview(file, mapping, false);
   };
 
   /**
@@ -433,6 +454,7 @@ export function LinkedInManagerLeadConfig({
     const rejectedRows = new Set(preview.rejected.map((entry) => entry.row));
     const firstHeader = chosenHeader('firstName');
     const lastHeader = chosenHeader('lastName');
+    const fullHeader = chosenHeader('fullName');
     const pairs: Array<{ before: string; after: string; changed: boolean }> = [];
     let acceptedIndex = 0;
     sample.rows.forEach((row, index) => {
@@ -440,10 +462,15 @@ export function LinkedInManagerLeadConfig({
       const clean = preview.accepted[acceptedIndex];
       acceptedIndex += 1;
       if (!clean) return;
-      const before =
-        `${firstHeader ? (row[firstHeader] ?? '') : ''} ${lastHeader ? (row[lastHeader] ?? '') : ''}`
-          .replace(/\s+/g, ' ')
-          .trim();
+      const before = (
+        firstHeader || lastHeader
+          ? `${firstHeader ? (row[firstHeader] ?? '') : ''} ${lastHeader ? (row[lastHeader] ?? '') : ''}`
+          : fullHeader
+            ? (row[fullHeader] ?? '')
+            : ''
+      )
+        .replace(/\s+/g, ' ')
+        .trim();
       const after = `${clean.firstName} ${clean.lastName}`.trim();
       if (before) pairs.push({ before, after, changed: before !== after });
     });
@@ -464,11 +491,11 @@ export function LinkedInManagerLeadConfig({
   const blocker = !file
     ? ''
     : missingRequired.length > 0
-      ? 'Point first name, last name and company at a column before importing.'
+      ? 'Map company and either a full-name column or separate first and last names before importing.'
       : !preview
         ? ''
         : preview.acceptedCount === 0
-          ? 'No row in this file has all three of first name, last name and company, so there is nothing to import yet.'
+          ? 'No row has usable first and last names plus a company; correct the source data or mapping.'
           : destination === 'new' && !newName.trim()
             ? 'Name the new list before importing.'
             : '';
@@ -483,7 +510,7 @@ export function LinkedInManagerLeadConfig({
           ? await createLinkedInManagerLeadList({
               seatKey: activeSeatKey,
               name: newName.trim(),
-              sourceKind: 'csv'
+              sourceKind: salesNavigatorPreset ? 'sales_navigator' : 'csv'
             })
           : destinationList!;
       const counts = (await importLinkedInManagerLeadCsv(
@@ -503,6 +530,7 @@ export function LinkedInManagerLeadConfig({
       setSample(null);
       setOverrides({});
       setAutoMapping({});
+      setSalesNavigatorPreset(false);
       setNewName('');
       if (compact) {
         // No report panel, no reopening a contacts browser this mode doesn't
@@ -672,7 +700,7 @@ export function LinkedInManagerLeadConfig({
   const mappingRows = FIELDS.map((entry) => {
     const chosen = chosenHeader(entry.field);
     const auto = autoMapping[entry.field] ?? '';
-    const missing = entry.required && !chosen;
+    const missing = missingRequired.some((item) => item.field === entry.field);
     const guessed = chosen === auto && preview?.mappingConfidence?.[entry.field] === 'guessed';
     return (
       <label
@@ -683,16 +711,15 @@ export function LinkedInManagerLeadConfig({
       >
         <span className="lead-map-name">
           {entry.label}
-          {entry.required && <em>Required</em>}
+          {entry.required && !chosenHeader('fullName') && <em>Required</em>}
+          {entry.field === 'company' && chosenHeader('fullName') && <em>Required</em>}
         </span>
         <Select
           value={chosen}
           disabled={busy !== ''}
           onChange={(event) => changeMapping(entry.field, event.target.value)}
         >
-          {!chosen && (
-            <option value="">{entry.required ? 'Choose a column…' : 'Not imported'}</option>
-          )}
+          {!chosen && <option value="">{missing ? 'Choose a column…' : 'Not imported'}</option>}
           {!entry.required && !auto && chosen && <option value="">Not imported</option>}
           {headers.map((header) => (
             <option key={header} value={header}>
@@ -741,9 +768,9 @@ export function LinkedInManagerLeadConfig({
               <Users size={18} className="li-heading-icon" /> Add leads from a CSV
             </h3>
             <p>
-              Names, companies and contact details from a file you already have. Nothing is stored
-              until you import, and what you confirm here is exactly what lands — campaigns enrol
-              people from these lists.
+              Import a CSV you are authorized to use, including a Sales Navigator-style lead export.
+              Map separate names or a full name, then review before importing. No scraping or
+              contact action happens on upload.
             </p>
           </div>
         </div>
@@ -842,6 +869,26 @@ export function LinkedInManagerLeadConfig({
           </label>
         </div>
 
+        {file && headers.length > 0 && (
+          <div className="lead-section">
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={busy !== ''}
+              onClick={applySalesNavigatorPreset}
+            >
+              {salesNavigatorPreset ? <Check size={14} /> : <FileUp size={14} />}
+              {salesNavigatorPreset
+                ? ' Sales Navigator CSV mapping applied'
+                : ' Use Sales Navigator CSV mapping'}
+            </button>
+            <p className="li-hint">
+              For a lead CSV you already have permission to export or use. Maps Name, Current
+              Company, profile URL and contact columns; it does not scrape or import directly from
+              LinkedIn. Review the detected fields before submitting.
+            </p>
+          </div>
+        )}
         {file &&
           headers.length > 0 &&
           (missingRequired.length > 0 ? (
@@ -849,8 +896,8 @@ export function LinkedInManagerLeadConfig({
               <h4>Which column is which</h4>
               <p className="li-hint">
                 Matched from your headings. Change any of them and the rows below are read again.
-                First name, last name and company have to point at a column — a lead without them is
-                not a lead a campaign can write to.
+                Company is required, plus either Full name or separate first and last name columns.
+                Rows with insufficient names remain excluded from import.
               </p>
               <div className="li-form-grid lead-map-grid">{mappingRows}</div>
             </div>

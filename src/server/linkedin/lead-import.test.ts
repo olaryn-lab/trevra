@@ -22,6 +22,63 @@ describe('LinkedIn lead CSV import', () => {
     });
   });
 
+  it('imports a Sales Navigator-style combined-name file, preserving source columns and rejecting incomplete rows', () => {
+    const csv = [
+      'Name,Current Company,Title,Profile URL,Location,Email Address',
+      'Dr. Maya Chen MBA,Acme,VP Revenue,https://linkedin.com/in/maya-sales/?trk=search,Zurich,maya@acme.test',
+      'Jonas Keller,Northwind,Founder,https://linkedin.com/in/jonas-sales/,Berlin,jonas@northwind.test',
+      'Jonas Keller,Northwind,Founder,https://linkedin.com/in/jonas-sales/,Berlin,jonas@northwind.test',
+      'Cher,Some Company,Artist,https://linkedin.com/in/cher/,London,cher@example.test',
+      'Ava Patel,,Founder,https://linkedin.com/in/ava-patel/,London,ava@example.test'
+    ].join('\n');
+    const parsed = parseLeadCsv(csv);
+    expect(parsed.mapping).toMatchObject({
+      fullName: 'Name',
+      company: 'Current Company',
+      profileUrl: 'Profile URL',
+      email: 'Email Address'
+    });
+    expect(parsed.accepted).toHaveLength(2);
+    expect(parsed.accepted.map((lead) => [lead.firstName, lead.lastName, lead.company])).toEqual([
+      ['Maya', 'Chen', 'Acme'],
+      ['Jonas', 'Keller', 'Northwind']
+    ]);
+    expect(parsed.accepted[0]?.customFields).toMatchObject({
+      title: 'VP Revenue',
+      location: 'Zurich'
+    });
+    expect(parsed.accepted[0]?.country).toBeNull();
+    expect(parsed.rejected.map((entry) => entry.reason)).toEqual([
+      'Duplicate lead in this CSV.',
+      'Missing required last name.',
+      'Missing required company.'
+    ]);
+  });
+
+  it('keeps explicit separate-name columns ahead of a combined-name alternative', () => {
+    const parsed = parseLeadCsv('First Name,Last Name,Name,Company\nAna,Silva,Wrong Name,Acme\n', {
+      fullName: 'Name'
+    });
+    expect(parsed.accepted[0]).toMatchObject({ firstName: 'Ana', lastName: 'Silva' });
+  });
+
+  it('fills just the missing half of a combined-name export, without overwriting explicit data', () => {
+    const parsed = parseLeadCsv('First Name,Name,Company\nAna,Ana del Carmen Silva,Acme\n');
+    expect(parsed.accepted[0]).toMatchObject({
+      firstName: 'Ana',
+      lastName: 'del Carmen Silva',
+      company: 'Acme'
+    });
+  });
+
+  it('never guesses Full name from a first-name-only column', () => {
+    expect(autoMatchLeadFields(['First Name', 'Company'])).toEqual({
+      firstName: 'First Name',
+      company: 'Company'
+    });
+    expect(() => parseLeadCsv('First Name,Company\nMaya,Acme')).toThrow(/lastName/);
+  });
+
   it('tags an exact alias hit as exact confidence', () => {
     const { mapping, confidence } = autoMatchLeadFieldsWithConfidence([
       'First Name',

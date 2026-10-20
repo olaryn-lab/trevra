@@ -288,6 +288,90 @@ describe('materialising a harvest into a campaign-usable list', () => {
 describe('one person, one contact row, per workspace', () => {
   const csv = (url: string) => `First Name,Last Name,Company,LinkedIn URL\nMaya,Chen,Acme,${url}`;
 
+  it('imports a named sales-export list with a combined name into real canonical People without duplicates', async () => {
+    const list = await createLeadList(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Authorized export',
+        sourceKind: 'sales_navigator'
+      },
+      NOW
+    );
+    const input = [
+      'Name,Current Company,Profile URL,Title',
+      'Maya Chen,Acme,https://www.linkedin.com/in/maya-sales-import/,VP Revenue',
+      'Jonas Keller,Northwind,https://www.linkedin.com/in/jonas-sales-import/,CEO'
+    ].join('\n');
+    const first = await importLeadCsv(
+      db,
+      { workspaceId: WORKSPACE_ID, listId: list.id, csv: input },
+      NOW
+    );
+    expect(first).toMatchObject({ inserted: 2, reused: 0, duplicates: 0, rejected: [] });
+    const again = await importLeadCsv(
+      db,
+      { workspaceId: WORKSPACE_ID, listId: list.id, csv: input },
+      NOW
+    );
+    expect(again.inserted).toBe(0);
+    expect(again.duplicates).toBe(2);
+    const contacts = await listLeadContacts(db, WORKSPACE_ID, list.id);
+    expect(contacts).toHaveLength(2);
+    expect(contacts[0]?.personId).toBeTruthy();
+    expect(contacts[1]?.personId).toBeTruthy();
+    expect((await getLeadList(db, WORKSPACE_ID, list.id))?.sourceKind).toBe('sales_navigator');
+    expect(await contactCount()).toBe(2);
+  });
+
+  it('allows an authorized manual Sales Navigator CSV without source URL but still refuses forged search URLs', async () => {
+    const noUrl = await createLeadList(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Uploaded prospect export',
+        sourceKind: 'sales_navigator'
+      },
+      NOW
+    );
+    expect(noUrl.sourceRef).toBeNull();
+    await expect(
+      createLeadList(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          name: 'Invalid Sales Navigator source',
+          sourceKind: 'sales_navigator',
+          sourceRef: 'https://attacker.example/sales/search/people/'
+        },
+        NOW
+      )
+    ).rejects.toThrow(/linkedin.com/);
+    await expect(
+      createLeadList(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          name: 'Wrong path',
+          sourceKind: 'sales_navigator',
+          sourceRef: 'https://www.linkedin.com/in/maya/'
+        },
+        NOW
+      )
+    ).rejects.toThrow(/people-search URL/);
+    await expect(
+      createLeadList(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          name: 'Unscoped basic search',
+          sourceKind: 'linkedin_search'
+        },
+        NOW
+      )
+    ).rejects.toThrow(/absolute LinkedIn URL/);
+  });
+
   it('links LinkedIn leads to the canonical Person spine and reuses an existing Person by email', async () => {
     const canonical = await resolveContact(db, WORKSPACE_ID, {
       name: 'Maya Chen',
