@@ -2830,6 +2830,38 @@ export async function pauseLinkedInManagedCampaign(id: string): Promise<ManagedC
   ).campaign;
 }
 
+export interface CampaignEmailReview {
+  actionId: string;
+  campaignId: string;
+  recipient: string;
+  subject: string;
+  body: string;
+  footer: string;
+  sender: string | null;
+  tracking: 'off' | 'opens' | 'opens_clicks';
+  threaded: boolean;
+  contentHash: string;
+  approved: boolean;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function getCampaignEmailReviews(campaignId: string): Promise<CampaignEmailReview[]> {
+  const result = await request<{ reviews: CampaignEmailReview[] }>(
+    `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/email-approvals`
+  );
+  return result.reviews;
+}
+export async function approveCampaignEmailReview(
+  campaignId: string,
+  actionId: string,
+  contentHash: string
+): Promise<CampaignEmailReview> {
+  const result = await request<{ review: CampaignEmailReview }>(
+    `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/email-approvals/${encodeURIComponent(actionId)}`,
+    { method: 'POST', body: JSON.stringify({ contentHash }) }
+  );
+  return result.review;
+}
+
 export async function stopLinkedInManagedCampaign(id: string): Promise<ManagedCampaign> {
   return (
     await request<{ campaign: ManagedCampaign }>(

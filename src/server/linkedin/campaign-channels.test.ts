@@ -44,6 +44,12 @@ import {
   syncCampaignEmailProviderEvents
 } from './campaign-channels.js';
 import { runManagedCampaigns } from './runner.js';
+import {
+  approveCampaignEmail,
+  campaignEmailPolicyGate,
+  listCampaignEmailReviews,
+  previewCampaignEmail
+} from './campaign-email-approval.js';
 import { upsertSeat } from './seats.js';
 import { saveWorkflow } from './workflows.js';
 
@@ -80,6 +86,10 @@ beforeEach(async () => {
   await db.prepare('DELETE FROM email_inbound_mailboxes WHERE workspace_id=?').run(WORKSPACE);
   await db.prepare('DELETE FROM email_deliverability_checks WHERE workspace_id=?').run(WORKSPACE);
   await db.prepare('DELETE FROM connections WHERE workspace_id=?').run(WORKSPACE);
+  await db
+    .prepare('DELETE FROM linkedin_campaign_email_approvals WHERE workspace_id=?')
+    .run(WORKSPACE);
+  await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE);
   await upsertSeat(
     db,
     WORKSPACE,
@@ -105,6 +115,14 @@ async function seedReadyMailbox(): Promise<void> {
       `Acme Labs, 1 Market Street\nPrivacy policy: https://acme.test/privacy\n${OUTREACH_OPT_OUT_SENTENCE}`,
     blockers: async () => []
   });
+  await db
+    .prepare(
+      `INSERT INTO workspace_policies
+      (id,workspace_id,name,priority,action_pattern,effect,conditions_json,enabled,created_at,updated_at)
+      VALUES ('pol_channel_test_allow',?,'Allowed by fixture',10,'action:email.send','allow',
+              '{}'::jsonb,TRUE,?::timestamptz,?::timestamptz)`
+    )
+    .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
   await db
     .prepare(
       `INSERT INTO connections
@@ -160,7 +178,237 @@ async function campaignFor(
   await startManagedCampaign(db, WORKSPACE, created.campaign.id, NOW);
   return created.campaign.id;
 }
+async function queuedReviewEmail(actionId: string) {
+  const campaignId = await campaignFor(
+    [
+      {
+        id: 'wait',
+        action: 'wait',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: { duration: { amount: 1, unit: 'days' } }
+      },
+      {
+        id: 'end',
+        action: 'end',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: { outcome: 'completed' }
+      }
+    ],
+    `First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Review,Acme,maya-review@example.com,https://linkedin.com/in/${actionId}\n`
+  );
+  await runManagedCampaigns(db, WORKSPACE, NOW);
+  const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+  await db
+    .prepare(
+      "UPDATE linkedin_campaign_members SET status='waiting',current_step_id='review-email',step_index=0,next_eligible_at=?::timestamptz WHERE workspace_id=? AND id=?"
+    )
+    .run(NOW.toISOString(), WORKSPACE, member.id);
+  await db
+    .prepare(
+      `INSERT INTO linkedin_campaign_channel_actions
+     (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,
+       idempotency_key,connection_id,created_at,updated_at)
+     VALUES (?,?,?,?,?, 'review-email','email','planned',?::timestamptz,?::jsonb,?,
+       'conn_campaign_live',?::timestamptz,?::timestamptz)`
+    )
+    .run(
+      actionId,
+      WORKSPACE,
+      campaignId,
+      member.id,
+      member.contactId,
+      NOW.toISOString(),
+      JSON.stringify({
+        recipient: 'maya-review@example.com',
+        subject: 'Hello Maya',
+        body: 'A specific reviewed body',
+        tracking: 'off',
+        threaded: false
+      }),
+      `idempotency-${actionId}`,
+      NOW.toISOString(),
+      NOW.toISOString()
+    );
+  return campaignId;
+}
+
 describe('campaign channel executor', () => {
+  it('defaults to exact-message approval, holds safely, and sends only after the owner grants it', async () => {
+    await seedReadyMailbox();
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE);
+    const campaignId = await queuedReviewEmail('licha_review_default');
+    const review = await previewCampaignEmail(db, WORKSPACE, 'licha_review_default');
+    expect(review).toMatchObject({
+      policy: { effect: 'require_approval' },
+      approved: false,
+      recipient: 'maya-review@example.com',
+      sender: 'founder@acme.test',
+      tracking: 'off'
+    });
+    expect(await listCampaignEmailReviews(db, WORKSPACE, campaignId)).toHaveLength(1);
+    expect(await runCampaignChannelActions(db, WORKSPACE, NOW)).toMatchObject({
+      claimed: 1,
+      sent: 0,
+      failed: 0,
+      unknown: 0
+    });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect((await campaignEmailPolicyGate(db, WORKSPACE, 'licha_review_default')).allowed).toBe(
+      false
+    );
+    await expect(
+      approveCampaignEmail(db, WORKSPACE, 'licha_review_default', 'wrong', 'owner', NOW)
+    ).rejects.toThrow('changed since review');
+    const approved = await approveCampaignEmail(
+      db,
+      WORKSPACE,
+      'licha_review_default',
+      review!.contentHash,
+      'owner',
+      NOW
+    );
+    expect(approved.approved).toBe(true);
+    expect((await campaignEmailPolicyGate(db, WORKSPACE, 'licha_review_default')).allowed).toBe(
+      true
+    );
+    const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
+    expect(run.sent).toBe(1);
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalidates an exact approval when content, footer or sender changes', async () => {
+    await seedReadyMailbox();
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE);
+    await queuedReviewEmail('licha_review_mutated');
+    const before = (await previewCampaignEmail(db, WORKSPACE, 'licha_review_mutated'))!;
+    await approveCampaignEmail(db, WORKSPACE, before.actionId, before.contentHash, 'owner', NOW);
+    await db
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions SET
+       payload_json=jsonb_set(payload_json,'{body}',to_jsonb('A different body'::text))
+       WHERE id=? AND workspace_id=?`
+      )
+      .run(before.actionId, WORKSPACE);
+    const changed = (await previewCampaignEmail(db, WORKSPACE, before.actionId))!;
+    expect(changed.approved).toBe(false);
+    expect(changed.contentHash).not.toBe(before.contentHash);
+    expect(await runCampaignChannelActions(db, WORKSPACE, NOW)).toMatchObject({
+      claimed: 1,
+      sent: 0,
+      failed: 0,
+      unknown: 0
+    });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_channel_actions SET status='planned',planned_for=?::timestamptz WHERE id=?"
+      )
+      .run(NOW.toISOString(), before.actionId);
+    await approveCampaignEmail(db, WORKSPACE, before.actionId, changed.contentHash, 'owner', NOW);
+    await db
+      .prepare(
+        "UPDATE connections SET mailbox_address='new@acme.test' WHERE id='conn_campaign_live'"
+      )
+      .run();
+    expect((await previewCampaignEmail(db, WORKSPACE, before.actionId))!.approved).toBe(false);
+    expect((await campaignEmailPolicyGate(db, WORKSPACE, before.actionId)).allowed).toBe(false);
+    await db
+      .prepare(
+        "UPDATE connections SET mailbox_address='founder@acme.test' WHERE id='conn_campaign_live'"
+      )
+      .run();
+    expect((await previewCampaignEmail(db, WORKSPACE, before.actionId))!.approved).toBe(true);
+    registerEmailComplianceProvider({
+      footer: async () =>
+        `Acme (new legal address), 2 Broadway\nPrivacy: https://acme.test/privacy\n${OUTREACH_OPT_OUT_SENTENCE}`,
+      blockers: async () => []
+    });
+    expect((await previewCampaignEmail(db, WORKSPACE, before.actionId))!.approved).toBe(false);
+    expect((await campaignEmailPolicyGate(db, WORKSPACE, before.actionId)).allowed).toBe(false);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
+  it('denies workspace-policy forbidden email even if an approval is attempted', async () => {
+    await seedReadyMailbox();
+    await queuedReviewEmail('licha_review_denied');
+    await db
+      .prepare(
+        "UPDATE workspace_policies SET effect='deny',name='Never send outbound email' WHERE workspace_id=?"
+      )
+      .run(WORKSPACE);
+    const review = (await previewCampaignEmail(db, WORKSPACE, 'licha_review_denied'))!;
+    expect(review.policy).toMatchObject({
+      effect: 'deny',
+      policyName: 'Never send outbound email'
+    });
+    await expect(
+      approveCampaignEmail(db, WORKSPACE, review.actionId, review.contentHash, 'owner', NOW)
+    ).rejects.toThrow('policy denies');
+    expect(await runCampaignChannelActions(db, WORKSPACE, NOW)).toMatchObject({
+      claimed: 1,
+      sent: 0,
+      failed: 0,
+      unknown: 0
+    });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
+  it('rejects a forged provider body even when an exact action was reviewed', async () => {
+    await seedReadyMailbox();
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE);
+    await queuedReviewEmail('licha_review_forged');
+    const review = (await previewCampaignEmail(db, WORKSPACE, 'licha_review_forged'))!;
+    await approveCampaignEmail(db, WORKSPACE, review.actionId, review.contentHash, 'owner', NOW);
+    const person = await db
+      .prepare(
+        `SELECT c.person_id,a.contact_id FROM linkedin_campaign_channel_actions a
+        JOIN linkedin_lead_contacts c ON c.id=a.contact_id
+        WHERE a.id='licha_review_forged' AND a.workspace_id=?`
+      )
+      .get<{ person_id: string; contact_id: string }>(WORKSPACE);
+    await expect(
+      executeConnectedAction(db, WORKSPACE, {
+        type: 'email_draft',
+        connection_id: 'conn_campaign_live',
+        require_connection_id: true,
+        recipient: review.recipient,
+        subject: review.subject,
+        body: 'FORGED CONTENT\n\n' + review.footer,
+        payload_hash: 'forged-provider-envelope',
+        structured_payload_json: JSON.stringify({
+          deliverySourceType: 'campaign_email',
+          deliverySourceId: review.actionId,
+          approvalContentHash: review.contentHash,
+          contactId: person!.contact_id,
+          personId: person!.person_id,
+          senderAddress: review.sender,
+          tracking: review.tracking,
+          threaded: review.threaded,
+          deliveryPurpose: 'outreach',
+          requireListUnsubscribe: true,
+          unsubscribeMode: 'list_unsubscribe_headers'
+        })
+      })
+    ).rejects.toThrow('no longer matches the exact approved preview');
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
+  it('does not expose another tenant’s pending email review', async () => {
+    await seedReadyMailbox();
+    const campaign = await queuedReviewEmail('licha_review_tenant');
+    expect(await listCampaignEmailReviews(db, 'other_workspace', campaign)).toEqual([]);
+    expect(await previewCampaignEmail(db, 'other_workspace', 'licha_review_tenant')).toBeNull();
+    await expect(
+      approveCampaignEmail(
+        db,
+        'other_workspace',
+        'licha_review_tenant',
+        '0'.repeat(64),
+        'other-owner',
+        NOW
+      )
+    ).rejects.toThrow('not awaiting approval');
+  });
   it('does not claim channel work while a campaign is paused and retires it on stop', async () => {
     const campaignId = await campaignFor(
       [

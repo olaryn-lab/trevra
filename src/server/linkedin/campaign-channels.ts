@@ -19,6 +19,7 @@ import { emailDomainOf } from '../email/deliverability.js';
 import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-address.js';
 import { getSenderDeliverability } from '../email/sender-deliverability.js';
 import { unsubscribeConfigured } from '../email/unsubscribe.js';
+import { campaignEmailPolicyGate } from './campaign-email-approval.js';
 import { assertNotSuppressed, SuppressionError } from '../suppressions.js';
 export type CampaignChannelKind = 'email' | 'find_email';
 export type CampaignChannelStatus =
@@ -467,6 +468,8 @@ async function executeEmail(
       `Lawful basis missing for cold email: ${lawfulBasis.reason} ${JURISDICTION_RULES_DISCLAIMER}`
     );
   const sender = await campaignEmailSenderReady(db, row.workspace_id, row.connection_id, now);
+  const gate = await campaignEmailPolicyGate(db, row.workspace_id, row.id);
+  if (!gate.allowed) throw new CampaignEmailSetupHold(gate.reason);
   const bodyWithFooter = `${body}\n\n${sender.footer}`;
   const threaded = payload.threaded === true;
   const tracking =
@@ -516,6 +519,7 @@ async function executeEmail(
       contactId: row.contact_id,
       deliverySourceType: 'campaign_email',
       deliverySourceId: row.id,
+      approvalContentHash: gate.review!.contentHash,
       campaignId: row.campaign_id,
       memberId: row.member_id,
       workflowStepId: row.workflow_step_id,

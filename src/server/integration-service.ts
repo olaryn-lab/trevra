@@ -29,6 +29,7 @@ import {
 } from './email-outcomes.js';
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
 import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from './email/compliance.js';
+import { campaignEmailPolicyGate } from './linkedin/campaign-email-approval.js';
 import { mailProviderFor } from './email/deliverability.js';
 import {
   OUTREACH_REPLY_OPT_OUT_SENTENCE,
@@ -771,6 +772,26 @@ export async function executeConnectedAction(
       ? structuredPayload.deliveryPurpose
       : ('outreach' as const);
   if (campaignSend) {
+    const sourceAction =
+      typeof structuredPayload.deliverySourceId === 'string'
+        ? structuredPayload.deliverySourceId
+        : '';
+    const gate = await campaignEmailPolicyGate(db, workspaceId, sourceAction);
+    if (!gate.allowed) throw new CampaignEmailSendRefusal('workspace', gate.reason);
+    const reviewed = gate.review!;
+    if (
+      structuredPayload.approvalContentHash !== reviewed.contentHash ||
+      action.connection_id !== reviewed.connectionId ||
+      recipient.toLowerCase() !== reviewed.recipient.toLowerCase() ||
+      String(action.subject ?? '').trim() !== reviewed.subject ||
+      String(action.body ?? '').trim() !== `${reviewed.body}\n\n${reviewed.footer}` ||
+      structuredPayload.tracking !== reviewed.tracking ||
+      structuredPayload.threaded !== reviewed.threaded
+    )
+      throw new CampaignEmailSendRefusal(
+        'workspace',
+        'The outbound campaign email no longer matches the exact approved preview; nothing sent.'
+      );
     const actualAddress = String(connection.mailbox_address ?? '')
       .trim()
       .toLowerCase();

@@ -6,6 +6,11 @@ import { createApp } from '../app.js';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { openDatabase, type Db } from '../db.js';
 import { importLeadCsv } from './lead-lists.js';
+import {
+  registerEmailComplianceProvider,
+  resetEmailComplianceProvider,
+  OUTREACH_OPT_OUT_SENTENCE
+} from '../email/compliance.js';
 import { upsertSeat } from './seats.js';
 
 let db: Db;
@@ -84,7 +89,10 @@ beforeEach(async () => {
     new Date('2026-06-01T09:00:00Z')
   );
 });
-afterEach(async () => db?.close());
+afterEach(async () => {
+  resetEmailComplianceProvider();
+  await db?.close();
+});
 
 describe('LinkedIn manager HTTP surface', () => {
   it('requires a Trevra session', async () => {
@@ -229,6 +237,130 @@ describe('LinkedIn manager HTTP surface', () => {
         ]
       })
       .expect(400);
+  });
+
+  it('exposes exact email reviews to the right tenant and approves only the fresh owner-reviewed hash', async () => {
+    registerEmailComplianceProvider({
+      footer: async () =>
+        `Acme, 1 Market St\nPrivacy: https://acme.test/privacy\n${OUTREACH_OPT_OUT_SENTENCE}`,
+      blockers: async () => []
+    });
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Review targets', sourceKind: 'csv' })
+        .expect(201)
+    ).body.list;
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: A,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Review,Acme,maya-review@acme.test,https://linkedin.com/in/review-api\n'
+      },
+      NOW
+    );
+    const flow = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/workflows')
+        .send({
+          name: 'Review flow',
+          steps: [
+            {
+              id: 'email',
+              action: 'email',
+              delayBefore: { amount: 0, unit: 'hours' },
+              config: {
+                subject: 'Hello',
+                variants: [{ id: 'a', body: 'Hi {{first_name}}', weight: 100 }],
+                tracking: 'off',
+                threaded: false
+              }
+            }
+          ]
+        })
+        .expect(201)
+    ).body.workflow;
+    const camp = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/campaigns')
+        .send({
+          name: 'Human review',
+          leadListId: list.id,
+          workflowId: flow.id
+        })
+        .expect(201)
+    ).body.campaign;
+    await db
+      .prepare("UPDATE linkedin_campaigns SET status='running' WHERE workspace_id=? AND id=?")
+      .run(A, camp.id);
+    const member = await db
+      .prepare(
+        'SELECT id,contact_id FROM linkedin_campaign_members WHERE workspace_id=? AND campaign_id=? LIMIT 1'
+      )
+      .get<{ id: string; contact_id: string }>(A, camp.id);
+    await db
+      .prepare(
+        `INSERT INTO connections(id,workspace_id,provider,provider_config_key,
+         external_connection_id,display_name,status,is_demo,mailbox_address,created_at,updated_at)
+       VALUES ('conn_review_api',?,'gmail','trevra-gmail','external-mailbox','Review mailbox',
+        'connected',0,'founder@acme.test',?::timestamptz,?::timestamptz)`
+      )
+      .run(A, NOW.toISOString(), NOW.toISOString());
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+       (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,
+        payload_json,idempotency_key,connection_id,created_at,updated_at)
+       VALUES ('licha_review_api',?,?,?,?, 'email','email','planned',?::timestamptz,
+        ?::jsonb,'review-api-key','conn_review_api',?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        A,
+        camp.id,
+        member!.id,
+        member!.contact_id,
+        NOW.toISOString(),
+        JSON.stringify({
+          recipient: 'maya-review@acme.test',
+          subject: 'A specific subject',
+          body: 'Hello Maya',
+          tracking: 'off'
+        }),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    const url = `/api/linkedin/manager/campaigns/${camp.id}/email-approvals`;
+    await request(app).get(url).expect(401);
+    await as(tokenB).get(url).expect(404);
+    await as(tokenB)
+      .post(`${url}/licha_review_api`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(404);
+    const listResponse = (await as(tokenA).get(url).expect(200)).body;
+    expect(listResponse.reviews).toHaveLength(1);
+    const review = listResponse.reviews[0];
+    expect(review).toMatchObject({
+      actionId: 'licha_review_api',
+      sender: 'founder@acme.test',
+      approved: false,
+      policy: { effect: 'require_approval' }
+    });
+    await as(tokenA)
+      .post(`${url}/licha_review_api`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(409);
+    await as(tokenA)
+      .post(`${url}/licha_review_api`)
+      .send({ contentHash: review.contentHash })
+      .expect(200);
+    expect((await as(tokenA).get(url).expect(200)).body.reviews[0].approved).toBe(true);
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_channel_actions SET payload_json=jsonb_set(payload_json,'{subject}',to_jsonb('CHANGED'::text)) WHERE id='licha_review_api'"
+      )
+      .run();
+    expect((await as(tokenA).get(url).expect(200)).body.reviews[0].approved).toBe(false);
   });
 
   it('creates a campaign draft with enrollment but zero ledger actions', async () => {

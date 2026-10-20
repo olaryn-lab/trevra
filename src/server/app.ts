@@ -452,6 +452,11 @@ import {
 } from './linkedin/campaign-channels.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
 import {
+  approveCampaignEmail,
+  listCampaignEmailReviews,
+  previewCampaignEmail
+} from './linkedin/campaign-email-approval.js';
+import {
   guardSeatSendModeChange,
   handoffResolutionSchema,
   resolveLinkedInHandoff
@@ -6194,6 +6199,48 @@ export function createApp(db: Db) {
         campaign,
         members: await listCampaignMembers(db, req.auth!.workspaceId, campaignId)
       });
+    })
+  );
+
+  // An approval grants permission for one exact sender/message/recipient.
+  // The worker independently re-evaluates workspace policy and the content hash.
+  app.get(
+    '/api/linkedin/manager/campaigns/:id/email-approvals',
+    linkedinRoute(async (req, res) => {
+      const campaignId = String(req.params.id);
+      const campaign = await getManagedCampaign(db, req.auth!.workspaceId, campaignId);
+      if (!campaign) throw new LinkedInApiError('Managed campaign not found', 404);
+      res.json({ reviews: await listCampaignEmailReviews(db, req.auth!.workspaceId, campaignId) });
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/email-approvals/:actionId',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve an outbound campaign email');
+      const campaignId = String(req.params.id);
+      const actionId = String(req.params.actionId);
+      const input = z
+        .object({ contentHash: z.string().regex(/^[0-9a-f]{64}$/) })
+        .strict()
+        .parse(req.body ?? {});
+      const candidate = await previewCampaignEmail(db, req.auth!.workspaceId, actionId);
+      if (!candidate || candidate.campaignId !== campaignId)
+        throw new LinkedInApiError('Campaign email not found or no longer pending', 404);
+      try {
+        const review = await approveCampaignEmail(
+          db,
+          req.auth!.workspaceId,
+          actionId,
+          input.contentHash,
+          req.auth!.userId
+        );
+        res.json({ review });
+      } catch (error) {
+        throw new LinkedInApiError(
+          error instanceof Error ? error.message : 'Campaign email approval failed',
+          409
+        );
+      }
     })
   );
 

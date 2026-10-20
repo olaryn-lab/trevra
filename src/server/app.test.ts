@@ -1386,6 +1386,10 @@ describe('owner-only acts', () => {
     // their own teammate/assignment authorization contract and are tested in
     // manager-team-api.test.ts.
     await member.agent.delete('/api/linkedin/manager/lead-lists/lst_x').expect(403);
+    await member.agent
+      .post('/api/linkedin/manager/campaigns/cmp_x/email-approvals/email_x')
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(403);
 
     // Export and erasure of the whole workspace.
     await member.agent.get('/api/workspace/export').expect(403);

@@ -90,6 +90,7 @@ import {
 import { NOT_ENOUGH_DATA, RATE_MIN_SAMPLE, ratePercent } from './analytics';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
 import { useIsWorkspaceOwner } from './auth-client';
+import { CampaignEmailApprovals } from './CampaignEmailApprovals';
 import { useWorkspaceMembers } from './TeamScreen';
 import { ConfirmDrawer } from './ui/dialog';
 import { ChoiceMenu } from './ui/choice-menu';
@@ -3131,6 +3132,9 @@ export function OutreachManagerRead({
                         sequence
                       </span>
                     </div>
+                  )}
+                  {open && campaign.status === 'running' && (
+                    <CampaignEmailApprovals campaignId={campaign.id} />
                   )}
 
                   {/*
