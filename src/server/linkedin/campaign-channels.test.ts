@@ -22,6 +22,7 @@ import { putWorkspaceSecret } from '../secrets/store.js';
 import { queueEnrichmentRun } from '../enrichment/runs.js';
 import { findSuppression } from '../suppressions.js';
 import { executeConnectedAction } from '../integration-service.js';
+import { addExclusions } from './exclusions.js';
 import {
   OUTREACH_OPT_OUT_SENTENCE,
   registerEmailComplianceProvider,
@@ -72,6 +73,7 @@ beforeEach(async () => {
     'linkedin_campaign_email_events',
     'linkedin_campaign_channel_actions',
     'linkedin_actions',
+    'linkedin_exclusions',
     'linkedin_campaign_members',
     'linkedin_campaign_waves',
     'linkedin_campaigns',
@@ -1729,6 +1731,72 @@ describe('campaign channel executor', () => {
         })
       })
     ).rejects.toThrow('recipient identity or reachability changed');
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(
+      await db
+        .prepare('SELECT COUNT(*)::int AS total FROM gtm_deliveries WHERE workspace_id=?')
+        .get<{ total: number }>(WORKSPACE)
+    ).toEqual({ total: 0 });
+  });
+
+  it('rechecks Never Contact URL variants at the shared provider boundary after preflight', async () => {
+    await seedReadyMailbox();
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Smith,Acme,maya-never@example.com,https://linkedin.com/in/provider-new-exclusion?trk=stale\n'
+    );
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    const contact = await db
+      .prepare('SELECT person_id FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
+      .get<{ person_id: string | null }>(WORKSPACE, member.contactId);
+    expect(contact?.person_id).toBeTruthy();
+    // The queued email was prepared before the operator excludes a canonical
+    // URL variant. A stale already-claimed worker must still refuse the send.
+    await addExclusions(
+      db,
+      WORKSPACE,
+      [
+        {
+          targetRef: 'https://www.linkedin.com/in/provider-new-exclusion/?trk=new',
+          reason: 'Opted out'
+        }
+      ],
+      NOW
+    );
+    await expect(
+      executeConnectedAction(db, WORKSPACE, {
+        type: 'email_draft',
+        connection_id: 'conn_campaign_live',
+        require_connection_id: true,
+        recipient: 'maya-never@example.com',
+        subject: 'Hello',
+        body: 'Hi Maya',
+        payload_hash: 'provider-new-exclusion-no-send',
+        structured_payload_json: JSON.stringify({
+          deliverySourceType: 'campaign_email',
+          deliverySourceId: 'licha_never_contact_race',
+          deliveryPurpose: 'outreach',
+          requireListUnsubscribe: true,
+          unsubscribeMode: 'list_unsubscribe_headers',
+          senderAddress: 'founder@acme.test',
+          personId: contact!.person_id,
+          contactId: member.contactId
+        })
+      })
+    ).rejects.toThrow('Never Contact list');
     expect(nangoMock.post).not.toHaveBeenCalled();
     expect(
       await db

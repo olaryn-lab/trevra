@@ -30,6 +30,7 @@ import {
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
 import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from './email/compliance.js';
 import { campaignEmailPolicyGate } from './linkedin/campaign-email-approval.js';
+import { filterExcluded } from './linkedin/exclusions.js';
 import {
   campaignTrackableUrls,
   renderCampaignHtmlWithFooter
@@ -691,12 +692,14 @@ export async function executeConnectedAction(
       );
     const contact = await db
       .prepare(
-        'SELECT person_id,email,do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?'
+        'SELECT person_id,email,profile_url,do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?'
       )
-      .get<{ person_id: string | null; email: string | null; do_not_contact: boolean }>(
-        workspaceId,
-        contactId
-      );
+      .get<{
+        person_id: string | null;
+        email: string | null;
+        profile_url: string | null;
+        do_not_contact: boolean;
+      }>(workspaceId, contactId);
     if (
       !contact ||
       contact.do_not_contact ||
@@ -706,6 +709,18 @@ export async function executeConnectedAction(
       throw new CampaignEmailSendRefusal(
         'recipient',
         'Campaign recipient identity or reachability changed; nothing sent.'
+      );
+    // A workspace Never Contact exclusion added after campaign preflight may
+    // cancel queued work but cannot recall a claimed in-flight action. Recheck
+    // the canonical profile at the shared provider boundary, just like the
+    // email/Person suppression and do-not-contact flag above.
+    if (
+      contact.profile_url &&
+      (await filterExcluded(db, workspaceId, [contact.profile_url])).excluded.length > 0
+    )
+      throw new CampaignEmailSendRefusal(
+        'recipient',
+        'Campaign recipient is on the Never Contact list; nothing sent.'
       );
     try {
       await assertNotSuppressed(db, workspaceId, { channel: 'email', email: recipient, personId });
