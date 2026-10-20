@@ -3,6 +3,7 @@ import { id, type Db } from '../db.js';
 import { recordAction, type LinkedInActionKind, type LinkedInActionStatus } from './actions.js';
 import { acceptedTri, repliedTri } from './branching.js';
 import { runCampaignChannelActions, syncCampaignEmailProviderEvents } from './campaign-channels.js';
+import { emailEventKindForCondition, emailEventBranchKeys } from './email-event-kind.js';
 import {
   decideAdmission,
   workflowAdmissionDemand,
@@ -32,6 +33,7 @@ import {
   chooseMessageVariant,
   delayMilliseconds,
   getWorkflow,
+  missingRequiredWorkflowVariables,
   renderWorkflowTemplate,
   stepUsesBookingLink,
   type WorkflowStep
@@ -750,9 +752,10 @@ async function evaluateWorkflowCondition(
 
   // External-channel and capability evidence is written into branch_state_json by the
   // channel executor. Unknown stays unknown; Monitor is what turns time into a No.
-  const externalValue = branchState[`external:${condition.kind}`];
-  if (externalValue === true) return 'yes';
-  if (externalValue === false) return 'no';
+  const emailKind = emailEventKindForCondition(condition.kind);
+  const keys = emailKind ? emailEventBranchKeys(emailKind) : [`external:${condition.kind}`];
+  if (keys.some((key) => branchState[key] === true)) return 'yes';
+  if (keys.some((key) => branchState[key] === false)) return 'no';
   return 'unknown';
 }
 
@@ -1629,6 +1632,27 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
               now,
               branchStatePatch(`blocked:${step.id}`, {
                 reason: BOOKING_LINK_MISSING_MESSAGE,
+                at: nowIso
+              })
+            )
+          );
+          result.membersBlocked += 1;
+          continue;
+        }
+
+        const missingVariables = missingRequiredWorkflowVariables(step, lead);
+        if (missingVariables.length > 0) {
+          memberWrites.set(
+            member.id,
+            stayOnStep(
+              stepIndex,
+              step.id,
+              completedStepIds,
+              new Date(now.getTime() + 3_600_000),
+              now,
+              branchStatePatch(`blocked:${step.id}`, {
+                reason: `missing_variable:${missingVariables[0]}`,
+                missingVariables,
                 at: nowIso
               })
             )

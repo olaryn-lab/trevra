@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { getChannel } from '../channels/registry.js';
 import type { Db } from '../db.js';
+import { filterExcluded } from './exclusions.js';
 import type { Skill, SkillContext } from '../skills/types.js';
 import type { SeatRef } from './actions.js';
 import {
@@ -580,7 +581,14 @@ async function seatLedgerFacts(
     pendingInvites: row?.pending_invites ?? 0,
     campaignUsed24: row?.campaign_used_24 ?? 0,
     duplicate: row?.duplicate === true,
-    suppressionReason: row?.suppression_reason ?? null,
+    suppressionReason:
+      row?.suppression_reason ??
+      (await (async () => {
+        const excluded = await filterExcluded(db, seat.workspaceId, [input.targetRef]);
+        return excluded.excluded[0]
+          ? `Never contact: ${excluded.excluded[0].reason || 'Excluded by workspace'}`
+          : null;
+      })()),
     linkedSeats: Number(row?.linked_seats ?? 1),
     identityKnown: row?.identity_known === true
   };

@@ -5,6 +5,7 @@ import { findSuppression } from '../suppressions.js';
 import { createLeadList, importLeadCsv } from './lead-lists.js';
 import {
   campaignMemberTimeline,
+  campaignOperationalAnalytics,
   createManagedCampaign,
   listCampaignMembers,
   pauseManagedCampaign,
@@ -486,6 +487,121 @@ describe('campaign channel executor', () => {
     ).toBe('skipped');
   });
 
+  it('reconciles actual email events with funnel, channel counters and branch keys', async () => {
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Smith,Acme,parity-reply@example.com,https://linkedin.com/in/parity-reply\n'
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+         (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,completed_at,external_ref,provider,created_at,updated_at)
+       VALUES ('licha_parity',?,?,?,?,?,'email','sent',?::timestamptz,'{}'::jsonb,'idem-parity',?::timestamptz,'parity-ref','simulation',?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'wait',
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    const before = await campaignOperationalAnalytics(db, WORKSPACE, campaignId, NOW);
+    expect(before.funnel.messaged).toBe(1);
+    expect(before.funnel.replied).toBe(0);
+    for (const kind of ['opened', 'clicked', 'reply'] as const) {
+      await recordCampaignEmailEvent(
+        db,
+        WORKSPACE,
+        { channelActionId: 'licha_parity', eventKind: kind, providerEventId: `evt-parity-${kind}` },
+        NOW
+      );
+    }
+    const after = await campaignOperationalAnalytics(db, WORKSPACE, campaignId, NOW);
+    expect(after.funnel.messaged).toBe(1);
+    expect(after.funnel.replied).toBe(1);
+    expect(after.channels.emailSent).toBe(1);
+    expect(after.channels.emailReplied).toBe(1);
+    const refreshed = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    expect(refreshed.branchState).toMatchObject({
+      'external:email_opened': true,
+      'external:email_clicked': true,
+      'external:email_reply': true,
+      'external:email_replied': true
+    });
+  });
+
+  it('records an email unsubscribe as excluded, not as a positive reply', async () => {
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nPat,Lee,Acme,parity-optout@example.com,https://linkedin.com/in/parity-optout\n'
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+         (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,completed_at,external_ref,provider,created_at,updated_at)
+       VALUES ('licha_optout',?,?,?,?,?,'email','sent',?::timestamptz,'{}'::jsonb,'idem-optout',?::timestamptz,'optout-ref','simulation',?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'wait',
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    await recordCampaignEmailEvent(
+      db,
+      WORKSPACE,
+      { channelActionId: 'licha_optout', eventKind: 'unsubscribe', providerEventId: 'evt-optout' },
+      NOW
+    );
+    const analytics = await campaignOperationalAnalytics(db, WORKSPACE, campaignId, NOW);
+    expect(analytics.funnel.excluded).toBe(1);
+    expect(analytics.funnel.replied).toBe(0);
+    expect(analytics.channels.emailReplied).toBe(0);
+    expect((await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.status).toBe('excluded');
+    expect(
+      await findSuppression(db, WORKSPACE, { channel: 'email', email: 'parity-optout@example.com' })
+    ).not.toBeNull();
+  });
+
   it('never claims a channel action that is no longer the member current workflow node', async () => {
     const campaignId = await campaignFor(
       [
@@ -697,6 +813,70 @@ describe('campaign channel executor', () => {
     const after = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
     expect(after.branchState['external:email_success']).toBe(false);
     expect(after.currentStepId).toBe('end');
+  });
+
+  it('refuses to send or track a campaign email when its lead was marked do-not-contact', async () => {
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,NoContact,Acme,maya@example.com,https://linkedin.com/in/maya-campaign-dnc\n'
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    await db
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=? AND id=?'
+      )
+      .run(WORKSPACE, member.contactId);
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_members SET status='waiting',current_step_id='wait',step_index=0,next_eligible_at=?::timestamptz WHERE workspace_id=? AND id=?"
+      )
+      .run(NOW.toISOString(), WORKSPACE, member.id);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+         (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,created_at,updated_at)
+       VALUES ('licha_dnc',?,?,?,?,?,'email','planned',?::timestamptz,?::jsonb,'dnc-key',?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'wait',
+        NOW.toISOString(),
+        JSON.stringify({
+          recipient: 'maya@example.com',
+          subject: 'Hello',
+          body: 'See https://example.com/tracked',
+          tracking: 'opens_clicks'
+        }),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
+    expect(run).toMatchObject({ sent: 0, failed: 1, unknown: 0 });
+    const refused = await db
+      .prepare(
+        "SELECT status,last_error,tracking_token FROM linkedin_campaign_channel_actions WHERE id='licha_dnc'"
+      )
+      .get<{ status: string; last_error: string | null; tracking_token: string | null }>();
+    expect(refused?.status).toBe('failed');
+    expect(refused?.last_error).toContain('do-not-contact');
+    expect(refused?.tracking_token).toBeNull();
   });
 
   it('records native tracking opens/clicks and resolves click redirects only from opaque token pairs', async () => {

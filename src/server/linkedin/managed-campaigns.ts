@@ -1,5 +1,7 @@
 import { id, type Db } from '../db.js';
 import { COUNTED_MESSAGE_KINDS, recordAction } from './actions.js';
+import { EMAIL_REPLY_EVENT_KIND } from './email-event-kind.js';
+import { safeCsvCell } from '../csv.js';
 import type { CampaignStatus } from './action-ledger.js';
 import {
   ADMISSION_FORECAST_MIN_SAMPLE,
@@ -11,6 +13,7 @@ import {
   type AdmissionPolicy
 } from './admission.js';
 import { getLeadList } from './lead-lists.js';
+import { filterExcluded } from './exclusions.js';
 import { effectivePosture, getSeat, OWNER_SEAT_KEY, warmupWeekOf } from './seats.js';
 import {
   bandForSeat,
@@ -1053,6 +1056,14 @@ export async function reevaluateCampaignExclusions(
     (policy.suppressedCompanies ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean)
   );
   const domains = normalizedSuppressedDomains(policy.suppressedDomains);
+  const neverContact = await filterExcluded(
+    db,
+    workspaceId,
+    rows.map((row) => row.profile_url).filter((url): url is string => Boolean(url))
+  );
+  const neverContactReasons = new Map(
+    neverContact.excluded.map((entry) => [entry.targetRef.trim(), entry.reason])
+  );
   const ids: string[] = [];
   const statuses: string[] = [];
   const reasons: string[] = [];
@@ -1069,7 +1080,9 @@ export async function reevaluateCampaignExclusions(
     // Global suppression is a workspace authority boundary. Campaign policy may
     // relax local eligibility heuristics, but it cannot opt a suppressed Person
     // back into outreach.
-    if (row.global_suppression) reason = 'Workspace suppression';
+    if (row.profile_url && neverContactReasons.has(row.profile_url.trim()))
+      reason = `Never contact: ${neverContactReasons.get(row.profile_url.trim()) || 'Excluded by workspace'}`;
+    else if (row.global_suppression) reason = 'Workspace suppression';
     else if (policy.excludeDoNotContact !== false && row.do_not_contact) reason = 'Do not contact';
     else if (policy.excludeMissingProfile !== false && !row.profile_url?.trim())
       reason = 'Missing LinkedIn profile URL';
@@ -3288,11 +3301,6 @@ export async function skipManagedCampaignMemberStep(
   return true;
 }
 
-function csvCell(value: unknown): string {
-  const text = value === null || value === undefined ? '' : String(value);
-  return /[",\n\r]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-}
-
 /** Exportable campaign result rows with no internal ledger identifiers required by the recipient. */
 export async function exportManagedCampaignCsv(
   db: Db,
@@ -3357,7 +3365,7 @@ export async function exportManagedCampaignCsv(
       row.exclusion_reason,
       row.last_failure_reason
     ];
-    lines.push(values.map(csvCell).join(','));
+    lines.push(values.map(safeCsvCell).join(','));
   }
   return `${lines.join('\n')}\n`;
 }
@@ -4401,13 +4409,13 @@ export async function campaignOperationalAnalytics(
              AND a.kind IN (${messageKinds}) AND a.status IN ('sent','accepted','replied')
          ) OR EXISTS (
            SELECT 1 FROM linkedin_campaign_channel_actions ca WHERE ca.workspace_id=m.workspace_id AND ca.member_id=m.id
-             AND ca.kind='email' AND ca.status='completed'
+             AND ca.kind='email' AND ca.status='sent'
          ))::int AS messaged,
          COUNT(*) FILTER (WHERE m.status='replied' OR EXISTS (
            SELECT 1 FROM linkedin_actions a WHERE a.workspace_id=m.workspace_id AND a.campaign_member_id=m.id AND a.status='replied'
          ) OR EXISTS (
            SELECT 1 FROM linkedin_campaign_channel_actions ca
-           JOIN linkedin_campaign_email_events ee ON ee.workspace_id=ca.workspace_id AND ee.channel_action_id=ca.id AND ee.event_kind='replied'
+           JOIN linkedin_campaign_email_events ee ON ee.workspace_id=ca.workspace_id AND ee.channel_action_id=ca.id AND ee.event_kind='${EMAIL_REPLY_EVENT_KIND}'
            WHERE ca.workspace_id=m.workspace_id AND ca.member_id=m.id
          ))::int AS replied,
          COUNT(*) FILTER (WHERE m.status='completed')::int AS completed,
@@ -4543,7 +4551,7 @@ export async function campaignOperationalAnalytics(
     .prepare(
       `SELECT COUNT(DISTINCT ca.id)::int AS total FROM linkedin_campaign_channel_actions ca
       JOIN linkedin_campaign_email_events ee ON ee.workspace_id=ca.workspace_id AND ee.channel_action_id=ca.id
-      WHERE ca.workspace_id=? AND ca.campaign_id=? AND ca.kind='email' AND ee.event_kind='replied'`
+      WHERE ca.workspace_id=? AND ca.campaign_id=? AND ca.kind='email' AND ee.event_kind='${EMAIL_REPLY_EVENT_KIND}'`
     )
     .get<{ total: number }>(workspaceId, campaignId);
 

@@ -22,6 +22,10 @@ Canonical boundary: docs/superpowers/specs/2026-08-20-agent-native-gtm-os-design
 Current shell: docs/gtm-shell-shape.md.
 Current journeys: docs/product-journeys-and-autonomous-work.md.
 
+## Competitive product priority (October 2026)
+
+Trevra must match and then **exceed Dripify's complete day-to-day experience** for LinkedIn and email outreach. Lead acquisition, import and enrichment, multichannel sequencing, inbox productivity, sender management, integrations, analytics, subscriptions and AI personalization are core product requirements—not optional extensions of a narrower GTM-control-plane concept. Track gaps and implementation evidence in `docs/planning/2026-10-20-dripify-parity-execution-plan.md`. Features unavailable because of platform authorization, privacy or execution constraints remain explicit parity gaps; never claim a capability works merely because some code exists. Preserve deterministic policy, approval, credential custody and idempotent outcomes while closing those gaps.
+
 ## Positioning
 
 The product promise is outcome-first:

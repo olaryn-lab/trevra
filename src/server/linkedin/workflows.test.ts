@@ -6,6 +6,7 @@ import {
   chooseMessageVariant,
   delayMilliseconds,
   diagnoseWorkflow,
+  missingRequiredWorkflowVariables,
   parseWorkflowSteps,
   renderWorkflowTemplate,
   stepUsesBookingLink,
@@ -218,6 +219,26 @@ describe('LinkedIn manager workflows', () => {
   // them could reach a message. A merge field for data the operator already
   // supplied is not a feature request, it is the data being connected to the
   // one place it was collected for.
+
+  it('supports explicit fallback personalization and reports only unprotected missing values', () => {
+    const lead = { firstName: ' ', lastName: '', company: 'Acme' };
+    expect(renderWorkflowTemplate('Hi {{first_name|there}} from {{company}}', lead)).toBe(
+      'Hi there from Acme'
+    );
+    expect(renderWorkflowTemplate('Role: {{custom.role|a founder}}', lead)).toBe('Role: a founder');
+    expect(unsupportedVariables('{{first_name|there}} {{custom.role|someone}}')).toEqual([]);
+    expect(unsupportedVariables('{{unknown_field|there}}')).toEqual(['unknown_field']);
+    const step = workflowStepsSchema.parse([
+      {
+        id: 'manual',
+        action: 'manual_message',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: { suggestedTemplate: 'Hi {{first_name|there}}, call {{phone}}.' }
+      }
+    ])[0];
+    expect(missingRequiredWorkflowVariables(step, lead)).toEqual(['phone']);
+    expect(missingRequiredWorkflowVariables(step, { ...lead, phone: '+41 555' })).toEqual([]);
+  });
 
   it('renders arbitrary imported custom fields and accepts them at validation time', () => {
     expect(unsupportedVariables('Hi {{custom.job_title}} at {{custom.icp_tier}}')).toEqual([]);

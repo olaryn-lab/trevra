@@ -1,0 +1,140 @@
+# Trevra — Dripify-complete execution plan
+
+> **Canonical implementation tracker.** Created 2026-10-20, baseline `a79cf55`, branch `feat/dripify-parity-20261020`.
+> Owner: engineering. Product goal: **deliver the entire useful Dripify experience, then exceed it**. A deliberate absence or disabled route is a **gap**, not parity. Preserve explicit platform/legal/credential risks and never label a feature complete without its end-to-end proof.
+
+## Ground rules and evidence
+
+- This plan supersedes the completion claims in `DRIPIFY_PARITY.md`; that file is an **historical** audit, not the active backlog.
+- Research input: `reports/Dripify feature parity with Trevra.md` and `research_notes/Dripify feature parity with Trevra/`. Both originated as untracked work in the source worktree and are copied into **this feature branch for versioned evidence**; no originals were changed. The report's market findings and code analysis are research, not certification.
+- Trevra's `PRODUCT.md` and `AGENTS.md` govern identity, suppression, deterministic policy, idempotency, credential custody, exact payload approval and recorded unknown outcomes. Competing on Dripify completeness does not license false status claims, unchecked third-party writes, or credential evasion.
+- Workflow: select the highest unblocked **P0** ID; inspect implementation and tests; create task-specific tests; implement; run targeted tests plus `npm run check`; update the ledger below with **actual** commit and result. Only then advance the task to VERIFIED.
+- Status: **NOT STARTED** (planned work not begun), **UNVERIFIED** (code/research exists but no complete end-to-end proof), **IN PROGRESS**, **BLOCKED**, **IMPLEMENTED** (changed but not end-to-end verified), **VERIFIED** (UI + service + DB + worker + tests), or **EXPLICIT GAP**. Existing code is only a starting point.
+- Definition of verified: correct UX including errors; correct tenant-scoped persistence and race behavior; actual provider send or an appropriately controlled test double; idempotent retries and unknown-result handling; analytics accurate; automated regression; no contradictory public claims.
+- Safety: for LinkedIn's unapproved automation/scraping, document restrictions and implement supported/manual alternatives. Local browser execution is not an exemption from LinkedIn terms. Do not disguise gaps as completed functionality.
+- Existing main worktree is dirty and diverged from origin; develop in an isolated worktree. **Do not clean, reset, rebase or overwrite main's unrelated changes.** Do not start/restart live servers.
+
+## Release gates
+
+| Gate                            | Deliverable                                                                                                                                         | Exit criteria                                                                                                                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R0 — trust the system           | email event/funnel, all contact suppression, campaign email compliance/consent, variable rendering, policy/approval, CSV, accurate controls         | zero unsafe sends in negative tests; real writer → DB → readers and worker integration tests                                                                                      |
+| R1 — first-class Dripify parity | lead acquisition and import, campaign builder/execution, finding email, unified inbox, template personalization, AI drafts, comprehensive analytics | founder can enrol representative cohort, reach first correct outbound action, receive replies, handle errors; all documented import paths work or show explicit unsupported state |
+| R2 — connected paid app         | full billing+trial, webhooks, API, CRM, team/roles, exports, inbox productivity                                                                     | subscription lifecycle, webhook delivery retries, CRM idempotency, seat/workspace isolation proven                                                                                |
+| R3 — surpass                    | evidence-grounded AI, intent/response workflows, outcome attribution, polish and trust features                                                     | quality + reliability evaluations compared with Dripify baseline; no broken user routes                                                                                           |
+| Release certification           | all tasks below                                                                                                                                     | all 46 capability rows independently verified or explicitly called out as open gaps; tests green; production smoke checks                                                         |
+
+## Current defect ledger (start here)
+
+| ID      | Prio | Status      | Task and acceptance proof                                                                                                                                                                                                                                                                                                        |
+| ------- | ---- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| TRV-001 | P0   | IMPLEMENTED | Canonical email event keys. Use writer `reply/bounce/opened/clicked`, map condition aliases, canonicalize funnel and channel counts. Regression: real recorded events visible in branch and analytics, late replies correctly attributed.                                                                                        |
+| TRV-002 | P0   | VERIFIED    | Email 'messaged' = confirmed `sent` channel action. No counting claimed/unknown/failed. Regression with email-only campaign.                                                                                                                                                                                                     |
+| TRV-003 | P0   | IMPLEMENTED | Distinguish reply, bounce, unsubscribe, delivery failure in member outcome and analytics. Bounce must not proceed down 'delivered' path; unsubscribes must not inflate replies.                                                                                                                                                  |
+| TRV-004 | P0   | IN PROGRESS | Campaign email execution through a dedicated audited adapter reusing first-touch checks: sender binding, compliance footer, lawful basis, suppression, reply sync, DNS, RFC8058 unsubscribe, policy, rendered payload hash, idempotency and no blind unknown retry. Workspace failure pauses email leg; lead failure skips lead. |
+| TRV-005 | P0   | IMPLEMENTED | Campaign tracking disclosure matches actual pixel/link rewriting, defaults off, documented consent. E2E for off/on.                                                                                                                                                                                                              |
+| TRV-006 | P0   | IMPLEMENTED | Never-contact exclusion enforced at enrolment, runner and final claim/send, with atomic cancellation of queued/held actions when a new exclusion is added. Keep non-removable distinction.                                                                                                                                       |
+| TRV-007 | P0   | VERIFIED    | Safe CSV serializer for all exports (including leading whitespace/control characters and formula prefixes), roundtrip compatible with Excel/Sheets; regression for malicious CSV fields.                                                                                                                                         |
+| TRV-008 | P0   | VERIFIED    | Support `{{field&#124;fallback}}`; hold on missing required variables, re-evaluate after enrichment, and do not plan any unsafe outbound task.                                                                                                                                                                                   |
+| TRV-009 | P0   | NOT STARTED | Workspace policy covers LinkedIn actions/campaign email/community replies; allow/deny/require_approval are visible and enforced at last safe send boundary.                                                                                                                                                                      |
+| TRV-010 | P0   | NOT STARTED | Credential custody: move LinkedIn secrets to allowed custody or obtain a documented, security-reviewed self-hosted exception. No secret dumping in logs/backups.                                                                                                                                                                 |
+| TRV-011 | P0   | IN PROGRESS | Align UI/server endorsement count, daily lead cap, safety route, worker entrypoint and all published claims. Remove unsupported open-source claim or add approved LICENSE. Update AGENTS routing identifiers and stale parity docs.                                                                                              |
+
+## Full Dripify capability parity registry
+
+Task IDs are permanent. Each status requires evidence; baseline findings below are from _static_ analysis, not operational verification. All registry tasks start NOT STARTED unless marked VERIFIED with a test/commit in the execution journal.
+
+| ID      | Area                          | Required Trevra end-state (must match or exceed Dripify)                                                                                 | Gap at baseline            | Priority | Verification |
+| ------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | -------- | ------------ |
+| TRV-012 | LinkedIn actions              | Invites, DMs, profile visits, follow/unfollow, InMail, withdraw and relevant social actions work on correct seats                        | coded; E2E uncertain       | P1       | UNVERIFIED   |
+| TRV-013 | Skill endorsements            | Requested endorsed-skill count equals actual action count                                                                                | UI accepts 1–10, driver 1  | P1       | IN PROGRESS  |
+| TRV-014 | Company/group/event           | Supported actions accurately report success, failures, restrictions and needed permissions                                               | coded, verify              | P2       | UNVERIFIED   |
+| TRV-015 | Conditions                    | Branch + monitor across all channels and aliases                                                                                         | email names broken         | P0       | IN PROGRESS  |
+| TRV-016 | Delay/reply/stop/resume       | Cross-campaign stop-on-reply, proper pacing and durable resume                                                                           | verify                     | P0       | UNVERIFIED   |
+| TRV-017 | Live campaign edits           | Versioned snapshots + intentional opt-in updates                                                                                         | coded, verify              | P1       | UNVERIFIED   |
+| TRV-018 | Templates                     | At least parity-quality saved and starter templates by source/campaign objective                                                         | 4 vs 18+                   | P2       | NOT STARTED  |
+| TRV-019 | A/B testing                   | Stable variant assignment, accurate tracking and meaningful confidence labels                                                            | coded, verify              | P1       | UNVERIFIED   |
+| TRV-020 | Sender capacity               | Multi-seat fairness, rotation, warmup, caps across campaigns                                                                             | coded, verify              | P1       | UNVERIFIED   |
+| TRV-021 | LinkedIn search intake        | User-visible supported search workflow; no silent 409 disguised as done                                                                  | route returns 409          | P1       | NOT STARTED  |
+| TRV-022 | Sales Navigator intake        | Supported, appropriately authorized import path and explicit restrictions                                                                | scraping path disabled     | P1       | NOT STARTED  |
+| TRV-023 | Post engagers & evergreen     | Post/comment/like lead selection and sustained refresh where permitted; otherwise explicit gap                                           | mostly absent              | P1       | NOT STARTED  |
+| TRV-024 | CSV/contact fields            | Flexible mapping, custom fields, skip report, workspace dedup, idempotent bulk import                                                    | partial                    | P0       | UNVERIFIED   |
+| TRV-025 | Pasted URLs                   | Resolve or request missing identity data; never send blank personalization                                                               | name fields empty          | P0       | IN PROGRESS  |
+| TRV-026 | Dedup                         | Person/contact/list/campaign and concurrent import rules                                                                                 | code exists; verify        | P0       | UNVERIFIED   |
+| TRV-027 | Never-contact and suppression | Blacklist and do-not-contact enforced on **every** channel and pending action                                                            | campaign exclusion missing | P0       | IN PROGRESS  |
+| TRV-028 | List management               | Rename/delete, import reports, errors and member reparenting                                                                             | UI gaps                    | P2       | NOT STARTED  |
+| TRV-029 | Account import/inbound        | Account and capture-source leads flow into campaigns                                                                                     | partial                    | P1       | UNVERIFIED   |
+| TRV-030 | Email finder                  | Customer-approved provider connection, confidence threshold, credits, reliable email_found branch                                        | environment-only endpoint  | P1       | NOT STARTED  |
+| TRV-031 | Email steps                   | Mailbox binding, threads, quotas, send state and suppression                                                                             | campaign safety gap        | P0       | UNVERIFIED   |
+| TRV-032 | Reply/bounce detection        | First and late replies, unsubscribe, bounce, branch and stop state all correct                                                           | broken                     | P0       | IN PROGRESS  |
+| TRV-033 | Open/click                    | Honest disclosure, off by default, optional tracked events and privacy state                                                             | misleading UI              | P0       | IN PROGRESS  |
+| TRV-034 | Deliverability                | SPF/DKIM/DMARC, footer, unsubscribe, reply sync and consent                                                                              | campaign path missing      | P0       | NOT STARTED  |
+| TRV-035 | Unified inbox                 | Search and read LinkedIn/Email/InMail with correct sender, attachments and thread ownership                                              | partial                    | P1       | UNVERIFIED   |
+| TRV-036 | Inbox organization            | Tags, notes, assignments, search/filters, archived/read actions                                                                          | missing                    | P1       | NOT STARTED  |
+| TRV-037 | Reply classification          | Deterministic and suggested classes, human review before state changes                                                                   | limited                    | P2       | UNVERIFIED   |
+| TRV-038 | Profile variables             | Core/custom fields, fallback syntax, no unsafe blank tokens                                                                              | missing fallback           | P0       | IN PROGRESS  |
+| TRV-039 | AI composing                  | Lead-specific drafting, approval, immutable payload hash, edit-invalidate                                                                | absent                     | P1       | NOT STARTED  |
+| TRV-040 | Rich content                  | Explicit support matrix for images/voice/GIF/video where provider supports                                                               | incomplete                 | P2       | UNVERIFIED   |
+| TRV-041 | Execution environment         | Dripify-like continuity including background tasks; clear distinction between email/cloud and LinkedIn/manual/companion with ToS caveats | companion must run         | P1       | UNVERIFIED   |
+| TRV-042 | Limits and safety             | Per-action pacing and transparent runtime overrides; no spoofed guarantees                                                               | coded, verify              | P0       | UNVERIFIED   |
+| TRV-043 | Human-send                    | Real actionable draft/handoff path and accurate sent confirmation                                                                        | coded, verify              | P1       | UNVERIFIED   |
+| TRV-044 | Multiple accounts             | Multiple seats, capacity, isolation and rotation                                                                                         | coded, verify              | P1       | UNVERIFIED   |
+| TRV-045 | Roles/team                    | Manager/team user roles and access controls                                                                                              | owner/member only          | P2       | NOT STARTED  |
+| TRV-046 | Per-rep reporting             | Attribution by human owner/queued-by, export, timeseries and seat/campaign filters                                                       | partial                    | P1       | UNVERIFIED   |
+| TRV-047 | Agencies/white label          | Agency workspace operations/branding evaluated against customer demand                                                                   | excluded by old vision     | P2       | NOT STARTED  |
+| TRV-048 | Funnel analytics              | Truthful messaged, accepted, replied, bounced, unsubscribed across channels                                                              | broken email aggregation   | P0       | IN PROGRESS  |
+| TRV-049 | Stats export                  | Dates, filters, campaign/rep CSV, formula safe                                                                                           | partial                    | P1       | IN PROGRESS  |
+| TRV-050 | Revenue outcomes              | Opportunities/CRM activity links, consent-aware conversion attribution                                                                   | partial                    | P2       | UNVERIFIED   |
+| TRV-051 | CRM                           | Connect/upsert/log HubSpot, Salesforce, Pipedrive (+ Attio); deterministic identity matching and custody                                 | limited notes only         | P1       | NOT STARTED  |
+| TRV-052 | Webhooks                      | Signed outbound event subscriptions, immutable event occurrence IDs, retry/DLQ/deactivation, safe payloads                               | none                       | P1       | NOT STARTED  |
+| TRV-053 | Public API                    | Documented supported authenticated API, rate limits, OpenAPI & consistent errors                                                         | fragmented                 | P1       | NOT STARTED  |
+| TRV-054 | MCP                           | Agent read/prepare/run access without unapproved external effects                                                                        | existing, verify           | P2       | UNVERIFIED   |
+| TRV-055 | Approval/policy/ledger        | Every consequential external write covered by named adapter, immutable approvals and durable audit                                       | bypasses                   | P0       | UNVERIFIED   |
+| TRV-056 | Deployment/custody            | Reliable self-host/hosted paths, safe secrets, clear operational requirements                                                            | gaps                       | P1       | NOT STARTED  |
+| TRV-057 | Billing/trial                 | No-card trial, first purchase, upgrade/downgrade/cancel, entitlement gating, idempotent usage and annual renewal notice                  | mostly unenforced          | P1       | NOT STARTED  |
+
+> 46 original competitor dimensions appear in the research. Registry IDs 012–057 are 46 independently tracked dimensions; 001–011 are cross-cutting defects that may close multiple rows. Avoid double-counting dimensions and defects.
+
+## Dependencies and sequencing
+
+1. **R0-A** `001–003,015,032,048`: canonical email writer → persistence → branch and funnel; then tests. Also cover late reply and unsubscribe semantics.
+2. **R0-B** `007`: reusable CSV serializer + regression for every export site.
+3. **R0-C** `008,025,038`: template grammar + strict hold, cross-channel integration test.
+4. **R0-D** `006,027`: exclusion transactional path + send-time enforcement.
+5. **R0-E** `004,005,009,010,011,031,033,034,055`: campaign adapter & policy, UI contract/credential/docs.
+6. **R1-A** `021–024,026,028–030`: lead intake first; gated source-specific connectors where provider rules allow.
+7. **R1-B** `012–020,039–044`: sequencer E2E + AI personalizer/approval + background/companion truth.
+8. **R2** `035–037,045–047,049–054,056–057`: inbox, team, API/integrations, commercial readiness.
+9. **R3** customer/user testing and competitive comparison; resolve all named product gaps.
+
+## Acceptance scenarios (run in real Postgres test setup)
+
+- A lead imported with only a URL and a message `Hi {{first_name}}` **never** sends `Hi `; if fallback is present, it renders correctly; if manually populated after hold, resumes safely.
+- Email-only campaign: confirmed sent counts as messaged exactly once; a reply increases replied once; opened/clicked drive conditions; bounce chooses bounced route; unsubscribe suppresses and does not count as reply.
+- Suppressed or excluded recipient before send gets **no** LinkedIn/email action, even if enrolled before exclusion.
+- Missing compliance footer, DNS, mailbox reply sync or List-Unsubscribe capability prevents campaign email from sending; provider unknown isn't auto-replayed.
+- CSV export with `=HYPERLINK(...)`, whitespace-`@SUM`, leading tab, quotes/newlines opens as literal cell text, not formula.
+- Every UI range and route agrees with server. No public claim promises unsupported sourcing, cloud execution or open-source licensing.
+- Billing over limit, plan change and repeated retry never bypass charges or send permissions; webhook duplicate events generate one idempotent delivery.
+- Git worktree independent, all tests green; review code diffs for deliberate omissions.
+
+## Execution journal
+
+| Date       | Task IDs            | Change + evidence                                                                                                                                                                                                                                             | Status                           |
+| ---------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------- |
+| 2026-10-20 | all                 | Baseline a79cf55; main has unrelated changes and local/origin divergence. Initial 46-dimension comparison was static research, not end-to-end proof.                                                                                                          | BASELINE                         |
+| 2026-10-20 | 001–003,015,032,048 | Shared event vocabulary, corrected sent-only email funnel and email reply counter; unsubscribes excluded rather than replied. Writer/analytics regression in Postgres: channel suite 13/13; event keys 5/5. Late-reply/bounce condition E2E still open.       | IMPLEMENTED / PARTIALLY VERIFIED |
+| 2026-10-20 | 007                 | Shared CSV serializer prevents formula interpretation from untrusted contact fields. Adversarial unit suite: 9/9, exporter uses it.                                                                                                                           | VERIFIED                         |
+| 2026-10-20 | 008,025,038         | Fallback syntax and pre-planning missing-value hold; Postgres proof of hold, enrichment and resumed correct manual task. Workflow tests 24/24; runner 43/43. Profile URL-only intake remains incomplete.                                                      | 008 VERIFIED; intake open        |
+| 2026-10-20 | 005,006,011,027     | Tracking disclosure corrected; default off; late Never-contact membership cancellation tested; final LinkedIn guard; UI daily cap and endorsement count corrected; AGENTS routing names fixed. Campaign-email compliance and remaining UI/claims outstanding. | IMPLEMENTED / IN PROGRESS        |
+| 2026-10-20 | release gate        | `npm run check` completed exit 0 on the final code including PostgreSQL tests, 14/14 campaign-channel regressions, TypeScript and production build. Existing SBOM generator swallowed a dependency-resolution error; SBOM not regenerated.                    | CHECK PASSED; SBOM NOT VERIFIED  |
+| 2026-10-20 | 004,006,027         | Added campaign-email last-moment Never-contact and do-not-contact refusals before tracking/provider side effects. Postgres channel suite 14/14; full compliance/approval adapter still open.                                                                  | IN PROGRESS / IMPLEMENTED        |
+| 2026-10-20 | research            | Copied original competitive report and five research note files into this branch so plan survives across sessions, preserving untracked originals.                                                                                                            | VERSIONED                        |
+
+## Handoff checklist
+
+- [ ] Each task has a real status, owning commit, acceptance-test evidence and remaining blockers.
+- [ ] `npm run check` passes; targeted new tests pass with real PostgreSQL.
+- [ ] Client and server agree; errors/suppression/uncertain states tested; negative tests prevent prohibited effects.
+- [ ] Screens and relevant documentation updated; recheck all 46 capability rows against actual code.
+- [ ] Mark explicit remaining parity gaps and platform constraints rather than calling an incomplete release complete.

@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto';
 import { id, type Db } from '../db.js';
 import { createSuppression } from '../suppressions.js';
-import type { VerifiedEmailOutcome } from '../email-outcomes.js';
+import { emailEventBranchKeys, type CampaignEmailEventKind } from './email-event-kind.js';
 import { projectCampaignEmailDelivery, projectCampaignEmailReply } from '../conversations.js';
 import { executeConnectedAction, readConnectedEmailThreadEvents } from '../integration-service.js';
 import { evaluateEmailLawfulBasis } from '../compliance/lawful-basis.js';
 import { JURISDICTION_RULES_DISCLAIMER } from '../compliance/jurisdiction-rules.js';
 import { campaignSnapshotSteps } from './managed-campaigns.js';
 import { delayMilliseconds } from './workflows.js';
+import { filterExcluded } from './exclusions.js';
 import { publicEmailOrigin } from '../email/public-origin.js';
 export type CampaignChannelKind = 'email' | 'find_email';
 export type CampaignChannelStatus =
@@ -302,8 +303,24 @@ async function executeEmail(
   // country requires one. Checked BEFORE tracking tokens exist, so a refused
   // send leaves nothing behind. Not legal advice; verify with counsel.
   const lead = await db
-    .prepare('SELECT person_id, country FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
-    .get<{ person_id: string | null; country: string | null }>(row.workspace_id, row.contact_id);
+    .prepare(
+      'SELECT person_id,country,profile_url,do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?'
+    )
+    .get<{
+      person_id: string | null;
+      country: string | null;
+      profile_url: string | null;
+      do_not_contact: boolean;
+    }>(row.workspace_id, row.contact_id);
+  if (!lead || lead.do_not_contact)
+    throw new Error(
+      'Campaign email recipient is missing or marked do-not-contact; nothing was sent.'
+    );
+  if (lead.profile_url) {
+    const blacklist = await filterExcluded(db, row.workspace_id, [lead.profile_url]);
+    if (blacklist.excluded.length > 0)
+      throw new Error('Recipient is on the Never contact list; nothing was sent.');
+  }
   const lawfulBasis = await evaluateEmailLawfulBasis(db, row.workspace_id, {
     email: recipient,
     personId: lead?.person_id ?? null,
@@ -487,7 +504,9 @@ function definiteFailure(error: unknown): boolean {
       error.message
     ) ||
     // Anchored: only our own pre-send refusal, never text a provider error echoes.
-    /^Lawful basis missing for cold email:/.test(error.message)
+    /^(?:Lawful basis missing for cold email:|Campaign email recipient is missing or marked do-not-contact;|Recipient is on the Never contact list;)/.test(
+      error.message
+    )
   );
 }
 
@@ -843,7 +862,7 @@ export async function recordCampaignEmailEvent(
   input: {
     channelActionId?: string;
     externalRef?: string;
-    eventKind: 'opened' | 'clicked' | VerifiedEmailOutcome;
+    eventKind: CampaignEmailEventKind;
     providerEventId?: string | null;
     metadata?: Record<string, unknown>;
     occurredAt?: string;
@@ -917,7 +936,9 @@ export async function recordCampaignEmailEvent(
        WHERE workspace_id=? AND id=?`
     )
     .run(
-      JSON.stringify({ [`external:email_${input.eventKind}`]: true }),
+      JSON.stringify(
+        Object.fromEntries(emailEventBranchKeys(input.eventKind).map((key) => [key, true]))
+      ),
       now.toISOString(),
       workspaceId,
       row.member_id
@@ -948,13 +969,14 @@ export async function recordCampaignEmailEvent(
   }
 
   if (input.eventKind === 'reply' || input.eventKind === 'unsubscribe') {
+    const newStatus = input.eventKind === 'unsubscribe' ? 'excluded' : 'replied';
     await db.transaction(async (tx) => {
       await tx
         .prepare(
-          `UPDATE linkedin_campaign_members SET status='replied',next_eligible_at=NULL,ended_at=?::timestamptz,updated_at=?::timestamptz
-           WHERE workspace_id=? AND id=? AND status IN ('pending','active','waiting','manual','paused')`
+          `UPDATE linkedin_campaign_members SET status=?,next_eligible_at=NULL,ended_at=?::timestamptz,updated_at=?::timestamptz
+           WHERE workspace_id=? AND id=? AND status IN ('pending','active','waiting','manual','paused','completed')`
         )
-        .run(now.toISOString(), now.toISOString(), workspaceId, row.member_id);
+        .run(newStatus, now.toISOString(), now.toISOString(), workspaceId, row.member_id);
       await tx
         .prepare(
           `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL WHERE workspace_id=? AND campaign_member_id=? AND status IN ('planned','held') AND claimed_at IS NULL`
