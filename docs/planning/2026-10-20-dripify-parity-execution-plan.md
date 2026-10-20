@@ -138,6 +138,8 @@ Task IDs are permanent. Each status requires evidence; baseline findings below a
 
 | 2026-10-20 | implementation commits | `6b1a2f9`: campaign-email fail-closed preflight, shared-provider identity check and safe skip/defer. `a4ef0dc`: server-side inbox search, UI paging, search index and database/API regressions. Both passed staged-file typecheck hooks; targeted tests: email 20+38+14 and inbox 54+53. Main/worktree unchanged; no deploy. | COMMITTED; PARITY INCOMPLETE |
 
+| 2026-10-20 | 035,036 and release gate | `b05ba3a`: search-page refresh deduplication, new 3/3 client tests. Final `npm run check` exits 0 on all implementation commits including the UI fix: full PostgreSQL/Vitest suite and production client/server build. Known `npm sbom` dependency error is suppressed by existing build script; SBOM artifact regeneration NOT verified. Vite chunk-size warning nonblocking. No production smoke/deploy, no full Dripify parity. | FULL CHECK PASSED; SBOM/DEPLOY NOT VERIFIED |
+
 ## Handoff checklist
 
 - [ ] Each task has a real status, owning commit, acceptance-test evidence and remaining blockers.
