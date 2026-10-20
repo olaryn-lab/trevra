@@ -375,6 +375,12 @@ import {
   listLinkedInPostPolicyEvents
 } from './linkedin/post-policy.js';
 import {
+  approveWithdrawal,
+  listPendingWithdrawalReviews,
+  listWithdrawalPolicyEvents,
+  reviewWithdrawal
+} from './linkedin/withdrawal-policy.js';
+import {
   INVITE_NOTE_MAX_CHARS,
   MAX_SEQUENCE_STEPS,
   SUPPORTED_MERGE_FIELDS
@@ -7992,6 +7998,54 @@ export function createApp(db: Db) {
     })
   );
 
+  app.get(
+    '/api/linkedin/withdrawals/approvals',
+    linkedinRoute(async (req, res) => {
+      res.json({ reviews: await listPendingWithdrawalReviews(db, req.auth!.workspaceId) });
+    })
+  );
+  app.get(
+    '/api/linkedin/withdrawals/approvals/:id/audit',
+    linkedinRoute(async (req, res) => {
+      const withdrawalId = String(req.params.id);
+      const row = await db
+        .prepare('SELECT id FROM linkedin_withdrawals WHERE workspace_id=? AND id=?')
+        .get<{ id: string }>(req.auth!.workspaceId, withdrawalId);
+      if (!row) throw new LinkedInApiError('Withdrawal not found', 404);
+      res.json({
+        events: await listWithdrawalPolicyEvents(db, req.auth!.workspaceId, withdrawalId)
+      });
+    })
+  );
+  app.post(
+    '/api/linkedin/withdrawals/approvals/:id',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve a LinkedIn withdrawal');
+      const withdrawalId = String(req.params.id);
+      const input = z
+        .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .parse(req.body ?? {});
+      if (!(await reviewWithdrawal(db, req.auth!.workspaceId, withdrawalId)))
+        throw new LinkedInApiError('Withdrawal not found or no longer pending', 404);
+      try {
+        res.json({
+          review: await approveWithdrawal(
+            db,
+            req.auth!.workspaceId,
+            withdrawalId,
+            input.contentHash,
+            req.auth!.userId
+          )
+        });
+      } catch (error) {
+        throw new LinkedInApiError(
+          error instanceof Error ? error.message : 'Withdrawal approval failed',
+          409
+        );
+      }
+    })
+  );
   app.get(
     '/api/linkedin/withdrawals',
     linkedinRoute(async (req, res) => {

@@ -2117,6 +2117,33 @@ export interface LinkedInPostReview {
   approved: boolean;
   policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
 }
+export interface LinkedInWithdrawalReview {
+  withdrawalId: string;
+  seatKey: string;
+  actionId: string;
+  targetRef: string;
+  pendingDays: number | null;
+  contentHash: string;
+  approved: boolean;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function getLinkedInWithdrawalReviews(): Promise<LinkedInWithdrawalReview[]> {
+  return (
+    await request<{ reviews: LinkedInWithdrawalReview[] }>('/api/linkedin/withdrawals/approvals')
+  ).reviews;
+}
+export async function approveLinkedInWithdrawalReview(
+  withdrawalId: string,
+  contentHash: string
+): Promise<LinkedInWithdrawalReview> {
+  return (
+    await request<{ review: LinkedInWithdrawalReview }>(
+      `/api/linkedin/withdrawals/approvals/${encodeURIComponent(withdrawalId)}`,
+      { method: 'POST', body: JSON.stringify({ contentHash }) }
+    )
+  ).review;
+}
+
 export async function getLinkedInPostReview(postId: string): Promise<LinkedInPostReview> {
   return (
     await request<{ review: LinkedInPostReview }>(

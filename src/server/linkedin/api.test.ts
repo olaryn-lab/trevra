@@ -2005,6 +2005,71 @@ describe('account (seat) scoping', () => {
   });
 });
 
+describe('Withdrawal policy approvals', () => {
+  it('requires exact owner review and never exposes another workspace invite', async () => {
+    const tokenA = await seedSession(WORKSPACE_A, 'Withdraw approval A');
+    const tokenB = await seedSession(WORKSPACE_B, 'Withdraw approval B');
+    await seat(WORKSPACE_A);
+    await seat(WORKSPACE_B);
+    const target = 'https://www.linkedin.com/in/withdraw-review-http/';
+    const written = await recordAction(
+      db,
+      {
+        workspaceId: WORKSPACE_A,
+        kind: 'invite',
+        targetRef: target,
+        status: 'sent',
+        source: 'export'
+      },
+      new Date(NOW.getTime() - 40 * 86400000)
+    );
+    const withdrawalId = `lwd_api_${randomBytes(6).toString('hex')}`;
+    await db
+      .prepare(
+        `INSERT INTO linkedin_withdrawals(
+        id,workspace_id,seat_key,action_id,target_ref,status,pending_days)
+       VALUES (?,?,'owner',?,?,'queued',40)`
+      )
+      .run(withdrawalId, WORKSPACE_A, written.id, target);
+    const path = '/api/linkedin/withdrawals/approvals';
+    expect((await as(tokenB).get(path).expect(200)).body.reviews).toEqual([]);
+    await as(tokenB)
+      .post(`${path}/${withdrawalId}`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(404);
+    await as(tokenB).get(`${path}/${withdrawalId}/audit`).expect(404);
+    const review = (await as(tokenA).get(path).expect(200)).body.reviews[0];
+    expect(review).toMatchObject({
+      withdrawalId,
+      targetRef: target,
+      approved: false,
+      policy: { effect: 'require_approval' }
+    });
+    await as(tokenA)
+      .post(`${path}/${withdrawalId}`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(409);
+    await as(tokenA)
+      .post(`${path}/${withdrawalId}`)
+      .send({ contentHash: review.contentHash })
+      .expect(200);
+    expect((await as(tokenA).get(path).expect(200)).body.reviews).toEqual([]);
+    expect((await as(tokenA).get(`${path}/${withdrawalId}/audit`).expect(200)).body.events).toEqual(
+      [
+        expect.objectContaining({
+          decision: 'approved',
+          contentHash: review.contentHash,
+          actorId: `usr_${WORKSPACE_A}`
+        })
+      ]
+    );
+    await db
+      .prepare('UPDATE linkedin_actions SET status=? WHERE workspace_id=? AND id=?')
+      .run('accepted', WORKSPACE_A, written.id);
+    expect((await as(tokenA).get(path).expect(200)).body.reviews).toEqual([]);
+  });
+});
+
 describe('LinkedIn posts', () => {
   const BLOCKS = [{ runs: [{ type: 'text', text: 'Hello world' }] }];
 

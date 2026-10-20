@@ -92,6 +92,7 @@ import { useActiveSeatKey } from './LinkedInActiveAccount';
 import { useIsWorkspaceOwner } from './auth-client';
 import { CampaignEmailApprovals } from './CampaignEmailApprovals';
 import { LinkedInActionApprovals } from './LinkedInActionApprovals';
+import { LinkedInWithdrawalApprovals } from './LinkedInWithdrawalApprovals';
 import { useWorkspaceMembers } from './TeamScreen';
 import { ConfirmDrawer } from './ui/dialog';
 import { ChoiceMenu } from './ui/choice-menu';
@@ -2803,6 +2804,7 @@ export function OutreachManagerRead({
     <div className="page-stack li-polished">
       {error && <div className="error-banner">{error}</div>}
       <LinkedInActionApprovals />
+      <LinkedInWithdrawalApprovals />
 
       <section className="page-panel" id="mgr-campaigns">
         <div className="section-heading">

@@ -1387,6 +1387,10 @@ describe('owner-only acts', () => {
     // manager-team-api.test.ts.
     await member.agent.delete('/api/linkedin/manager/lead-lists/lst_x').expect(403);
     await member.agent
+      .post('/api/linkedin/withdrawals/approvals/withdrawal_x')
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(403);
+    await member.agent
       .post('/api/linkedin/posts/post_x/approve')
       .send({ contentHash: '0'.repeat(64) })
       .expect(403);

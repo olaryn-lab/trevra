@@ -87,6 +87,21 @@ beforeEach(async () => {
       NOW.toISOString(),
       NOW.toISOString()
     );
+  await db
+    .prepare(
+      `INSERT INTO workspace_policies(id,workspace_id,name,priority,action_pattern,
+      effect,conditions_json,enabled,created_at,updated_at)
+      VALUES (?,?,?,?,?,'allow','{}'::jsonb,TRUE,?::timestamptz,?::timestamptz)`
+    )
+    .run(
+      id('policy'),
+      WORKSPACE_ID,
+      'Fixture withdrawal allow',
+      100,
+      'action:linkedin.withdraw',
+      NOW.toISOString(),
+      NOW.toISOString()
+    );
   await upsertSeat(
     db,
     WORKSPACE_ID,

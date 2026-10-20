@@ -29,6 +29,11 @@ import type { LinkedInSafetyVerdict } from './guard.js';
 import { LINKEDIN_LIMITS } from './limits.js';
 import { OWNER_SEAT_KEY, getSeat, upsertSeat } from './seats.js';
 import {
+  approveWithdrawal,
+  listPendingWithdrawalReviews,
+  reviewWithdrawal
+} from './withdrawal-policy.js';
+import {
   DEFAULT_STALE_AFTER_DAYS,
   WITHDRAWN_STATUS,
   claimNextWithdrawal,
@@ -40,6 +45,7 @@ import {
   evaluateWithdrawalSafety,
   executeWithdrawal,
   markActionWithdrawn,
+  releaseWithdrawalClaim,
   runWithdrawalBatch,
   selectWithdrawalCandidates,
   sweepStaleInvites,
@@ -80,6 +86,15 @@ beforeEach(async () => {
   await db.prepare('DELETE FROM linkedin_withdrawals WHERE workspace_id=?').run(WORKSPACE_ID);
   await db.prepare('DELETE FROM linkedin_actions WHERE workspace_id=?').run(WORKSPACE_ID);
   await db.prepare('DELETE FROM linkedin_seats WHERE workspace_id=?').run(WORKSPACE_ID);
+  await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE_ID);
+  await db
+    .prepare(
+      `INSERT INTO workspace_policies(
+      id,workspace_id,name,priority,action_pattern,effect,conditions_json,enabled,created_at,updated_at)
+     VALUES ('pol_withdraw_fixture',?,'Fixture withdraw allow',100,
+       'action:linkedin.withdraw','allow','{}'::jsonb,TRUE,?::timestamptz,?::timestamptz)`
+    )
+    .run(WORKSPACE_ID, NOW.toISOString(), NOW.toISOString());
 });
 
 afterEach(async () => {
@@ -636,6 +651,112 @@ describe('executeWithdrawal', () => {
     return claimed;
   }
 
+  it('holds unapproved withdrawals, releases the claim, and clicks only after exact approval', async () => {
+    await steadySeat();
+    await pendingInvite('owner-review', 40);
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE_ID);
+    const claimed = await claimOne();
+    const review = (await reviewWithdrawal(db, WORKSPACE_ID, claimed.id))!;
+    expect(review.policy.effect).toBe('require_approval');
+    expect(
+      (await listPendingWithdrawalReviews(db, WORKSPACE_ID)).map((row) => row.withdrawalId)
+    ).toContain(claimed.id);
+    const { driver, targets } = fakeDriver();
+    const blocked = await executeWithdrawal(
+      db,
+      SEAT,
+      { driver, page, evaluate: async () => allowed() },
+      claimed,
+      NOW
+    );
+    expect(blocked).toMatchObject({
+      status: 'queued',
+      blocked: true,
+      withdrawn: false,
+      halt: false
+    });
+    expect(targets).toEqual([]);
+    const claim = await db
+      .prepare('SELECT claimed_at FROM linkedin_withdrawals WHERE id=?')
+      .get<{ claimed_at: string | null }>(claimed.id);
+    expect(claim?.claimed_at).toBeNull();
+    await expect(
+      approveWithdrawal(db, WORKSPACE_ID, claimed.id, '0'.repeat(64), 'owner', NOW)
+    ).rejects.toThrow('changed');
+    await approveWithdrawal(db, WORKSPACE_ID, claimed.id, review.contentHash, 'owner', NOW);
+    const again = await claimNextWithdrawal(db, SEAT, 'lbatch_2', NOW);
+    expect(again?.id).toBe(claimed.id);
+    const sent = await executeWithdrawal(
+      db,
+      SEAT,
+      { driver, page, evaluate: async () => allowed() },
+      again!,
+      NOW
+    );
+    expect(sent.withdrawn).toBe(true);
+    expect(targets).toEqual([claimed.targetRef]);
+    const events = await db
+      .prepare(
+        'SELECT decision FROM linkedin_withdrawal_policy_events WHERE workspace_id=? AND withdrawal_id=?'
+      )
+      .all<{ decision: string }>(WORKSPACE_ID, claimed.id);
+    expect(events.map((row) => row.decision).sort()).toEqual(
+      ['held', 'approved', 'allowed'].sort()
+    );
+  });
+
+  it('revoking workspace permission blocks an already-approved withdrawal', async () => {
+    await steadySeat();
+    await pendingInvite('revoked', 40);
+    const claimed = await claimOne();
+    await releaseWithdrawalClaim(db, claimed.id, WORKSPACE_ID);
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE_ID);
+    const review = (await reviewWithdrawal(db, WORKSPACE_ID, claimed.id))!;
+    await approveWithdrawal(db, WORKSPACE_ID, claimed.id, review.contentHash, 'owner', NOW);
+    await db
+      .prepare(
+        `INSERT INTO workspace_policies(
+       id,workspace_id,name,priority,action_pattern,effect,conditions_json,enabled,created_at,updated_at)
+       VALUES ('pol_withdraw_deny',?,'Deny withdrawals',100,'action:linkedin.withdraw',
+         'deny','{}'::jsonb,TRUE,?::timestamptz,?::timestamptz)`
+      )
+      .run(WORKSPACE_ID, NOW.toISOString(), NOW.toISOString());
+    const again = await claimNextWithdrawal(db, SEAT, 'lbatch_2', NOW);
+    const { driver, targets } = fakeDriver();
+    const result = await executeWithdrawal(
+      db,
+      SEAT,
+      { driver, page, evaluate: async () => allowed() },
+      again!,
+      NOW
+    );
+    expect(result).toMatchObject({ status: 'queued', blocked: true, withdrawn: false });
+    expect(targets).toEqual([]);
+    expect(await reviewWithdrawal(db, 'another_workspace', claimed.id)).toBeNull();
+    await expect(
+      approveWithdrawal(db, 'another_workspace', claimed.id, review.contentHash, 'other', NOW)
+    ).rejects.toThrow('no longer awaiting');
+  });
+
+  it('shows pending reviews past 200 earlier stale queue entries', async () => {
+    await steadySeat();
+    await pendingInvite('after-200', 40);
+    await sweepStaleInvites(db, SEAT, NOW);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_withdrawals(
+        id,workspace_id,seat_key,action_id,target_ref,status,pending_days,queued_at)
+       SELECT 'lwd_stale_paging_'||i,?, 'owner','missing_action_'||i,
+          'missing_target_'||i,'queued',40,?::timestamptz + interval '1 minute'
+       FROM generate_series(1,205) AS i`
+      )
+      .run(WORKSPACE_ID, NOW.toISOString());
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE_ID);
+    const reviews = await listPendingWithdrawalReviews(db, WORKSPACE_ID);
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]?.targetRef).toBe('https://www.linkedin.com/in/after-200/');
+  });
+
   it('withdraws, marks the ledger, and settles the queue row', async () => {
     await steadySeat();
     const actionId = await pendingInvite('maya', 40);
@@ -843,6 +964,32 @@ describe('runWithdrawalBatch', () => {
       }
     };
   }
+
+  it('does not reclaim a held withdrawal and still executes the approved next withdrawal', async () => {
+    await steadySeat();
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE_ID);
+    await pendingInvite('first-hold', 40);
+    await pendingInvite('second-approved', 40);
+    await sweepStaleInvites(db, SEAT, NOW);
+    const pending = await listPendingWithdrawalReviews(db, WORKSPACE_ID);
+    const approved = pending.find((row) => row.targetRef.includes('second-approved'))!;
+    await approveWithdrawal(
+      db,
+      WORKSPACE_ID,
+      approved.withdrawalId,
+      approved.contentHash,
+      'owner',
+      NOW
+    );
+    const { deps, targets } = batchDeps();
+    const result = await runWithdrawalBatch(db, SEAT, deps);
+    expect(result).toMatchObject({ withdrawn: 1, blocked: 1, halted: false });
+    expect(targets).toEqual(['https://www.linkedin.com/in/second-approved/']);
+    const stillQueued = await listPendingWithdrawalReviews(db, WORKSPACE_ID);
+    expect(stillQueued.map((row) => row.targetRef)).toContain(
+      'https://www.linkedin.com/in/first-hold/'
+    );
+  });
 
   it('PACES THE QUEUE -- a gap between every withdrawal but the first', async () => {
     // Withdrawal actions use the same queue rhythm as other LinkedIn writes.
