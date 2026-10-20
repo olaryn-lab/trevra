@@ -990,6 +990,51 @@ describe('inbox routes (031)', () => {
     expect(read.messages).toEqual([]);
   });
 
+  it('searches names, URLs and snippets server-side with paging and strict workspace scope', async () => {
+    await thread(WORKSPACE_A, 'urn:alpha');
+    await thread(WORKSPACE_A, 'urn:beta');
+    await thread(WORKSPACE_B, 'urn:foreign');
+    await db
+      .prepare(
+        `UPDATE linkedin_threads SET name=CASE WHEN thread_urn='urn:alpha' THEN 'Dripify Switcher'
+        ELSE 'Other Person' END, snippet='pricing request'
+       WHERE workspace_id=?`
+      )
+      .run(WORKSPACE_A);
+    const first = (
+      await as(sessionA)
+        .get('/api/linkedin/inbox/threads')
+        .query({ search: 'pricing', limit: 1, offset: 0 })
+        .expect(200)
+    ).body as {
+      threads: Array<{ threadUrn: string }>;
+    };
+    const second = (
+      await as(sessionA)
+        .get('/api/linkedin/inbox/threads')
+        .query({ search: 'pricing', limit: 1, offset: 1 })
+        .expect(200)
+    ).body as {
+      threads: Array<{ threadUrn: string }>;
+    };
+    expect(first.threads).toHaveLength(1);
+    expect(second.threads).toHaveLength(1);
+    expect(first.threads[0]?.threadUrn).not.toBe(second.threads[0]?.threadUrn);
+    const name = (
+      await as(sessionA).get('/api/linkedin/inbox/threads').query({ search: 'dripify' }).expect(200)
+    ).body as { threads: Array<{ threadUrn: string }> };
+    expect(name.threads.map((t) => t.threadUrn)).toEqual(['urn:alpha']);
+    const foreign = (
+      await as(sessionB).get('/api/linkedin/inbox/threads').query({ search: 'Dripify' }).expect(200)
+    ).body as { threads: unknown[] };
+    expect(foreign.threads).toEqual([]);
+    await as(sessionA).get('/api/linkedin/inbox/threads').query({ offset: -1 }).expect(400);
+    await as(sessionA)
+      .get('/api/linkedin/inbox/threads')
+      .query({ search: 'a'.repeat(121) })
+      .expect(400);
+  });
+
   it("cannot read, sync or answer another workspace's conversation", async () => {
     await thread(WORKSPACE_A, '2-maya==');
     await as(sessionB).get('/api/linkedin/inbox/threads/2-maya==').expect(404);

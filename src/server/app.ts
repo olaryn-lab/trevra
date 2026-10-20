@@ -10623,6 +10623,8 @@ const linkedinInboxFiltersSchema = z.object({
   hasReply: queryBoolean.optional(),
   campaignId: z.string().trim().min(1).max(120).optional(),
   seatKey: z.string().trim().min(1).max(64).optional(),
+  search: z.string().trim().max(120).optional(),
+  offset: z.coerce.number().int().min(0).max(100000).default(0),
   limit: z.coerce.number().int().min(1).max(500).default(100)
 });
 

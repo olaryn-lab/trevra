@@ -3223,6 +3223,8 @@ export async function getLinkedInThreads(
     campaignId?: string;
     seatKey?: string;
     limit?: number;
+    search?: string;
+    offset?: number;
   } = {}
 ): Promise<LinkedInThreadRecord[]> {
   const query = new URLSearchParams();
@@ -3231,6 +3233,8 @@ export async function getLinkedInThreads(
   if (filters.campaignId) query.set('campaignId', filters.campaignId);
   if (filters.seatKey) query.set('seatKey', filters.seatKey);
   if (filters.limit !== undefined) query.set('limit', String(filters.limit));
+  if (filters.search?.trim()) query.set('search', filters.search.trim());
+  if (filters.offset !== undefined) query.set('offset', String(filters.offset));
   const result = await request<{ threads?: LinkedInThreadRecord[] }>(
     `/api/linkedin/inbox/threads${query.size ? `?${query}` : ''}`
   );
