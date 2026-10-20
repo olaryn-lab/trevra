@@ -27,6 +27,9 @@ import {
   getBufferChannels,
   getContentChannelVariants,
   listLinkedInPosts,
+  getLinkedInPostReview,
+  approveLinkedInPostReview,
+  type LinkedInPostReview,
   prepareBufferDraft,
   publishLinkedInPostNow,
   updateLinkedInPost,
@@ -34,6 +37,7 @@ import {
   type LinkedInPost
 } from './api';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
+import { useIsWorkspaceOwner } from './auth-client';
 import { replaceNavigate } from './ui/route';
 import type { ContentChannelVariant } from '../server/content/channel-variants';
 import type { BufferChannel, BufferConnectionState } from '../server/content/buffer';
@@ -572,6 +576,9 @@ const STATUS_LABELS: Record<LinkedInPost['status'], string> = {
 
 function PostRow({ post, onChanged }: { post: LinkedInPost; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
+  const isOwner = useIsWorkspaceOwner();
+  const [review, setReview] = useState<LinkedInPostReview | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
   // A 409 (someone else already published it, the worker already claimed it)
   // or a 5xx used to become an unhandled rejection and a row that silently
   // did not change -- the user's own click looked like it did nothing.
@@ -596,6 +603,33 @@ function PostRow({ post, onChanged }: { post: LinkedInPost; onChanged: () => voi
       onChanged();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Something went wrong.');
+    } finally {
+      setBusy(false);
+    }
+  };
+  const loadReview = async () => {
+    setBusy(true);
+    setError('');
+    try {
+      setReview(await getLinkedInPostReview(post.id));
+      setReviewOpen(true);
+    } catch (error) {
+      setError(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const approveReview = async () => {
+    if (!review) return;
+    setBusy(true);
+    setError('');
+    try {
+      const next = await approveLinkedInPostReview(post.id, review.contentHash);
+      setReview(next);
+      onChanged();
+    } catch (error) {
+      await loadReview();
+      setError(errorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -626,6 +660,59 @@ function PostRow({ post, onChanged }: { post: LinkedInPost; onChanged: () => voi
         </span>
       )}
       {error && <span className="li-post-row-error">{error}</span>}
+      {post.status === 'scheduled' && (
+        <span className="li-post-row-actions">
+          <button
+            className="secondary-button"
+            type="button"
+            disabled={busy}
+            onClick={() => void loadReview()}
+          >
+            Review approval
+          </button>
+        </span>
+      )}
+      {reviewOpen && post.status === 'scheduled' && review && (
+        <div className="panel" aria-label="Review scheduled LinkedIn post">
+          <p>
+            <strong>Account:</strong> {review.seatKey} · <strong>Scheduled:</strong>{' '}
+            {review.scheduledAt}
+          </p>
+          <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{review.body}</pre>
+          <p>{review.media.length} image(s). Review every attachment before approving:</p>
+          {review.media.map((item) => (
+            <figure key={item.id}>
+              <img
+                src={`/api/linkedin/posts/${encodeURIComponent(post.id)}/media/${encodeURIComponent(item.id)}`}
+                alt={item.name}
+                style={{ maxWidth: '240px', maxHeight: '240px', objectFit: 'contain' }}
+              />
+              <figcaption>
+                {item.name} · SHA-256 {item.digest.slice(0, 12)}…
+              </figcaption>
+            </figure>
+          ))}
+          <p>
+            {review.policy.effect === 'deny'
+              ? `Blocked by workspace policy: ${review.policy.policyName}`
+              : review.policy.effect === 'allow'
+                ? 'Workspace policy allows publishing.'
+                : review.approved
+                  ? 'This exact post is approved.'
+                  : 'Owner approval required before the post is published.'}
+          </p>
+          {isOwner && review.policy.effect === 'require_approval' && !review.approved && (
+            <button
+              type="button"
+              disabled={busy}
+              className="primary-button"
+              onClick={() => void approveReview()}
+            >
+              Approve exact post &amp; images
+            </button>
+          )}
+        </div>
+      )}
       {(post.status === 'draft' ||
         post.status === 'scheduled' ||
         post.status === 'failed' ||

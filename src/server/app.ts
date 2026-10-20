@@ -360,6 +360,7 @@ import {
   cancelPost,
   createPost,
   getPost,
+  getPostImage,
   LINKEDIN_POST_IMAGE_MAX_BYTES,
   LINKEDIN_POST_IMAGE_TYPES,
   LinkedInPostsApiError,
@@ -368,6 +369,11 @@ import {
   type LinkedInPostStatus
 } from './linkedin/posts.js';
 import { plainTextLength, renderPostBody } from '../shared/linkedin-post-format.js';
+import {
+  approveLinkedInPost,
+  reviewLinkedInPost,
+  listLinkedInPostPolicyEvents
+} from './linkedin/post-policy.js';
 import {
   INVITE_NOTE_MAX_CHARS,
   MAX_SEQUENCE_STEPS,
@@ -5806,6 +5812,67 @@ export function createApp(db: Db) {
     })
   );
 
+  app.get(
+    '/api/linkedin/posts/:id/review',
+    linkedinRoute(async (req, res) => {
+      const review = await reviewLinkedInPost(db, req.auth!.workspaceId, String(req.params.id));
+      if (!review) throw new LinkedInPostsApiError('Scheduled post not available for review.', 404);
+      res.json({ review });
+    })
+  );
+  app.post(
+    '/api/linkedin/posts/:id/approve',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve a LinkedIn scheduled post');
+      const input = z
+        .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .parse(req.body ?? {});
+      const postId = String(req.params.id);
+      if (!(await reviewLinkedInPost(db, req.auth!.workspaceId, postId)))
+        throw new LinkedInPostsApiError('Scheduled post not found', 404);
+      try {
+        res.json({
+          review: await approveLinkedInPost(
+            db,
+            req.auth!.workspaceId,
+            postId,
+            input.contentHash,
+            req.auth!.userId
+          )
+        });
+      } catch (error) {
+        throw new LinkedInPostsApiError(
+          error instanceof Error ? error.message : 'Approval failed',
+          409
+        );
+      }
+    })
+  );
+  app.get(
+    '/api/linkedin/posts/:id/audit',
+    linkedinRoute(async (req, res) => {
+      const postId = String(req.params.id);
+      if (!(await getPost(db, req.auth!.workspaceId, postId)))
+        throw new LinkedInPostsApiError('Post not found.', 404);
+      res.json({ events: await listLinkedInPostPolicyEvents(db, req.auth!.workspaceId, postId) });
+    })
+  );
+  app.get(
+    '/api/linkedin/posts/:id/media/:imageId',
+    linkedinRoute(async (req, res) => {
+      const image = await getPostImage(
+        db,
+        req.auth!.workspaceId,
+        String(req.params.id),
+        String(req.params.imageId)
+      );
+      if (!image) throw new LinkedInPostsApiError('Post image not found.', 404);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.type(image.mimeType).send(image.bytes);
+    })
+  );
   app.post(
     '/api/linkedin/posts/:id/media',
     express.raw({ type: [...LINKEDIN_POST_IMAGE_TYPES], limit: LINKEDIN_POST_IMAGE_MAX_BYTES }),

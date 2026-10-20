@@ -2107,6 +2107,35 @@ export async function editLinkedInActionBody(
   return result.action;
 }
 
+export interface LinkedInPostReview {
+  postId: string;
+  seatKey: string;
+  body: string;
+  scheduledAt: string | null;
+  media: Array<{ id: string; name: string; mimeType: string; digest: string }>;
+  contentHash: string;
+  approved: boolean;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function getLinkedInPostReview(postId: string): Promise<LinkedInPostReview> {
+  return (
+    await request<{ review: LinkedInPostReview }>(
+      `/api/linkedin/posts/${encodeURIComponent(postId)}/review`
+    )
+  ).review;
+}
+export async function approveLinkedInPostReview(
+  postId: string,
+  contentHash: string
+): Promise<LinkedInPostReview> {
+  return (
+    await request<{ review: LinkedInPostReview }>(
+      `/api/linkedin/posts/${encodeURIComponent(postId)}/approve`,
+      { method: 'POST', body: JSON.stringify({ contentHash }) }
+    )
+  ).review;
+}
+
 export async function listLinkedInPosts(
   filters: { seatKey?: string; status?: LinkedInPostStatus; limit?: number } = {}
 ): Promise<LinkedInPost[]> {

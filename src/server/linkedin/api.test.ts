@@ -2041,6 +2041,63 @@ describe('LinkedIn posts', () => {
     expect(tooLong.status).toBe(400);
   });
 
+  it('scopes scheduled-post approval, rejects stale hashes and invalidates after edit', async () => {
+    const tokenA = await seedSession(WORKSPACE_A, 'Post owner A');
+    const tokenB = await seedSession(WORKSPACE_B, 'Post owner B');
+    await seat(WORKSPACE_A);
+    await seat(WORKSPACE_B);
+    const created = await as(tokenA)
+      .post('/api/linkedin/posts')
+      .send({
+        blocks: [{ runs: [{ type: 'text', text: 'Exact approved content' }] }],
+        status: 'scheduled',
+        scheduledAt: new Date(Date.now() + 600000).toISOString()
+      })
+      .expect(200);
+    const postId = created.body.post.id as string;
+    const path = `/api/linkedin/posts/${postId}`;
+    await as(tokenB).get(`${path}/review`).expect(404);
+    await as(tokenB).get(`${path}/audit`).expect(404);
+    await as(tokenB)
+      .post(`${path}/approve`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(404);
+    const review = (await as(tokenA).get(`${path}/review`).expect(200)).body.review;
+    expect(review).toMatchObject({
+      body: 'Exact approved content',
+      approved: false,
+      policy: { effect: 'require_approval' }
+    });
+    await as(tokenA)
+      .post(`${path}/approve`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(409);
+    await as(tokenA).post(`${path}/approve`).send({ contentHash: review.contentHash }).expect(200);
+    expect((await as(tokenA).get(`${path}/review`).expect(200)).body.review.approved).toBe(true);
+    expect((await as(tokenA).get(`${path}/audit`).expect(200)).body.events).toEqual([
+      expect.objectContaining({ decision: 'approved', contentHash: review.contentHash })
+    ]);
+    await as(tokenA)
+      .patch(path)
+      .send({ blocks: [{ runs: [{ type: 'text', text: 'Changed after approval' }] }] })
+      .expect(200);
+    expect((await as(tokenA).get(`${path}/review`).expect(200)).body.review.approved).toBe(false);
+    const media = (
+      await as(tokenA)
+        .post(`${path}/media`)
+        .set('Content-Type', 'image/png')
+        .send(Buffer.from([1, 2, 3]))
+        .expect(201)
+    ).body.post.media;
+    expect(media).toHaveLength(1);
+    const imageId = media[0].id as string;
+    await as(tokenB).get(`${path}/media/${imageId}`).expect(404);
+    const own = await as(tokenA).get(`${path}/media/${imageId}`).expect(200);
+    expect(own.headers['content-type']).toContain('image/png');
+    expect(own.headers['cache-control']).toContain('no-store');
+    expect(Buffer.from(own.body).equals(Buffer.from([1, 2, 3]))).toBe(true);
+  });
+
   it('publish-now sets scheduledAt to now and status to scheduled -- never synchronously posted', async () => {
     const token = await seedSession(WORKSPACE_A, 'A');
     await seat(WORKSPACE_A);
