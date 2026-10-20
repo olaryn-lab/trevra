@@ -251,6 +251,134 @@ describe('pasted LinkedIn profile URLs', () => {
       company: ''
     });
   });
+
+  it('holds pasted profiles outside campaigns until manual identity review, then rechecks all exclusions', async () => {
+    const list = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'Manual identity review', sourceKind: 'profile_urls' },
+      NOW
+    );
+    await importLeadProfileUrls(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        urls: ['https://linkedin.com/in/manual-review/']
+      },
+      NOW
+    );
+    const initial = (await listLeadContacts(db, WORKSPACE_ID, list.id))[0]!;
+    const workflow = await saveWorkflow(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Review required campaign',
+        steps: [
+          {
+            id: 'invite',
+            action: 'connection_request',
+            delayBefore: { amount: 0, unit: 'hours' },
+            config: { message: 'Hello {{first_name}}' }
+          }
+        ]
+      },
+      NOW
+    );
+    const created = await createManagedCampaign(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Profiles require review',
+        leadListId: list.id,
+        workflowId: workflow.id
+      },
+      NOW
+    );
+    expect(created.enrolled).toBe(0);
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]).toMatchObject({
+      status: 'excluded',
+      exclusionReason: 'Missing lead identity',
+      admittedAt: null
+    });
+    await expect(
+      updateLeadContact(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          contactId: initial.id,
+          firstName: 'Maya',
+          lastName: '',
+          company: 'Acme',
+          profileUrl: initial.profileUrl
+        },
+        NOW
+      )
+    ).rejects.toThrow(/last name/i);
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]?.status).toBe(
+      'excluded'
+    );
+
+    // Changing the same contact through another workspace is not an identity review.
+    await expect(
+      updateLeadContact(
+        db,
+        {
+          workspaceId: 'other_workspace',
+          contactId: initial.id,
+          firstName: 'Maya',
+          lastName: 'Chen',
+          company: 'Acme',
+          profileUrl: initial.profileUrl
+        },
+        NOW
+      )
+    ).rejects.toThrow('Lead not found.');
+    const reviewed = await updateLeadContact(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        contactId: initial.id,
+        firstName: 'Maya',
+        lastName: 'Chen',
+        company: 'Acme',
+        profileUrl: initial.profileUrl,
+        doNotContact: true
+      },
+      NOW
+    );
+    expect(reviewed).toMatchObject({ firstName: 'Maya', lastName: 'Chen', company: 'Acme' });
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]).toMatchObject({
+      status: 'excluded',
+      exclusionReason: 'Workspace suppression'
+    });
+    // Releasing the lead-specific opt-out is an explicit edit; no recipient gets
+    // automatically admitted by bypassing the existing suppression policies.
+    await updateLeadContact(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        contactId: initial.id,
+        firstName: 'Maya',
+        lastName: 'Chen',
+        company: 'Acme',
+        profileUrl: initial.profileUrl,
+        doNotContact: false
+      },
+      new Date(NOW.getTime() + 1_000)
+    );
+    // Removing a contact-specific suppression reruns every other eligibility check.
+    // No unsafe blind status flip is allowed while any other exclusion remains.
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]?.status).toBe(
+      'pending'
+    );
+    const { reevaluateCampaignExclusions } = await import('./managed-campaigns.js');
+    expect(
+      await reevaluateCampaignExclusions(db, WORKSPACE_ID, created.campaign.id, NOW)
+    ).toMatchObject({ pending: 1, excluded: 0 });
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]?.status).toBe(
+      'pending'
+    );
+  });
 });
 
 describe('materialising a harvest into a campaign-usable list', () => {

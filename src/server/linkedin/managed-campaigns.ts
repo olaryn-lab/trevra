@@ -911,10 +911,11 @@ export async function createManagedCampaign(
 const ELIGIBILITY_EXCLUSION_REASONS = new Set([
   '__eligibility__',
   'Do not contact',
+  'Workspace suppression',
   'Missing LinkedIn profile URL',
+  'Missing lead identity',
   'Suppressed company',
   'Suppressed email domain',
-  'Member of an excluded lead list',
   'Duplicate LinkedIn profile URL',
   'Already in another live campaign',
   'Existing conversation',
@@ -967,7 +968,7 @@ export async function reevaluateCampaignExclusions(
   const lookback = Math.max(0, Math.trunc(policy.contactedLookbackDays ?? 0));
   const rows = await db
     .prepare(
-      `SELECT m.id,m.status,m.exclusion_reason,c.email,c.company,c.profile_url,c.do_not_contact,
+      `SELECT m.id,m.status,m.exclusion_reason,c.email,c.company,c.first_name,c.last_name,c.profile_url,c.do_not_contact,
               EXISTS (
                 SELECT 1 FROM suppressions s
                 WHERE s.workspace_id=m.workspace_id AND s.lifted_at IS NULL
@@ -1040,6 +1041,8 @@ export async function reevaluateCampaignExclusions(
       exclusion_reason: string | null;
       email: string | null;
       company: string;
+      first_name: string;
+      last_name: string;
       profile_url: string | null;
       do_not_contact: boolean;
       global_suppression: boolean;
@@ -1084,6 +1087,8 @@ export async function reevaluateCampaignExclusions(
       reason = `Never contact: ${neverContactReasons.get(row.profile_url.trim()) || 'Excluded by workspace'}`;
     else if (row.global_suppression) reason = 'Workspace suppression';
     else if (policy.excludeDoNotContact !== false && row.do_not_contact) reason = 'Do not contact';
+    else if (!row.first_name.trim() || !row.last_name.trim() || !row.company.trim())
+      reason = 'Missing lead identity';
     else if (policy.excludeMissingProfile !== false && !row.profile_url?.trim())
       reason = 'Missing LinkedIn profile URL';
     else if (companies.has(row.company.trim().toLowerCase())) reason = 'Suppressed company';

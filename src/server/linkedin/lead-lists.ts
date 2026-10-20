@@ -1055,6 +1055,22 @@ export async function updateLeadContact(
       now
     );
   }
+  // Pasted-URL contacts have no name/company. They stay excluded until an
+  // operator completes identity; restoring eligibility must run the *whole*
+  // campaign policy again, not blindly flip excluded -> pending.
+  const awaitingIdentity = await db
+    .prepare(
+      `SELECT DISTINCT campaign_id FROM linkedin_campaign_members
+       WHERE workspace_id=? AND contact_id=? AND admitted_at IS NULL
+         AND status='excluded'
+         AND exclusion_reason IN ('Missing lead identity','Workspace suppression','Do not contact')`
+    )
+    .all<{ campaign_id: string }>(input.workspaceId, input.contactId);
+  if (awaitingIdentity.length > 0) {
+    const { reevaluateCampaignExclusions } = await import('./managed-campaigns.js');
+    for (const member of awaitingIdentity)
+      await reevaluateCampaignExclusions(db, input.workspaceId, member.campaign_id, now);
+  }
   return updated;
 }
 

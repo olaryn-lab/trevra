@@ -538,8 +538,12 @@ async function reserveEnrichmentCredit(db: Db, row: ChannelRow, now: Date): Prom
 async function reserveHunterCampaignCredit(db: Db, row: ChannelRow, now: Date): Promise<void> {
   if (row.credits_used > 0) return;
   await db.transaction(async (tx) => {
-    // Serialize campaign finders per workspace; the existing enrichment runs
-    // still independently hold their own bounded estimates in enrichmentUsage.
+    // Share the same workspace reservation lock as queueEnrichmentRun. Otherwise
+    // an approved domain-search estimate and a finder can both see the last
+    // credit before either transaction commits, oversubscribing the monthly cap.
+    await tx
+      .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))')
+      .get(`${row.workspace_id}:enrichment-cap`);
     const settings = await tx
       .prepare(
         'SELECT monthly_credit_cap,key_status FROM enrichment_settings WHERE workspace_id=? FOR UPDATE'

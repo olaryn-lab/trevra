@@ -19,6 +19,7 @@ vi.mock('@nangohq/node', () => ({
 }));
 import { openDatabase, type Db } from '../db.js';
 import { putWorkspaceSecret } from '../secrets/store.js';
+import { queueEnrichmentRun } from '../enrichment/runs.js';
 import { findSuppression } from '../suppressions.js';
 import { executeConnectedAction } from '../integration-service.js';
 import {
@@ -95,6 +96,7 @@ beforeEach(async () => {
     .prepare('DELETE FROM workspace_secrets WHERE workspace_id=? AND kind=?')
     .run(WORKSPACE, 'hunter_api_key');
   await db.prepare('DELETE FROM enrichment_usage_ledger WHERE workspace_id=?').run(WORKSPACE);
+  await db.prepare('DELETE FROM enrichment_runs WHERE workspace_id=?').run(WORKSPACE);
   await db.prepare('DELETE FROM enrichment_settings WHERE workspace_id=?').run(WORKSPACE);
   await upsertSeat(
     db,
@@ -904,6 +906,89 @@ describe('campaign channel executor', () => {
     expect(
       (await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.branchState['external:email_found']
     ).toBe(false);
+  });
+
+  it('does not spend finder credits already reserved for an approved workspace enrichment run', async () => {
+    await db
+      .prepare(
+        "INSERT INTO enrichment_settings(workspace_id,monthly_credit_cap,key_status) VALUES (?,1,'valid')"
+      )
+      .run(WORKSPACE);
+    await db
+      .prepare(
+        'INSERT INTO users(id,workspace_id,email,name,created_at) VALUES (?,?,?,?,?::timestamptz) ON CONFLICT (id) DO NOTHING'
+      )
+      .run(
+        'usr_finder_budget_test',
+        WORKSPACE,
+        'finder-budget@test.trevra.local',
+        'Budget tester',
+        NOW.toISOString()
+      );
+    await queueEnrichmentRun(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        actorType: 'user',
+        actorUserId: 'usr_finder_budget_test',
+        idempotencyKey: 'reserve-before-campaign',
+        planHash: 'hunter-estimate-fixture',
+        domains: ['example.com'],
+        emailsPerDomain: 1,
+        includeUnverified: false,
+        estimatedCredits: 1
+      },
+      NOW
+    );
+    vi.stubEnv('TREVRA_SECRETS_KEY', Buffer.alloc(32, 7).toString('base64'));
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE,
+      kind: 'hunter_api_key',
+      plaintext: 'hunter-queued-run'
+    });
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('Cap bypassed');
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'find',
+          action: 'find_email',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { providerId: 'hunter', refresh: false }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Example,https://linkedin.com/in/maya-reserved\n',
+      { enrichmentCreditCap: 1 }
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const action = await db
+      .prepare(
+        "SELECT status,credits_used,last_error FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND campaign_id=? AND kind='find_email'"
+      )
+      .get<{ status: string; credits_used: number; last_error: string }>(WORKSPACE, campaignId);
+    expect(action).toMatchObject({
+      status: 'planned',
+      credits_used: 0
+    });
+    expect(action?.last_error).toContain('monthly credit cap reached');
+    expect(fetchImpl).not.toHaveBeenCalled();
+    expect(
+      (
+        await db
+          .prepare(
+            'SELECT COALESCE(SUM(credits),0)::int AS total FROM enrichment_usage_ledger WHERE workspace_id=?'
+          )
+          .get<{ total: number }>(WORKSPACE)
+      )?.total
+    ).toBe(0);
   });
 
   it('shares the workspace monthly cap with ordinary enrichment and refuses the next provider call', async () => {

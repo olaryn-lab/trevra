@@ -261,6 +261,7 @@ export function LinkedInManagerLeadConfig({
   const [contactTotal, setContactTotal] = useState(0);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [filter, setFilter] = useState('');
+  const [needsIdentityOnly, setNeedsIdentityOnly] = useState(false);
   const [visible, setVisible] = useState(PAGE);
   const [draft, setDraft] = useState<ContactDraft | null>(null);
   const [armed, setArmed] = useState('');
@@ -296,6 +297,7 @@ export function LinkedInManagerLeadConfig({
       setDraft(null);
       setArmed('');
       setFilter('');
+      setNeedsIdentityOnly(false);
       setVisible(PAGE);
       if (!listId) return;
       setContactsLoading(true);
@@ -682,14 +684,18 @@ export function LinkedInManagerLeadConfig({
   const openMeta = lists.find((list) => list.id === openListId) ?? null;
   /** The lead a Remove press has armed, so the consequences can be read before the second press. */
   const armedContact = contacts.find((contact) => contact.id === armed) ?? null;
+  const needsIdentity = (contact: LinkedInLeadContact) =>
+    !contact.firstName.trim() || !contact.lastName.trim() || !contact.company.trim();
+  const identityReviewCount = contacts.filter(needsIdentity).length;
   const term = filter.trim().toLowerCase();
-  const filtered = term
-    ? contacts.filter((contact) =>
-        `${contact.firstName} ${contact.lastName} ${contact.company} ${contact.email ?? ''}`
+  const filtered = contacts.filter(
+    (contact) =>
+      (!needsIdentityOnly || needsIdentity(contact)) &&
+      (!term ||
+        `${contact.firstName} ${contact.lastName} ${contact.company} ${contact.email ?? ''} ${contact.profileUrl ?? ''}`
           .toLowerCase()
-          .includes(term)
-      )
-    : contacts;
+          .includes(term))
+  );
   const shown = filtered.slice(0, visible);
   const draftValid =
     draft !== null &&
@@ -787,9 +793,10 @@ export function LinkedInManagerLeadConfig({
         <details className="mgr-advanced">
           <summary>Paste LinkedIn profile URLs instead</summary>
           <p className="li-hint">
-            One /in/ profile per line. Trevra stores only canonical profile identity here; names and
-            company stay blank until you edit or enrich them, so no fake personalization data is
-            created.
+            One /in/ profile per line. Trevra imports the canonical URL without guessing identity or
+            reading restricted profile data. Imported profiles enter the identity-review queue and
+            cannot join a campaign until you complete first name, last name and company in Lead
+            lists.
           </p>
           <textarea
             rows={5}
@@ -1101,8 +1108,9 @@ export function LinkedInManagerLeadConfig({
             <div>
               <h3 aria-level={2}>Leads in a list</h3>
               <p>
-                Read a list, fix a row, drop somebody who left. Editing a lead here changes them
-                everywhere, including in campaigns they are already in.
+                Review pasted URLs, complete missing identity, edit existing leads and manage
+                exclusions. Incomplete identities cannot be admitted to campaigns; saving the
+                required fields rechecks campaign eligibility.
               </p>
             </div>
             <button
@@ -1162,12 +1170,23 @@ export function LinkedInManagerLeadConfig({
                   Find someone
                   <input
                     value={filter}
-                    placeholder="Name, company or email"
+                    placeholder="Name, company, email or profile URL"
                     onChange={(event) => {
                       setFilter(event.target.value);
                       setVisible(PAGE);
                     }}
                   />
+                </label>
+                <label className="li-check-row">
+                  <input
+                    type="checkbox"
+                    checked={needsIdentityOnly}
+                    onChange={(event) => {
+                      setNeedsIdentityOnly(event.target.checked);
+                      setVisible(PAGE);
+                    }}
+                  />
+                  Needs identity review ({identityReviewCount.toLocaleString()})
                 </label>
                 {openMeta && (
                   <span className="li-chip">From {SOURCE_LABELS[openMeta.sourceKind]}</span>
@@ -1260,11 +1279,23 @@ export function LinkedInManagerLeadConfig({
                     {contactTotal > contacts.length &&
                       ` The first ${contacts.length.toLocaleString()} of ${pluralGrouped(contactTotal, 'lead')} are shown — one read of a list returns no more than that, and Find someone searches the ones it returned.`}
                   </p>
+                  {identityReviewCount > 0 && (
+                    <p className="li-hint" role="status">
+                      {pluralGrouped(identityReviewCount, 'profile')} need first name, last name and
+                      company confirmed by a person before campaign admission.
+                      {contactTotal > contacts.length
+                        ? ' Review count covers only the loaded contacts.'
+                        : ''}
+                    </p>
+                  )}
                   {draft && (
                     <div className="lead-editor" ref={editorRef}>
                       <h4>
-                        Editing {contacts.find((contact) => contact.id === draft.id)?.firstName}{' '}
-                        {contacts.find((contact) => contact.id === draft.id)?.lastName}
+                        {contacts.find(
+                          (contact) => contact.id === draft.id && needsIdentity(contact)
+                        )
+                          ? 'Complete profile identity'
+                          : 'Edit lead identity'}
                       </h4>
                       <div className="li-form-grid lead-edit-grid">
                         <label>
@@ -1340,8 +1371,9 @@ export function LinkedInManagerLeadConfig({
                         </label>
                       </div>
                       <p className="li-hint">
-                        Names are cleaned on save the same way they are on import. First name, last
-                        name and company are required.
+                        Confirm names and company from an authorized source. Trevra never infers
+                        them from the LinkedIn URL. After saving, pending campaign eligibility is
+                        rechecked with all workspace exclusions and policies.
                       </p>
                       <div className="mgr-actions">
                         <button
@@ -1444,9 +1476,20 @@ export function LinkedInManagerLeadConfig({
                               className={editing ? 'lead-row-editing' : undefined}
                             >
                               <td>
-                                <strong>
-                                  {contact.firstName} {contact.lastName}
-                                </strong>
+                                {needsIdentity(contact) ? (
+                                  <button
+                                    type="button"
+                                    className="secondary-button"
+                                    disabled={rowBusy !== ''}
+                                    onClick={() => startEdit(contact)}
+                                  >
+                                    Complete identity
+                                  </button>
+                                ) : (
+                                  <strong>
+                                    {contact.firstName} {contact.lastName}
+                                  </strong>
+                                )}
                               </td>
                               <td>{contact.company || '—'}</td>
                               <td>{contact.email || '—'}</td>
