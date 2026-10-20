@@ -3521,6 +3521,16 @@ button:disabled {
   color: var(--ink);
   font-size: var(--t-text-sm);
 }
+.ol-auth-page {
+  --ol-login-primary: var(--t-green-600);
+  --ol-login-primary-fg: #ffffff;
+}
+:root[data-theme='dark'] .ol-auth-page,
+.dark .ol-auth-page {
+  --ol-login-primary: var(--t-night-green);
+  --ol-login-primary-fg: var(--t-night);
+}
+/* Login contract owns the dimensions, including expanded email controls. */
 .auth-submit {
   width: 100%;
   min-height: 44px;

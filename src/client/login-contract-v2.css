@@ -1,4 +1,4 @@
-/* OLARYN LOGIN VISUAL CONTRACT v2.0 — identical in all five applications.
+/* OLARYN LOGIN VISUAL CONTRACT v3.0 — identical in all five applications.
  * Product identity, enabled methods and authorization are supplied by each host.
  * No authentication behavior lives in this file.
  * 448px card; 16px radius; 52px action rows; a single primary action.
@@ -58,17 +58,17 @@ body:has(.ol-auth-page){margin:0;background:var(--ol-login-page)!important;}
   display:flex!important;
   align-items:center!important;
   justify-content:center!important;
-  gap:10px!important;
+  gap:12px!important;
   margin:0!important;
   color:var(--ol-login-fg)!important;
-  font-size:15px!important;
+  font-size:18px!important;
   font-weight:550!important;
-  line-height:24px!important;
+  line-height:32px!important;
   text-align:center!important;
   letter-spacing:0!important;
 }
-.ol-auth-brand svg,.ol-auth-brand .brand-mark{width:24px!important;height:24px!important;flex:none!important;}
-.ol-auth-intro {margin:34px 0 28px!important;text-align:center!important;}
+.ol-auth-brand svg,.ol-auth-brand img,.ol-auth-brand .brand-mark{width:32px!important;height:32px!important;flex:none!important;object-fit:contain!important;}
+.ol-auth-intro {margin:32px 0 28px!important;text-align:center!important;}
 .ol-auth-title {
   margin:0!important;
   color:var(--ol-login-fg)!important;
@@ -130,7 +130,7 @@ body:has(.ol-auth-page){margin:0;background:var(--ol-login-page)!important;}
 }
 /* Some apps have no passkey: promote the first available provider only. */
 .ol-auth-methods:not(:has(.ol-auth-primary)) .ol-auth-method-list > .ol-auth-action:first-child,
-.ol-auth-methods:not(:has(.ol-auth-primary)) > .ol-auth-expand > .ol-auth-action {
+.ol-auth-methods:not(:has(.ol-auth-primary)) > .ol-auth-action:first-child {
   background:var(--ol-login-primary)!important;
   border-color:var(--ol-login-primary)!important;
   color:var(--ol-login-primary-fg)!important;
@@ -142,9 +142,38 @@ body:has(.ol-auth-page){margin:0;background:var(--ol-login-page)!important;}
 .ol-auth-expand > summary::-webkit-details-marker{display:none;}
 .ol-auth-expand > summary{list-style:none!important;}
 .ol-auth-expand[open] > .ol-auth-email-body,.ol-auth-email-body{
+  display:flex!important;flex-direction:column!important;gap:12px!important;
   margin:10px 0 0!important;padding:14px!important;
   border:1px solid var(--ol-login-border)!important;
   border-radius:8px!important;background:var(--ol-login-card)!important;
+}
+.ol-auth-email-body label,.ol-auth-email-body .field-label{
+  display:flex!important;flex-direction:column!important;gap:8px!important;
+  margin:0!important;color:var(--ol-login-fg)!important;
+  font-size:14px!important;font-weight:550!important;line-height:1.4!important;
+}
+.ol-auth-email-body input[type="email"]{
+  box-sizing:border-box!important;display:block!important;
+  width:100%!important;height:52px!important;min-height:52px!important;
+  margin:0!important;padding:12px 14px!important;
+  border:1px solid var(--ol-login-border)!important;border-radius:8px!important;
+  background:var(--ol-login-card)!important;color:var(--ol-login-fg)!important;
+  font:inherit!important;font-size:14px!important;
+}
+.ol-auth-email-body input[type="email"]::placeholder{color:var(--ol-login-muted)!important;opacity:1!important;}
+.ol-auth-email-body input[type="email"]:focus-visible{outline:2px solid var(--ol-login-fg)!important;outline-offset:2px!important;}
+.ol-auth-email-body :is(button[type="submit"],.ol-auth-submit,.choice-main){
+  box-sizing:border-box!important;display:flex!important;align-items:center!important;
+  justify-content:center!important;gap:10px!important;width:100%!important;
+  height:52px!important;min-height:52px!important;margin:0!important;
+  padding:12px 14px!important;border:1px solid var(--ol-login-primary)!important;
+  border-radius:8px!important;background:var(--ol-login-primary)!important;
+  color:var(--ol-login-primary-fg)!important;font:inherit!important;
+  font-size:14px!important;font-weight:600!important;line-height:1.3!important;
+  text-align:center!important;cursor:pointer;
+}
+.ol-auth-email-body :is(button[type="submit"],.ol-auth-submit,.choice-main):disabled{
+  opacity:.75!important;cursor:not-allowed!important;
 }
 .ol-auth-footer {
   margin:28px 0 0!important;

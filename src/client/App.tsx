@@ -970,7 +970,7 @@ function AuthScreen({
                     {showEmail && (
                       <div id="trevra-email-form" className="auth-email-fields ol-auth-email-body">
                         <label>
-                          Email
+                          Email address
                           <input
                             type="email"
                             autoComplete="email"
@@ -986,7 +986,7 @@ function AuthScreen({
                           />
                         </label>
                         <button
-                          className="primary-button auth-submit"
+                          className="primary-button auth-submit ol-auth-submit"
                           disabled={busy || socialBusy !== null || !email.trim()}
                           onClick={() => void sendMagicLink()}
                         >
