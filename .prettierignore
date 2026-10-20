@@ -3,3 +3,6 @@ dist-server
 node_modules
 package-lock.json
 *.min.js
+
+# Versioned, byte-identical shared Olaryn design layer; format at the source.
+src/client/login-contract-v2.css
