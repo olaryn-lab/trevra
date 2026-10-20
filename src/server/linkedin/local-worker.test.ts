@@ -944,6 +944,32 @@ describe('the safety gate runs per action', () => {
     expect(result.executed).toBe(2);
   });
 
+  it('defers a policy-unapproved browser action before invoking the driver', async () => {
+    const harness = fakeStore(threeActions);
+    const { driver, calls } = fakeDriver();
+    const reviewed: string[] = [];
+    const result = await runLinkedInLocalBatch(harness.store, {
+      driver,
+      page,
+      sleep: noSleep,
+      log: () => {},
+      evaluate: async () => verdict(),
+      authorizeAction: async (candidate) => {
+        reviewed.push(candidate.id);
+        return candidate.id === 'lact_2'
+          ? { allowed: false, reason: 'Exact owner approval required' }
+          : { allowed: true, reason: 'Approved' };
+      }
+    });
+    expect(reviewed).toEqual(['lact_1', 'lact_2', 'lact_3']);
+    expect(calls.map((row) => row.target)).toEqual([
+      'https://www.linkedin.com/in/a/',
+      'https://www.linkedin.com/in/c/'
+    ]);
+    expect(result.blocked).toBe(1);
+    expect(harness.released).toContainEqual({ id: 'lact_2', failureKind: null });
+  });
+
   it('releases a refused action without letting it reach the driver', async () => {
     const harness = fakeStore(threeActions);
     const { driver, calls } = fakeDriver();

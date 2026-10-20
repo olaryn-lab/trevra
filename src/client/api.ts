@@ -2830,6 +2830,37 @@ export async function pauseLinkedInManagedCampaign(id: string): Promise<ManagedC
   ).campaign;
 }
 
+export interface LinkedInActionReview {
+  actionId: string;
+  campaignId: string | null;
+  seatKey: string;
+  kind: string;
+  targetRef: string;
+  subject: string | null;
+  body: string | null;
+  threadUrn: string | null;
+  hasAttachments: boolean;
+  contentHash: string;
+  approved: boolean;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function getLinkedInActionReviews(): Promise<LinkedInActionReview[]> {
+  return (
+    await request<{ reviews: LinkedInActionReview[] }>('/api/linkedin/manager/action-approvals')
+  ).reviews;
+}
+export async function approveLinkedInActionReview(
+  actionId: string,
+  contentHash: string
+): Promise<LinkedInActionReview> {
+  return (
+    await request<{ review: LinkedInActionReview }>(
+      `/api/linkedin/manager/action-approvals/${encodeURIComponent(actionId)}`,
+      { method: 'POST', body: JSON.stringify({ contentHash }) }
+    )
+  ).review;
+}
+
 export interface CampaignEmailReview {
   actionId: string;
   campaignId: string;

@@ -6,6 +6,7 @@ import { createApp } from '../app.js';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { openDatabase, type Db } from '../db.js';
 import { importLeadCsv } from './lead-lists.js';
+import { recordAction } from './actions.js';
 import {
   registerEmailComplianceProvider,
   resetEmailComplianceProvider,
@@ -98,6 +99,63 @@ describe('LinkedIn manager HTTP surface', () => {
   it('requires a Trevra session', async () => {
     await request(app).get('/api/linkedin/manager/lead-lists').expect(401);
     await request(app).get('/api/linkedin/manager/analytics').expect(401);
+  });
+
+  it('reviews browser actions only in their own workspace and rejects stale approval hashes', async () => {
+    const action = await recordAction(
+      db,
+      {
+        workspaceId: A,
+        kind: 'dm',
+        targetRef: 'https://linkedin.com/in/maya-review-http/',
+        status: 'planned',
+        source: 'manual',
+        plannedFor: NOW.toISOString()
+      },
+      NOW
+    );
+    await db
+      .prepare('UPDATE linkedin_actions SET body=? WHERE workspace_id=? AND id=?')
+      .run('First message', A, action.id);
+    const path = '/api/linkedin/manager/action-approvals';
+    await request(app).get(path).expect(401);
+    expect((await as(tokenB).get(path).expect(200)).body.reviews).toEqual([]);
+    await as(tokenB)
+      .post(`${path}/${action.id}`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(404);
+    const reviews = (await as(tokenA).get(path).expect(200)).body.reviews;
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({
+      actionId: action.id,
+      body: 'First message',
+      seatKey: 'owner',
+      policy: { effect: 'require_approval' },
+      approved: false
+    });
+    await as(tokenA)
+      .post(`${path}/${action.id}`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(409);
+    await as(tokenA)
+      .post(`${path}/${action.id}`)
+      .send({ contentHash: reviews[0].contentHash })
+      .expect(200);
+    await as(tokenB).get(`${path}/${action.id}/audit`).expect(404);
+    expect((await as(tokenA).get(`${path}/${action.id}/audit`).expect(200)).body.events).toEqual([
+      expect.objectContaining({
+        decision: 'approved',
+        contentHash: reviews[0].contentHash,
+        actorId: `usr_${A}`
+      })
+    ]);
+    expect((await as(tokenA).get(path).expect(200)).body.reviews).toEqual([]);
+    await db
+      .prepare('UPDATE linkedin_actions SET body=? WHERE workspace_id=? AND id=?')
+      .run('A different message', A, action.id);
+    expect((await as(tokenA).get(path).expect(200)).body.reviews).toMatchObject([
+      { actionId: action.id, body: 'A different message', approved: false }
+    ]);
   });
 
   it('keeps list/workflow/campaign read models workspace-scoped', async () => {

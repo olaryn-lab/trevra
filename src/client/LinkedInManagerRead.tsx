@@ -91,6 +91,7 @@ import { NOT_ENOUGH_DATA, RATE_MIN_SAMPLE, ratePercent } from './analytics';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
 import { useIsWorkspaceOwner } from './auth-client';
 import { CampaignEmailApprovals } from './CampaignEmailApprovals';
+import { LinkedInActionApprovals } from './LinkedInActionApprovals';
 import { useWorkspaceMembers } from './TeamScreen';
 import { ConfirmDrawer } from './ui/dialog';
 import { ChoiceMenu } from './ui/choice-menu';
@@ -2801,6 +2802,7 @@ export function OutreachManagerRead({
   return (
     <div className="page-stack li-polished">
       {error && <div className="error-banner">{error}</div>}
+      <LinkedInActionApprovals />
 
       <section className="page-panel" id="mgr-campaigns">
         <div className="section-heading">

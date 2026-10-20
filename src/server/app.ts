@@ -457,6 +457,12 @@ import {
   previewCampaignEmail
 } from './linkedin/campaign-email-approval.js';
 import {
+  approveLinkedInAction,
+  listLinkedInActionReviews,
+  listLinkedInActionPolicyEvents,
+  reviewLinkedInAction
+} from './linkedin/action-policy.js';
+import {
   guardSeatSendModeChange,
   handoffResolutionSchema,
   resolveLinkedInHandoff
@@ -6199,6 +6205,56 @@ export function createApp(db: Db) {
         campaign,
         members: await listCampaignMembers(db, req.auth!.workspaceId, campaignId)
       });
+    })
+  );
+
+  // Exact LinkedIn browser-action approvals, including individual replies.
+  app.get(
+    '/api/linkedin/manager/action-approvals',
+    linkedinRoute(async (req, res) => {
+      const input = z.object({ campaignId: z.string().min(1).optional() }).parse(req.query);
+      res.json({
+        reviews: await listLinkedInActionReviews(db, req.auth!.workspaceId, input.campaignId)
+      });
+    })
+  );
+  app.get(
+    '/api/linkedin/manager/action-approvals/:actionId/audit',
+    linkedinRoute(async (req, res) => {
+      const actionId = String(req.params.actionId);
+      const row = await db
+        .prepare('SELECT id FROM linkedin_actions WHERE workspace_id=? AND id=?')
+        .get<{ id: string }>(req.auth!.workspaceId, actionId);
+      if (!row) throw new LinkedInApiError('LinkedIn action not found', 404);
+      res.json({
+        events: await listLinkedInActionPolicyEvents(db, req.auth!.workspaceId, actionId)
+      });
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/action-approvals/:actionId',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve a LinkedIn browser action');
+      const input = z
+        .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .parse(req.body ?? {});
+      const actionId = String(req.params.actionId);
+      if (!(await reviewLinkedInAction(db, req.auth!.workspaceId, actionId)))
+        throw new LinkedInApiError('LinkedIn action not found or no longer pending', 404);
+      try {
+        res.json({
+          review: await approveLinkedInAction(
+            db,
+            req.auth!.workspaceId,
+            actionId,
+            input.contentHash,
+            req.auth!.userId
+          )
+        });
+      } catch (error) {
+        throw new LinkedInApiError(error instanceof Error ? error.message : 'Approval failed', 409);
+      }
     })
   );
 
