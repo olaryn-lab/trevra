@@ -2308,6 +2308,17 @@ export async function updateLinkedInManagerSeat(
   ).seat;
 }
 
+export async function renameLinkedInManagerLeadList(
+  listId: string,
+  name: string
+): Promise<LinkedInLeadList> {
+  return (
+    await request<{ list: LinkedInLeadList }>(
+      `/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}`,
+      { method: 'PATCH', body: JSON.stringify({ name }) }
+    )
+  ).list;
+}
 export async function getLinkedInManagerLeadLists(seatKey?: string): Promise<LinkedInLeadList[]> {
   return (
     await request<{ lists: LinkedInLeadList[] }>(

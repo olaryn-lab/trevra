@@ -268,6 +268,47 @@ export async function createLeadList(
   return toList(row);
 }
 
+/**
+ * Rename only the label; membership and campaign foreign keys use the stable
+ * list id, never this mutable display string. Unique names are per seat.
+ * Locks the row and uses the DB unique index to settle racing updates.
+ */
+export async function renameLeadList(
+  db: Db,
+  workspaceId: string,
+  listId: string,
+  rawName: string,
+  now = new Date()
+): Promise<LinkedInLeadList | undefined> {
+  const name = rawName.trim();
+  if (!name || name.length > 200)
+    throw new LinkedInApiError('List name must be between 1 and 200 characters.', 400);
+  return db.transaction(async (tx) => {
+    const row = await tx
+      .prepare(
+        'SELECT id,seat_key,name FROM linkedin_lead_lists WHERE workspace_id=? AND id=? FOR UPDATE'
+      )
+      .get<{ id: string; seat_key: string; name: string }>(workspaceId, listId);
+    if (!row) return undefined;
+    if (row.name !== name) {
+      try {
+        await tx
+          .prepare(
+            'UPDATE linkedin_lead_lists SET name=?,updated_at=?::timestamptz WHERE workspace_id=? AND id=?'
+          )
+          .run(name, now.toISOString(), workspaceId, listId);
+      } catch (error) {
+        if ((error as { code?: string })?.code === '23505')
+          throw new LinkedInApiError(
+            'A list with this name already exists on this LinkedIn account.',
+            409
+          );
+        throw error;
+      }
+    }
+    return getLeadList(tx, workspaceId, listId, row.seat_key);
+  });
+}
 export async function listLeadLists(
   db: Db,
   workspaceId: string,

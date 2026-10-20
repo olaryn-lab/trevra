@@ -20,6 +20,7 @@ import {
   importLinkedInManagerLeadCsv,
   importLinkedInManagerProfileUrls,
   previewLinkedInManagerLeadCsv,
+  renameLinkedInManagerLeadList,
   updateLinkedInManagerLeadContact,
   type LinkedInLeadCsvPreview
 } from './api';
@@ -29,6 +30,7 @@ import type {
   LinkedInLeadList
 } from '../server/linkedin/lead-lists';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
+import { useIsWorkspaceOwner } from './auth-client';
 import { salesNavigatorCsvMapping } from './leadCsvPresets';
 import { errorMessage } from './LinkedInSafety';
 import { ActionMenu } from './ui/action-menu';
@@ -214,6 +216,7 @@ export function LinkedInManagerLeadConfig({
   onImported?: (list: LinkedInLeadList) => void;
 }) {
   const [activeSeatKey] = useActiveSeatKey();
+  const isOwner = useIsWorkspaceOwner();
   const [lists, setLists] = useState<LinkedInLeadList[]>([]);
   const [listsLoading, setListsLoading] = useState(true);
 
@@ -263,6 +266,9 @@ export function LinkedInManagerLeadConfig({
   const [armed, setArmed] = useState('');
   const [rowBusy, setRowBusy] = useState('');
   const [listError, setListError] = useState('');
+  const [renamingList, setRenamingList] = useState(false);
+  const [renameName, setRenameName] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
   const editorRef = useRef<HTMLDivElement | null>(null);
   /** The confirmation is brought to the operator for the same reason the editor is. */
   const confirmRef = useRef<HTMLDivElement | null>(null);
@@ -284,6 +290,7 @@ export function LinkedInManagerLeadConfig({
   const openList = useCallback(
     async (listId: string) => {
       setOpenListId(listId);
+      setRenamingList(false);
       setContacts([]);
       setContactTotal(0);
       setDraft(null);
@@ -1165,8 +1172,75 @@ export function LinkedInManagerLeadConfig({
                 {openMeta && (
                   <span className="li-chip">From {SOURCE_LABELS[openMeta.sourceKind]}</span>
                 )}
+                {openMeta && isOwner && !renamingList && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={renameBusy || contactsLoading}
+                    onClick={() => {
+                      setRenameName(openMeta.name);
+                      setRenamingList(true);
+                    }}
+                  >
+                    <Pencil size={14} /> Rename list
+                  </button>
+                )}
               </div>
 
+              {renamingList && openMeta && (
+                <form
+                  className="li-filter-row"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!renameName.trim()) return;
+                    setRenameBusy(true);
+                    setListError('');
+                    void (async () => {
+                      try {
+                        const updated = await renameLinkedInManagerLeadList(
+                          openMeta.id,
+                          renameName
+                        );
+                        await loadLists();
+                        await onChanged();
+                        setToast(
+                          `Lead list renamed to “${updated.name}”. Membership and campaigns are unchanged.`
+                        );
+                        setRenamingList(false);
+                      } catch (error) {
+                        setListError(errorMessage(error, 'Could not rename this lead list.'));
+                      } finally {
+                        setRenameBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  <label>
+                    New list name
+                    <input
+                      value={renameName}
+                      maxLength={200}
+                      required
+                      onChange={(event) => setRenameName(event.target.value)}
+                    />
+                  </label>
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={renameBusy || !renameName.trim()}
+                  >
+                    Save name
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    disabled={renameBusy}
+                    onClick={() => setRenamingList(false)}
+                  >
+                    Cancel
+                  </button>
+                </form>
+              )}
               {contactsLoading ? (
                 <p className="empty-copy">Reading this list…</p>
               ) : contacts.length === 0 ? (

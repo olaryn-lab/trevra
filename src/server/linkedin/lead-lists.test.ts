@@ -10,6 +10,7 @@ import {
   importLeadSourceContacts,
   listLeadContacts,
   listLeadLists,
+  renameLeadList,
   removeLeadContact,
   updateLeadContact
 } from './lead-lists.js';
@@ -145,6 +146,54 @@ describe('account-scoped lead lists', () => {
       second.id
     );
     expect(await getLeadList(db, WORKSPACE_ID, second.id, 'owner')).toBeUndefined();
+  });
+
+  it('renames only the account-scoped list label, preserving identity, members and collisions', async () => {
+    await upsertSeat(db, WORKSPACE_ID, { label: 'Second', timezone: 'UTC' }, NOW, 'second');
+    const owner = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Prospects' }, NOW);
+    const other = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Existing' }, NOW);
+    const second = await createLeadList(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Referred',
+        seatKey: 'second'
+      },
+      NOW
+    );
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: owner.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Acme,https://linkedin.com/in/maya-listrename'
+      },
+      NOW
+    );
+    const renamed = await renameLeadList(
+      db,
+      WORKSPACE_ID,
+      owner.id,
+      '  Referred  ',
+      new Date(NOW.getTime() + 1000)
+    );
+    expect(renamed).toMatchObject({
+      id: owner.id,
+      name: 'Referred',
+      seatKey: 'owner',
+      leadCount: 1
+    });
+    expect((await listLeadContacts(db, WORKSPACE_ID, owner.id)).length).toBe(1);
+    expect((await getLeadList(db, WORKSPACE_ID, second.id, 'second'))?.name).toBe('Referred');
+    await expect(renameLeadList(db, WORKSPACE_ID, owner.id, 'existing', NOW)).rejects.toMatchObject(
+      { status: 409 }
+    );
+    expect((await getLeadList(db, WORKSPACE_ID, owner.id))?.name).toBe('Referred');
+    expect((await getLeadList(db, WORKSPACE_ID, other.id))?.name).toBe('Existing');
+    expect(await renameLeadList(db, 'other_workspace', owner.id, 'Stolen', NOW)).toBeUndefined();
+    await expect(renameLeadList(db, WORKSPACE_ID, owner.id, '   ', NOW)).rejects.toMatchObject({
+      status: 400
+    });
   });
 
   it('imports a CSV into a list created under a non-owner seat', async () => {

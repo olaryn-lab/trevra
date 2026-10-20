@@ -450,6 +450,27 @@ describe('LinkedIn manager HTTP surface', () => {
     expect((await as(tokenA).get(url).expect(200)).body.reviews[0].approved).toBe(false);
   });
 
+  it('renames a lead list via authenticated HTTP without altering tenant or campaign references', async () => {
+    const created = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Original name', sourceKind: 'csv' })
+        .expect(201)
+    ).body.list;
+    const path = `/api/linkedin/manager/lead-lists/${created.id}`;
+    await as(tokenB).patch(path).send({ name: 'Other workspace' }).expect(404);
+    await as(tokenA).patch(path).send({ name: '   ' }).expect(400);
+    const renamed = (await as(tokenA).patch(path).send({ name: '  Better name  ' }).expect(200))
+      .body.list;
+    expect(renamed).toMatchObject({ id: created.id, name: 'Better name', seatKey: 'owner' });
+    expect(
+      (await as(tokenA).get('/api/linkedin/manager/lead-lists').expect(200)).body.lists
+    ).toMatchObject([expect.objectContaining({ id: created.id, name: 'Better name' })]);
+    expect(
+      (await as(tokenB).get('/api/linkedin/manager/lead-lists').expect(200)).body.lists
+    ).toEqual([]);
+  });
+
   it('creates a campaign draft with enrollment but zero ledger actions', async () => {
     const list = (
       await as(tokenA)

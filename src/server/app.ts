@@ -448,6 +448,7 @@ import {
   ingestLeadSignal,
   listLeadContacts,
   listLeadLists,
+  renameLeadList,
   removeLeadContact,
   updateLeadContact,
   type LeadListSourceKind
@@ -7483,6 +7484,24 @@ export function createApp(db: Db) {
    * Owner-only: this is the delete that removes a workspace's contact data
    * rather than a row about it.
    */
+  app.patch(
+    '/api/linkedin/manager/lead-lists/:id',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'rename a lead list');
+      const input = z
+        .object({ name: z.string().trim().min(1).max(200) })
+        .strict()
+        .parse(req.body ?? {});
+      const renamed = await renameLeadList(
+        db,
+        req.auth!.workspaceId,
+        String(req.params.id),
+        input.name
+      );
+      if (!renamed) throw new LinkedInApiError('Lead list not found', 404);
+      res.json({ list: renamed });
+    })
+  );
   app.delete(
     '/api/linkedin/manager/lead-lists/:id',
     linkedinRoute(async (req, res) => {
