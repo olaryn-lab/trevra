@@ -800,6 +800,9 @@ function AuthScreen({
   return (
     <main className="marketing-runtime">
       <div className="auth-shell auth-shell-centered">
+        <div className="auth-login-theme">
+          <ThemeToggle />
+        </div>
         <section className="auth-story">
           <a
             className="brand auth-brand"
