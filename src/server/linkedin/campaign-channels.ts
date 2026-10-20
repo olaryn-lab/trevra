@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import { id, type Db } from '../db.js';
+import { createHunterProvider } from '../enrichment/hunter.js';
+import { readWorkspaceSecretPlaintext } from '../secrets/store.js';
+import { enrichmentUsage } from '../enrichment/settings.js';
 import { createSuppression } from '../suppressions.js';
 import { emailEventBranchKeys, type CampaignEmailEventKind } from './email-event-kind.js';
 import { projectCampaignEmailDelivery, projectCampaignEmailReply } from '../conversations.js';
@@ -500,35 +503,69 @@ async function executeEmail(
   });
 }
 
+async function reserveCampaignCreditTx(tx: Db, row: ChannelRow, now: Date): Promise<void> {
+  const campaign = await tx
+    .prepare(
+      `SELECT enrichment_credit_cap FROM linkedin_campaigns WHERE workspace_id=? AND id=? FOR UPDATE`
+    )
+    .get<{ enrichment_credit_cap: number | null }>(row.workspace_id, row.campaign_id);
+  if (!campaign) throw new Error('Campaign no longer exists.');
+  const cap =
+    campaign.enrichment_credit_cap === null
+      ? 0
+      : Math.max(0, Number(campaign.enrichment_credit_cap));
+  const used = await tx
+    .prepare(
+      `SELECT COALESCE(SUM(credits_used),0)::int AS total
+       FROM linkedin_campaign_channel_actions
+       WHERE workspace_id=? AND campaign_id=? AND kind='find_email'`
+    )
+    .get<{ total: number }>(row.workspace_id, row.campaign_id);
+  if (Number(used?.total ?? 0) >= cap)
+    throw new Error('Campaign enrichment credit cap reached; no provider lookup was attempted.');
+  await tx
+    .prepare(
+      `UPDATE linkedin_campaign_channel_actions SET credits_used=1,updated_at=?::timestamptz
+       WHERE workspace_id=? AND id=? AND credits_used=0`
+    )
+    .run(now.toISOString(), row.workspace_id, row.id);
+}
 async function reserveEnrichmentCredit(db: Db, row: ChannelRow, now: Date): Promise<void> {
   if (row.credits_used > 0) return;
+  await db.transaction((tx) => reserveCampaignCreditTx(tx, row, now));
+  row.credits_used = 1;
+}
+async function reserveHunterCampaignCredit(db: Db, row: ChannelRow, now: Date): Promise<void> {
+  if (row.credits_used > 0) return;
   await db.transaction(async (tx) => {
-    const campaign = await tx
+    // Serialize campaign finders per workspace; the existing enrichment runs
+    // still independently hold their own bounded estimates in enrichmentUsage.
+    const settings = await tx
       .prepare(
-        `SELECT enrichment_credit_cap FROM linkedin_campaigns WHERE workspace_id=? AND id=? FOR UPDATE`
+        'SELECT monthly_credit_cap,key_status FROM enrichment_settings WHERE workspace_id=? FOR UPDATE'
       )
-      .get<{ enrichment_credit_cap: number | null }>(row.workspace_id, row.campaign_id);
-    if (!campaign) throw new Error('Campaign no longer exists.');
-    const cap =
-      campaign.enrichment_credit_cap === null
-        ? 0
-        : Math.max(0, Number(campaign.enrichment_credit_cap));
-    const used = await tx
+      .get<{ monthly_credit_cap: number; key_status: string }>(row.workspace_id);
+    if (settings?.key_status !== 'valid')
+      throw new CampaignEmailSetupHold(
+        'Hunter workspace key must be verified before campaign enrichment.'
+      );
+    const available =
+      Number(settings.monthly_credit_cap) -
+      (await enrichmentUsage(tx, row.workspace_id, now)).usedCredits;
+    if (available < 1)
+      throw new CampaignEmailSetupHold(
+        'Workspace Hunter monthly credit cap reached; no lookup attempted.'
+      );
+    await reserveCampaignCreditTx(tx, row, now);
+    await tx
       .prepare(
-        `SELECT COALESCE(SUM(credits_used),0)::int AS total FROM linkedin_campaign_channel_actions
-        WHERE workspace_id=? AND campaign_id=? AND kind='find_email'`
+        `INSERT INTO enrichment_usage_ledger
+       (id,workspace_id,run_id,provider,operation,credits,occurred_at)
+       VALUES (?,?,?,'hunter','email_finder',1,?::timestamptz)`
       )
-      .get<{ total: number }>(row.workspace_id, row.campaign_id);
-    if (Number(used?.total ?? 0) >= cap)
-      throw new Error('Campaign enrichment credit cap reached; no provider lookup was attempted.');
-    const reserved = await tx
-      .prepare(
-        `UPDATE linkedin_campaign_channel_actions SET credits_used=1,updated_at=?::timestamptz
-        WHERE workspace_id=? AND id=? AND credits_used=0 RETURNING id`
-      )
-      .get<{ id: string }>(now.toISOString(), row.workspace_id, row.id);
-    if (reserved) row.credits_used = 1;
+      .run(id('enl'), row.workspace_id, row.id, now.toISOString());
   });
+  row.credits_used = 1;
 }
 
 async function executeFindEmail(
@@ -539,7 +576,7 @@ async function executeFindEmail(
 ): Promise<{ provider: string; externalRef: string }> {
   const contact = await db
     .prepare(
-      `SELECT email,email_source,email_provenance,email_confidence,email_verification_status,first_name,last_name,company,profile_url
+      `SELECT email,email_source,email_provenance,email_confidence,email_verification_status,first_name,last_name,company,profile_url,do_not_contact
        FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?`
     )
     .get<{
@@ -552,8 +589,20 @@ async function executeFindEmail(
       last_name: string;
       company: string;
       profile_url: string | null;
+      do_not_contact: boolean;
     }>(row.workspace_id, row.contact_id);
   if (!contact) throw new Error('Campaign contact no longer exists.');
+  if (contact.do_not_contact)
+    throw new CampaignEmailRecipientBlocked(
+      'Campaign contact is marked do-not-contact; no enrichment lookup attempted.'
+    );
+  if (contact.profile_url) {
+    const excluded = await filterExcluded(db, row.workspace_id, [contact.profile_url]);
+    if (excluded.excluded.length)
+      throw new CampaignEmailRecipientBlocked(
+        'Recipient is on the Never Contact list; no enrichment lookup attempted.'
+      );
+  }
   if (contact.email && payload.refresh !== true) {
     return {
       provider: contact.email_source ?? contact.email_provenance ?? 'existing',
@@ -564,6 +613,68 @@ async function executeFindEmail(
   const providerId = String(
     payload.providerId ?? process.env.TREVRA_EMAIL_ENRICHMENT_PROVIDER ?? 'environment'
   );
+  if (providerId === 'hunter') {
+    const apiKey = await readWorkspaceSecretPlaintext(db, row.workspace_id, 'hunter_api_key');
+    if (!apiKey)
+      throw new CampaignEmailSetupHold(
+        'Hunter API key not connected for this workspace; no lookup attempted.'
+      );
+    const finder = createHunterProvider(apiKey).findEmail;
+    if (!finder) throw new CampaignEmailSetupHold('Hunter Email Finder is not configured.');
+    // Reserve atomically before the provider call. An explicit no-result is free
+    // and releases the reservation; ambiguous failures retain it for review.
+    await reserveHunterCampaignCredit(db, row, now);
+    const result = await finder({
+      firstName: contact.first_name,
+      lastName: contact.last_name,
+      company: contact.company,
+      profileUrl: contact.profile_url
+    });
+    if (result.credits === 0) {
+      // Known zero-cost response settles the pre-call reservation to zero in
+      // both the campaign budget and the workspace usage total atomically.
+      await db.transaction(async (tx) => {
+        await tx
+          .prepare(
+            `UPDATE linkedin_campaign_channel_actions
+           SET credits_used=0,updated_at=?::timestamptz
+           WHERE workspace_id=? AND id=? AND credits_used=1`
+          )
+          .run(now.toISOString(), row.workspace_id, row.id);
+        await tx
+          .prepare(
+            `UPDATE enrichment_usage_ledger SET credits=0
+           WHERE workspace_id=? AND run_id=? AND operation='email_finder'`
+          )
+          .run(row.workspace_id, row.id);
+      });
+      row.credits_used = 0;
+    }
+    if (!result.email) {
+      return {
+        provider: 'hunter',
+        externalRef: contact.email ? `email:${contact.email}` : 'email:not-found'
+      };
+    }
+    const update = await db
+      .prepare(
+        `UPDATE linkedin_lead_contacts
+       SET email=?,email_source='hunter',email_provenance='enriched',
+           email_confidence=?,email_verification_status=?,updated_at=?
+       WHERE workspace_id=? AND id=? AND do_not_contact=FALSE RETURNING id`
+      )
+      .get<{ id: string }>(
+        result.email,
+        result.confidence,
+        result.verificationStatus,
+        now.toISOString(),
+        row.workspace_id,
+        row.contact_id
+      );
+    if (!update) throw new Error('Campaign contact is do-not-contact or no longer exists.');
+    return { provider: 'hunter', externalRef: `email:${result.email}` };
+  }
+
   const endpoint = process.env.TREVRA_EMAIL_ENRICHMENT_URL?.trim();
   if (!endpoint) {
     // A definite no-provider result is not an unknown external side effect. It can branch cleanly.
@@ -623,7 +734,7 @@ async function executeFindEmail(
 function definiteFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   return (
-    /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|enrichment credit cap reached/i.test(
+    /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|Hunter rejected the API key|Hunter rate limit reached|Hunter account has no credits|Hunter API key not connected|Hunter Email Finder is not configured|Hunter workspace key must be verified|Workspace Hunter monthly credit cap reached|Campaign contact is do-not-contact|enrichment credit cap reached/i.test(
       error.message
     ) ||
     // Anchored: only our own pre-send refusal, never text a provider error echoes.
@@ -895,11 +1006,11 @@ export async function runCampaignChannelActions(
         }
         continue;
       }
-      if (error instanceof CampaignEmailRecipientBlocked && row.kind === 'email') {
+      if (error instanceof CampaignEmailRecipientBlocked) {
         await skipBlockedCampaignRecipient(db, row, error, now);
         continue;
       }
-      if (error instanceof CampaignEmailSetupHold && row.kind === 'email') {
+      if (error instanceof CampaignEmailSetupHold) {
         await holdCampaignEmailSetup(db, row, error, now);
         continue;
       }

@@ -20,6 +20,87 @@ function stubFetch(responses: Array<{ status: number; body?: unknown } | Error>)
 }
 
 describe('Hunter adapter', () => {
+  it('finds web-sourced emails with the workspace key only in a header and no invented address', async () => {
+    const { fetchImpl, calls } = stubFetch([
+      {
+        status: 200,
+        body: {
+          data: {
+            email: 'MAYA@EXAMPLE.COM',
+            score: 92,
+            source_type: 'found',
+            verification: { status: 'valid' },
+            sources: [{ uri: 'https://example.com/team' }]
+          }
+        }
+      }
+    ]);
+    const provider = createHunterProvider(KEY, { fetchImpl });
+    const found = await provider.findEmail!({
+      firstName: 'Maya',
+      lastName: 'Smith',
+      company: 'Example',
+      profileUrl: null
+    });
+    expect(found).toEqual({
+      email: 'maya@example.com',
+      confidence: 0.92,
+      verificationStatus: 'valid',
+      credits: 1
+    });
+    const url = new URL(calls[0]!.url);
+    expect(url.pathname).toBe('/v2/email-finder/found');
+    expect(url.searchParams.get('company')).toBe('Example');
+    expect(url.searchParams.get('first_name')).toBe('Maya');
+    expect(url.searchParams.get('last_name')).toBe('Smith');
+    expect(url.searchParams.has('api_key')).toBe(false);
+    expect(calls[0]!.headers['X-API-KEY']).toBe(KEY);
+  });
+
+  it('rejects low-confidence emails without understating a successful provider charge', async () => {
+    const { fetchImpl } = stubFetch([
+      {
+        status: 200,
+        body: {
+          data: { email: 'guess@example.com', score: 45 }
+        }
+      }
+    ]);
+    const result = await createHunterProvider(KEY, { fetchImpl }).findEmail!({
+      firstName: 'Maya',
+      lastName: 'Smith',
+      company: 'Example',
+      profileUrl: null
+    });
+    expect(result).toEqual({
+      email: null,
+      confidence: 0.45,
+      verificationStatus: null,
+      credits: 1
+    });
+  });
+
+  it('returns a known zero-cost miss for unidentifiable profiles and Hunter 451 refusals', async () => {
+    const { fetchImpl, calls } = stubFetch([{ status: 451 }]);
+    const provider = createHunterProvider(KEY, { fetchImpl });
+    const missing = await provider.findEmail!({
+      firstName: '',
+      lastName: '',
+      company: '',
+      profileUrl: null
+    });
+    expect(missing).toMatchObject({ email: null, credits: 0 });
+    expect(calls).toHaveLength(0);
+    const refused = await provider.findEmail!({
+      firstName: '',
+      lastName: '',
+      company: '',
+      profileUrl: 'https://www.linkedin.com/in/maya-example/?trk=public'
+    });
+    expect(refused).toMatchObject({ email: null, credits: 0 });
+    expect(new URL(calls[0]!.url).searchParams.get('linkedin_handle')).toBe('maya-example');
+  });
+
   it('checks the key against the free account endpoint with the key in a header', async () => {
     const { fetchImpl, calls } = stubFetch([{ status: 200, body: { data: { email: 'f@x.com' } } }]);
     await createHunterProvider(KEY, { fetchImpl }).checkKey();

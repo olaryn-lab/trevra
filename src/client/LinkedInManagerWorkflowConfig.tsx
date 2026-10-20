@@ -745,7 +745,7 @@ function blankStep(action: Action, stepId: string, delayBefore: WorkflowDelay): 
       }
     };
   if (action === 'find_email')
-    return { ...base, action, config: { providerId: null, refresh: false } };
+    return { ...base, action, config: { providerId: 'hunter', refresh: false } };
   if (action === 'add_tag' || action === 'remove_tag')
     return { ...base, action, config: { tag: 'prospect' } };
   const exhaustive: never = action;
@@ -2974,17 +2974,19 @@ function WorkflowStepCard({
         {step.action === 'find_email' && (
           <div className="li-span-2 li-form-grid">
             <label>
-              Enrichment provider ID (optional)
-              <input
-                value={step.config.providerId ?? ''}
+              Email finder provider
+              <Select
+                value={step.config.providerId ?? 'environment'}
                 onChange={(event) =>
                   onChange({
                     ...step,
-                    config: { ...step.config, providerId: event.target.value || null }
+                    config: { ...step.config, providerId: event.target.value }
                   })
                 }
-                placeholder="Configured default"
-              />
+              >
+                <option value="hunter">Hunter — workspace key, found-only (70%+ confidence)</option>
+                <option value="environment">Legacy server-configured provider</option>
+              </Select>
             </label>
             <label className="li-check-row">
               <input

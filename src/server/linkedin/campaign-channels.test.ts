@@ -18,6 +18,7 @@ vi.mock('@nangohq/node', () => ({
   }
 }));
 import { openDatabase, type Db } from '../db.js';
+import { putWorkspaceSecret } from '../secrets/store.js';
 import { findSuppression } from '../suppressions.js';
 import { executeConnectedAction } from '../integration-service.js';
 import {
@@ -90,6 +91,11 @@ beforeEach(async () => {
     .prepare('DELETE FROM linkedin_campaign_email_approvals WHERE workspace_id=?')
     .run(WORKSPACE);
   await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE);
+  await db
+    .prepare('DELETE FROM workspace_secrets WHERE workspace_id=? AND kind=?')
+    .run(WORKSPACE, 'hunter_api_key');
+  await db.prepare('DELETE FROM enrichment_usage_ledger WHERE workspace_id=?').run(WORKSPACE);
+  await db.prepare('DELETE FROM enrichment_settings WHERE workspace_id=?').run(WORKSPACE);
   await upsertSeat(
     db,
     WORKSPACE,
@@ -101,6 +107,7 @@ beforeEach(async () => {
 afterEach(async () => {
   resetEmailComplianceProvider();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   nangoMock.post.mockClear();
   nangoMock.get.mockClear();
   await db?.close();
@@ -609,6 +616,356 @@ describe('campaign channel executor', () => {
     });
     const after = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
     expect(after.stepIndex).toBe(1);
+  });
+
+  it('finds an email with the sealed workspace Hunter key and advances the branch only once', async () => {
+    await db
+      .prepare(
+        "INSERT INTO enrichment_settings(workspace_id,monthly_credit_cap,key_status) VALUES (?,1,'valid')"
+      )
+      .run(WORKSPACE);
+    vi.stubEnv('TREVRA_SECRETS_KEY', Buffer.alloc(32, 7).toString('base64'));
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE,
+      kind: 'hunter_api_key',
+      plaintext: 'hunter-workspace-fixture-key'
+    });
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      expect((init?.headers as Record<string, string>)['X-API-KEY']).toBe(
+        'hunter-workspace-fixture-key'
+      );
+      return new Response(
+        JSON.stringify({
+          data: {
+            email: 'MAYA@EXAMPLE.COM',
+            score: 93,
+            verification: { status: 'valid' },
+            source_type: 'found'
+          }
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        }
+      );
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'find',
+          action: 'find_email',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { providerId: 'hunter', refresh: false }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Example,https://linkedin.com/in/maya-hunter\n',
+      { enrichmentCreditCap: 1 }
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const action = await db
+      .prepare(
+        "SELECT status,provider,external_ref,credits_used FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND campaign_id=? AND kind='find_email'"
+      )
+      .get<{ status: string; provider: string; external_ref: string; credits_used: number }>(
+        WORKSPACE,
+        campaignId
+      );
+    expect(action).toMatchObject({
+      status: 'sent',
+      provider: 'hunter',
+      external_ref: 'email:maya@example.com',
+      credits_used: 1
+    });
+    const contact = await db
+      .prepare(
+        'SELECT email,email_source,email_confidence,email_verification_status FROM linkedin_lead_contacts WHERE workspace_id=?'
+      )
+      .get<{
+        email: string;
+        email_source: string;
+        email_confidence: number;
+        email_verification_status: string;
+      }>(WORKSPACE);
+    expect(contact?.email).toBe('maya@example.com');
+    expect(contact?.email_source).toBe('hunter');
+    expect(Number(contact?.email_confidence)).toBeCloseTo(0.93);
+    expect(contact?.email_verification_status).toBe('valid');
+    expect(
+      (await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.branchState['external:email_found']
+    ).toBe(true);
+    await runCampaignChannelActions(db, WORKSPACE, new Date(NOW.getTime() + 60000));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(new URL(String(fetchImpl.mock.calls[0]?.[0])).searchParams.has('api_key')).toBe(false);
+    expect(
+      await db
+        .prepare(
+          "SELECT provider,operation,credits FROM enrichment_usage_ledger WHERE workspace_id=? AND run_id=(SELECT id FROM linkedin_campaign_channel_actions WHERE campaign_id=? AND kind='find_email')"
+        )
+        .get<{ provider: string; operation: string; credits: number }>(WORKSPACE, campaignId)
+    ).toMatchObject({ provider: 'hunter', operation: 'email_finder', credits: 1 });
+  });
+
+  it('holds the same campaign node until the workspace Hunter key is connected without charging', async () => {
+    vi.stubEnv('TREVRA_SECRETS_KEY', Buffer.alloc(32, 7).toString('base64'));
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('This provider must not be called');
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'find',
+          action: 'find_email',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { providerId: 'hunter', refresh: false }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Example,https://linkedin.com/in/maya-nokey\n',
+      { enrichmentCreditCap: 1 }
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const action = await db
+      .prepare(
+        "SELECT status,credits_used,last_error FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND campaign_id=? AND kind='find_email'"
+      )
+      .get<{ status: string; credits_used: number; last_error: string }>(WORKSPACE, campaignId);
+    expect(action?.status).toBe('planned');
+    expect(action?.credits_used).toBe(0);
+    expect(action?.last_error).toContain('Hunter API key not connected');
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    expect(member.branchState['external:email_found']).toBeUndefined();
+    expect(
+      (
+        await db
+          .prepare(
+            'SELECT count(*)::int AS count FROM enrichment_usage_ledger WHERE workspace_id=?'
+          )
+          .get<{ count: number }>(WORKSPACE)
+      )?.count
+    ).toBe(0);
+    expect(fetchImpl).not.toHaveBeenCalled();
+
+    // The exact action remains queued: connecting Hunter resumes it without
+    // re-enrolling the lead or advancing a false no-email branch.
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE,
+      kind: 'hunter_api_key',
+      plaintext: 'hunter-after-onboarding'
+    });
+    await db
+      .prepare(
+        "INSERT INTO enrichment_settings(workspace_id,monthly_credit_cap,key_status) VALUES (?,1,'valid')"
+      )
+      .run(WORKSPACE);
+    const readyFetch = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            data: { email: 'ready@example.com', score: 91, verification: { status: 'valid' } }
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+    );
+    vi.stubGlobal('fetch', readyFetch);
+    await runCampaignChannelActions(db, WORKSPACE, new Date(NOW.getTime() + 61 * 60000));
+    const resumed = await db
+      .prepare(
+        "SELECT status,credits_used,external_ref FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND campaign_id=? AND kind='find_email'"
+      )
+      .get<{ status: string; credits_used: number; external_ref: string }>(WORKSPACE, campaignId);
+    expect(resumed).toMatchObject({
+      status: 'sent',
+      credits_used: 1,
+      external_ref: 'email:ready@example.com'
+    });
+    expect(
+      (await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.branchState['external:email_found']
+    ).toBe(true);
+    expect(readyFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('never calls Hunter or charges a credit for a lead marked do-not-contact', async () => {
+    await db
+      .prepare(
+        "INSERT INTO enrichment_settings(workspace_id,monthly_credit_cap,key_status) VALUES (?,1,'valid')"
+      )
+      .run(WORKSPACE);
+    vi.stubEnv('TREVRA_SECRETS_KEY', Buffer.alloc(32, 7).toString('base64'));
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE,
+      kind: 'hunter_api_key',
+      plaintext: 'hunter-no-optouts'
+    });
+    const fetchImpl = vi.fn(async () => {
+      throw new Error('Do-not-contact lookup reached provider');
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'find',
+          action: 'find_email',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { providerId: 'hunter', refresh: false }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Example,https://linkedin.com/in/maya-private\n',
+      { enrichmentCreditCap: 1 }
+    );
+    await db
+      .prepare('UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=?')
+      .run(WORKSPACE);
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    expect(fetchImpl).not.toHaveBeenCalled();
+    const usage = await db
+      .prepare('SELECT count(*)::int AS total FROM enrichment_usage_ledger WHERE workspace_id=?')
+      .get<{ total: number }>(WORKSPACE);
+    expect(usage?.total).toBe(0);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0];
+    expect(member?.branchState['external:email_found']).not.toBe(true);
+  });
+
+  it('returns no email and frees the campaign reservation when Hunter finds nothing', async () => {
+    await db
+      .prepare(
+        "INSERT INTO enrichment_settings(workspace_id,monthly_credit_cap,key_status) VALUES (?,1,'valid')"
+      )
+      .run(WORKSPACE);
+    vi.stubEnv('TREVRA_SECRETS_KEY', Buffer.alloc(32, 7).toString('base64'));
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE,
+      kind: 'hunter_api_key',
+      plaintext: 'hunter-workspace-fixture-key'
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ data: { email: null } }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          })
+      )
+    );
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'find',
+          action: 'find_email',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { providerId: 'hunter', refresh: false }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Example,https://linkedin.com/in/maya-noresult\n',
+      { enrichmentCreditCap: 1 }
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const action = await db
+      .prepare(
+        "SELECT status,credits_used,external_ref FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND campaign_id=? AND kind='find_email'"
+      )
+      .get<{ status: string; credits_used: number; external_ref: string }>(WORKSPACE, campaignId);
+    expect(action).toMatchObject({
+      status: 'sent',
+      credits_used: 0,
+      external_ref: 'email:not-found'
+    });
+    const usage = await db
+      .prepare(
+        "SELECT credits FROM enrichment_usage_ledger WHERE workspace_id=? AND run_id=(SELECT id FROM linkedin_campaign_channel_actions WHERE campaign_id=? AND kind='find_email')"
+      )
+      .get<{ credits: number }>(WORKSPACE, campaignId);
+    expect(Number(usage?.credits)).toBe(0);
+    expect(
+      (await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.branchState['external:email_found']
+    ).toBe(false);
+  });
+
+  it('shares the workspace monthly cap with ordinary enrichment and refuses the next provider call', async () => {
+    await db
+      .prepare(
+        "INSERT INTO enrichment_settings(workspace_id,monthly_credit_cap,key_status) VALUES (?,1,'valid')"
+      )
+      .run(WORKSPACE);
+    vi.stubEnv('TREVRA_SECRETS_KEY', Buffer.alloc(32, 7).toString('base64'));
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE,
+      kind: 'hunter_api_key',
+      plaintext: 'hunter-fixture-budget'
+    });
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ data: { email: 'found@example.com', score: 97 } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+    );
+    vi.stubGlobal('fetch', fetchImpl);
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'find',
+          action: 'find_email',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { providerId: 'hunter', refresh: false }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,LinkedIn URL\nMaya,One,Example,https://linkedin.com/in/maya-monthly-cap\nJon,Two,Example,https://linkedin.com/in/jon-monthly-cap\n',
+      { enrichmentCreditCap: 2 }
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const actions = await db
+      .prepare(
+        "SELECT status,credits_used,last_error FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND campaign_id=? AND kind='find_email' ORDER BY id"
+      )
+      .all<{ status: string; credits_used: number; last_error: string | null }>(
+        WORKSPACE,
+        campaignId
+      );
+    expect(actions).toHaveLength(2);
+    expect(actions.map((item) => item.status).sort()).toEqual(['planned', 'sent']);
+    expect(actions.some((item) => /monthly credit cap reached/.test(item.last_error ?? ''))).toBe(
+      true
+    );
+    expect(actions.reduce((sum, item) => sum + Number(item.credits_used), 0)).toBe(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    const charged = await db
+      .prepare(
+        "SELECT SUM(credits)::numeric AS charged FROM enrichment_usage_ledger WHERE workspace_id=? AND operation='email_finder'"
+      )
+      .get<{ charged: number }>(WORKSPACE);
+    expect(Number(charged?.charged)).toBe(1);
   });
 
   it('reserves enrichment credits exactly once and blocks before the provider when the campaign cap is exhausted', async () => {
