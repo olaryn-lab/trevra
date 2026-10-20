@@ -148,6 +148,8 @@ Task IDs are permanent. Each status requires evidence; baseline findings below a
 
 | 2026-10-20 | 004,055 | Shared-provider campaign HTML now reconstructs and compares the exact tracked HTML using the persisted campaign token, recorded link tokens/targets, current public origin, approved text and legal footer. With tracking off, any HTML payload is refused. The positive open/click send and forged-provider-body/HTML negative paths pass: channel 25/25, integration-service 38/38, TypeScript. No surprise HTML can be substituted into a reviewed plain-text email. | HTML SEND BOUNDARY VERIFIED IN TESTS |
 
+| 2026-10-20 | 004,009,031,055 | `d1d3b3f`: exact per-email workspace-policy/owner-review flow including migration 139, review UI and owner-only API; `218d120`: shared provider checks the actual tracked HTML against persisted URLs/pixel. Final `npm run check` **exit 0** on both commits: real PostgreSQL/Vitest suites, TS and production client/server build. Known `npm sbom` dependency-resolution error swallowed by existing script (no regenerated SBOM); Vite >500-kB warning. No deployment or browser smoke test. Follow-up: LinkedIn/browser and community policy, durable policy audit, campaigns with many pending email reviews. | COMMITTED / FULL TEST GATE PASSED; GLOBAL PARITY INCOMPLETE |
+
 ## Handoff checklist
 
 - [ ] Each task has a real status, owning commit, acceptance-test evidence and remaining blockers.
