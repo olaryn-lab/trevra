@@ -2575,18 +2575,20 @@ function WorkflowStepCard({
 
         {step.action === 'endorse_skills' && (
           <label>
-            Skills to endorse (currently one per action)
+            Skills to endorse (1–10 per action)
             <input
               type="number"
               min={1}
-              max={1}
-              disabled
+              max={10}
               value={step.config.maxSkills}
               onChange={(event) =>
                 onChange({
                   ...step,
                   config: {
-                    maxSkills: 1
+                    maxSkills: Math.max(
+                      1,
+                      Math.min(10, Math.trunc(Number(event.target.value) || 1))
+                    )
                   }
                 })
               }

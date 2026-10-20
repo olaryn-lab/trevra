@@ -403,14 +403,25 @@ describe('endorseSkills', () => {
     expect(result.detail).toContain('Endorsed 1 of the 9');
   });
 
-  it('clamps every requested skill count to one externally visible endorsement', async () => {
+  it('clamps every requested skill count to ten and honors configured workflow maxSkills', async () => {
     const one = skillsPage(9);
     await endorseSkills(one.page, TARGET, { sleep: one.sleep, limit: 1 });
     expect(one.clicked).toHaveLength(1);
 
     const many = skillsPage(40);
     await endorseSkills(many.page, TARGET, { sleep: many.sleep, limit: 99 });
-    expect(many.clicked).toHaveLength(1);
+    expect(many.clicked).toHaveLength(10);
+    expect(many.slept).toEqual(Array(9).fill(1250));
+
+    const workflow = skillsPage(9);
+    const result = await endorseSkills(workflow.page, TARGET, {
+      sleep: workflow.sleep,
+      maxSkills: 4,
+      limit: 1
+    });
+    expect(workflow.clicked).toHaveLength(4);
+    expect(workflow.slept).toEqual([1250, 1250, 1250]);
+    expect(result.detail).toContain('Endorsed 4 of the 9');
 
     const zero = skillsPage(9);
     await endorseSkills(zero.page, TARGET, { sleep: zero.sleep, limit: 0 });
@@ -453,17 +464,17 @@ describe('endorseSkills', () => {
     expect(result.ok).toBe(true);
     expect(
       fake.clicked.filter((entry) => entry === ENGAGE_SELECTORS.endorseDialogDismiss)
-    ).toHaveLength(1);
+    ).toHaveLength(2);
   });
 
-  it('adds no synthetic sleep inside an endorsement action', async () => {
+  it('paces multiple actual endorsements inside one ledger action', async () => {
     const fake = skillsPage(5);
     await endorseSkills(fake.page, TARGET, {
       sleep: fake.sleep,
       seed: 'batch-2:action-7',
       limit: 3
     });
-    expect(fake.slept).toEqual([]);
+    expect(fake.slept).toEqual([1250, 1250]);
     expect(engageGapMs('batch-2:action-7:1')).toBe(0);
   });
 
@@ -476,6 +487,19 @@ describe('endorseSkills', () => {
     const result = await endorseSkills(fake.page, TARGET, { sleep: fake.sleep });
     expect(result.failureKind).toBe('challenge');
     expect(result.detail).toContain('after 0');
+  });
+
+  it('reports confirmed partial progress when a limit wall interrupts a multi-skill action', async () => {
+    const fake = skillsPage(5, {
+      onClick: (_selector, counts) => {
+        if ((counts[ENGAGE_SELECTORS.endorseButton] ?? 0) <= 3) counts[SELECTORS.challengeForm] = 1;
+      }
+    });
+    const result = await endorseSkills(fake.page, TARGET, { sleep: fake.sleep, maxSkills: 4 });
+    expect(result.ok).toBe(false);
+    expect(result.failureKind).toBe('challenge');
+    expect(result.detail).toContain('after 1');
+    expect(fake.clicked.filter((item) => item === ENGAGE_SELECTORS.endorseButton)).toHaveLength(2);
   });
 
   it('is unknown when a click leaves the control count unchanged', async () => {

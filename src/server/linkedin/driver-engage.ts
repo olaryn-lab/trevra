@@ -171,20 +171,19 @@ export interface EngageOptions {
 
 export interface EndorseOptions extends EngageOptions {
   /**
-   * How many listed skills to endorse. Default 3, clamped to 1..10.
-   *
-   * Three is the number LinkedIn's own profile card shows before "show all",
-   * so endorsing three is the shape of a person who read the top of the
-   * section and stopped -- and it is UNVERIFIED-VENDOR, a judgement about
-   * plausible behaviour rather than a published limit. The upper clamp exists
-   * because "endorse every skill this stranger lists" is not a thing a human
-   * does, and one ledger action must not be able to become thirty clicks.
+   * How many listed skills to endorse. Defaults to 1, capped at 10.
+   * An approved campaign step authorizes this exact configured upper bound,
+   * never an unlimited series. Partial failures are reported as failures
+   * with the confirmed count instead of silently replaying a batch.
    */
   limit?: number;
+  /** Workflow/ledger spelling; authoritative when both are present. */
+  maxSkills?: number;
 }
 
 const DEFAULT_ENDORSE_LIMIT = 1;
-const MAX_ENDORSE_LIMIT = 1;
+const MAX_ENDORSE_LIMIT = 10;
+const ENDORSE_INTER_CLICK_GAP_MS = 1250;
 
 function fail(failureKind: LinkedInFailureKind, detail: string): LinkedInDriverResult {
   return { ok: false, failureKind, detail };
@@ -627,14 +626,13 @@ export async function likeRecentPost(
  * ------------------------------------------------------------------------ */
 
 /**
- * Endorse up to `limit` of the target's listed skills. Default 3.
+ * Endorse up to the approved `maxSkills` count. Default 1; hard cap 10.
  *
- * ONE LEDGER ACTION, SEVERAL CLICKS, and that asymmetry is the thing to hold
- * on to while reading this: the gate ran once, for one `endorse`, so this
- * routine may not turn itself into N actions' worth of activity. `limit` is
- * clamped rather than trusted, and the pauses between clicks come from
- * `engageGapMs` rather than from `ACTION_GAP_SECONDS`, which paces LEDGER
- * actions and is the worker's to apply.
+ * ONE LEDGER ACTION, SEVERAL CLICKS: each click must have a confirmed
+ * decline in the remaining unendorsed-control count. A fixed bounded
+ * inter-click gap spaces provider writes independently of the worker's
+ * pacing between separate ledger actions. Do not treat one ledger row as
+ * proof of one provider write when maxSkills is greater than one.
  *
  * The loop re-reads `endorseButton` every pass and always clicks `first()`,
  * which works because an endorsed skill's control changes label -- so the
@@ -660,10 +658,10 @@ export async function endorseSkills(
   const profile = canonicalProfileFor(target);
   if (!profile) return unopenable(target, 'skills page');
   const skillsUrl = `${profile}details/skills/`;
-  const limit = Math.min(
-    MAX_ENDORSE_LIMIT,
-    Math.max(1, Math.trunc(opts.limit ?? DEFAULT_ENDORSE_LIMIT))
-  );
+  const requested = opts.maxSkills ?? opts.limit ?? DEFAULT_ENDORSE_LIMIT;
+  const limit = Number.isFinite(requested)
+    ? Math.min(MAX_ENDORSE_LIMIT, Math.max(1, Math.trunc(requested)))
+    : DEFAULT_ENDORSE_LIMIT;
 
   const blocked = await openAt(page, skillsUrl);
   if (blocked) return blocked;
@@ -687,6 +685,15 @@ export async function endorseSkills(
     const buttons = page.locator(ENGAGE_SELECTORS.endorseButton);
     const before = await buttons.count();
     if (before === 0) break;
+
+    // Multiple endorsements are one approved ledger action but several provider
+    // writes. Apply a small fixed gap between clicks; the outer worker's
+    // per-action pacing alone cannot space out the individual changes.
+    // The injected clock keeps tests deterministic.
+    if (index > 0)
+      await (
+        opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+      )(ENDORSE_INTER_CLICK_GAP_MS);
 
     // EVERYTHING BELOW THIS LINE IS POST-CLICK, for this iteration.
     try {

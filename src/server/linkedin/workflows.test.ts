@@ -220,6 +220,33 @@ describe('LinkedIn manager workflows', () => {
   // supplied is not a feature request, it is the data being connected to the
   // one place it was collected for.
 
+  it('keeps the endorsed skill count through workflow validation and rejects oversized requests', () => {
+    const raw = {
+      id: 'skills',
+      action: 'endorse_skills',
+      delayBefore: { amount: 0, unit: 'days' },
+      config: { maxSkills: 6 }
+    };
+    const parsed = workflowStepsSchema.parse([raw]);
+    expect(parsed[0]).toMatchObject({ action: 'endorse_skills', config: { maxSkills: 6 } });
+    expect(
+      workflowStepsSchema.safeParse([
+        {
+          ...raw,
+          config: { maxSkills: 11 }
+        }
+      ]).success
+    ).toBe(false);
+    expect(
+      workflowStepsSchema.safeParse([
+        {
+          ...raw,
+          config: { maxSkills: 0 }
+        }
+      ]).success
+    ).toBe(false);
+  });
+
   it('supports explicit fallback personalization and reports only unprotected missing values', () => {
     const lead = { firstName: ' ', lastName: '', company: 'Acme' };
     expect(renderWorkflowTemplate('Hi {{first_name|there}} from {{company}}', lead)).toBe(

@@ -268,13 +268,7 @@ export const workflowStepSchema = z.discriminatedUnion('action', [
       action: z.literal('endorse_skills'),
       config: z
         .object({
-          maxSkills: z
-            .number()
-            .int()
-            .min(1)
-            .max(10)
-            .default(1)
-            .transform(() => 1)
+          maxSkills: z.number().int().min(1).max(10).default(1)
         })
         .strict()
     })
