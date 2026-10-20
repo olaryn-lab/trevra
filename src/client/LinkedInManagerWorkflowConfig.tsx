@@ -29,6 +29,7 @@ import type { LinkedInWorkflow, WorkflowDelay, WorkflowStep } from '../server/li
 import { errorMessage } from './LinkedInSafety';
 import { useIsWorkspaceOwner } from './auth-client';
 import { Select } from './ui/primitives';
+import { ADDITIONAL_WORKFLOW_STARTERS } from './workflow-starter-recipes';
 /* ---------------------------------------------------------------------------
  * The reusable workflow builder.
  *
@@ -1165,7 +1166,8 @@ const STARTERS: readonly Starter[] = [
         }
       ];
     }
-  }
+  },
+  ...ADDITIONAL_WORKFLOW_STARTERS
 ];
 
 /* ---------------------------------------------------------------------------
@@ -1214,6 +1216,10 @@ export function LinkedInManagerWorkflowConfig({
 }) {
   const isOwner = useIsWorkspaceOwner();
   const [library, setLibrary] = useState<LinkedInWorkflow[]>([]);
+  const [starterQuery, setStarterQuery] = useState('');
+  const visibleStarters = STARTERS.filter((starter) =>
+    (starter.label + ' ' + starter.blurb).toLowerCase().includes(starterQuery.trim().toLowerCase())
+  );
   const [id, setId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [scope, setScope] = useState<'workspace' | 'personal'>(() =>
@@ -1717,8 +1723,18 @@ export function LinkedInManagerWorkflowConfig({
     return (
       <div className="li-wf-compact li-polished">
         {error && <div className="error-banner">{error}</div>}
+        <label className="li-wf-starter-filter">
+          Find a workflow template
+          <input
+            type="search"
+            aria-label="Search workflow templates"
+            placeholder={`Search ${STARTERS.length} workflows by objective`}
+            value={starterQuery}
+            onChange={(event) => setStarterQuery(event.target.value)}
+          />
+        </label>
         <div className="li-wf-starters">
-          {STARTERS.map((starter) => (
+          {visibleStarters.map((starter) => (
             <button
               className="li-wf-starter"
               type="button"
@@ -1836,8 +1852,18 @@ export function LinkedInManagerWorkflowConfig({
             it runs. Start from one of these and edit it, or pick any of the six actions below as
             the first step.
           </p>
+          <label className="li-wf-starter-filter">
+            Find a workflow template
+            <input
+              type="search"
+              aria-label="Search workflow templates"
+              placeholder={`Search ${STARTERS.length} workflows by objective`}
+              value={starterQuery}
+              onChange={(event) => setStarterQuery(event.target.value)}
+            />
+          </label>
           <div className="li-wf-starters">
-            {STARTERS.map((starter) => (
+            {visibleStarters.map((starter) => (
               <button
                 className="li-wf-starter"
                 type="button"

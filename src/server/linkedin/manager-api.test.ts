@@ -7,6 +7,7 @@ import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { openDatabase, type Db } from '../db.js';
 import { importLeadCsv } from './lead-lists.js';
 import { recordAction } from './actions.js';
+import { ADDITIONAL_WORKFLOW_STARTERS } from '../../client/workflow-starter-recipes.js';
 import {
   registerEmailComplianceProvider,
   resetEmailComplianceProvider,
@@ -156,6 +157,34 @@ describe('LinkedIn manager HTTP surface', () => {
     expect((await as(tokenA).get(path).expect(200)).body.reviews).toMatchObject([
       { actionId: action.id, body: 'A different message', approved: false }
     ]);
+  });
+
+  it('saves all new starter templates through the real API without sending or leaking to another workspace', async () => {
+    const route = '/api/linkedin/manager/workflows';
+    for (const recipe of ADDITIONAL_WORKFLOW_STARTERS) {
+      let stepNo = 0;
+      const steps = recipe.build(() => `node-${++stepNo}`);
+      const created = (
+        await as(tokenA)
+          .post(route)
+          .send({ name: recipe.label, scope: 'workspace', steps })
+          .expect(201)
+      ).body.workflow;
+      expect(created.name).toBe(recipe.label);
+      expect(created.steps).toHaveLength(steps.length);
+    }
+    const own = (await as(tokenA).get(route).expect(200)).body.workflows;
+    expect(own.map((row: { name: string }) => row.name).sort()).toEqual(
+      ADDITIONAL_WORKFLOW_STARTERS.map((row) => row.label).sort()
+    );
+    expect((await as(tokenB).get(route).expect(200)).body.workflows).toEqual([]);
+    expect(
+      (
+        await db
+          .prepare('SELECT count(*) AS count FROM linkedin_actions WHERE workspace_id=?')
+          .get<{ count: number }>(A)
+      )?.count
+    ).toBe(0);
   });
 
   it('keeps list/workflow/campaign read models workspace-scoped', async () => {
