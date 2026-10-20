@@ -149,35 +149,66 @@ async function trackedHtmlBody(
   return renderCampaignTrackedContent(body, origin, token, replacements);
 }
 
+/**
+ * Reserve channel work under one short workspace lock. A claimed email consumes
+ * its mailbox's daily capacity until it settles: counting only confirmed sends
+ * lets two workers both pass the cap before either provider call returns.
+ * Unknown outcomes also reserve today's slot until explicitly reconciled.
+ * This lock covers only the database claim, never the external provider call.
+ */
 async function claimNext(db: Db, workspaceId: string, now: Date): Promise<ChannelRow | null> {
-  return (
-    (await db
-      .prepare(
-        `UPDATE linkedin_campaign_channel_actions SET status='claimed',claimed_at=?::timestamptz,attempt_count=attempt_count+1,updated_at=?::timestamptz
-         WHERE id=(
-           SELECT q.id
-           FROM linkedin_campaign_channel_actions q
-           JOIN linkedin_campaigns c
-             ON c.workspace_id=q.workspace_id AND c.id=q.campaign_id
-           JOIN linkedin_campaign_members m
-             ON m.workspace_id=q.workspace_id AND m.id=q.member_id
-           WHERE q.workspace_id=? AND q.status='planned' AND q.planned_for<=?::timestamptz
-             AND q.claimed_at IS NULL AND c.status='running'
-             AND m.status IN ('active','waiting')
-             AND m.current_step_id=q.workflow_step_id
-             AND NOT EXISTS (
-               SELECT 1 FROM linkedin_actions r
-               WHERE r.workspace_id=q.workspace_id AND r.campaign_member_id=q.member_id
-                 AND r.status='replied'
-             )
-           ORDER BY q.planned_for ASC,q.created_at ASC,q.id ASC
-           FOR UPDATE OF q SKIP LOCKED LIMIT 1
-         )
-         RETURNING id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,payload_json,variant_id,idempotency_key,connection_id,attempt_count,credits_used,tracking_token`
-      )
-      .get<ChannelRow>(now.toISOString(), now.toISOString(), workspaceId, now.toISOString())) ??
-    null
-  );
+  const timestamp = now.toISOString();
+  const dayStart = new Date(now.getTime() - 86_400_000).toISOString();
+  return db.transaction(async (tx) => {
+    await tx
+      .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))')
+      .get(`${workspaceId}:campaign-mailbox-cap`);
+    return (
+      (await tx
+        .prepare(
+          `UPDATE linkedin_campaign_channel_actions SET status='claimed',claimed_at=?::timestamptz,attempt_count=attempt_count+1,updated_at=?::timestamptz
+           WHERE id=(
+             SELECT q.id
+             FROM linkedin_campaign_channel_actions q
+             JOIN linkedin_campaigns c
+               ON c.workspace_id=q.workspace_id AND c.id=q.campaign_id
+             JOIN linkedin_campaign_members m
+               ON m.workspace_id=q.workspace_id AND m.id=q.member_id
+             WHERE q.workspace_id=? AND q.status='planned' AND q.planned_for<=?::timestamptz
+               AND q.claimed_at IS NULL AND c.status='running'
+               AND m.status IN ('active','waiting')
+               AND m.current_step_id=q.workflow_step_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM linkedin_actions r
+                 WHERE r.workspace_id=q.workspace_id AND r.campaign_member_id=q.member_id
+                   AND r.status='replied'
+               )
+               AND (
+                 q.kind<>'email' OR q.connection_id IS NULL OR NOT EXISTS (
+                   SELECT 1 FROM linkedin_campaign_mailbox_settings setting
+                   WHERE setting.workspace_id=q.workspace_id
+                     AND setting.connection_id=q.connection_id
+                     AND (
+                       SELECT COUNT(*) FROM linkedin_campaign_channel_actions reserved
+                       WHERE reserved.workspace_id=q.workspace_id
+                         AND reserved.connection_id=q.connection_id
+                         AND reserved.kind='email'
+                         AND (
+                           reserved.status='claimed'
+                           OR (reserved.status='sent' AND reserved.completed_at>=?::timestamptz)
+                           OR (reserved.status='unknown' AND reserved.updated_at>=?::timestamptz)
+                         )
+                     ) >= setting.daily_limit
+                 )
+               )
+             ORDER BY q.planned_for ASC,q.created_at ASC,q.id ASC
+             FOR UPDATE OF q SKIP LOCKED LIMIT 1
+           )
+           RETURNING id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,payload_json,variant_id,idempotency_key,connection_id,attempt_count,credits_used,tracking_token`
+        )
+        .get<ChannelRow>(timestamp, timestamp, workspaceId, timestamp, dayStart, dayStart)) ?? null
+    );
+  });
 }
 
 async function mailboxMaySend(
@@ -255,6 +286,7 @@ async function mailboxMaySend(
 
 /** An expected workspace setup problem never becomes an unknown provider outcome. */
 class CampaignEmailSetupHold extends Error {}
+class CampaignEmailPolicyHold extends Error {}
 class CampaignEmailRecipientBlocked extends Error {}
 
 /**
@@ -322,18 +354,46 @@ async function campaignEmailSenderReady(
 async function holdCampaignEmailSetup(
   db: Db,
   row: ChannelRow,
-  error: CampaignEmailSetupHold,
-  now: Date
+  error: Error,
+  now: Date,
+  holdMailboxLeg = false
 ) {
   const next = new Date(now.getTime() + 60 * 60_000);
-  await db
-    .prepare(
-      `UPDATE linkedin_campaign_channel_actions
-     SET status='planned', claimed_at=NULL, planned_for=?::timestamptz,
-         last_error=?, updated_at=?::timestamptz
-     WHERE workspace_id=? AND id=? AND status='claimed'`
-    )
-    .run(next.toISOString(), error.message, now.toISOString(), row.workspace_id, row.id);
+  await db.transaction(async (tx) => {
+    if (holdMailboxLeg && row.kind === 'email') {
+      // A missing reply sync, sender identity, DNS proof or footer applies to the
+      // whole mailbox leg, not to one recipient. Hold its other due emails at once
+      // instead of burning each worker tick on the same setup failure. A policy
+      // review/denial is action-specific and must never pause approved peers.
+      await tx
+        .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))')
+        .get(`${row.workspace_id}:campaign-mailbox-cap`);
+      await tx
+        .prepare(
+          `UPDATE linkedin_campaign_channel_actions
+           SET planned_for=?::timestamptz,last_error=?,updated_at=?::timestamptz
+           WHERE workspace_id=? AND kind='email' AND status='planned'
+             AND connection_id IS NOT DISTINCT FROM ?
+             AND planned_for<=?::timestamptz`
+        )
+        .run(
+          next.toISOString(),
+          error.message,
+          now.toISOString(),
+          row.workspace_id,
+          row.connection_id,
+          now.toISOString()
+        );
+    }
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+         SET status='planned', claimed_at=NULL, planned_for=?::timestamptz,
+             last_error=?, updated_at=?::timestamptz
+         WHERE workspace_id=? AND id=? AND status='claimed'`
+      )
+      .run(next.toISOString(), error.message, now.toISOString(), row.workspace_id, row.id);
+  });
 }
 
 /** A recipient-level pre-send refusal is terminal, never an unknown side effect. */
@@ -443,7 +503,7 @@ async function executeEmail(
     );
   const sender = await campaignEmailSenderReady(db, row.workspace_id, row.connection_id, now);
   const gate = await campaignEmailPolicyGate(db, row.workspace_id, row.id);
-  if (!gate.allowed) throw new CampaignEmailSetupHold(gate.reason);
+  if (!gate.allowed) throw new CampaignEmailPolicyHold(gate.reason);
   const bodyWithFooter = `${body}\n\n${sender.footer}`;
   const threaded = payload.threaded === true;
   const tracking =
@@ -1014,8 +1074,12 @@ export async function runCampaignChannelActions(
         await skipBlockedCampaignRecipient(db, row, error, now);
         continue;
       }
-      if (error instanceof CampaignEmailSetupHold) {
+      if (error instanceof CampaignEmailPolicyHold) {
         await holdCampaignEmailSetup(db, row, error, now);
+        continue;
+      }
+      if (error instanceof CampaignEmailSetupHold) {
+        await holdCampaignEmailSetup(db, row, error, now, true);
         continue;
       }
       const status = await settleFailure(db, row, error, now);
@@ -1023,7 +1087,6 @@ export async function runCampaignChannelActions(
       else result.unknown += 1;
     }
   }
-  return result;
   return result;
 }
 /** Resolve a provider side effect whose outcome was unknown without guessing or duplicating it. */

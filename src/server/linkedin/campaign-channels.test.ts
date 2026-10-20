@@ -58,6 +58,7 @@ import { saveWorkflow } from './workflows.js';
 let db: Db;
 const WORKSPACE = 'ws_campaign_channels_test';
 const NOW = new Date('2026-08-20T09:00:00.000Z');
+let createdListCount = 0;
 
 beforeEach(async () => {
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
@@ -165,18 +166,22 @@ async function campaignFor(
   csv: string,
   options: { enrichmentCreditCap?: number | null } = {}
 ) {
-  const list = await createLeadList(db, { workspaceId: WORKSPACE, name: 'Leads' }, NOW);
+  const list = await createLeadList(
+    db,
+    { workspaceId: WORKSPACE, name: `Leads ${++createdListCount}` },
+    NOW
+  );
   await importLeadCsv(db, { workspaceId: WORKSPACE, listId: list.id, csv }, NOW);
   const workflow = await saveWorkflow(
     db,
-    { workspaceId: WORKSPACE, name: 'Channel flow', steps },
+    { workspaceId: WORKSPACE, name: `Channel flow ${createdListCount}`, steps },
     NOW
   );
   const created = await createManagedCampaign(
     db,
     {
       workspaceId: WORKSPACE,
-      name: 'Channel campaign',
+      name: `Channel campaign ${createdListCount}`,
       leadListId: list.id,
       workflowId: workflow.id,
       admissionPolicy: { maxWaveSize: 10 },
@@ -239,6 +244,33 @@ async function queuedReviewEmail(actionId: string) {
       NOW.toISOString()
     );
   return campaignId;
+}
+
+async function queuedReviewPair(first: string, second: string): Promise<void> {
+  await queuedReviewEmail(first);
+  await queuedReviewEmail(second);
+  // The second campaign creation also ticks the first campaign. Restore both
+  // fixture members to their manually queued email step so either order may send.
+  await db
+    .prepare(
+      `UPDATE linkedin_campaign_members
+       SET status='waiting',current_step_id='review-email',step_index=0,
+           next_eligible_at=?::timestamptz
+       WHERE workspace_id=? AND id IN (
+         SELECT member_id FROM linkedin_campaign_channel_actions
+         WHERE workspace_id=? AND id IN (?,?)
+       )`
+    )
+    .run(NOW.toISOString(), WORKSPACE, WORKSPACE, first, second);
+  await db
+    .prepare(
+      `UPDATE linkedin_campaigns SET status='running'
+       WHERE workspace_id=? AND id IN (
+         SELECT campaign_id FROM linkedin_campaign_channel_actions
+         WHERE workspace_id=? AND id IN (?,?)
+       )`
+    )
+    .run(WORKSPACE, WORKSPACE, first, second);
 }
 
 describe('campaign channel executor', () => {
@@ -443,6 +475,118 @@ describe('campaign channel executor', () => {
       )
     ).rejects.toThrow('not awaiting approval');
   });
+  it('defers due email actions on broken mailbox setup and resumes after recovery', async () => {
+    await seedReadyMailbox();
+    await queuedReviewPair('licha_setup_first', 'licha_setup_second');
+    await db.prepare('DELETE FROM email_inbound_mailboxes WHERE workspace_id=?').run(WORKSPACE);
+    const held = await runCampaignChannelActions(db, WORKSPACE, NOW);
+    expect(held).toMatchObject({ claimed: 1, sent: 0, failed: 0, unknown: 0 });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    const deferred = await db
+      .prepare(
+        `SELECT status,attempt_count,last_error,planned_for
+         FROM linkedin_campaign_channel_actions
+         WHERE workspace_id=? AND id IN ('licha_setup_first','licha_setup_second')
+         ORDER BY id`
+      )
+      .all<{ status: string; attempt_count: number; last_error: string; planned_for: string }>(
+        WORKSPACE
+      );
+    expect(deferred).toHaveLength(2);
+    expect(deferred.map((item) => item.attempt_count).sort()).toEqual([0, 1]);
+    for (const action of deferred) {
+      expect(action.status).toBe('planned');
+      expect(action.last_error).toContain('Replies are not syncing');
+      expect(new Date(action.planned_for).getTime()).toBe(NOW.getTime() + 3_600_000);
+    }
+    await db
+      .prepare(
+        `INSERT INTO email_inbound_mailboxes
+         (workspace_id,connection_id,address,sync_status,designated_at,updated_at)
+         VALUES (?,'conn_campaign_live','founder@acme.test','syncing',?::timestamptz,?::timestamptz)`
+      )
+      .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+    expect(
+      await runCampaignChannelActions(db, WORKSPACE, new Date(NOW.getTime() + 3_600_000))
+    ).toMatchObject({ claimed: 2, sent: 2 });
+    expect(nangoMock.post).toHaveBeenCalledTimes(2);
+  });
+
+  it('reserves one mailbox daily slot across concurrent workers before provider confirmation', async () => {
+    await seedReadyMailbox();
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_mailbox_settings
+         (workspace_id,connection_id,daily_limit,timezone,working_days_json,
+          work_start_minute,work_end_minute)
+         VALUES (?,'conn_campaign_live',1,'UTC','[1,2,3,4,5]'::jsonb,480,1080)`
+      )
+      .run(WORKSPACE);
+    await queuedReviewPair('licha_capacity_first', 'licha_capacity_second');
+
+    let providerStarted!: () => void;
+    let releaseProvider!: () => void;
+    const started = new Promise<void>((resolve) => {
+      providerStarted = resolve;
+    });
+    const pending = new Promise<void>((resolve) => {
+      releaseProvider = resolve;
+    });
+    nangoMock.post.mockImplementation(async () => {
+      providerStarted();
+      await pending;
+      return { data: { id: 'mailbox-cap-send', threadId: 'mailbox-cap-thread' }, headers: {} };
+    });
+
+    const first = runCampaignChannelActions(db, WORKSPACE, NOW, 1);
+    try {
+      await started;
+      // A distinct executor can claim through another pooled PostgreSQL connection
+      // while the first provider call is still pending.
+      const second = await runCampaignChannelActions(db, WORKSPACE, NOW, 1);
+      expect(second).toMatchObject({ claimed: 0, sent: 0, failed: 0, unknown: 0 });
+      expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseProvider();
+    }
+    expect(await first).toMatchObject({ claimed: 1, sent: 1 });
+    expect((await runCampaignChannelActions(db, WORKSPACE, NOW, 1)).claimed).toBe(0);
+    expect(
+      await db
+        .prepare(
+          `SELECT status,COUNT(*)::int AS total
+           FROM linkedin_campaign_channel_actions
+           WHERE workspace_id=? AND id IN ('licha_capacity_first','licha_capacity_second')
+           GROUP BY status ORDER BY status`
+        )
+        .all<{ status: string; total: number }>(WORKSPACE)
+    ).toEqual([
+      { status: 'planned', total: 1 },
+      { status: 'sent', total: 1 }
+    ]);
+  });
+
+  it('reserves mailbox capacity for an unresolved email provider outcome', async () => {
+    await seedReadyMailbox();
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_mailbox_settings
+         (workspace_id,connection_id,daily_limit,timezone,working_days_json,
+          work_start_minute,work_end_minute)
+         VALUES (?,'conn_campaign_live',1,'UTC','[1,2,3,4,5]'::jsonb,480,1080)`
+      )
+      .run(WORKSPACE);
+    await queuedReviewPair('licha_unknown_slot', 'licha_unknown_next');
+    nangoMock.post.mockRejectedValueOnce(new Error('Network lost after provider acceptance'));
+    expect(await runCampaignChannelActions(db, WORKSPACE, NOW, 1)).toMatchObject({
+      claimed: 1,
+      sent: 0,
+      unknown: 1
+    });
+    expect((await runCampaignChannelActions(db, WORKSPACE, NOW, 1)).claimed).toBe(0);
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+  });
+
   it('does not claim channel work while a campaign is paused and retires it on stop', async () => {
     const campaignId = await campaignFor(
       [
