@@ -1,4 +1,5 @@
 import { id, type Db } from '../db.js';
+import { withSuppressionBoundary } from '../suppressions.js';
 import { canonicalProfileUrl } from './driver-scrape.js';
 
 /**
@@ -105,7 +106,10 @@ export async function addExclusions(
   entries: readonly ExclusionInput[],
   now: Date
 ): Promise<{ exclusions: LinkedInExclusion[]; added: number; updated: number }> {
-  return db.transaction(async (tx) => {
+  // This irreversible Never Contact write must be ordered with email pixel/
+  // click evidence. An exclusion committed while tracking is in flight must
+  // not be invisible to a stale telemetry permission decision.
+  return withSuppressionBoundary(db, workspaceId, async (tx) => {
     const timestamp = now.toISOString();
     const seen = new Set<string>();
     const exclusions: LinkedInExclusion[] = [];

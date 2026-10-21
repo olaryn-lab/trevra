@@ -118,17 +118,27 @@ describe('/u/:token failures', () => {
   // A Db whose matching statements throw, standing in for any failure inside
   // applyUnsubscribeToken (a DB outage, createSuppression refusing, ...).
   function failingApp(failOn: RegExp): Express {
-    const broken = new Proxy(db, {
-      get(target, prop, receiver) {
-        const value = Reflect.get(target, prop, receiver);
-        if (prop !== 'prepare') return typeof value === 'function' ? value.bind(target) : value;
-        return (sql: string) => {
-          if (failOn.test(sql)) throw new Error('forced failure at /var/secret/stack.ts');
-          return target.prepare(sql);
-        };
-      }
-    }) as Db;
-    return createApp(broken);
+    const failInsideTransaction = (database: Db): Db =>
+      new Proxy(database, {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (prop === 'prepare') {
+            return (sql: string) => {
+              if (failOn.test(sql)) throw new Error('forced failure at /var/secret/stack.ts');
+              return target.prepare(sql);
+            };
+          }
+          // Unsubscribe persists suppressions inside a PostgreSQL transaction.
+          // Fault injection must reach the transaction's checked-out Db too;
+          // replacing prepare() only on the outer pooled handle misses it.
+          if (prop === 'transactionOrInline') {
+            return <T>(work: (tx: Db) => Promise<T>) =>
+              target.transactionOrInline((tx) => work(failInsideTransaction(tx)));
+          }
+          return typeof value === 'function' ? value.bind(target) : value;
+        }
+      }) as Db;
+    return createApp(failInsideTransaction(db));
   }
 
   it('renders the error page, not a stack, when the unsubscribe throws', async () => {

@@ -3,7 +3,7 @@ import { id, type Db } from '../db.js';
 import { createHunterProvider } from '../enrichment/hunter.js';
 import { readWorkspaceSecretPlaintext } from '../secrets/store.js';
 import { enrichmentUsage } from '../enrichment/settings.js';
-import { createSuppression } from '../suppressions.js';
+import { createSuppression, withSuppressionBoundary } from '../suppressions.js';
 import { emailEventBranchKeys, type CampaignEmailEventKind } from './email-event-kind.js';
 import { projectCampaignEmailDelivery, projectCampaignEmailReply } from '../conversations.js';
 import {
@@ -1189,9 +1189,37 @@ export async function recordCampaignEmailEvent(
     metadata?: Record<string, unknown>;
     occurredAt?: string;
   },
-  now: Date = new Date()
+  now: Date = new Date(),
+  trackingGate?: { kind: 'opened' | 'clicked'; token: string; linkToken?: string }
 ): Promise<{ recorded: boolean; memberId: string | null }> {
-  return db.transaction(async (tx) => {
+  return withSuppressionBoundary(db, workspaceId, async (tx) => {
+    // The same transaction-scoped lock serializes telemetry with suppression
+    // writers. Re-read eligibility *after* acquiring it, in this transaction,
+    // rather than trusting a pre-lock public token lookup or prior consent.
+    if (trackingGate) {
+      if (!input.channelActionId) return { recorded: false, memberId: null };
+      const target = await tx
+        .prepare(
+          `SELECT a.workspace_id,a.id,a.payload_json,
+          c.email,c.person_id,c.profile_url,c.do_not_contact
+          FROM linkedin_campaign_channel_actions a
+          JOIN linkedin_lead_contacts c ON c.id=a.contact_id AND c.workspace_id=a.workspace_id
+          WHERE a.workspace_id=? AND a.id=? AND a.tracking_token=?
+            AND a.kind='email' AND a.status='sent'
+            AND (?::text IS NULL OR EXISTS (
+              SELECT 1 FROM linkedin_campaign_email_tracking_links l
+              WHERE l.workspace_id=a.workspace_id AND l.channel_action_id=a.id AND l.token=?))`
+        )
+        .get<EmailTrackingTarget>(
+          workspaceId,
+          input.channelActionId,
+          trackingGate.token,
+          trackingGate.linkToken ?? null,
+          trackingGate.linkToken ?? null
+        );
+      if (!target || !(await mayRecordEmailTracking(tx, target, trackingGate.kind)))
+        return { recorded: false, memberId: null };
+    }
     const row = input.channelActionId
       ? await tx
           .prepare(
@@ -1429,7 +1457,7 @@ export async function recordCampaignEmailTrackingOpen(
        WHERE a.tracking_token=? AND a.kind='email' AND a.status='sent'`
     )
     .get<EmailTrackingTarget>(token);
-  if (!row || !(await mayRecordEmailTracking(db, row, 'opened'))) return false;
+  if (!row) return false;
   const event = await recordCampaignEmailEvent(
     db,
     row.workspace_id,
@@ -1439,7 +1467,8 @@ export async function recordCampaignEmailTrackingOpen(
       providerEventId: `tracking-open:${token}`,
       metadata: { source: 'trevra-pixel' }
     },
-    now
+    now,
+    { kind: 'opened', token }
   );
   return event.recorded;
 }
@@ -1473,19 +1502,18 @@ export async function recordCampaignEmailTrackingClick(
   // A suppression lookup or telemetry write failure must fail closed for data
   // collection while preserving the already-issued destination URL.
   try {
-    if (await mayRecordEmailTracking(db, row, 'clicked')) {
-      await recordCampaignEmailEvent(
-        db,
-        row.workspace_id,
-        {
-          channelActionId: row.id,
-          eventKind: 'clicked',
-          providerEventId: `tracking-click:${linkToken}`,
-          metadata: { source: 'trevra-redirect' }
-        },
-        now
-      );
-    }
+    await recordCampaignEmailEvent(
+      db,
+      row.workspace_id,
+      {
+        channelActionId: row.id,
+        eventKind: 'clicked',
+        providerEventId: `tracking-click:${linkToken}`,
+        metadata: { source: 'trevra-redirect' }
+      },
+      now,
+      { kind: 'clicked', token: actionToken, linkToken }
+    );
   } catch {
     // No event is recorded here as a fallback; the public redirect still works.
   }

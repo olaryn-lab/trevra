@@ -20,7 +20,12 @@ vi.mock('@nangohq/node', () => ({
 import { openDatabase, type Db } from '../db.js';
 import { putWorkspaceSecret } from '../secrets/store.js';
 import { queueEnrichmentRun } from '../enrichment/runs.js';
-import { createSuppression, findSuppression, liftSuppression } from '../suppressions.js';
+import {
+  createSuppression,
+  findSuppression,
+  liftSuppression,
+  withSuppressionBoundary
+} from '../suppressions.js';
 import { executeConnectedAction } from '../integration-service.js';
 import { addExclusions } from './exclusions.js';
 import {
@@ -2675,14 +2680,95 @@ describe('campaign channel executor', () => {
       NOW
     );
 
-    // Never Contact is a cross-channel stop, and the campaign send boundary
-    // already considers it. Previously the telemetry boundary silently did not.
-    await addExclusions(
+    // Race regression: the opt-out transaction has acquired the suppression
+    // serialization lock but has not committed. An open or click arriving now
+    // must wait and recheck *after* the suppression commits, not record an
+    // event based on the earlier visible state.
+    let unlock!: () => void;
+    let hasLock!: () => void;
+    const lockReady = new Promise<void>((resolve) => {
+      hasLock = resolve;
+    });
+    const unlocked = new Promise<void>((resolve) => {
+      unlock = resolve;
+    });
+    const optOut = db.transaction(async (tx) =>
+      withSuppressionBoundary(tx, WORKSPACE, async (held) => {
+        hasLock();
+        await unlocked;
+        return createSuppression(
+          held,
+          {
+            workspaceId: WORKSPACE,
+            channel: 'email',
+            email: 'maya@example.com',
+            reason: 'Late unsubscribe during telemetry',
+            source: 'racing_opt_out'
+          },
+          NOW
+        );
+      })
+    );
+    await lockReady;
+    const racingOpen = recordCampaignEmailTrackingOpen(db, token, NOW);
+    const racingClick = recordCampaignEmailTrackingClick(db, token, linkToken, NOW);
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
+      expect(await eventCount()).toBe(0);
+    } finally {
+      unlock();
+    }
+    const racedSuppression = await optOut;
+    expect(await racingOpen).toBe(false);
+    expect(await racingClick).toBe('https://example.com/recipient-resource');
+    expect(await eventCount()).toBe(0);
+    await liftSuppression(
       db,
-      WORKSPACE,
-      [{ targetRef: 'https://linkedin.com/in/maya-private-tracking', reason: 'Never contact' }],
+      {
+        workspaceId: WORKSPACE,
+        suppressionId: racedSuppression.id,
+        actorType: 'system'
+      },
       NOW
     );
+
+    // A Never Contact exclusion arriving during telemetry must serialize the
+    // same way as canonical email suppression. This transaction blocks both
+    // public event writes until its new blacklist row and queue cancellations
+    // commit together.
+    let finishExclusion!: () => void;
+    let exclusionLockReady!: () => void;
+    const exclusionLocked = new Promise<void>((resolve) => {
+      exclusionLockReady = resolve;
+    });
+    const exclusionRelease = new Promise<void>((resolve) => {
+      finishExclusion = resolve;
+    });
+    const exclusionWrite = db.transaction((tx) =>
+      withSuppressionBoundary(tx, WORKSPACE, async (held) => {
+        exclusionLockReady();
+        await exclusionRelease;
+        return addExclusions(
+          held,
+          WORKSPACE,
+          [{ targetRef: 'https://linkedin.com/in/maya-private-tracking', reason: 'Never contact' }],
+          NOW
+        );
+      })
+    );
+    await exclusionLocked;
+    const openAfterExclusionStarts = recordCampaignEmailTrackingOpen(db, token, NOW);
+    const clickAfterExclusionStarts = recordCampaignEmailTrackingClick(db, token, linkToken, NOW);
+    try {
+      await new Promise<void>((resolve) => setTimeout(resolve, 80));
+      expect(await eventCount()).toBe(0);
+    } finally {
+      finishExclusion();
+    }
+    const excluded = await exclusionWrite;
+    expect(excluded.added).toBe(1);
+    expect(await openAfterExclusionStarts).toBe(false);
+    expect(await clickAfterExclusionStarts).toBe('https://example.com/recipient-resource');
     expect(await recordCampaignEmailTrackingOpen(db, token, NOW)).toBe(false);
     expect(await recordCampaignEmailTrackingClick(db, token, linkToken, NOW)).toBe(
       'https://example.com/recipient-resource'
