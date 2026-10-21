@@ -15,7 +15,7 @@ import {
   canonicalMeetingSchema,
   type CanonicalMeeting
 } from './meetings/types.js';
-import { assertNotSuppressed, SuppressionError } from './suppressions.js';
+import { assertNotSuppressed, SuppressionError, withSuppressionBoundary } from './suppressions.js';
 import {
   assertEmailDeliveryCapacity,
   claimEmailDelivery,
@@ -654,6 +654,7 @@ export async function disconnectIntegration(
 
 /** A pre-provider campaign-email refusal with a known, non-unknown outcome. */
 export class CampaignEmailSendRefusal extends Error {
+  readonly status = 409;
   constructor(
     public readonly scope: 'recipient' | 'workspace',
     message: string
@@ -1095,17 +1096,77 @@ export async function executeConnectedAction(
     await markEmailDeliveryFailure(db, deliveryId, error);
     throw error;
   }
-  if (campaignSend) {
-    try {
-      await assertCampaignEmailClaimCurrent(
-        db,
-        workspaceId,
-        String(structuredPayload.deliverySourceId ?? '')
-      );
-    } catch (error) {
-      await markEmailDeliveryFailure(db, deliveryId, error);
-      throw error;
-    }
+  // A provider preflight can take time: thread lookups, Zoho account reads and
+  // Graph draft creation all introduce an opt-out window. This is the final
+  // local check before each actual send, using the same transaction boundary as
+  // suppression writers. Never hold a DB lock across a provider network call:
+  // an opt-out after this check may race an already in-flight provider request.
+  const assertBeforeProviderWrite = async (): Promise<void> => {
+    await withSuppressionBoundary(db, workspaceId, async (tx) => {
+      const boundPersonId =
+        campaignSend && typeof structuredPayload.personId === 'string'
+          ? structuredPayload.personId
+          : null;
+      if (campaignSend) {
+        const actionId = String(structuredPayload.deliverySourceId ?? '');
+        await assertCampaignEmailClaimCurrent(tx, workspaceId, actionId);
+        const contactId = String(structuredPayload.contactId ?? '');
+        const contact = await tx
+          .prepare(
+            'SELECT person_id,email,profile_url,do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?'
+          )
+          .get<{
+            person_id: string | null;
+            email: string | null;
+            profile_url: string | null;
+            do_not_contact: boolean;
+          }>(workspaceId, contactId);
+        if (
+          !contact ||
+          contact.do_not_contact ||
+          contact.person_id !== boundPersonId ||
+          contact.email?.trim().toLowerCase() !== recipient.toLowerCase()
+        )
+          throw new CampaignEmailSendRefusal(
+            'recipient',
+            'Campaign recipient identity or reachability changed before provider send; nothing sent.'
+          );
+        if (
+          contact.profile_url &&
+          (await filterExcluded(tx, workspaceId, [contact.profile_url])).excluded.length > 0
+        )
+          throw new CampaignEmailSendRefusal(
+            'recipient',
+            'Campaign recipient is on the Never Contact list; nothing sent.'
+          );
+        const gate = await campaignEmailPolicyGate(tx, workspaceId, actionId);
+        if (!gate.allowed) throw new CampaignEmailSendRefusal('workspace', gate.reason);
+        if (gate.review?.contentHash !== structuredPayload.approvalContentHash)
+          throw new CampaignEmailSendRefusal(
+            'workspace',
+            'Campaign approval changed during provider preparation; nothing sent.'
+          );
+      }
+      try {
+        await assertNotSuppressed(tx, workspaceId, {
+          channel: 'email',
+          email: recipient,
+          personId: boundPersonId
+        });
+      } catch (error) {
+        if (!campaignSend || !(error instanceof SuppressionError)) throw error;
+        throw new CampaignEmailSendRefusal(
+          'recipient',
+          'Campaign recipient was suppressed before provider send; nothing sent.'
+        );
+      }
+    });
+  };
+  try {
+    await assertBeforeProviderWrite();
+  } catch (error) {
+    await markEmailDeliveryFailure(db, deliveryId, error);
+    throw error;
   }
   const nango = getNango();
 
@@ -1158,6 +1219,7 @@ export async function executeConnectedAction(
         });
         const mimeDraftId = String(mimeDraft.data.id ?? '').trim();
         if (!mimeDraftId) throw new Error('Microsoft MIME draft returned no message id.');
+        await assertBeforeProviderWrite();
         await nango.post({
           endpoint: `/v1.0/me/messages/${encodeURIComponent(mimeDraftId)}/send`,
           providerConfigKey,
@@ -1189,6 +1251,7 @@ export async function executeConnectedAction(
         });
         const replyId = String(replyDraft.data.id ?? '').trim();
         if (!replyId) throw new Error('Microsoft reply draft returned no message id.');
+        await assertBeforeProviderWrite();
         await nango.post({
           endpoint: `/v1.0/me/messages/${encodeURIComponent(replyId)}/send`,
           providerConfigKey,
@@ -1223,6 +1286,7 @@ export async function executeConnectedAction(
       });
       const draftId = String(draft.data.id ?? '').trim();
       if (!draftId) throw new Error('Microsoft message draft returned no message id.');
+      await assertBeforeProviderWrite();
       await nango.post({
         endpoint: `/v1.0/me/messages/${encodeURIComponent(draftId)}/send`,
         providerConfigKey,
@@ -1267,6 +1331,7 @@ export async function executeConnectedAction(
           'This Zoho Mail connection now sends as a different address than the approved mailbox; nothing was sent. Reconnect it and prepare the email again.'
         );
       }
+      await assertBeforeProviderWrite();
       const sent = await sendZohoMessage(nango, zohoConnection, {
         accountId: account.accountId,
         fromAddress: approvedAddress,
@@ -1315,6 +1380,7 @@ export async function executeConnectedAction(
         extraHeaders: unsubscribeHeaders
       })
     ).toString('base64url');
+    await assertBeforeProviderWrite();
     const response = await nango.post<{ id?: string; threadId?: string }>({
       endpoint: '/gmail/v1/users/me/messages/send',
       providerConfigKey,

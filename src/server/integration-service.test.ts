@@ -402,6 +402,89 @@ describe('connected mailbox threading', () => {
     expect(nangoMock.post).not.toHaveBeenCalled();
   });
 
+  it('blocks a Gmail send when suppression arrives during thread lookup', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    let signalLookup!: () => void;
+    let releaseLookup!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => (signalLookup = resolve));
+    const lookupRelease = new Promise<void>((resolve) => (releaseLookup = resolve));
+    nangoMock.get.mockImplementation(async (config: Record<string, unknown>) => {
+      if ((config.params as { format?: string } | undefined)?.format === 'minimal') {
+        signalLookup();
+        await lookupRelease;
+        return { data: { threadId: 'existing-thread' }, headers: {} };
+      }
+      return { data: {}, headers: {} };
+    });
+    const sending = executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Follow-up',
+      body: 'Checking back',
+      structured_payload_json: JSON.stringify({ threaded: true, threadExternalRef: 'old-message' }),
+      payload_hash: 'race-gmail-thread-suppression'
+    });
+    await lookupStarted;
+    await createSuppression(database, {
+      workspaceId,
+      channel: 'all',
+      email: 'lead@example.test',
+      reason: 'Opted out during lookup',
+      source: 'race_test'
+    });
+    releaseLookup();
+    await expect(sending).rejects.toThrow(/Opted out during lookup/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(
+      await database
+        .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+        .get<{ status: string }>(workspaceId, 'race-gmail-thread-suppression')
+    ).toEqual({ status: 'failed' });
+  });
+
+  it('prevents Microsoft send when suppression arrives after a draft was created', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('microsoft');
+    let signalDraft!: () => void;
+    let releaseDraft!: () => void;
+    const draftStarted = new Promise<void>((resolve) => (signalDraft = resolve));
+    const draftRelease = new Promise<void>((resolve) => (releaseDraft = resolve));
+    nangoMock.post.mockImplementation(async (config: Record<string, unknown>) => {
+      if (config.endpoint === '/v1.0/me/messages') {
+        signalDraft();
+        await draftRelease;
+        return { data: { id: 'prepared-draft' }, headers: {} };
+      }
+      throw new Error('Unexpected provider send after suppression');
+    });
+    const sending = executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Draft',
+      body: 'Must not send',
+      structured_payload_json: '{}',
+      payload_hash: 'race-ms-draft-suppression'
+    });
+    await draftStarted;
+    await createSuppression(database, {
+      workspaceId,
+      channel: 'email',
+      email: 'lead@example.test',
+      reason: 'Opted out while drafting',
+      source: 'race_test'
+    });
+    releaseDraft();
+    await expect(sending).rejects.toThrow(/Opted out while drafting/);
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    expect(nangoMock.post.mock.calls[0]?.[0]).toMatchObject({ endpoint: '/v1.0/me/messages' });
+    expect(
+      await database
+        .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+        .get<{ status: string }>(workspaceId, 'race-ms-draft-suppression')
+    ).toEqual({ status: 'failed' });
+  });
+
   it('threads Gmail follow-ups with threadId and RFC reply headers', async () => {
     const { database, workspaceId, connectionId } = await mailbox('gmail');
     nangoMock.post

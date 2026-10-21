@@ -798,6 +798,7 @@ async function executeFindEmail(
 
 function definiteFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  if (error instanceof CampaignEmailSendRefusal) return true;
   return (
     /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|Hunter rejected the API key|Hunter rate limit reached|Hunter account has no credits|Hunter API key not connected|Hunter Email Finder is not configured|Hunter workspace key must be verified|Workspace Hunter monthly credit cap reached|Campaign contact is do-not-contact|enrichment credit cap reached/i.test(
       error.message
