@@ -691,6 +691,9 @@ export function LinkedInManagerLeadConfig({
   const removeContact = async (contact: LinkedInLeadContact) => {
     setRowBusy(contact.id);
     try {
+      // Never remove the row or report success until the authenticated API
+      // confirms deletion. A failed request must leave the lead visible.
+      await deleteLinkedInManagerLeadContact(contact.id);
       setContacts((current) => current.filter((entry) => entry.id !== contact.id));
       setContactTotal((current) => Math.max(0, current - 1));
       // Removing an already-loaded row shifts every later OFFSET by one.
@@ -1551,7 +1554,7 @@ export function LinkedInManagerLeadConfig({
                                           onSelect: () => startEdit(contact)
                                         },
                                         {
-                                          label: 'Remove from list',
+                                          label: 'Remove lead permanently',
                                           icon: <Trash2 size={12} />,
                                           disabled: rowBusy !== '',
                                           danger: true,

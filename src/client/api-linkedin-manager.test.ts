@@ -1,5 +1,7 @@
+import { readFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  deleteLinkedInManagerLeadContact,
   resolveLinkedInHandoff,
   updateLinkedInManagerSeat,
   updateLinkedInSeatCapabilities
@@ -76,5 +78,50 @@ describe('LinkedIn manager client API wiring', () => {
     expect(path).toBe('/api/linkedin/handoffs/lact_1/resolve');
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual({ resolution: 'sent' });
+  });
+
+  it('requires the server to confirm a permanent lead deletion', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ deleted: true }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ deleted: false }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ error: 'Deletion failed' }), {
+          status: 500,
+          headers: { 'Content-Type': 'application/json' }
+        })
+      );
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(deleteLinkedInManagerLeadContact('lead/id')).resolves.toBeUndefined();
+    await expect(deleteLinkedInManagerLeadContact('lead/id')).rejects.toThrow(/did not confirm/);
+    await expect(deleteLinkedInManagerLeadContact('lead/id')).rejects.toThrow(/Deletion failed/);
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/linkedin/manager/contacts/lead%2Fid');
+    expect(init.method).toBe('DELETE');
+    expect(init.credentials).toBe('include');
+  });
+
+  it('never removes a lead from the UI before awaiting the deletion API', async () => {
+    // Source guard: server tests cannot exercise the browser event handler, and
+    // a prior regression removed the remote call while retaining a success toast.
+    const source = await readFile(
+      new URL('./LinkedInManagerLeadConfig.tsx', import.meta.url),
+      'utf8'
+    );
+    const handler =
+      source.split('const removeContact = async ')[1]?.split('const openMeta =')[0] ?? '';
+    expect(handler).toMatch(
+      /await deleteLinkedInManagerLeadContact\(contact\.id\);[\s\S]*setContacts\(/
+    );
   });
 });

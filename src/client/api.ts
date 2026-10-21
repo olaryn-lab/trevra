@@ -2549,13 +2549,13 @@ export async function updateLinkedInManagerLeadContact(
   ).contact;
 }
 
-export async function deleteLinkedInManagerLeadContact(contactId: string): Promise<boolean> {
-  return (
-    await request<{ deleted: boolean }>(
-      `/api/linkedin/manager/contacts/${encodeURIComponent(contactId)}`,
-      { method: 'DELETE' }
-    )
-  ).deleted;
+export async function deleteLinkedInManagerLeadContact(contactId: string): Promise<void> {
+  const result = await request<{ deleted: boolean }>(
+    `/api/linkedin/manager/contacts/${encodeURIComponent(contactId)}`,
+    { method: 'DELETE' }
+  );
+  // A 200 response is not proof of deletion if the body says otherwise.
+  if (result.deleted !== true) throw new Error('The server did not confirm lead deletion.');
 }
 
 export async function getLinkedInManagerWorkflows(): Promise<LinkedInWorkflow[]> {
