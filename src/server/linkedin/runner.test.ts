@@ -224,6 +224,63 @@ describe('managed campaign runner', () => {
     ).toEqual({ high: 0, low: 0, normal: 1 });
   });
 
+  it('holds the assigned A/B arm when its merge data is missing, then queues a safe selected arm', async () => {
+    const listId = await seededList('Variant variable coverage', [
+      { first: 'Maya', last: 'Smith', company: 'Acme', slug: 'variant-maya' }
+    ]);
+    const workflowId = (
+      await saveWorkflow(
+        db,
+        {
+          workspaceId: WORKSPACE,
+          name: 'Variable-specific A/B gating',
+          steps: [
+            {
+              id: 'invite',
+              action: 'connection_request',
+              delayBefore: { amount: 0, unit: 'hours' },
+              config: {
+                variants: [
+                  { id: 'safe', body: 'Hi {{first_name}}', weight: 50 },
+                  { id: 'needs-phone', body: 'Call {{phone}}', weight: 50 }
+                ]
+              }
+            }
+          ]
+        },
+        NOW
+      )
+    ).id;
+    const campaignId = await runningCampaign(listId, workflowId, 'Variable-specific A/B gating');
+    const [member] = await members(campaignId);
+    expect(member).toBeDefined();
+    await db
+      .prepare(
+        'UPDATE linkedin_campaign_members SET assigned_variants=?::jsonb WHERE workspace_id=? AND id=?'
+      )
+      .run(JSON.stringify({ invite: 'needs-phone' }), WORKSPACE, member.id);
+
+    expect((await runManagedCampaigns(db, WORKSPACE, NOW)).actionsPlanned).toBe(0);
+    expect(await actions()).toHaveLength(0);
+    const blocked = await db
+      .prepare(
+        'SELECT branch_state_json FROM linkedin_campaign_members WHERE workspace_id=? AND id=?'
+      )
+      .get<{ branch_state_json: Record<string, unknown> }>(WORKSPACE, member.id);
+    expect(JSON.stringify(blocked?.branch_state_json)).toContain('missing_variable:phone');
+
+    // An operator changes the selected variant while the action is not queued.
+    // The next tick must not inherit the unselected arm's phone requirement.
+    await db
+      .prepare(
+        'UPDATE linkedin_campaign_members SET assigned_variants=?::jsonb WHERE workspace_id=? AND id=?'
+      )
+      .run(JSON.stringify({ invite: 'safe' }), WORKSPACE, member.id);
+    expect((await runManagedCampaigns(db, WORKSPACE, at(HOUR))).actionsPlanned).toBe(1);
+    const planned = (await actions()).find((item) => item.workflow_step_id === 'invite');
+    expect(planned).toMatchObject({ body: 'Hi Maya', variant_id: 'safe', status: 'planned' });
+  });
+
   it('queues a small amount of active outreach during the first account warm-up week', async () => {
     await db.prepare('DELETE FROM linkedin_seats WHERE workspace_id=?').run(WORKSPACE);
     await upsertSeat(

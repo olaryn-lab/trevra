@@ -2353,7 +2353,7 @@ export async function previewManagedCampaignLaunch(
       code: 'missing_booking_link',
       severity: 'warning',
       message: BOOKING_LINK_MISSING_MESSAGE,
-      stepIds: workflow.steps.filter(stepUsesBookingLink).map((step) => step.id)
+      stepIds: workflow.steps.filter((step) => stepUsesBookingLink(step)).map((step) => step.id)
     });
   }
   const sampleRows = await db

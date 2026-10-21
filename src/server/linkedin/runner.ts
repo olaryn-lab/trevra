@@ -1619,9 +1619,27 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
           continue;
         }
 
-        // The link was removed after start (start itself refuses without one).
-        // Hold the member and say why; never render the step with a blank link.
-        if (!bookingLink && stepUsesBookingLink(step)) {
+        // A/B variants may require different lead fields. Resolve the same
+        // stable member:step variant that execution uses, before the hold gate:
+        // never block a safe arm merely because an unselected arm asks for phone.
+        // Conversely, a missing field in the selected arm must never be sent.
+        const variants =
+          step.action === 'connection_request' ||
+          step.action === 'message' ||
+          step.action === 'inmail' ||
+          step.action === 'email' ||
+          step.action === 'group_message' ||
+          step.action === 'event_message'
+            ? step.config.variants
+            : undefined;
+        const selectedVariant = variants?.length
+          ? (variants.find(
+              (variant) => variant.id === parseVariants(member.assigned_variants)[step.id]
+            ) ?? chooseMessageVariant(variants, `${member.id}:${step.id}`))
+          : null;
+
+        // A removed link only blocks an arm that actually requires the link.
+        if (!bookingLink && stepUsesBookingLink(step, selectedVariant?.id)) {
           memberWrites.set(
             member.id,
             stayOnStep(
@@ -1640,7 +1658,7 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
           continue;
         }
 
-        const missingVariables = missingRequiredWorkflowVariables(step, lead);
+        const missingVariables = missingRequiredWorkflowVariables(step, lead, selectedVariant?.id);
         if (missingVariables.length > 0) {
           memberWrites.set(
             member.id,
