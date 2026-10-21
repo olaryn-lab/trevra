@@ -3522,13 +3522,15 @@ button:disabled {
   font-size: var(--t-text-sm);
 }
 .ol-auth-page {
-  --ol-login-primary: var(--t-green-600);
+  /* Trevra primary green, applied to the provider primary and inline email CTA. */
+  --ol-login-primary: #176b45;
   --ol-login-primary-fg: #ffffff;
 }
 :root[data-theme='dark'] .ol-auth-page,
 .dark .ol-auth-page {
-  --ol-login-primary: var(--t-night-green);
-  --ol-login-primary-fg: var(--t-night);
+  /* Branded accent with dark ink for accessible contrast in dark mode. */
+  --ol-login-primary: #61c18f;
+  --ol-login-primary-fg: #111a15;
 }
 /* Login contract owns the dimensions, including expanded email controls. */
 .auth-submit {

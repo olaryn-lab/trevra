@@ -214,7 +214,7 @@ body:has(.ol-auth-page){margin:0;background:var(--ol-login-page)!important;}
 @media(max-width:560px){
   .ol-auth-page{padding:56px 12px!important;}
   .ol-auth-card{padding:28px 22px 24px!important;}
-  .ol-auth-intro{margin:28px 0 24px!important;}
+  .ol-auth-intro{margin:32px 0 24px!important;}
   .ol-auth-title{font-size:27px!important;}
 }
 @media(max-height:690px){
