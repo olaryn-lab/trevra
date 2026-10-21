@@ -43,6 +43,9 @@ const {
 } = await import('./integration-service.js');
 const { createSuppression, findSuppression } = await import('./suppressions.js');
 const { resolveContact } = await import('./lead-capture/people.js');
+const { upsertSeat } = await import('./linkedin/seats.js');
+const { createLeadList, importLeadCsv } = await import('./linkedin/lead-lists.js');
+const { addExclusions } = await import('./linkedin/exclusions.js');
 const { findUnsubscribeDelivery } = await import('./email/unsubscribe.js');
 
 type DbQueryable = ConstructorParameters<typeof Db>[0];
@@ -378,6 +381,83 @@ describe('connected mailbox threading', () => {
       );
     return { database, workspaceId: tenant.workspaceId, connectionId };
   }
+
+  async function seedLinkedInRecipient(database: LiveDb, workspaceId: string) {
+    await upsertSeat(
+      database,
+      workspaceId,
+      { label: 'Owner', timezone: 'Europe/Zurich' },
+      new Date()
+    );
+    const list = await createLeadList(database, { workspaceId, name: 'Import only' });
+    await importLeadCsv(database, {
+      workspaceId,
+      listId: list.id,
+      csv: 'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Smith,Acme,lead@example.test,https://linkedin.com/in/maya-optout\n'
+    });
+  }
+
+  it('blocks noncampaign email when a linked lead is DNC without a suppression row', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await seedLinkedInRecipient(database, workspaceId);
+    await database
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=? AND email=?'
+      )
+      .run(workspaceId, 'lead@example.test');
+    expect(
+      await findSuppression(database, workspaceId, { channel: 'email', email: 'lead@example.test' })
+    ).toBeNull();
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test',
+        subject: 'Should be held',
+        body: 'No send',
+        structured_payload_json: '{}',
+        payload_hash: 'legacy-lead-dnc'
+      })
+    ).rejects.toThrow(/do-not-contact/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(
+      await database
+        .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+        .get<{ status: string }>(workspaceId, 'legacy-lead-dnc')
+    ).toEqual({ status: 'failed' });
+  });
+
+  it('blocks noncampaign email for a linked Never Contact profile without a suppression row', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await seedLinkedInRecipient(database, workspaceId);
+    await addExclusions(
+      database,
+      workspaceId,
+      [
+        {
+          targetRef: 'https://www.linkedin.com/in/maya-optout/?trk=operator',
+          reason: 'Asked not to be contacted',
+          source: 'test'
+        }
+      ],
+      new Date()
+    );
+    expect(
+      await findSuppression(database, workspaceId, { channel: 'email', email: 'lead@example.test' })
+    ).toBeNull();
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test',
+        subject: 'Should be held',
+        body: 'No send',
+        structured_payload_json: '{}',
+        payload_hash: 'legacy-lead-never-contact'
+      })
+    ).rejects.toThrow(/Never Contact/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
   it('refuses a globally suppressed email before contacting the provider', async () => {
     const { database, workspaceId, connectionId } = await mailbox('gmail');
     await createSuppression(database, {

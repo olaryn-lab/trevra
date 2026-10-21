@@ -1147,6 +1147,29 @@ export async function executeConnectedAction(
             'Campaign approval changed during provider preparation; nothing sent.'
           );
       }
+      // A legacy/skill/reply email may bypass the managed-campaign contact
+      // preflight entirely. Do not let an explicit do-not-contact flag or a
+      // linked Never Contact profile become ineffective simply because a
+      // separate canonical suppression row was never materialized. The shared
+      // workspace lock orders this read with supported DNC/exclusion writers.
+      const emailLeads = await tx
+        .prepare(
+          `SELECT do_not_contact,profile_url FROM linkedin_lead_contacts
+           WHERE workspace_id=? AND LOWER(BTRIM(email))=LOWER(?)`
+        )
+        .all<{ do_not_contact: boolean; profile_url: string | null }>(workspaceId, recipient);
+      if (emailLeads.some((lead) => lead.do_not_contact))
+        throw Object.assign(new Error('Email recipient is marked do-not-contact; nothing sent.'), {
+          status: 409
+        });
+      const profiles = emailLeads
+        .map((lead) => lead.profile_url)
+        .filter((profile): profile is string => Boolean(profile));
+      if (profiles.length && (await filterExcluded(tx, workspaceId, profiles)).excluded.length)
+        throw Object.assign(
+          new Error('Email recipient is on the workspace Never Contact list; nothing sent.'),
+          { status: 409 }
+        );
       try {
         await assertNotSuppressed(tx, workspaceId, {
           channel: 'email',
