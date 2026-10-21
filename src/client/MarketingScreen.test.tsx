@@ -15,13 +15,15 @@ describe('MarketingScreen', () => {
     }
   });
 
-  it('connects sourced evidence to a safe payload reveal', () => {
+  it('labels synthetic evidence and payloads as illustrative rather than live customer outcomes', () => {
     const html = renderToStaticMarkup(<MarketingApp />);
     expect(html).toContain('HARD FACT');
     expect(html).toContain('REPORTED');
     expect(html).toContain('Reveal the exact payload');
-    expect(html).not.toContain('Illustrative example');
-    expect(html).not.toContain('Not customer data');
+    expect(html).toContain('Illustrative example');
+    expect(html).toContain('not live customer data');
+    expect(html).toContain('Illustrative workspace preview');
+    expect(html).toContain('not an actual customer result');
     expect(html).not.toContain('Approve this run');
     expect(html).not.toContain('Approved — released to you');
   });

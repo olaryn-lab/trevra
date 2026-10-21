@@ -45,7 +45,7 @@ export const FAQ_ITEMS: ReadonlyArray<FaqItem> = [
   {
     question: 'Can it send outreach without me?',
     answer:
-      'No. Trevra checks workspace policy and locks the exact action. A human must approve it before a named execution adapter can run.'
+      'Workspace policy controls that. Consequential sends require exact-action owner approval by default; the owner can explicitly allow eligible actions or deny them. An agent cannot grant its own approval.'
   },
   {
     question: 'Do I need a CRM?',
@@ -124,7 +124,7 @@ export function buildStructuredData(config: StructuredDataConfig) {
           'Exact-payload approval with cryptographic hashing',
           'Named, idempotent execution adapters for external writes',
           'Append-only events and inspectable run outcomes',
-          'Open source and self-hostable on PostgreSQL'
+          'PostgreSQL-backed self-hosting; deployment and licensing terms require approval'
         ],
         publisher: { '@id': `${config.origin}/#organization` }
       },
@@ -205,8 +205,7 @@ Agent tokens cannot approve or execute consequential actions. Trevra freezes the
 Integration plumbing is delegated to Nango or official provider SDKs for GTM systems such as Gmail, Microsoft 365, CRM providers, public communities, and research sources. Trevra owns normalization, source provenance, policy, approvals, and outcomes rather than rebuilding OAuth or token storage.
 
 ## Ownership
-Trevra is open source, PostgreSQL-only, and self-hostable. The workspace, playbook state, ledger, evidence, and configuration can stay in infrastructure you control.
-
+Trevra uses PostgreSQL and has documented self-hosting procedures. No software license has been published for this repository; source availability does not grant deployment or redistribution rights. Contact the team to obtain approved licensing and deployment terms.
 ## Questions
 ${questions}
 

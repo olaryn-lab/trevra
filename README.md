@@ -126,7 +126,7 @@ Open:
 
 ### Local sign-in
 
-FOSS/local Trevra signs users in directly with its built-in Better Auth email/password flow. No Authward service, Authward database, Mailpit instance, or external identity credentials are required. Self-hosted production uses the same boundary.
+Local development Trevra signs users in directly with its built-in Better Auth email/password flow. No Authward service, Authward database, Mailpit instance, or external identity credentials are required. Self-hosted production uses the same boundary, subject to separately approved deployment rights.
 
 Managed hosted Trevra is different by design: `TREVRA_DEPLOYMENT_MODE=hosted` disables Trevra password auth and requires Authward as the upstream identity authority. Social providers and passwordless login are configured on Authward, not in Trevra. Gmail and Calendar delegated permissions remain separate Nango connections.
 

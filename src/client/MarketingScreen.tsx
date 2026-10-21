@@ -141,6 +141,9 @@ export function MarketingScreen({
         </div>
 
         <figure className="hero-evidence">
+          <figcaption>
+            Illustrative example · sample signals and payload, not live customer data.
+          </figcaption>
           <div className="evidence-card">
             <div className="evidence-head">
               <span>Customer Research</span>
@@ -242,6 +245,7 @@ export function MarketingScreen({
         </ol>
 
         <figure className="workspace-preview">
+          <figcaption>Illustrative workspace preview · not an actual customer result.</figcaption>
           <aside className="workspace-rail" aria-label="Illustrative Trevra workspace navigation">
             <div className="workspace-wordmark">
               <span>

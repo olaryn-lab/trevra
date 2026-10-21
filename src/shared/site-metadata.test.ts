@@ -5,6 +5,7 @@ import {
   buildStructuredData,
   buildWebPageStructuredData,
   FAQ_ITEMS,
+  renderLlmsText,
   renderRobotsTxt,
   SITE_DESCRIPTION,
   SITE_NAME,
@@ -91,6 +92,31 @@ describe('buildStructuredData', () => {
       expect(featureText).not.toContain(phrase);
       expect(SITE_DESCRIPTION).not.toContain(phrase);
     }
+  });
+
+  it('does not assert an unpublished license in JSON-LD or LLM discovery content', () => {
+    const jsonLd = JSON.stringify(buildStructuredData(BASE_CONFIG));
+    const llms = renderLlmsText(
+      {
+        origin: BASE_CONFIG.origin,
+        name: BASE_CONFIG.name,
+        description: BASE_CONFIG.description,
+        supportEmail: BASE_CONFIG.supportEmail,
+        securityEmail: BASE_CONFIG.supportEmail
+      },
+      true
+    );
+    expect(jsonLd).not.toMatch(/open.source|foss|free.software/i);
+    expect(llms).not.toMatch(/open.source|foss|free.software/i);
+    expect(llms).toContain('No software license has been published');
+    expect(jsonLd).toContain('licensing terms require approval');
+  });
+
+  it('describes explicitly allowed sends without promising unconditional human approval', () => {
+    const faq = FAQ_ITEMS.find((item) => item.question === 'Can it send outreach without me?');
+    expect(faq?.answer).toMatch(/require exact-action owner approval by default/);
+    expect(faq?.answer).toMatch(/explicitly allow eligible actions/);
+    expect(JSON.stringify(buildStructuredData(BASE_CONFIG))).toContain(faq!.answer);
   });
 });
 
