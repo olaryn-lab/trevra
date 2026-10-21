@@ -1327,6 +1327,249 @@ describe('campaign channel executor', () => {
     expect(
       await findSuppression(db, WORKSPACE, { channel: 'email', email: 'bounce-me@example.com' })
     ).toMatchObject({ reason: 'Email delivery hard-bounced', source: 'campaign_email_bounce' });
+    expect((await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.status).toBe('excluded');
+    expect(
+      await recordCampaignEmailEvent(
+        db,
+        WORKSPACE,
+        {
+          channelActionId: 'licha_bounce',
+          eventKind: 'bounce',
+          providerEventId: 'provider-bounce-1'
+        },
+        NOW
+      )
+    ).toMatchObject({ recorded: false });
+    expect(
+      (
+        await db
+          .prepare(
+            "SELECT COUNT(*)::int AS total FROM linkedin_campaign_email_events WHERE workspace_id=? AND channel_action_id='licha_bounce'"
+          )
+          .get<{ total: number }>(WORKSPACE)
+      )?.total
+    ).toBe(1);
+  });
+
+  it('ignores fabricated email events for unsent or unresolved channel actions', async () => {
+    await seedReadyMailbox();
+    await queuedReviewEmail('licha_unsent_event');
+    for (const status of ['planned', 'claimed', 'unknown', 'failed', 'skipped']) {
+      await db
+        .prepare(
+          'UPDATE linkedin_campaign_channel_actions SET status=? WHERE workspace_id=? AND id=?'
+        )
+        .run(status, WORKSPACE, 'licha_unsent_event');
+      const result = await recordCampaignEmailEvent(
+        db,
+        WORKSPACE,
+        {
+          channelActionId: 'licha_unsent_event',
+          eventKind: 'unsubscribe',
+          providerEventId: `unsent-${status}`
+        },
+        NOW
+      );
+      expect(result).toEqual({ recorded: false, memberId: null });
+    }
+    expect(
+      (
+        await db
+          .prepare(
+            'SELECT COUNT(*)::int AS total FROM linkedin_campaign_email_events WHERE workspace_id=?'
+          )
+          .get<{ total: number }>(WORKSPACE)
+      )?.total
+    ).toBe(0);
+    expect(
+      await findSuppression(db, WORKSPACE, {
+        channel: 'email',
+        email: 'maya-review@example.com'
+      })
+    ).toBeNull();
+  });
+
+  it('a hard bounce atomically retires pending email and LinkedIn sends', async () => {
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nPat,Lee,Acme,bounce-future@example.com,https://linkedin.com/in/bounce-future\n'
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+         (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,completed_at,created_at,updated_at)
+         VALUES ('licha_bounce_prior',?,?,?,?,?,'email','sent',?::timestamptz,'{}'::jsonb,'prior',?::timestamptz,?::timestamptz,?::timestamptz),
+                ('licha_bounce_future',?,?,?,?,?,'email','planned',?::timestamptz,'{}'::jsonb,'future',NULL,?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'wait',
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString(),
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'end',
+        new Date(NOW.getTime() + 60_000).toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    await recordCampaignEmailEvent(
+      db,
+      WORKSPACE,
+      {
+        channelActionId: 'licha_bounce_prior',
+        eventKind: 'bounce',
+        providerEventId: 'hard-bounce-future'
+      },
+      NOW
+    );
+    expect((await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.status).toBe('excluded');
+    expect(
+      await db
+        .prepare(
+          "SELECT status FROM linkedin_campaign_channel_actions WHERE id='licha_bounce_future'"
+        )
+        .get<{ status: string }>()
+    ).toEqual({ status: 'skipped' });
+    expect(
+      await findSuppression(db, WORKSPACE, { channel: 'email', email: 'bounce-future@example.com' })
+    ).not.toBeNull();
+  });
+
+  it('stops other campaigns for the same Person without falsely attributing their reply', async () => {
+    const steps: Parameters<typeof saveWorkflow>[1]['steps'] = [
+      {
+        id: 'wait',
+        action: 'wait',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: { duration: { amount: 1, unit: 'days' } }
+      },
+      {
+        id: 'end',
+        action: 'end',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: { outcome: 'completed' }
+      }
+    ];
+    const csv =
+      'First Name,Last Name,Company,Email,LinkedIn URL\n' +
+      'Maya,Smith,Acme,maya-cross@example.com,https://linkedin.com/in/maya-cross\n';
+    const firstId = await campaignFor(steps, csv);
+    const secondId = await campaignFor(steps, csv);
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const [first] = await listCampaignMembers(db, WORKSPACE, firstId);
+    const [second] = await listCampaignMembers(db, WORKSPACE, secondId);
+    expect(first?.id).toBeTruthy();
+    expect(second?.id).toBeTruthy();
+    const identity = await db
+      .prepare('SELECT person_id FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
+      .get<{ person_id: string | null }>(WORKSPACE, first!.contactId);
+    const identity2 = await db
+      .prepare('SELECT person_id FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
+      .get<{ person_id: string | null }>(WORKSPACE, second!.contactId);
+    expect(identity?.person_id).toBeTruthy();
+    expect(identity?.person_id).toBe(identity2?.person_id);
+    // The registry correctly enforces one actively enrolled Person per workspace.
+    // Model a late reply to a completed earlier campaign while a later campaign
+    // is actively queued: this is the real cross-campaign case.
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_members SET status='completed' WHERE workspace_id=? AND id=?"
+      )
+      .run(WORKSPACE, first!.id);
+    await db
+      .prepare(
+        `UPDATE linkedin_campaign_members SET status='waiting',next_eligible_at=?::timestamptz
+         WHERE workspace_id=? AND id=?`
+      )
+      .run(NOW.toISOString(), WORKSPACE, second!.id);
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+         (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,completed_at,created_at,updated_at)
+         VALUES ('licha_cross_sent',?,?,?,?,?,'email','sent',?::timestamptz,'{}'::jsonb,'cross-sent',?::timestamptz,?::timestamptz,?::timestamptz),
+                ('licha_cross_queued',?,?,?,?,?,'email','planned',?::timestamptz,'{}'::jsonb,'cross-queued',NULL,?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        WORKSPACE,
+        firstId,
+        first!.id,
+        first!.contactId,
+        'wait',
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString(),
+        WORKSPACE,
+        secondId,
+        second!.id,
+        second!.contactId,
+        'wait',
+        NOW.toISOString(),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    await db
+      .prepare(
+        `INSERT INTO linkedin_actions
+         (id,workspace_id,seat_key,kind,target_ref,status,planned_for,campaign_id,campaign_member_id,source,replay_scope,created_at)
+         VALUES ('lact_cross_future',?,'owner','dm','https://linkedin.com/in/maya-cross','planned',?::timestamptz,?,?,'campaign','cross-future',?::timestamptz)`
+      )
+      .run(WORKSPACE, NOW.toISOString(), secondId, second!.id, NOW.toISOString());
+
+    expect(
+      await recordCampaignEmailEvent(
+        db,
+        WORKSPACE,
+        {
+          channelActionId: 'licha_cross_sent',
+          eventKind: 'reply',
+          providerEventId: 'cross-person-reply'
+        },
+        NOW
+      )
+    ).toMatchObject({ recorded: true, memberId: first!.id });
+    const updatedFirst = (await listCampaignMembers(db, WORKSPACE, firstId))[0]!;
+    const updatedSecond = (await listCampaignMembers(db, WORKSPACE, secondId))[0]!;
+    expect(updatedFirst.status).toBe('replied');
+    expect(updatedSecond.status).toBe('excluded');
+    expect(updatedSecond.exclusionReason).toContain('another campaign');
+    expect(
+      await db
+        .prepare(
+          "SELECT status FROM linkedin_campaign_channel_actions WHERE id='licha_cross_queued'"
+        )
+        .get<{ status: string }>()
+    ).toEqual({ status: 'skipped' });
+    expect(
+      await db
+        .prepare("SELECT status FROM linkedin_actions WHERE id='lact_cross_future'")
+        .get<{ status: string }>()
+    ).toEqual({ status: 'skipped' });
+    const otherStats = await campaignOperationalAnalytics(db, WORKSPACE, secondId, NOW);
+    expect(otherStats.funnel.replied).toBe(0);
   });
 
   it('an email reply stops LinkedIn and channel work for the same member', async () => {
@@ -1677,6 +1920,66 @@ describe('campaign channel executor', () => {
       .get<{ token: string; target_url: string }>(WORKSPACE);
     expect(link?.token).toMatch(/^lietl_/);
     expect(link?.target_url).toBe('https://example.com/demo');
+  });
+
+  it('refuses a stale claimed campaign email at the shared send boundary after a reply or opt-out', async () => {
+    await seedReadyMailbox();
+    await queuedReviewEmail('licha_stale_claim');
+    const review = (await previewCampaignEmail(db, WORKSPACE, 'licha_stale_claim'))!;
+    const row = await db
+      .prepare(
+        `SELECT a.member_id,a.contact_id,c.person_id
+         FROM linkedin_campaign_channel_actions a
+         JOIN linkedin_lead_contacts c ON c.workspace_id=a.workspace_id AND c.id=a.contact_id
+         WHERE a.workspace_id=? AND a.id=?`
+      )
+      .get<{ member_id: string; contact_id: string; person_id: string | null }>(
+        WORKSPACE,
+        review.actionId
+      );
+    expect(row?.person_id).toBeTruthy();
+    // The worker had claimed a reviewed email before another channel observed a
+    // reply. The final provider boundary must honor that newer member state.
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_channel_actions SET status='claimed' WHERE workspace_id=? AND id=?"
+      )
+      .run(WORKSPACE, review.actionId);
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_members SET status='excluded',exclusion_reason='Opted out elsewhere' WHERE workspace_id=? AND id=?"
+      )
+      .run(WORKSPACE, row!.member_id);
+    await expect(
+      executeConnectedAction(db, WORKSPACE, {
+        type: 'email_draft',
+        connection_id: review.connectionId,
+        require_connection_id: true,
+        recipient: review.recipient,
+        subject: review.subject,
+        body: `${review.body}\n\n${review.footer}`,
+        payload_hash: 'stale-claim-provider-boundary',
+        structured_payload_json: JSON.stringify({
+          deliverySourceType: 'campaign_email',
+          deliverySourceId: review.actionId,
+          approvalContentHash: review.contentHash,
+          contactId: row!.contact_id,
+          personId: row!.person_id,
+          senderAddress: review.sender,
+          tracking: review.tracking,
+          threaded: review.threaded,
+          deliveryPurpose: 'outreach',
+          requireListUnsubscribe: true,
+          unsubscribeMode: 'list_unsubscribe_headers'
+        })
+      })
+    ).rejects.toThrow('no longer current');
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(
+      await db
+        .prepare('SELECT COUNT(*)::int AS total FROM gtm_deliveries WHERE workspace_id=?')
+        .get<{ total: number }>(WORKSPACE)
+    ).toEqual({ total: 0 });
   });
 
   it('rechecks do-not-contact at the shared provider boundary after the campaign preflight', async () => {
@@ -2167,7 +2470,7 @@ describe('campaign channel executor', () => {
     expect(refreshed.branchState['external:email_clicked']).toBe(true);
   });
 
-  it('polls mailbox thread telemetry automatically and a detected reply stops queued work', async () => {
+  it('polls past temporary delivery failures so a later reply still stops queued work', async () => {
     const campaignId = await campaignFor(
       [
         {
@@ -2220,13 +2523,30 @@ describe('campaign channel executor', () => {
       )
       .run(WORKSPACE, NOW.toISOString(), campaignId, member.id, NOW.toISOString());
 
-    const synced = await syncCampaignEmailProviderEvents(db, WORKSPACE, NOW, 50, async () => [
+    const temporary = await syncCampaignEmailProviderEvents(db, WORKSPACE, NOW, 50, async () => [
       {
-        kind: 'reply',
-        providerEventId: 'gmail:reply-1',
-        occurredAt: '2026-08-20T09:01:00.000Z'
+        kind: 'delivery_failure',
+        providerEventId: 'gmail:soft-failure',
+        occurredAt: '2026-08-20T09:00:15.000Z'
       }
     ]);
+    expect(temporary).toMatchObject({ checked: 1, deliveryFailures: 1, replied: 0, failed: 0 });
+    expect(
+      await findSuppression(db, WORKSPACE, { channel: 'email', email: 'maya@example.com' })
+    ).toBeNull();
+    const synced = await syncCampaignEmailProviderEvents(
+      db,
+      WORKSPACE,
+      new Date(NOW.getTime() + 11 * 60_000),
+      50,
+      async () => [
+        {
+          kind: 'reply',
+          providerEventId: 'gmail:reply-1',
+          occurredAt: '2026-08-20T09:01:00.000Z'
+        }
+      ]
+    );
     expect(synced).toMatchObject({ checked: 1, replied: 1, bounced: 0, failed: 0 });
     expect((await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.status).toBe('replied');
     expect(

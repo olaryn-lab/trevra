@@ -662,6 +662,58 @@ export class CampaignEmailSendRefusal extends Error {
   }
 }
 
+/**
+ * Revalidate the authoritative campaign cursor after setup/approval and again
+ * after preparing delivery headers. A previously claimed email can outlive a
+ * reply, opt-out, campaign pause, or workflow step change while the worker is
+ * preparing provider metadata. No new provider write may begin from that row.
+ */
+async function assertCampaignEmailClaimCurrent(
+  db: Db,
+  workspaceId: string,
+  actionId: string
+): Promise<void> {
+  const row = await db
+    .prepare(
+      `SELECT q.status AS action_status,c.status AS campaign_status,
+              m.status AS member_status,
+              m.current_step_id=q.workflow_step_id AS current_step_match,
+              EXISTS (
+                SELECT 1 FROM linkedin_actions a
+                WHERE a.workspace_id=q.workspace_id AND a.campaign_member_id=q.member_id
+                  AND a.status='replied'
+              ) AS has_reply
+       FROM linkedin_campaign_channel_actions q
+       JOIN linkedin_campaigns c ON c.workspace_id=q.workspace_id AND c.id=q.campaign_id
+       JOIN linkedin_campaign_members m ON m.workspace_id=q.workspace_id AND m.id=q.member_id
+       WHERE q.workspace_id=? AND q.id=? AND q.kind='email'`
+    )
+    .get<{
+      action_status: string;
+      campaign_status: string;
+      member_status: string;
+      current_step_match: boolean;
+      has_reply: boolean;
+    }>(workspaceId, actionId);
+  if (row?.campaign_status !== 'running') {
+    throw new CampaignEmailSendRefusal(
+      'workspace',
+      'The campaign is no longer running; the email leg is held without sending.'
+    );
+  }
+  if (
+    row.action_status !== 'claimed' ||
+    !['active', 'waiting'].includes(row.member_status) ||
+    !row.current_step_match ||
+    row.has_reply
+  ) {
+    throw new CampaignEmailSendRefusal(
+      'recipient',
+      'The claimed campaign email is no longer current or its member stopped; nothing sent.'
+    );
+  }
+}
+
 export async function executeConnectedAction(
   db: Db,
   workspaceId: string,
@@ -954,6 +1006,13 @@ export async function executeConnectedAction(
       );
     }
   }
+  if (campaignSend) {
+    await assertCampaignEmailClaimCurrent(
+      db,
+      workspaceId,
+      String(structuredPayload.deliverySourceId ?? '')
+    );
+  }
   const localConnectionId = String(connection.id);
   const claimed = await claimEmailDelivery(db, {
     workspaceId,
@@ -1035,6 +1094,18 @@ export async function executeConnectedAction(
     );
     await markEmailDeliveryFailure(db, deliveryId, error);
     throw error;
+  }
+  if (campaignSend) {
+    try {
+      await assertCampaignEmailClaimCurrent(
+        db,
+        workspaceId,
+        String(structuredPayload.deliverySourceId ?? '')
+      );
+    } catch (error) {
+      await markEmailDeliveryFailure(db, deliveryId, error);
+      throw error;
+    }
   }
   const nango = getNango();
 

@@ -1190,49 +1190,52 @@ export async function recordCampaignEmailEvent(
   },
   now: Date = new Date()
 ): Promise<{ recorded: boolean; memberId: string | null }> {
-  const row = input.channelActionId
-    ? await db
-        .prepare(
-          `SELECT a.id,a.member_id,a.campaign_id,a.contact_id,c.email,c.person_id
+  return db.transaction(async (tx) => {
+    const row = input.channelActionId
+      ? await tx
+          .prepare(
+            `SELECT a.id,a.member_id,a.campaign_id,a.contact_id,c.email,c.person_id
            FROM linkedin_campaign_channel_actions a
            JOIN linkedin_lead_contacts c ON c.workspace_id=a.workspace_id AND c.id=a.contact_id
-          WHERE a.workspace_id=? AND a.id=? AND a.kind='email'`
-        )
-        .get<{
-          id: string;
-          member_id: string;
-          campaign_id: string;
-          contact_id: string;
-          email: string | null;
-          person_id: string | null;
-        }>(workspaceId, input.channelActionId)
-    : await db
-        .prepare(
-          `SELECT a.id,a.member_id,a.campaign_id,a.contact_id,c.email,c.person_id
+          WHERE a.workspace_id=? AND a.id=? AND a.kind='email' AND a.status='sent'`
+          )
+          .get<{
+            id: string;
+            member_id: string;
+            campaign_id: string;
+            contact_id: string;
+            email: string | null;
+            person_id: string | null;
+          }>(workspaceId, input.channelActionId)
+      : await tx
+          .prepare(
+            `SELECT a.id,a.member_id,a.campaign_id,a.contact_id,c.email,c.person_id
            FROM linkedin_campaign_channel_actions a
            JOIN linkedin_lead_contacts c ON c.workspace_id=a.workspace_id AND c.id=a.contact_id
-          WHERE a.workspace_id=? AND a.external_ref=? AND a.kind='email'
+          WHERE a.workspace_id=? AND a.external_ref=? AND a.kind='email' AND a.status='sent'
           ORDER BY a.completed_at DESC LIMIT 1`
-        )
-        .get<{
-          id: string;
-          member_id: string;
-          campaign_id: string;
-          contact_id: string;
-          email: string | null;
-          person_id: string | null;
-        }>(workspaceId, input.externalRef ?? '');
-  if (!row) return { recorded: false, memberId: null };
-  const eventId = input.providerEventId
-    ? `lice_${sha(`${workspaceId}:${input.providerEventId}`).slice(0, 32)}`
-    : id('lice');
-  try {
-    await db
+          )
+          .get<{
+            id: string;
+            member_id: string;
+            campaign_id: string;
+            contact_id: string;
+            email: string | null;
+            person_id: string | null;
+          }>(workspaceId, input.externalRef ?? '');
+    if (!row) return { recorded: false, memberId: null };
+    const eventId = input.providerEventId
+      ? `lice_${sha(`${workspaceId}:${input.providerEventId}`).slice(0, 32)}`
+      : id('lice');
+    // Persist event and all derived safety effects atomically; dedup must not
+    // skip a suppression or campaign stop after a partial write.
+    const inserted = await tx
       .prepare(
         `INSERT INTO linkedin_campaign_email_events (id,workspace_id,channel_action_id,event_kind,provider_event_id,occurred_at,metadata_json,created_at)
-         VALUES (?,?,?,?,?,?::timestamptz,?::jsonb,?::timestamptz)`
+       VALUES (?,?,?,?,?,?::timestamptz,?::jsonb,?::timestamptz)
+       ON CONFLICT DO NOTHING RETURNING id`
       )
-      .run(
+      .get<{ id: string }>(
         eventId,
         workspaceId,
         row.id,
@@ -1242,56 +1245,49 @@ export async function recordCampaignEmailEvent(
         JSON.stringify(input.metadata ?? {}),
         now.toISOString()
       );
-  } catch (error) {
-    const code =
-      error && typeof error === 'object' && 'code' in error
-        ? String((error as { code?: unknown }).code)
-        : '';
-    if (code === '23505') return { recorded: false, memberId: row.member_id };
-    throw error;
-  }
+    if (!inserted) return { recorded: false, memberId: row.member_id };
 
-  await db
-    .prepare(
-      `UPDATE linkedin_campaign_members SET branch_state_json=COALESCE(branch_state_json,'{}'::jsonb) || ?::jsonb,updated_at=?::timestamptz
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_members SET branch_state_json=COALESCE(branch_state_json,'{}'::jsonb) || ?::jsonb,updated_at=?::timestamptz
        WHERE workspace_id=? AND id=?`
-    )
-    .run(
-      JSON.stringify(
-        Object.fromEntries(emailEventBranchKeys(input.eventKind).map((key) => [key, true]))
-      ),
-      now.toISOString(),
-      workspaceId,
-      row.member_id
-    );
-
-  if ((input.eventKind === 'bounce' || input.eventKind === 'unsubscribe') && row.email) {
-    const unsubscribe = input.eventKind === 'unsubscribe';
-    // Verified unsubscribe intent and provider-confirmed hard bounce are durable
-    // GTM safety state, not campaign-local telemetry. Generic delivery failures
-    // do not suppress: a temporary/provider failure is not evidence that the
-    // address must never be contacted again.
-    await createSuppression(
-      db,
-      {
+      )
+      .run(
+        JSON.stringify(
+          Object.fromEntries(emailEventBranchKeys(input.eventKind).map((key) => [key, true]))
+        ),
+        now.toISOString(),
         workspaceId,
-        channel: 'email',
-        personId: row.person_id,
-        email: row.email,
-        reason: unsubscribe
-          ? 'Recipient requested email unsubscribe'
-          : 'Email delivery hard-bounced',
-        source: unsubscribe ? 'campaign_email_unsubscribe' : 'campaign_email_bounce',
-        sourceRef: input.providerEventId ?? row.id,
-        actorType: 'system'
-      },
-      now
-    );
-  }
+        row.member_id
+      );
 
-  if (input.eventKind === 'reply' || input.eventKind === 'unsubscribe') {
-    const newStatus = input.eventKind === 'unsubscribe' ? 'excluded' : 'replied';
-    await db.transaction(async (tx) => {
+    if ((input.eventKind === 'bounce' || input.eventKind === 'unsubscribe') && row.email) {
+      const unsubscribe = input.eventKind === 'unsubscribe';
+      // Verified unsubscribe intent and provider-confirmed hard bounce are durable
+      // GTM safety state, not campaign-local telemetry. Generic delivery failures
+      // do not suppress: a temporary/provider failure is not evidence that the
+      // address must never be contacted again.
+      await createSuppression(
+        tx,
+        {
+          workspaceId,
+          channel: 'email',
+          personId: row.person_id,
+          email: row.email,
+          reason: unsubscribe
+            ? 'Recipient requested email unsubscribe'
+            : 'Email delivery hard-bounced',
+          source: unsubscribe ? 'campaign_email_unsubscribe' : 'campaign_email_bounce',
+          sourceRef: input.providerEventId ?? row.id,
+          actorType: 'system'
+        },
+        now
+      );
+    }
+
+    if (['reply', 'unsubscribe', 'bounce'].includes(input.eventKind)) {
+      // Hard bounce is terminal; ordinary delivery_failure is not hard-bounce evidence.
+      const newStatus = input.eventKind === 'reply' ? 'replied' : 'excluded';
       await tx
         .prepare(
           `UPDATE linkedin_campaign_members SET status=?,next_eligible_at=NULL,ended_at=?::timestamptz,updated_at=?::timestamptz
@@ -1309,9 +1305,53 @@ export async function recordCampaignEmailEvent(
            WHERE workspace_id=? AND member_id=? AND status='planned'`
         )
         .run(now.toISOString(), workspaceId, row.member_id);
-    });
-  }
-  return { recorded: true, memberId: row.member_id };
+
+      // A Person can be enrolled in several campaigns. The originating member
+      // owns this event and its reply attribution. Other active memberships
+      // must stop, but must not be falsely counted as having replied here.
+      if (row.person_id) {
+        const others = await tx
+          .prepare(
+            `UPDATE linkedin_campaign_members m
+             SET status='excluded',exclusion_reason=?,next_eligible_at=NULL,
+                 ended_at=?::timestamptz,updated_at=?::timestamptz
+             FROM linkedin_lead_contacts contact
+             WHERE m.workspace_id=? AND contact.workspace_id=m.workspace_id
+               AND contact.id=m.contact_id AND contact.person_id=?
+               AND m.id<>? AND m.status IN ('pending','active','waiting','manual','paused')
+             RETURNING m.id`
+          )
+          .all<{ id: string }>(
+            input.eventKind === 'reply'
+              ? 'A reply was received in another campaign.'
+              : 'An email opt-out or hard bounce was received in another campaign.',
+            now.toISOString(),
+            now.toISOString(),
+            workspaceId,
+            row.person_id,
+            row.member_id
+          );
+        const otherIds = others.map((item) => item.id);
+        if (otherIds.length > 0) {
+          await tx
+            .prepare(
+              `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL
+               WHERE workspace_id=? AND campaign_member_id=ANY(?::text[])
+                 AND status IN ('planned','held') AND claimed_at IS NULL`
+            )
+            .run(workspaceId, otherIds);
+          await tx
+            .prepare(
+              `UPDATE linkedin_campaign_channel_actions
+               SET status='skipped',claimed_at=NULL,updated_at=?::timestamptz
+               WHERE workspace_id=? AND member_id=ANY(?::text[]) AND status='planned'`
+            )
+            .run(now.toISOString(), workspaceId, otherIds);
+        }
+      }
+    }
+    return { recorded: true, memberId: row.member_id };
+  });
 }
 
 /** Public tracking pixel target. The opaque token reveals no workspace/action id. */
@@ -1414,7 +1454,7 @@ export async function syncCampaignEmailProviderEvents(
          AND NOT EXISTS (
            SELECT 1 FROM linkedin_campaign_email_events e
            WHERE e.workspace_id=q.workspace_id AND e.channel_action_id=q.id
-             AND e.event_kind IN ('reply','unsubscribe','bounce','delivery_failure')
+             AND e.event_kind IN ('reply','unsubscribe','bounce')
          )
        ORDER BY COALESCE(q.telemetry_checked_at,q.completed_at) ASC,q.id ASC
        LIMIT ?`
