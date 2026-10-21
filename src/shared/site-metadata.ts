@@ -58,7 +58,8 @@ export const FAQ_ITEMS: ReadonlyArray<FaqItem> = [
   },
   {
     question: 'Can I self-host?',
-    answer: 'Yes. Trevra is open source, PostgreSQL-only, and can run in your own infrastructure.'
+    answer:
+      'Trevra supports PostgreSQL-based self-hosted deployments. Contact the team for deployment access and licensing terms.'
   }
 ];
 
