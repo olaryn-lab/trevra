@@ -84,11 +84,11 @@
   --t-focus: #176b45;
   --t-focus-on-fill: #ffffff;
 
-  /* -- radius: five steps and the pill. Nothing else. -------------------- */
+  /* -- fleet geometry: 6px controls, 12px panels; circular switches/avatars. -- */
   --t-r-xs: 4px;
   --t-r-sm: 6px;
-  --t-r-md: 8px;
-  --t-r-lg: 10px;
+  --t-r-md: 6px;
+  --t-r-lg: 12px;
   --t-r-xl: 12px;
   --t-r-pill: 999px;
 
@@ -1479,7 +1479,7 @@ h1 {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--green-3);
   color: var(--green);
   font-size: var(--t-text-chip);
@@ -1726,7 +1726,7 @@ h1 {
 }
 .workspace-agent-name > span:not(.connection-status) {
   padding: 2px 7px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-surface);
   color: var(--muted);
   font-size: var(--t-text-chip);
@@ -1759,7 +1759,7 @@ h1 {
 .workspace-agent-skills > span {
   padding: 4px 8px;
   border: 1px solid var(--line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--panel);
   color: var(--muted);
   font-size: var(--t-text-chip);
@@ -2139,7 +2139,7 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   padding: 3px 8px;
   background: var(--t-surface-2);
   color: var(--muted);
@@ -2254,7 +2254,7 @@ button:disabled {
   min-height: 28px;
   padding: 4px 8px;
   border: 1px solid var(--line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--panel);
   color: var(--ink);
   font: inherit;
@@ -2900,7 +2900,7 @@ button:disabled {
   display: inline-flex;
   margin-top: 7px;
   padding: 3px 8px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-surface-2);
   color: var(--muted);
   font-size: var(--t-text-chip);
@@ -4171,7 +4171,7 @@ button:disabled {
   font-size: var(--t-text-sm);
   color: var(--green);
   background: var(--green-3);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   padding: 6px 10px;
 }
 .run-status {
@@ -4180,7 +4180,7 @@ button:disabled {
   letter-spacing: var(--t-track-caps);
   font-size: var(--t-text-chip);
   font-weight: 700;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   padding: 3px 9px;
   background: var(--blue-bg);
   color: var(--blue);
@@ -4538,7 +4538,7 @@ button:disabled {
   line-height: 1.45;
 }
 .policy-effect {
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   padding: 4px 9px;
   font-size: var(--t-text-chip);
   font-weight: 700;
@@ -5576,7 +5576,7 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   padding: 3px 9px;
   font-size: var(--t-text-chip);
   font-weight: 700;
@@ -5605,7 +5605,7 @@ button:disabled {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   padding: 4px 11px;
   font-size: var(--t-text-chip);
   font-weight: 700;
@@ -7321,7 +7321,7 @@ button:disabled {
 .li-inbox-filters select {
   min-height: var(--t-tap);
   border: 1px solid var(--line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-field);
   padding: 0 10px;
   color: var(--ink);
@@ -7381,7 +7381,7 @@ button:disabled {
   width: 100%;
   min-height: var(--t-tap);
   border: 1px solid var(--line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-surface-2);
   padding: 0 12px 0 33px;
   color: var(--ink);
@@ -7462,7 +7462,7 @@ button:disabled {
   flex: none;
   width: 7px;
   height: 7px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-green-fill);
   align-self: center;
 }
@@ -7491,7 +7491,7 @@ button:disabled {
   flex: none;
   width: 34px;
   height: 34px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   display: grid;
   place-items: center;
   font-size: var(--t-text-chip);
@@ -7566,7 +7566,7 @@ button:disabled {
   text-transform: uppercase;
   letter-spacing: var(--t-track-caps);
   padding: 3px 10px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
 }
 /* A run of same-direction messages reads as one group -- the who/when caption
    is said once, not once per bubble. See `groupMessages`. */
@@ -11093,7 +11093,7 @@ button:disabled {
   gap: 7px;
   flex: none;
   padding: 4px 11px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-surface-2);
   color: var(--muted);
   font-size: var(--t-text-chip);
@@ -11291,7 +11291,7 @@ button:disabled {
   width: 100%;
   height: 3px;
   margin-top: 5px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-surface-3);
   overflow: hidden;
 }
@@ -11535,7 +11535,7 @@ button:disabled {
   display: grid;
   place-items: center;
   border: 1px solid var(--t-line-strong);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-surface);
   color: var(--ink);
   box-shadow: var(--t-shadow-sm);
@@ -13241,7 +13241,7 @@ button:disabled {
   min-height: 22px;
   padding: 2px 7px;
   border: 1px solid var(--t-amber-line);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-amber-bg);
   color: var(--t-amber);
   font-size: var(--t-text-chip);
@@ -13465,7 +13465,7 @@ button:disabled {
   flex: 0 0 30px;
   place-items: center;
   border: 1px solid var(--t-line-strong);
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   color: var(--t-muted);
   font-size: var(--t-text-xs);
   font-weight: var(--t-w-bold);
@@ -14319,7 +14319,7 @@ button:disabled {
 }
 .research-performance-chain span {
   padding: 3px 6px;
-  border-radius: var(--t-r-pill);
+  border-radius: var(--t-r-sm);
   background: var(--t-surface-2);
   color: var(--muted);
   font-size: var(--t-text-chip);
