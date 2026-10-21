@@ -520,13 +520,15 @@ export function WorkerNotice({ worker }: { worker: LinkedInWorkerStatus | null }
             : 'This machine has Playwright but cannot open a browser.'
       }
     >
-      <p>
-        {off
-          ? 'You can still add accounts here and set their hours and daily limits. Connecting one, and sending from it, happens on a Trevra with LinkedIn automation on — the reason it is off here is below, in the server’s own words.'
-          : needsPlaywright
-            ? 'Add accounts and set their limits now. Connecting one needs a browser this server can open, which is two commands and a switch.'
-            : 'Add accounts and set their limits now. Connecting one needs a browser this server can open, and what is stopping it from opening one is below.'}
-      </p>
+      {/* Keep the actual server reason(s) visible; avoid restating an unblocked
+          capability or implying this deployment can enable hosted automation. */}
+      {blockers.length === 0 && (
+        <p>
+          {off
+            ? 'Ask the operator to enable LinkedIn automation for this deployment.'
+            : 'Check browser availability and permissions on the worker.'}
+        </p>
+      )}
       {needsPlaywright && (
         <p className="li-blocked-message">
           <code>npm i playwright &amp;&amp; npx playwright install chromium</code>

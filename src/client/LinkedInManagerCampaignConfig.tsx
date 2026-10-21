@@ -924,12 +924,11 @@ export function LinkedInManagerCampaignConfig({
                     </div>
                     {mailboxes.length > 0 && (
                       <div className="li-span-2">
-                        <p className="li-hint">
-                          Mailbox pacing is enforced independently from LinkedIn pacing.{' '}
-                          {isWorkspaceOwner
-                            ? 'You can edit it here.'
-                            : 'Only the workspace owner can change it.'}
-                        </p>
+                        {!isWorkspaceOwner && (
+                          <p className="li-hint">
+                            Only the workspace owner can change mailbox limits.
+                          </p>
+                        )}
                         {mailboxes.map((mailbox) => (
                           <details className="mgr-advanced" key={`mailbox-settings-${mailbox.id}`}>
                             <summary>

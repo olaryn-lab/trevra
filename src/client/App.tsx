@@ -1267,20 +1267,6 @@ function AgentAccessPanel({ setToast }: { setToast: (message: string) => void })
       title="Connect Claude Code or Codex"
       description="Create one workspace-scoped token, then paste the generated command in your terminal."
     >
-      <div className="agent-access-intro">
-        <p>
-          The token appears only once. Trevra stores its hash, so it cannot show the plaintext again
-          after you dismiss these commands.
-        </p>
-        {active.length > 0 && (
-          <p>
-            This workspace already has {active.length} active{' '}
-            {active.length === 1 ? 'access token' : 'access tokens'}. Their plaintext cannot be
-            recovered; create new access only when another agent needs it.
-          </p>
-        )}
-      </div>
-
       {agents.length > 0 && (
         <FormGrid>
           <Field label="Agent">
@@ -1297,16 +1283,21 @@ function AgentAccessPanel({ setToast }: { setToast: (message: string) => void })
       )}
 
       {!revealed ? (
-        <InlineActions>
-          <Button variant="primary" onClick={() => void create()} disabled={busy === 'create'}>
-            {busy === 'create' ? (
-              <LoaderCircle className="spin" size={16} />
-            ) : (
-              <KeyRound size={16} />
-            )}
-            Create access
-          </Button>
-        </InlineActions>
+        <>
+          <p className="li-hint">
+            New access tokens are shown only once. Save the generated command before closing it.
+          </p>
+          <InlineActions>
+            <Button variant="primary" onClick={() => void create()} disabled={busy === 'create'}>
+              {busy === 'create' ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <KeyRound size={16} />
+              )}
+              Create access
+            </Button>
+          </InlineActions>
+        </>
       ) : (
         <>
           <div className="agent-access-reveal" role="status">
