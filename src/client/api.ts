@@ -2505,15 +2505,17 @@ export async function importLinkedInManagerLeadCsv(
   return response.json();
 }
 
-/** Bounded lead-list page with the authoritative total and next-page status. */
+/** Server-filtered lead-list page: result counts cover the entire list, not loaded rows. */
 export async function getLinkedInManagerLeadContacts(
   listId: string,
   seatKey?: string,
-  page: { offset?: number; limit?: number } = {}
+  page: { offset?: number; limit?: number; query?: string; needsIdentityOnly?: boolean } = {}
 ): Promise<{
   list: LinkedInLeadList;
   contacts: LinkedInLeadContact[];
   total: number;
+  listTotal: number;
+  identityReviewCount: number;
   pageLimit: number;
   offset: number;
   hasMore: boolean;
@@ -2522,6 +2524,8 @@ export async function getLinkedInManagerLeadContacts(
   if (seatKey) params.set('seatKey', seatKey);
   if (page.offset !== undefined) params.set('offset', String(page.offset));
   if (page.limit !== undefined) params.set('limit', String(page.limit));
+  if (page.query?.trim()) params.set('query', page.query.trim());
+  if (page.needsIdentityOnly) params.set('needsIdentityOnly', 'true');
   const query = params.toString();
   return request(
     `/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}/contacts${query ? `?${query}` : ''}`

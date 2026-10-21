@@ -5,7 +5,7 @@ import type { Express } from 'express';
 import { createApp } from '../app.js';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { openDatabase, type Db } from '../db.js';
-import { importLeadCsv } from './lead-lists.js';
+import { importLeadCsv, importLeadProfileUrls } from './lead-lists.js';
 import { recordAction } from './actions.js';
 import { ADDITIONAL_WORKFLOW_STARTERS } from '../../client/workflow-starter-recipes.js';
 import {
@@ -245,6 +245,61 @@ describe('LinkedIn manager HTTP surface', () => {
     }
     const past = (await as(tokenA).get(`${url}?offset=999&limit=2`).expect(200)).body;
     expect(past).toMatchObject({ contacts: [], total: 3, hasMore: false });
+  });
+
+  it('searches and reviews all list members, with filtered totals and strict query validation', async () => {
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Filter review' })
+        .expect(201)
+    ).body.list;
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: A,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,Chen,Acme,https://linkedin.com/in/review-api-maya/\nJules,Stone,Percent%Works,https://linkedin.com/in/review-api-jules/'
+      },
+      NOW
+    );
+    const profiles = await importLeadProfileUrls(
+      db,
+      {
+        workspaceId: A,
+        listId: list.id,
+        urls: ['https://www.linkedin.com/in/review-api-unknown/']
+      },
+      NOW
+    );
+    expect(profiles.inserted).toBe(1);
+    const url = `/api/linkedin/manager/lead-lists/${list.id}/contacts`;
+    const searched = (await as(tokenA).get(`${url}?query=jules&limit=1`).expect(200)).body;
+    expect(searched).toMatchObject({
+      total: 1,
+      listTotal: 3,
+      identityReviewCount: 1,
+      hasMore: false
+    });
+    expect(searched.contacts[0].firstName).toBe('Jules');
+    const percent = (await as(tokenA).get(`${url}?query=%25`).expect(200)).body;
+    expect(percent.total).toBe(1);
+    expect(percent.contacts[0].company).toBe('Percent%Works');
+    const review = (await as(tokenA).get(`${url}?needsIdentityOnly=true`).expect(200)).body;
+    expect(review).toMatchObject({ total: 1, listTotal: 3, identityReviewCount: 1 });
+    expect(review.contacts[0].firstName).toBe('');
+    const noHit = (await as(tokenA).get(`${url}?query=maya&needsIdentityOnly=true`).expect(200))
+      .body;
+    expect(noHit).toMatchObject({ contacts: [], total: 0, listTotal: 3, identityReviewCount: 1 });
+    for (const invalid of [
+      `query=${'x'.repeat(201)}`,
+      'query=x&query=y',
+      'needsIdentityOnly=1',
+      'needsIdentityOnly=TRUE',
+      'needsIdentityOnly=true&needsIdentityOnly=false'
+    ])
+      await as(tokenA).get(`${url}?${invalid}`).expect(400);
+    await as(tokenB).get(`${url}?query=maya`).expect(404);
   });
 
   it('previews and automatches CSV without persisting a contact', async () => {

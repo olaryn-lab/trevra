@@ -376,6 +376,77 @@ export async function listLeadContacts(
   ).map(toContact);
 }
 
+/** A bounded review page; totals describe the complete list and the server-side filter. */
+export interface LeadContactReviewPage {
+  contacts: LinkedInLeadContact[];
+  /** Matching contacts after search/review filters, before pagination. */
+  total: number;
+  /** Every member of the list, irrespective of filters. */
+  listTotal: number;
+  /** Incomplete identities anywhere in the list, not just loaded rows. */
+  identityReviewCount: number;
+}
+
+const NEEDS_IDENTITY_SQL = `(
+  BTRIM(COALESCE(c.first_name,'')) = '' OR
+  BTRIM(COALESCE(c.last_name,'')) = '' OR
+  BTRIM(COALESCE(c.company,'')) = ''
+)`;
+const MEMBER_CONTACT_FROM = `
+  FROM linkedin_lead_list_members m
+  JOIN linkedin_lead_contacts c ON c.id=m.contact_id AND c.workspace_id=m.workspace_id
+`;
+
+/** Search/review all members before applying the bounded page, never just the first 5,000. */
+export async function readLeadContactReviewPage(
+  db: Db,
+  workspaceId: string,
+  listId: string,
+  input: { limit: number; offset: number; query?: string; needsIdentityOnly?: boolean }
+): Promise<LeadContactReviewPage> {
+  const query = (input.query ?? '').trim();
+  if (query.length > 200) throw new LinkedInApiError('Search must be 200 characters or fewer', 400);
+  const predicates = ['m.workspace_id=?', 'm.list_id=?'];
+  const params: Array<string> = [workspaceId, listId];
+  if (query) {
+    // POSITION treats user-supplied % and _ as literal characters rather than
+    // SQL wildcard operators and keeps every value in a prepared parameter.
+    predicates.push(
+      `POSITION(LOWER(?) IN LOWER(CONCAT_WS(' ',c.first_name,c.last_name,c.company,c.email,c.profile_url))) > 0`
+    );
+    params.push(query);
+  }
+  if (input.needsIdentityOnly) predicates.push(NEEDS_IDENTITY_SQL);
+  const where = ` WHERE ${predicates.join(' AND ')}`;
+  const [rows, matches, all] = await Promise.all([
+    db
+      .prepare(
+        `SELECT ${MEMBER_CONTACT_SELECT}${MEMBER_CONTACT_FROM}${where}
+       ORDER BY m.created_at,c.id LIMIT ? OFFSET ?`
+      )
+      .all<ContactRow>(
+        ...params,
+        Math.max(1, Math.min(Math.trunc(input.limit), LEAD_CONTACT_READ_LIMIT)),
+        Math.max(0, Math.trunc(input.offset))
+      ),
+    db
+      .prepare(`SELECT COUNT(*)::int AS total${MEMBER_CONTACT_FROM}${where}`)
+      .get<{ total: number }>(...params),
+    db
+      .prepare(
+        `SELECT COUNT(*)::int AS list_total,
+      COUNT(*) FILTER (WHERE ${NEEDS_IDENTITY_SQL})::int AS identity_review_count
+      ${MEMBER_CONTACT_FROM} WHERE m.workspace_id=? AND m.list_id=?`
+      )
+      .get<{ list_total: number; identity_review_count: number }>(workspaceId, listId)
+  ]);
+  return {
+    contacts: rows.map(toContact),
+    total: Number(matches?.total ?? 0),
+    listTotal: Number(all?.list_total ?? 0),
+    identityReviewCount: Number(all?.identity_review_count ?? 0)
+  };
+}
 /**
  * How many people are in this list, ignoring any page bound.
  *

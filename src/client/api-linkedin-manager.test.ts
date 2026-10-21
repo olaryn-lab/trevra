@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deleteLinkedInManagerLeadContact,
+  getLinkedInManagerLeadContacts,
   resolveLinkedInHandoff,
   updateLinkedInManagerSeat,
   updateLinkedInSeatCapabilities
@@ -111,6 +112,40 @@ describe('LinkedIn manager client API wiring', () => {
     expect(init.credentials).toBe('include');
   });
 
+  it('passes whole-list search and identity-review filters to the paginated API', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          list: {},
+          contacts: [],
+          total: 0,
+          listTotal: 8,
+          identityReviewCount: 3,
+          offset: 5,
+          hasMore: false,
+          pageLimit: 2
+        }),
+        {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        }
+      )
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await getLinkedInManagerLeadContacts('list/1', 'second', {
+      query: ' %_',
+      offset: 5,
+      limit: 2,
+      needsIdentityOnly: true
+    });
+    expect(result).toMatchObject({ total: 0, listTotal: 8, identityReviewCount: 3 });
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe(
+      '/api/linkedin/manager/lead-lists/list%2F1/contacts?seatKey=second&offset=5&limit=2&query=%25_&needsIdentityOnly=true'
+    );
+    expect(init.credentials).toBe('include');
+  });
+
   it('never removes a lead from the UI before awaiting the deletion API', async () => {
     // Source guard: server tests cannot exercise the browser event handler, and
     // a prior regression removed the remote call while retaining a success toast.
@@ -121,7 +156,7 @@ describe('LinkedIn manager client API wiring', () => {
     const handler =
       source.split('const removeContact = async ')[1]?.split('const openMeta =')[0] ?? '';
     expect(handler).toMatch(
-      /await deleteLinkedInManagerLeadContact\(contact\.id\);[\s\S]*setContacts\(/
+      /await deleteLinkedInManagerLeadContact\(contact\.id\);[\s\S]*await readContacts\([\s\S]*setToast\(/
     );
   });
 });

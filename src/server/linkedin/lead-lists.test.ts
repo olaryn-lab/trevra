@@ -10,6 +10,7 @@ import {
   importLeadSourceContacts,
   listLeadContacts,
   listLeadLists,
+  readLeadContactReviewPage,
   renameLeadList,
   removeLeadContact,
   updateLeadContact
@@ -148,6 +149,104 @@ describe('account-scoped lead lists', () => {
     expect(await listLeadContacts(db, 'foreign_workspace', list.id, 2, 2)).toEqual([]);
     expect(await countLeadContacts(db, WORKSPACE_ID, list.id)).toBe(3);
   });
+  it('searches every member before paging and reports full-list identity reviews', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Full review' }, NOW);
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,Chen,Acme,https://linkedin.com/in/review-maya/\nAlex,Smith,Percent%Works,https://linkedin.com/in/review-alex/\nJules,Stone,Under_score,https://linkedin.com/in/review-jules/'
+      },
+      NOW
+    );
+    await importLeadProfileUrls(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        urls: ['https://linkedin.com/in/review-incomplete/']
+      },
+      NOW
+    );
+    const page = (query: string, needsIdentityOnly = false, offset = 0) =>
+      readLeadContactReviewPage(db, WORKSPACE_ID, list.id, {
+        limit: 1,
+        offset,
+        query,
+        needsIdentityOnly
+      });
+    const late = await page('jules');
+    expect(late).toMatchObject({ total: 1, listTotal: 4, identityReviewCount: 1 });
+    expect(late.contacts).toHaveLength(1);
+    expect(late.contacts[0].firstName).toBe('Jules');
+    expect((await page('%')).contacts.map((c) => c.company)).toEqual(['Percent%Works']);
+    expect((await page('_')).contacts.map((c) => c.company)).toEqual(['Under_score']);
+    expect(await page('jules', false, 1)).toMatchObject({ contacts: [], total: 1 });
+    const incomplete = await page('', true);
+    expect(incomplete).toMatchObject({ total: 1, listTotal: 4, identityReviewCount: 1 });
+    expect(incomplete.contacts[0].profileUrl).toContain('/review-incomplete/');
+    expect((await page('MAYA', true)).total).toBe(0);
+    expect((await page('  ', false)).total).toBe(4);
+    expect(
+      (
+        await readLeadContactReviewPage(db, 'other_workspace', list.id, {
+          limit: 1,
+          offset: 0,
+          query: 'Maya'
+        })
+      ).contacts
+    ).toEqual([]);
+    await expect(page('x'.repeat(201))).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('finds and reviews contact 5,001 beyond the default page boundary', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Large review' }, NOW);
+    const prefix = `test_${list.id}_`;
+    const timestamp = NOW.toISOString();
+    await db
+      .prepare(
+        `
+      WITH created AS (
+        INSERT INTO linkedin_lead_contacts
+          (id,workspace_id,list_id,first_name,last_name,company,dedupe_key,original_json,custom_fields_json,created_at,updated_at)
+        SELECT ? || LPAD(n::text,5,'0'), ?, ?,
+               CASE WHEN n=5001 THEN 'Late' ELSE 'Known' END,
+               'Person', CASE WHEN n=5001 THEN '' ELSE 'Acme' END,
+               ? || LPAD(n::text,5,'0'), '{}'::jsonb, '{}'::jsonb, ?::timestamptz, ?::timestamptz
+        FROM generate_series(1,5001) n
+        RETURNING id
+      )
+      INSERT INTO linkedin_lead_list_members(workspace_id,list_id,contact_id,created_at)
+      SELECT ?, ?, id, ?::timestamptz FROM created
+    `
+      )
+      .run(
+        prefix,
+        WORKSPACE_ID,
+        list.id,
+        prefix,
+        timestamp,
+        timestamp,
+        WORKSPACE_ID,
+        list.id,
+        timestamp
+      );
+    expect(await countLeadContacts(db, WORKSPACE_ID, list.id)).toBe(5001);
+    const finalPage = await listLeadContacts(db, WORKSPACE_ID, list.id, 2, 5000);
+    expect(finalPage).toHaveLength(1);
+    expect(finalPage[0].firstName).toBe('Late');
+    const review = await readLeadContactReviewPage(db, WORKSPACE_ID, list.id, {
+      limit: 5,
+      offset: 0,
+      query: 'late',
+      needsIdentityOnly: true
+    });
+    expect(review).toMatchObject({ total: 1, listTotal: 5001, identityReviewCount: 1 });
+    expect(review.contacts).toHaveLength(1);
+    expect(review.contacts[0].firstName).toBe('Late');
+  }, 20_000);
+
   it('allows the same list name on two LinkedIn accounts and only lists the selected account', async () => {
     await upsertSeat(db, WORKSPACE_ID, { label: 'Second', timezone: 'UTC' }, NOW, 'second');
     const owner = await createLeadList(

@@ -248,13 +248,14 @@ export function LinkedInManagerLeadConfig({
   /* -- the list half ----------------------------------------------------- */
   const [openListId, setOpenListId] = useState('');
   const [contacts, setContacts] = useState<LinkedInLeadContact[]>([]);
-  /** The next server offset, distinct from the number currently matching a local filter. */
   const [nextContactOffset, setNextContactOffset] = useState(0);
   const [contactsMoreLoading, setContactsMoreLoading] = useState(false);
-  /** A late response from a previous list must not overwrite or append to a new one. */
+  /** Every new list/filter request invalidates earlier page responses. */
   const contactReadVersion = useRef(0);
-  /** Server-side list total, not just the contacts in the first response. */
+  /** Number matching the current server-side filter, before pagination. */
   const [contactTotal, setContactTotal] = useState(0);
+  const [listTotal, setListTotal] = useState(0);
+  const [identityReviewCount, setIdentityReviewCount] = useState(0);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [filter, setFilter] = useState('');
   const [needsIdentityOnly, setNeedsIdentityOnly] = useState(false);
@@ -284,13 +285,39 @@ export function LinkedInManagerLeadConfig({
     }
   }, [activeSeatKey]);
 
+  const readContacts = useCallback(
+    async (listId: string, query: string, needsReview: boolean, version: number) => {
+      try {
+        const result = await getLinkedInManagerLeadContacts(listId, activeSeatKey, {
+          query,
+          needsIdentityOnly: needsReview
+        });
+        if (contactReadVersion.current !== version) return;
+        setContacts(result.contacts);
+        setContactTotal(result.total);
+        setListTotal(result.listTotal);
+        setIdentityReviewCount(result.identityReviewCount);
+        setNextContactOffset(result.offset + result.contacts.length);
+        setListError('');
+      } catch (err) {
+        if (contactReadVersion.current === version)
+          setListError(errorMessage(err, 'Unable to read the leads in that list.'));
+      } finally {
+        if (contactReadVersion.current === version) setContactsLoading(false);
+      }
+    },
+    [activeSeatKey]
+  );
+
   const openList = useCallback(
     async (listId: string) => {
-      const readVersion = ++contactReadVersion.current;
+      const version = ++contactReadVersion.current;
       setOpenListId(listId);
       setRenamingList(false);
       setContacts([]);
       setContactTotal(0);
+      setListTotal(0);
+      setIdentityReviewCount(0);
       setNextContactOffset(0);
       setContactsMoreLoading(false);
       setDraft(null);
@@ -300,23 +327,30 @@ export function LinkedInManagerLeadConfig({
       setVisible(PAGE);
       if (!listId) return;
       setContactsLoading(true);
-      try {
-        const result = await getLinkedInManagerLeadContacts(listId, activeSeatKey);
-        if (contactReadVersion.current !== readVersion) return;
-        setContacts(result.contacts);
-        setContactTotal(result.total);
-        setNextContactOffset(result.offset + result.contacts.length);
-        setListError('');
-      } catch (err) {
-        if (contactReadVersion.current === readVersion)
-          setListError(errorMessage(err, 'Unable to read the leads in that list.'));
-      } finally {
-        if (contactReadVersion.current === readVersion) setContactsLoading(false);
-      }
+      await readContacts(listId, '', false, version);
     },
-    [activeSeatKey]
+    [readContacts]
   );
 
+  // Search all list members on the server; debounce keystrokes and invalidate
+  // in-flight older queries before they can overwrite a newer filter.
+  useEffect(() => {
+    if (!openListId) return;
+    const version = ++contactReadVersion.current;
+    setContactsLoading(true);
+    setContactsMoreLoading(false);
+    // A failed new search must never leave stale contacts actionable as though
+    // they matched the current server-side filter.
+    setContacts([]);
+    setContactTotal(0);
+    setNextContactOffset(0);
+    const timer = setTimeout(() => {
+      setVisible(PAGE);
+      void readContacts(openListId, filter, needsIdentityOnly, version);
+    }, 250);
+    return () => clearTimeout(timer);
+    // Opening a new list starts its own default read; this effect is for filter changes.
+  }, [filter, needsIdentityOnly]);
   const loadMoreContacts = async () => {
     if (!openListId || contactsLoading || contactsMoreLoading || nextContactOffset >= contactTotal)
       return;
@@ -325,7 +359,9 @@ export function LinkedInManagerLeadConfig({
     setContactsMoreLoading(true);
     try {
       const page = await getLinkedInManagerLeadContacts(listId, activeSeatKey, {
-        offset: nextContactOffset
+        offset: nextContactOffset,
+        query: filter,
+        needsIdentityOnly
       });
       if (contactReadVersion.current !== version) return;
       setContacts((current) => {
@@ -333,6 +369,8 @@ export function LinkedInManagerLeadConfig({
         return [...current, ...page.contacts.filter((contact) => !known.has(contact.id))];
       });
       setContactTotal(page.total);
+      setListTotal(page.listTotal);
+      setIdentityReviewCount(page.identityReviewCount);
       setNextContactOffset(page.hasMore ? page.offset + page.contacts.length : page.total);
       setListError('');
     } catch (err) {
@@ -662,11 +700,10 @@ export function LinkedInManagerLeadConfig({
         profileUrl: draft.profileUrl.trim() || null,
         doNotContact: draft.doNotContact
       });
-      setContacts((current) =>
-        current.map((contact) => (contact.id === updated.id ? updated : contact))
-      );
       setDraft(null);
-      setListError('');
+      setVisible(PAGE);
+      setContactsLoading(true);
+      await readContacts(openListId, filter, needsIdentityOnly, ++contactReadVersion.current);
       setToast(`${updated.firstName} ${updated.lastName} updated.`);
       await onChanged();
     } catch (err) {
@@ -691,15 +728,12 @@ export function LinkedInManagerLeadConfig({
   const removeContact = async (contact: LinkedInLeadContact) => {
     setRowBusy(contact.id);
     try {
-      // Never remove the row or report success until the authenticated API
-      // confirms deletion. A failed request must leave the lead visible.
+      // The success state follows an authenticated, affirmative deletion reply.
       await deleteLinkedInManagerLeadContact(contact.id);
-      setContacts((current) => current.filter((entry) => entry.id !== contact.id));
-      setContactTotal((current) => Math.max(0, current - 1));
-      // Removing an already-loaded row shifts every later OFFSET by one.
-      setNextContactOffset((current) => Math.max(0, current - 1));
       setArmed('');
-      setListError('');
+      setVisible(PAGE);
+      setContactsLoading(true);
+      await readContacts(openListId, filter, needsIdentityOnly, ++contactReadVersion.current);
       setToast(
         `${contact.firstName} ${contact.lastName} removed. Their place in every campaign they were in went with them, along with any message a campaign was waiting on you to write for them. What Trevra already sent stays in the ledger.`
       );
@@ -717,16 +751,8 @@ export function LinkedInManagerLeadConfig({
   const armedContact = contacts.find((contact) => contact.id === armed) ?? null;
   const needsIdentity = (contact: LinkedInLeadContact) =>
     !contact.firstName.trim() || !contact.lastName.trim() || !contact.company.trim();
-  const identityReviewCount = contacts.filter(needsIdentity).length;
-  const term = filter.trim().toLowerCase();
-  const filtered = contacts.filter(
-    (contact) =>
-      (!needsIdentityOnly || needsIdentity(contact)) &&
-      (!term ||
-        `${contact.firstName} ${contact.lastName} ${contact.company} ${contact.email ?? ''} ${contact.profileUrl ?? ''}`
-          .toLowerCase()
-          .includes(term))
-  );
+  /** The server filters the whole list; these are only the currently loaded matching rows. */
+  const filtered = contacts;
   const shown = filtered.slice(0, visible);
   const draftValid =
     draft !== null &&
@@ -1201,6 +1227,7 @@ export function LinkedInManagerLeadConfig({
                   Find someone
                   <input
                     value={filter}
+                    maxLength={200}
                     placeholder="Name, company, email or profile URL"
                     onChange={(event) => {
                       setFilter(event.target.value);
@@ -1292,29 +1319,29 @@ export function LinkedInManagerLeadConfig({
                 </form>
               )}
               {contactsLoading ? (
-                <p className="empty-copy">Reading this list…</p>
+                <p className="empty-copy">Searching this list…</p>
               ) : contacts.length === 0 ? (
                 <p className="empty-copy">
-                  Nothing in this list yet. Import a CSV above and it fills up.
+                  {listTotal === 0
+                    ? 'Nothing in this list yet. Import a CSV above and it fills up.'
+                    : `No leads match ${filter.trim() ? `“${filter.trim()}”` : 'this review filter'} in this list.`}
                 </p>
               ) : (
                 <>
-                  {/* The server total makes unloaded contacts explicit, including
-                    identity-review results that have not been read yet. */}
-                  <p className="li-hint">
-                    {pluralGrouped(filtered.length, 'lead')}
-                    {term ? ` of ${pluralGrouped(contacts.length, 'lead')} loaded` : ''} in “
-                    {openMeta?.name ?? 'this list'}”.
+                  <p className="li-hint" role="status">
+                    {pluralGrouped(contactTotal, 'matching lead')} in “
+                    {openMeta?.name ?? 'this list'}”
+                    {listTotal !== contactTotal
+                      ? ` (of ${pluralGrouped(listTotal, 'lead')} total)`
+                      : ''}
+                    .
                     {contactTotal > contacts.length &&
-                      ` ${contacts.length.toLocaleString()} of ${pluralGrouped(contactTotal, 'lead')} loaded. Search and identity review cover loaded contacts; load the next page to continue.`}
+                      ` ${contacts.length.toLocaleString()} matching leads loaded; load later pages to review the rest.`}
                   </p>
                   {identityReviewCount > 0 && (
-                    <p className="li-hint" role="status">
+                    <p className="li-hint">
                       {pluralGrouped(identityReviewCount, 'profile')} need first name, last name and
-                      company confirmed by a person before campaign admission.
-                      {contactTotal > contacts.length
-                        ? ' Review count covers only the loaded contacts.'
-                        : ''}
+                      company confirmed before campaign admission across the entire list.
                     </p>
                   )}
                   {draft && (
@@ -1603,9 +1630,6 @@ export function LinkedInManagerLeadConfig({
                           : `Load next page (${pluralGrouped(contactTotal - nextContactOffset, 'lead')} remain)`}
                       </button>
                     </div>
-                  )}
-                  {filtered.length === 0 && (
-                    <p className="empty-copy">Nobody in this list matches “{filter.trim()}”.</p>
                   )}
                 </>
               )}

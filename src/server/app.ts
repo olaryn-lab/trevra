@@ -444,7 +444,6 @@ import { addExclusions, filterExcluded, listExclusions } from './linkedin/exclus
 import { parseLeadCsv } from './linkedin/lead-import.js';
 import {
   LEAD_CONTACT_READ_LIMIT,
-  countLeadContacts,
   createLeadList,
   deleteLeadList,
   getLeadList,
@@ -452,8 +451,8 @@ import {
   importLeadProfileUrls,
   importLeadSourceContacts,
   ingestLeadSignal,
-  listLeadContacts,
   listLeadLists,
+  readLeadContactReviewPage,
   renameLeadList,
   removeLeadContact,
   updateLeadContact,
@@ -6250,17 +6249,26 @@ export function createApp(db: Db) {
       );
       if (limit === 0) throw new LinkedInApiError('limit must be at least 1', 400);
       const offset = pageNumber(req.query.offset, 'offset', 0, 2_000_000_000);
-      const [contacts, total] = await Promise.all([
-        listLeadContacts(db, workspaceId, listId, limit, offset),
-        countLeadContacts(db, workspaceId, listId)
-      ]);
+      if (
+        req.query.query !== undefined &&
+        (typeof req.query.query !== 'string' || req.query.query.length > 200)
+      )
+        throw new LinkedInApiError('query must be a string of 200 characters or fewer', 400);
+      const reviewFlag = req.query.needsIdentityOnly;
+      if (reviewFlag !== undefined && reviewFlag !== 'true' && reviewFlag !== 'false')
+        throw new LinkedInApiError('needsIdentityOnly must be true or false', 400);
+      const results = await readLeadContactReviewPage(db, workspaceId, listId, {
+        limit,
+        offset,
+        query: typeof req.query.query === 'string' ? req.query.query : undefined,
+        needsIdentityOnly: reviewFlag === 'true'
+      });
       res.json({
         list,
-        contacts,
-        total,
+        ...results,
         pageLimit: limit,
         offset,
-        hasMore: offset + contacts.length < total
+        hasMore: offset + results.contacts.length < results.total
       });
     })
   );
