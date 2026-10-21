@@ -3,6 +3,8 @@
 > **Canonical implementation tracker.** Created 2026-10-20, baseline `a79cf55`, branch `feat/dripify-parity-20261020`.
 > Owner: engineering. Product goal: **deliver the entire useful Dripify experience, then exceed it**. A deliberate absence or disabled route is a **gap**, not parity. Preserve explicit platform/legal/credential risks and never label a feature complete without its end-to-end proof.
 
+> **Launch priority update (2026-10-21):** The owner now prioritizes a first _working, safe, founder-assisted launch_, not all 46 Dripify capabilities. Follow [launch-critical scope](../release/2026-10-21-trevra-launch-mvp-scope.md) and L1–L8 for immediate work; defer CRM, AI composing, outbound webhooks, public API, agency features, and self-service billing unless needed for the chosen launch model. This document remains a **long-term parity backlog**, not the minimum launch acceptance gate. Its release certification remains strict and separate.
+
 ## Ground rules and evidence
 
 - This plan supersedes the completion claims in `DRIPIFY_PARITY.md`; that file is an **historical** audit, not the active backlog.
