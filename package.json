@@ -20,6 +20,8 @@
     "test:unit": "vitest run",
     "test:watch": "vitest",
     "check": "npm test && npm run build",
+    "release:certify": "tsx scripts/check-parity-release.ts",
+    "release:check": "npm run check && npm run release:certify",
     "check:nango": "cd nango-integrations && npm ci && NANGO_CLI_UPGRADE_MODE=ignore npx --no-install nango compile --no-interactive",
     "selfhost:init": "bash scripts/selfhost-init.sh",
     "selfhost:deploy": "bash scripts/selfhost-deploy.sh",
