@@ -309,6 +309,124 @@ describe('publishCommunityReply', () => {
     expect(calls).toEqual([]);
   });
 
+  it('rejects spoofed or ambiguous GitHub issue URLs before any claim or provider request', async () => {
+    const { fetchImpl, calls } = stubFetch(
+      () => new Response(JSON.stringify({ id: 100 }), { status: 201 })
+    );
+    const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
+    const badUrls = [
+      'https://evil.test/https://github.com/a/b/issues/1',
+      'https://evil.test/?next=https://github.com/a/b/issues/1',
+      'https://github.com.evil.test/a/b/issues/1',
+      'http://github.com/a/b/issues/1',
+      'https://github.com@evil.test/a/b/issues/1',
+      'https://github.com/a/b/issues/1/another',
+      'https://github.com/a/b/issues/1comments',
+      'https://github.com/a/b/issues/0',
+      'https://github.com/a/b/issues/%31',
+      'https://github.com/a/b/tree/main'
+    ];
+    for (const [index, threadUrl] of badUrls.entries()) {
+      await expect(
+        publishCommunityReply(
+          db,
+          DEMO_WORKSPACE_ID,
+          { ...githubPayload, threadUrl },
+          `bad-github-url-${index}`,
+          NOW,
+          options
+        )
+      ).rejects.toThrow(/GitHub reply/);
+    }
+    expect(calls).toEqual([]);
+    const claims = await db
+      .prepare(
+        "SELECT COUNT(*)::int AS total FROM outreach_posts WHERE workspace_id=? AND payload_hash LIKE 'bad-github-url-%'"
+      )
+      .get<{ total: number }>(DEMO_WORKSPACE_ID);
+    expect(claims?.total).toBe(0);
+  });
+
+  it('does not send a second differently worded approved reply to an already posted thread', async () => {
+    const { fetchImpl, calls } = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({ id: 203, html_url: 'https://github.com/a/b/issues/1#issuecomment-203' }),
+          { status: 201 }
+        )
+    );
+    const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
+    const first = await publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      githubPayload,
+      'thread-one-first',
+      NOW,
+      options
+    );
+    expect(first.status).toBe('posted');
+    await expect(
+      publishCommunityReply(
+        db,
+        DEMO_WORKSPACE_ID,
+        { ...githubPayload, body: 'Different approved wording' },
+        'thread-one-second',
+        NOW,
+        options
+      )
+    ).rejects.toThrow(/thread already has a posted reply/i);
+    // Another feed can use a different external id, a www host, and a pull
+    // route for the same GitHub issue. It still must not send twice.
+    await expect(
+      publishCommunityReply(
+        db,
+        DEMO_WORKSPACE_ID,
+        {
+          ...githubPayload,
+          threadExternalId: 'other-source-key',
+          threadUrl: 'https://www.github.com/a/b/pull/1/?view=conversation',
+          body: 'Yet another approved version'
+        },
+        'thread-one-third',
+        NOW,
+        options
+      )
+    ).rejects.toThrow(/thread already has a posted reply/i);
+    expect(calls).toHaveLength(1);
+    const rows = await db
+      .prepare(
+        "SELECT COUNT(*)::int AS count FROM outreach_posts WHERE workspace_id=? AND thread_external_id=? AND platform='github' AND status <> 'failed'"
+      )
+      .get<{ count: number }>(DEMO_WORKSPACE_ID, githubPayload.threadExternalId);
+    expect(rows?.count).toBe(1);
+  });
+
+  it('does not turn a pending unknown thread into a second differently worded request', async () => {
+    const { fetchImpl, calls } = stubFetch(() => new Response('gateway timeout', { status: 502 }));
+    const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
+    await expect(
+      publishCommunityReply(
+        db,
+        DEMO_WORKSPACE_ID,
+        githubPayload,
+        'pending-thread-first',
+        NOW,
+        options
+      )
+    ).rejects.toThrow(/outcome is unknown/);
+    await expect(
+      publishCommunityReply(
+        db,
+        DEMO_WORKSPACE_ID,
+        { ...githubPayload, body: 'A different reply after unknown status' },
+        'pending-thread-second',
+        NOW,
+        options
+      )
+    ).rejects.toThrow(/thread already has a pending reply/i);
+    expect(calls).toHaveLength(1);
+  });
+
   it('posts to GitHub and logs the delivery', async () => {
     const { fetchImpl, calls } = stubFetch(
       () =>
@@ -644,10 +762,17 @@ describe('publishCommunityReply', () => {
     }
     const { fetchImpl } = stubFetch(() => new Response('{}', { status: 200 }));
     await expect(
-      publishCommunityReply(db, DEMO_WORKSPACE_ID, payload, 'hash-capped', NOW, {
-        credentials: credentials({}),
-        fetchImpl
-      })
+      publishCommunityReply(
+        db,
+        DEMO_WORKSPACE_ID,
+        { ...payload, threadExternalId: 'not-a-previous-reddit-thread' },
+        'hash-capped',
+        NOW,
+        {
+          credentials: credentials({}),
+          fetchImpl
+        }
+      )
     ).rejects.toThrow(/Daily cap reached/);
   });
 });

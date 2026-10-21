@@ -8,6 +8,7 @@ import { createSsrfFetch } from '../skills/guard.js';
 import {
   countPostsToday,
   existingPost,
+  existingPostForThread,
   lastPostInCommunity,
   recordPost,
   settlePost
@@ -212,14 +213,40 @@ type ReplyPublisher = (
  * - reddit        -- has one, and is `prepare-only` by policy. Gate 1 stops it.
  * - linkedin      -- disabled outright; see scouts/linkedin.ts.
  */
+/** A reply's approved URL must identify the GitHub thread itself, not merely
+ * contain the text `github.com/` in an unrelated host, query or pathname.
+ * Reject extra segments and ambiguous encoded components before reserving any
+ * posting capacity. The REST API uses issues/{number}/comments for both issue
+ * and pull-request conversation comments.
+ */
+function githubReplyTarget(value: string): { owner: string; repo: string; number: string } {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('GitHub reply requires a valid HTTPS github.com issue or pull URL.');
+  }
+  if (
+    url.protocol !== 'https:' ||
+    !['github.com', 'www.github.com'].includes(url.hostname) ||
+    url.port ||
+    url.username ||
+    url.password
+  ) {
+    throw new Error('GitHub reply requires an HTTPS github.com issue or pull URL.');
+  }
+  const match = /^\/([a-zA-Z0-9-]+)\/([a-zA-Z0-9_.-]+)\/(?:issues|pull)\/([1-9][0-9]*)\/?$/.exec(
+    url.pathname
+  );
+  if (!match) throw new Error('GitHub reply URL must name exactly one issue or pull request.');
+  return { owner: match[1], repo: match[2], number: match[3] };
+}
+
 const REPLY_PUBLISHERS: Readonly<Record<string, ReplyPublisher>> = {
   async github(payload, { credentials, client }) {
+    const { owner, repo, number } = githubReplyTarget(payload.threadUrl);
     const token = credentials.get('GITHUB_TOKEN');
     if (!token) throw new Error('GITHUB_TOKEN is required to post a GitHub comment.');
-    const match = /github\.com\/([^/]+)\/([^/]+)\/(?:issues|pull)\/(\d+)/.exec(payload.threadUrl);
-    if (!match)
-      throw new Error(`Could not derive owner/repo/number from GitHub URL: ${payload.threadUrl}`);
-    const [, owner, repo, number] = match;
 
     const result = await postJson(
       client,
@@ -377,6 +404,9 @@ export async function publishCommunityReply(
       `Refusing to post to ${payload.platform}: the approved payload does not carry a passing safety verdict (metadata.safetyAllowed !== true).`
     );
   }
+  // Invalid GitHub URLs must not create a pending claim, consume a daily quota
+  // or resolve to an unintended real GitHub thread during provider dispatch.
+  if (payload.platform === 'github') githubReplyTarget(payload.threadUrl);
   await assertCommunityReplyNotDenied(db, workspaceId, options);
 
   // A window check followed by an independent claim lets different workers
@@ -394,8 +424,29 @@ export async function publishCommunityReply(
     if (previous) return { kind: 'existing' as const, previous };
 
     await assertCommunityReplyNotDenied(tx, workspaceId, options);
-    await assertPostingWindow(tx, workspaceId, payload.platform, community, now);
 
+    // The exact-payload replay guard is not a thread-level stop: approving
+    // different wording produces a different hash for the same recipient.
+    // This query and the claim share the workspace/platform advisory lock, so
+    // two concurrent differently worded approvals cannot both slip through.
+    const githubTarget =
+      payload.platform === 'github' ? githubReplyTarget(payload.threadUrl) : null;
+    const canonicalUrl = githubTarget
+      ? `https://github.com/${githubTarget.owner.toLowerCase()}/${githubTarget.repo.toLowerCase()}/issues/${githubTarget.number}`
+      : null;
+    const priorThread = await existingPostForThread(
+      tx,
+      workspaceId,
+      payload.platform,
+      payload.threadExternalId,
+      canonicalUrl
+    );
+    if (priorThread)
+      throw new Error(
+        `This ${payload.platform} thread already has a ${priorThread.status} reply or manual handoff (post ${priorThread.id}); inspect and resolve it rather than sending another message.`
+      );
+
+    await assertPostingWindow(tx, workspaceId, payload.platform, community, now);
     const reason = handoffReason(payload.platform);
     const claim = await recordPost(
       tx,

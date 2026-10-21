@@ -257,6 +257,44 @@ export async function existingPost(
     .get<ExistingPost>(workspaceId, payloadHash);
 }
 
+/** A thread must not receive a second outreach reply merely because someone
+ * approved different wording and therefore generated a new payload hash.
+ * Pending/unknown, posted and manual handoff all reserve the thread; only a
+ * provider-confirmed failure releases it. Called under the same workspace +
+ * platform advisory reservation as post creation.
+ */
+export async function existingPostForThread(
+  db: Db,
+  workspaceId: string,
+  platform: string,
+  threadExternalId: string,
+  githubCanonicalUrl: string | null
+): Promise<ExistingPost | undefined> {
+  // GitHub source feeds do not consistently use a unique external id for each
+  // issue, so use the canonical issue URL for GitHub. Pull and issue URLs
+  // address the same issue-comment API. Other platforms use their own stable
+  // thread ids. All checks are workspace+platform scoped.
+  return db
+    .prepare(
+      `SELECT id,status,provider,external_ref FROM outreach_posts
+    WHERE workspace_id=? AND platform=? AND status <> 'failed'
+      AND (CASE WHEN ?::text IS NOT NULL THEN
+        REGEXP_REPLACE(REPLACE(REGEXP_REPLACE(
+          LOWER(SPLIT_PART(SPLIT_PART(thread_url,CHR(63),1),'#',1)),
+          '^https://www[.]github[.]com','https://github.com'),
+          '/pull/','/issues/'), '/+$', '') = ?::text
+        ELSE thread_external_id=?::text END)
+    ORDER BY created_at DESC LIMIT 1`
+    )
+    .get<ExistingPost>(
+      workspaceId,
+      platform,
+      githubCanonicalUrl,
+      githubCanonicalUrl,
+      threadExternalId
+    );
+}
+
 /** An owner may settle only an aged, explicitly investigated unknown write. */
 export class CommunityPostResolutionError extends Error {
   constructor(
