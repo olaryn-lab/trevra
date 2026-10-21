@@ -19,7 +19,7 @@ const HOSTS = ['hooks.partner.example'];
 let db: Db;
 
 async function createEvent(workspaceId: string, eventType = 'linkedin_campaign.started') {
-  return appendDomainEvent(db, {
+  const event = await appendDomainEvent(db, {
     workspaceId,
     streamType: 'linkedin_campaign',
     streamId: `campaign-${workspaceId}`,
@@ -29,6 +29,16 @@ async function createEvent(workspaceId: string, eventType = 'linkedin_campaign.s
     payload: { sensitiveEmail: 'someone@example.test', apiKey: 'do-not-publish' },
     occurredAt: NOW
   });
+  // The outbox's production DEFAULT CURRENT_TIMESTAMP is intentionally based on
+  // the database clock. These tests dispatch at a fixed simulated instant; make
+  // the test event due at that instant instead of assuming DB time equals NOW.
+  // This changes only isolated fixture rows, not production delivery semantics.
+  await db
+    .prepare(
+      'UPDATE outbound_webhook_deliveries SET next_attempt_at=?::timestamptz WHERE workspace_id=? AND event_id=?'
+    )
+    .run(NOW.toISOString(), workspaceId, event.id);
+  return event;
 }
 async function rowsFor(workspaceId: string) {
   return db
