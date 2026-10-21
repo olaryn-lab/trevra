@@ -183,6 +183,32 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export type { UnresolvedCommunityPost } from '../shared/community-post';
+
+export async function getUnresolvedCommunityPosts() {
+  const result = await request<{
+    posts: import('../shared/community-post').UnresolvedCommunityPost[];
+  }>('/api/outreach/posts/unresolved');
+  return result.posts;
+}
+
+export async function resolveUncertainCommunityPost(
+  postId: string,
+  input: {
+    outcome: 'posted' | 'not_posted';
+    verificationUrl: string;
+    confirmation: string;
+  }
+): Promise<{ id: string; status: 'posted' | 'failed'; verificationUrl: string }> {
+  const response = await request<{
+    post: { id: string; status: 'posted' | 'failed'; verificationUrl: string };
+  }>(`/api/outreach/posts/${encodeURIComponent(postId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify(input)
+  });
+  return response.post;
+}
+
 export type BillingSnapshot =
   | { enabled: false }
   | {
@@ -2107,6 +2133,62 @@ export async function editLinkedInActionBody(
   return result.action;
 }
 
+export interface LinkedInPostReview {
+  postId: string;
+  seatKey: string;
+  body: string;
+  scheduledAt: string | null;
+  media: Array<{ id: string; name: string; mimeType: string; digest: string }>;
+  contentHash: string;
+  approved: boolean;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export interface LinkedInWithdrawalReview {
+  withdrawalId: string;
+  seatKey: string;
+  actionId: string;
+  targetRef: string;
+  pendingDays: number | null;
+  contentHash: string;
+  approved: boolean;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function getLinkedInWithdrawalReviews(): Promise<LinkedInWithdrawalReview[]> {
+  return (
+    await request<{ reviews: LinkedInWithdrawalReview[] }>('/api/linkedin/withdrawals/approvals')
+  ).reviews;
+}
+export async function approveLinkedInWithdrawalReview(
+  withdrawalId: string,
+  contentHash: string
+): Promise<LinkedInWithdrawalReview> {
+  return (
+    await request<{ review: LinkedInWithdrawalReview }>(
+      `/api/linkedin/withdrawals/approvals/${encodeURIComponent(withdrawalId)}`,
+      { method: 'POST', body: JSON.stringify({ contentHash }) }
+    )
+  ).review;
+}
+
+export async function getLinkedInPostReview(postId: string): Promise<LinkedInPostReview> {
+  return (
+    await request<{ review: LinkedInPostReview }>(
+      `/api/linkedin/posts/${encodeURIComponent(postId)}/review`
+    )
+  ).review;
+}
+export async function approveLinkedInPostReview(
+  postId: string,
+  contentHash: string
+): Promise<LinkedInPostReview> {
+  return (
+    await request<{ review: LinkedInPostReview }>(
+      `/api/linkedin/posts/${encodeURIComponent(postId)}/approve`,
+      { method: 'POST', body: JSON.stringify({ contentHash }) }
+    )
+  ).review;
+}
+
 export async function listLinkedInPosts(
   filters: { seatKey?: string; status?: LinkedInPostStatus; limit?: number } = {}
 ): Promise<LinkedInPost[]> {
@@ -2252,6 +2334,17 @@ export async function updateLinkedInManagerSeat(
   ).seat;
 }
 
+export async function renameLinkedInManagerLeadList(
+  listId: string,
+  name: string
+): Promise<LinkedInLeadList> {
+  return (
+    await request<{ list: LinkedInLeadList }>(
+      `/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}`,
+      { method: 'PATCH', body: JSON.stringify({ name }) }
+    )
+  ).list;
+}
 export async function getLinkedInManagerLeadLists(seatKey?: string): Promise<LinkedInLeadList[]> {
   return (
     await request<{ lists: LinkedInLeadList[] }>(
@@ -2309,14 +2402,28 @@ export interface LinkedInLeadCsvPreview {
   headers: string[];
   mapping: Partial<
     Record<
-      'firstName' | 'lastName' | 'company' | 'email' | 'phone' | 'country' | 'profileUrl',
+      | 'firstName'
+      | 'lastName'
+      | 'company'
+      | 'email'
+      | 'phone'
+      | 'country'
+      | 'profileUrl'
+      | 'fullName',
       string
     >
   >;
   /** Which mapped fields automatch guessed by similarity rather than an exact heading match. Absent entries were exact (or came from an explicit override). */
   mappingConfidence?: Partial<
     Record<
-      'firstName' | 'lastName' | 'company' | 'email' | 'phone' | 'country' | 'profileUrl',
+      | 'firstName'
+      | 'lastName'
+      | 'company'
+      | 'email'
+      | 'phone'
+      | 'country'
+      | 'profileUrl'
+      | 'fullName',
       'exact' | 'guessed'
     >
   >;
@@ -2398,26 +2505,30 @@ export async function importLinkedInManagerLeadCsv(
   return response.json();
 }
 
-/**
- * A page of one lead list, and HOW MANY PEOPLE ARE ACTUALLY ON IT.
- *
- * `total` is counted server-side, not `contacts.length`: the route returns at
- * most one page, so the two differ exactly when the screen most needs to say
- * so. Announcing a truncation from the page length alone is how the UI came to
- * claim a first-1,000 that nobody had counted.
- */
+/** Server-filtered lead-list page: result counts cover the entire list, not loaded rows. */
 export async function getLinkedInManagerLeadContacts(
   listId: string,
-  seatKey?: string
+  seatKey?: string,
+  page: { offset?: number; limit?: number; query?: string; needsIdentityOnly?: boolean } = {}
 ): Promise<{
   list: LinkedInLeadList;
   contacts: LinkedInLeadContact[];
   total: number;
-  /** The server's page bound. `contacts.length` is short of `total` exactly when this is reached. */
+  listTotal: number;
+  identityReviewCount: number;
   pageLimit: number;
+  offset: number;
+  hasMore: boolean;
 }> {
+  const params = new URLSearchParams();
+  if (seatKey) params.set('seatKey', seatKey);
+  if (page.offset !== undefined) params.set('offset', String(page.offset));
+  if (page.limit !== undefined) params.set('limit', String(page.limit));
+  if (page.query?.trim()) params.set('query', page.query.trim());
+  if (page.needsIdentityOnly) params.set('needsIdentityOnly', 'true');
+  const query = params.toString();
   return request(
-    `/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}/contacts${seatKey ? `?seatKey=${encodeURIComponent(seatKey)}` : ''}`
+    `/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}/contacts${query ? `?${query}` : ''}`
   );
 }
 
@@ -2442,13 +2553,13 @@ export async function updateLinkedInManagerLeadContact(
   ).contact;
 }
 
-export async function deleteLinkedInManagerLeadContact(contactId: string): Promise<boolean> {
-  return (
-    await request<{ deleted: boolean }>(
-      `/api/linkedin/manager/contacts/${encodeURIComponent(contactId)}`,
-      { method: 'DELETE' }
-    )
-  ).deleted;
+export async function deleteLinkedInManagerLeadContact(contactId: string): Promise<void> {
+  const result = await request<{ deleted: boolean }>(
+    `/api/linkedin/manager/contacts/${encodeURIComponent(contactId)}`,
+    { method: 'DELETE' }
+  );
+  // A 200 response is not proof of deletion if the body says otherwise.
+  if (result.deleted !== true) throw new Error('The server did not confirm lead deletion.');
 }
 
 export async function getLinkedInManagerWorkflows(): Promise<LinkedInWorkflow[]> {
@@ -2814,6 +2925,69 @@ export async function pauseLinkedInManagedCampaign(id: string): Promise<ManagedC
       { method: 'POST', body: '{}' }
     )
   ).campaign;
+}
+
+export interface LinkedInActionReview {
+  actionId: string;
+  campaignId: string | null;
+  seatKey: string;
+  kind: string;
+  targetRef: string;
+  subject: string | null;
+  body: string | null;
+  threadUrn: string | null;
+  hasAttachments: boolean;
+  contentHash: string;
+  approved: boolean;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function getLinkedInActionReviews(): Promise<LinkedInActionReview[]> {
+  return (
+    await request<{ reviews: LinkedInActionReview[] }>('/api/linkedin/manager/action-approvals')
+  ).reviews;
+}
+export async function approveLinkedInActionReview(
+  actionId: string,
+  contentHash: string
+): Promise<LinkedInActionReview> {
+  return (
+    await request<{ review: LinkedInActionReview }>(
+      `/api/linkedin/manager/action-approvals/${encodeURIComponent(actionId)}`,
+      { method: 'POST', body: JSON.stringify({ contentHash }) }
+    )
+  ).review;
+}
+
+export interface CampaignEmailReview {
+  actionId: string;
+  campaignId: string;
+  recipient: string;
+  subject: string;
+  body: string;
+  footer: string;
+  sender: string | null;
+  tracking: 'off' | 'opens' | 'opens_clicks';
+  threaded: boolean;
+  contentHash: string;
+  approved: boolean;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function getCampaignEmailReviews(campaignId: string): Promise<CampaignEmailReview[]> {
+  const result = await request<{ reviews: CampaignEmailReview[] }>(
+    `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/email-approvals`
+  );
+  return result.reviews;
+}
+export async function approveCampaignEmailReview(
+  campaignId: string,
+  actionId: string,
+  contentHash: string
+): Promise<CampaignEmailReview> {
+  const result = await request<{ review: CampaignEmailReview }>(
+    `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/email-approvals/${encodeURIComponent(actionId)}`,
+    { method: 'POST', body: JSON.stringify({ contentHash }) }
+  );
+  return result.review;
 }
 
 export async function stopLinkedInManagedCampaign(id: string): Promise<ManagedCampaign> {
@@ -3223,6 +3397,8 @@ export async function getLinkedInThreads(
     campaignId?: string;
     seatKey?: string;
     limit?: number;
+    search?: string;
+    offset?: number;
   } = {}
 ): Promise<LinkedInThreadRecord[]> {
   const query = new URLSearchParams();
@@ -3231,6 +3407,8 @@ export async function getLinkedInThreads(
   if (filters.campaignId) query.set('campaignId', filters.campaignId);
   if (filters.seatKey) query.set('seatKey', filters.seatKey);
   if (filters.limit !== undefined) query.set('limit', String(filters.limit));
+  if (filters.search?.trim()) query.set('search', filters.search.trim());
+  if (filters.offset !== undefined) query.set('offset', String(filters.offset));
   const result = await request<{ threads?: LinkedInThreadRecord[] }>(
     `/api/linkedin/inbox/threads${query.size ? `?${query}` : ''}`
   );
@@ -4031,6 +4209,53 @@ export interface RedditAccountResponse {
   worker: RedditWorkerStatus;
 }
 
+export type RedditCommentStatus = 'prepared' | 'executing' | 'posted' | 'failed' | 'unknown';
+export interface RedditCommentReview {
+  id: string;
+  threadUrl: string;
+  body: string;
+  contentHash: string;
+  status: RedditCommentStatus;
+  approved: boolean;
+  approvedBy: string | null;
+  externalRef: string | null;
+  failureKind: string | null;
+  detail: string | null;
+  policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+}
+export async function prepareRedditCommentAction(input: {
+  url: string;
+  body: string;
+}): Promise<RedditCommentReview> {
+  return (
+    await request<{ comment: RedditCommentReview }>('/api/reddit/comment', {
+      method: 'POST',
+      body: JSON.stringify(input)
+    })
+  ).comment;
+}
+export async function listRedditCommentActions(): Promise<RedditCommentReview[]> {
+  return (await request<{ comments: RedditCommentReview[] }>('/api/reddit/comments')).comments;
+}
+export async function approveRedditCommentAction(
+  id: string,
+  contentHash: string
+): Promise<RedditCommentReview> {
+  return (
+    await request<{ comment: RedditCommentReview }>(
+      `/api/reddit/comments/${encodeURIComponent(id)}/approve`,
+      { method: 'POST', body: JSON.stringify({ contentHash }) }
+    )
+  ).comment;
+}
+export async function executeRedditCommentAction(id: string): Promise<{
+  posted: boolean;
+  status: RedditCommentStatus;
+  externalRef: string | null;
+  reason: string | null;
+}> {
+  return request(`/api/reddit/comments/${encodeURIComponent(id)}/execute`, { method: 'POST' });
+}
 export async function getRedditAccount(): Promise<RedditAccountResponse> {
   return request('/api/reddit/account');
 }

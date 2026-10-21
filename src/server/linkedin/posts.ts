@@ -443,6 +443,25 @@ export async function ensurePostImage(
   });
 }
 
+/** Authenticated image preview for exact owner review; never a public asset. */
+export async function getPostImage(
+  db: Db,
+  workspaceId: string,
+  postId: string,
+  imageId: string
+): Promise<{ bytes: Buffer; mimeType: LinkedInPostImageMime } | null> {
+  const row = await db
+    .prepare(
+      `SELECT mime_type,bytes FROM linkedin_post_media
+     WHERE workspace_id=? AND post_id=? AND id=?`
+    )
+    .get<{ mime_type: string; bytes: Buffer }>(workspaceId, postId, imageId);
+  if (!row || !isPostImageMime(row.mime_type)) return null;
+  return {
+    mimeType: row.mime_type,
+    bytes: Buffer.isBuffer(row.bytes) ? row.bytes : Buffer.from(row.bytes ?? [])
+  };
+}
 export async function loadPostImages(
   db: Db,
   workspaceId: string,
@@ -502,7 +521,8 @@ export async function claimNextDuePost(
   db: Db,
   workspaceId: string,
   now: Date,
-  excludeSeatKeys: readonly string[] = []
+  excludeSeatKeys: readonly string[] = [],
+  excludePostIds: readonly string[] = []
 ): Promise<LinkedInPost | undefined> {
   return db.transaction(async (tx) => {
     const row = await tx
@@ -513,7 +533,7 @@ export async function claimNextDuePost(
       WHERE id = (
         SELECT id FROM linkedin_posts
         WHERE workspace_id = ? AND status = 'scheduled' AND scheduled_at <= ?
-          AND seat_key <> ALL(?)
+          AND seat_key <> ALL(?) AND id <> ALL(?)
         ORDER BY scheduled_at ASC
         FOR UPDATE SKIP LOCKED
         LIMIT 1
@@ -521,7 +541,13 @@ export async function claimNextDuePost(
       RETURNING ${POST_COLUMNS}
     `
       )
-      .get<PostRow>(now.toISOString(), workspaceId, now.toISOString(), [...excludeSeatKeys]);
+      .get<PostRow>(
+        now.toISOString(),
+        workspaceId,
+        now.toISOString(),
+        [...excludeSeatKeys],
+        [...excludePostIds]
+      );
     return row ? toPost(row) : undefined;
   });
 }

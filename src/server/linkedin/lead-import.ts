@@ -9,7 +9,8 @@ export const LEAD_FIELDS = [
   'email',
   'phone',
   'country',
-  'profileUrl'
+  'profileUrl',
+  'fullName'
 ] as const;
 export type LeadField = (typeof LEAD_FIELDS)[number];
 
@@ -21,6 +22,8 @@ export interface LeadFieldMapping {
   phone?: string;
   country?: string;
   profileUrl?: string;
+  /** One combined-name column, e.g. an explicitly exported prospect list. */
+  fullName?: string;
 }
 
 export interface NormalizedLeadInput {
@@ -85,7 +88,8 @@ const FIELD_ALIASES: Record<LeadField, readonly string[]> = {
     // Same idea as 'cell phone' above: close enough to a bare 'LI Profile'
     // header for the fuzzy pass, not identical to it.
     'li profile url'
-  ]
+  ],
+  fullName: ['name', 'full name', 'fullname', 'lead name', 'contact name']
 };
 
 const SCRUB_TOKENS = new Set([
@@ -213,13 +217,16 @@ export function autoMatchLeadFieldsWithConfidence(headers: readonly string[]): {
   }
 
   for (const field of LEAD_FIELDS) {
-    if (mapping[field]) continue;
+    if (mapping[field] || field === 'fullName') continue; // Never guess that one column holds both name parts.
     const aliasKeys = FIELD_ALIASES[field].map(headerKey);
     let best: { header: string; score: number } | null = null;
     for (const header of headers) {
       if (claimed.has(header)) continue;
       const key = headerKey(header);
       if (!key) continue;
+      // A freeform Location (e.g. Zurich metropolitan area) is not a country.
+      // Country is used by outreach compliance; fuzzy matching must not infer it.
+      if (field === 'country' && !key.includes('country')) continue;
       const score = Math.max(...aliasKeys.map((alias) => headerSimilarity(key, alias)));
       if (score >= FUZZY_MATCH_THRESHOLD && (!best || score > best.score)) best = { header, score };
     }
@@ -445,8 +452,10 @@ export function normalizeLeadRow(
     return header ? String(row[header] ?? '') : '';
   };
   // DEDICATED COLUMNS, so the scrub may not empty them: see `scrubNameField`.
-  const firstName = scrubNameField(read('firstName'));
-  const lastName = scrubNameField(read('lastName'));
+  const combined = splitAndScrubName(read('fullName'));
+  // Explicit separate columns always win. Use combined only to fill blanks.
+  const firstName = scrubNameField(read('firstName')) || combined.firstName;
+  const lastName = scrubNameField(read('lastName')) || combined.lastName;
   const company = read('company').normalize('NFKC').replace(/\s+/g, ' ').trim();
   if (!firstName || !lastName || !company) {
     const missing = [!firstName && 'first name', !lastName && 'last name', !company && 'company']
@@ -548,11 +557,15 @@ export function parseLeadCsv(csv: string, override: LeadFieldMapping = {}): Lead
   const { mapping: auto, confidence: mappingConfidence } =
     autoMatchLeadFieldsWithConfidence(headers);
   const mapping: LeadFieldMapping = { ...auto, ...override };
-  for (const required of ['firstName', 'lastName', 'company'] as const) {
-    if (!mapping[required])
-      throw new Error(`Could not map required field '${required}'. Choose a CSV column for it.`);
-    if (!headers.includes(mapping[required] as string))
-      throw new Error(`Mapped column '${mapping[required]}' does not exist in this CSV.`);
+  if (!mapping.company)
+    throw new Error("Could not map required field 'company'. Choose a CSV column for it.");
+  if (!mapping.fullName) {
+    for (const required of ['firstName', 'lastName'] as const) {
+      if (!mapping[required])
+        throw new Error(
+          `Could not map required field '${required}'. Choose a CSV column for it, or map Full name.`
+        );
+    }
   }
   for (const [field, header] of Object.entries(mapping)) {
     if (header && !headers.includes(header))

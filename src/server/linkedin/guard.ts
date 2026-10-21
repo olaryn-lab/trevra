@@ -1,6 +1,8 @@
 import { z } from 'zod';
 import { getChannel } from '../channels/registry.js';
 import type { Db } from '../db.js';
+import { filterExcluded } from './exclusions.js';
+import { canonicalProfileUrl } from './driver-scrape.js';
 import type { Skill, SkillContext } from '../skills/types.js';
 import type { SeatRef } from './actions.js';
 import {
@@ -407,6 +409,22 @@ async function seatLedgerFacts(
   now: Date
 ): Promise<SeatLedgerFacts> {
   const nowIso = now.toISOString();
+  // Canonical profile equivalents are bound as ordinary SQL text parameters.
+  // A bare action handle/other URL has no known LinkedIn profile and must not
+  // accidentally match any stored contact. This query is part of the existing
+  // ledger read, not an additional DB roundtrip for every browser action.
+  const canonicalTarget = canonicalProfileUrl(input.targetRef);
+  const path = canonicalTarget
+    ? new URL(canonicalTarget).pathname.replace(/\/$/, '').toLowerCase()
+    : '';
+  const profileVariants = path
+    ? [
+        'https://www.linkedin.com',
+        'https://linkedin.com',
+        'http://www.linkedin.com',
+        'http://linkedin.com'
+      ].map((host) => host + path)
+    : ['', '', '', ''];
   const at = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
   const since24 = new Date(now.getTime() - 24 * 3_600_000).toISOString();
   const since7d = new Date(now.getTime() - 24 * 7 * 3_600_000).toISOString();
@@ -498,7 +516,13 @@ async function seatLedgerFacts(
                LOWER(RTRIM(SPLIT_PART(SPLIT_PART(?::text, chr(63),1),'#',1),'/')))
             )
           ORDER BY CASE WHEN s.channel='linkedin' THEN 0 ELSE 1 END, s.created_at DESC
-          LIMIT 1) AS suppression_reason
+          LIMIT 1) AS suppression_reason,
+        EXISTS (
+          SELECT 1 FROM linkedin_lead_contacts
+           WHERE workspace_id=? AND do_not_contact IS TRUE AND profile_url IS NOT NULL
+             AND LOWER(RTRIM(SPLIT_PART(SPLIT_PART(profile_url,chr(63),1),'#',1),'/'))
+                 IN (?,?,?,?)
+        ) AS direct_dnc
       FROM windowed
     `
     )
@@ -516,6 +540,7 @@ async function seatLedgerFacts(
       campaign_used_24: number;
       duplicate: boolean;
       suppression_reason: string | null;
+      direct_dnc: boolean;
     }>(
       seat.workspaceId,
       seat.seatKey,
@@ -552,7 +577,9 @@ async function seatLedgerFacts(
       input.excludeActionId,
       seat.workspaceId,
       input.targetRef,
-      input.targetRef
+      input.targetRef,
+      seat.workspaceId,
+      ...profileVariants
     );
 
   // bucket 0 is the newest 24h and the array is oldest-first, so it lands last
@@ -580,7 +607,15 @@ async function seatLedgerFacts(
     pendingInvites: row?.pending_invites ?? 0,
     campaignUsed24: row?.campaign_used_24 ?? 0,
     duplicate: row?.duplicate === true,
-    suppressionReason: row?.suppression_reason ?? null,
+    suppressionReason:
+      row?.suppression_reason ??
+      (row?.direct_dnc ? 'Lead marked do-not-contact in the workspace contact list' : null) ??
+      (await (async () => {
+        const excluded = await filterExcluded(db, seat.workspaceId, [input.targetRef]);
+        return excluded.excluded[0]
+          ? `Never contact: ${excluded.excluded[0].reason || 'Excluded by workspace'}`
+          : null;
+      })()),
     linkedSeats: Number(row?.linked_seats ?? 1),
     identityKnown: row?.identity_known === true
   };

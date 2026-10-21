@@ -82,6 +82,14 @@ export class Db {
     await this.queryable.query(sql);
   }
 
+  /** Reuse an existing transaction without opening a nested PostgreSQL BEGIN.
+   * Needed for safety operations called both by public handlers and by event
+   * writers whose persistent state must commit atomically with suppression.
+   */
+  async transactionOrInline<T>(work: (tx: Db) => Promise<T>): Promise<T> {
+    return this.pool ? this.transaction(work) : work(this);
+  }
+
   async transaction<T>(work: (tx: Db) => Promise<T>): Promise<T> {
     if (!this.pool)
       throw new Error('Transactions can only be started from a pooled database handle');

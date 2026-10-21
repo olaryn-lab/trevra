@@ -15,7 +15,7 @@ import {
   canonicalMeetingSchema,
   type CanonicalMeeting
 } from './meetings/types.js';
-import { assertNotSuppressed } from './suppressions.js';
+import { assertNotSuppressed, SuppressionError, withSuppressionBoundary } from './suppressions.js';
 import {
   assertEmailDeliveryCapacity,
   claimEmailDelivery,
@@ -28,6 +28,14 @@ import {
   type VerifiedEmailOutcome
 } from './email-outcomes.js';
 import { outreachUnsubscribeHeaders } from './email/unsubscribe.js';
+import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from './email/compliance.js';
+import { campaignEmailPolicyGate } from './linkedin/campaign-email-approval.js';
+import { filterExcluded } from './linkedin/exclusions.js';
+import {
+  campaignTrackableUrls,
+  renderCampaignHtmlWithFooter
+} from './linkedin/campaign-email-html.js';
+import { publicEmailOrigin } from './email/public-origin.js';
 import { mailProviderFor } from './email/deliverability.js';
 import {
   OUTREACH_REPLY_OPT_OUT_SENTENCE,
@@ -644,6 +652,69 @@ export async function disconnectIntegration(
     .run(workspaceId, localConnectionId);
 }
 
+/** A pre-provider campaign-email refusal with a known, non-unknown outcome. */
+export class CampaignEmailSendRefusal extends Error {
+  readonly status = 409;
+  constructor(
+    public readonly scope: 'recipient' | 'workspace',
+    message: string
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * Revalidate the authoritative campaign cursor after setup/approval and again
+ * after preparing delivery headers. A previously claimed email can outlive a
+ * reply, opt-out, campaign pause, or workflow step change while the worker is
+ * preparing provider metadata. No new provider write may begin from that row.
+ */
+async function assertCampaignEmailClaimCurrent(
+  db: Db,
+  workspaceId: string,
+  actionId: string
+): Promise<void> {
+  const row = await db
+    .prepare(
+      `SELECT q.status AS action_status,c.status AS campaign_status,
+              m.status AS member_status,
+              m.current_step_id=q.workflow_step_id AS current_step_match,
+              EXISTS (
+                SELECT 1 FROM linkedin_actions a
+                WHERE a.workspace_id=q.workspace_id AND a.campaign_member_id=q.member_id
+                  AND a.status='replied'
+              ) AS has_reply
+       FROM linkedin_campaign_channel_actions q
+       JOIN linkedin_campaigns c ON c.workspace_id=q.workspace_id AND c.id=q.campaign_id
+       JOIN linkedin_campaign_members m ON m.workspace_id=q.workspace_id AND m.id=q.member_id
+       WHERE q.workspace_id=? AND q.id=? AND q.kind='email'`
+    )
+    .get<{
+      action_status: string;
+      campaign_status: string;
+      member_status: string;
+      current_step_match: boolean;
+      has_reply: boolean;
+    }>(workspaceId, actionId);
+  if (row?.campaign_status !== 'running') {
+    throw new CampaignEmailSendRefusal(
+      'workspace',
+      'The campaign is no longer running; the email leg is held without sending.'
+    );
+  }
+  if (
+    row.action_status !== 'claimed' ||
+    !['active', 'waiting'].includes(row.member_status) ||
+    !row.current_step_match ||
+    row.has_reply
+  ) {
+    throw new CampaignEmailSendRefusal(
+      'recipient',
+      'The claimed campaign email is no longer current or its member stopped; nothing sent.'
+    );
+  }
+}
+
 export async function executeConnectedAction(
   db: Db,
   workspaceId: string,
@@ -655,10 +726,68 @@ export async function executeConnectedAction(
   }
   const recipient = String(action.recipient ?? '').trim();
   if (!recipient) throw new Error('Email action requires recipient.');
-  // This is the last shared boundary before Gmail/Microsoft side effects. Every
-  // email path reaches this function, so a campaign, playbook, agent, or legacy
-  // recommendation cannot route around a workspace suppression.
-  await assertNotSuppressed(db, workspaceId, { channel: 'email', email: recipient });
+  const structuredPayload = JSON.parse(String(action.structured_payload_json ?? '{}')) as Record<
+    string,
+    unknown
+  >;
+  const campaignSend = structuredPayload.deliverySourceType === 'campaign_email';
+  if (campaignSend) {
+    // Even after the campaign worker's checks, contact state can change during
+    // mailbox/DNS checks. Re-read it at the shared provider boundary.
+    const contactId =
+      typeof structuredPayload.contactId === 'string' ? structuredPayload.contactId : '';
+    const personId =
+      typeof structuredPayload.personId === 'string' ? structuredPayload.personId : '';
+    if (!contactId || !personId)
+      throw new CampaignEmailSendRefusal(
+        'recipient',
+        'Campaign email has no bound Person and contact identity.'
+      );
+    const contact = await db
+      .prepare(
+        'SELECT person_id,email,profile_url,do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?'
+      )
+      .get<{
+        person_id: string | null;
+        email: string | null;
+        profile_url: string | null;
+        do_not_contact: boolean;
+      }>(workspaceId, contactId);
+    if (
+      !contact ||
+      contact.do_not_contact ||
+      contact.person_id !== personId ||
+      contact.email?.trim().toLowerCase() !== recipient.toLowerCase()
+    )
+      throw new CampaignEmailSendRefusal(
+        'recipient',
+        'Campaign recipient identity or reachability changed; nothing sent.'
+      );
+    // A workspace Never Contact exclusion added after campaign preflight may
+    // cancel queued work but cannot recall a claimed in-flight action. Recheck
+    // the canonical profile at the shared provider boundary, just like the
+    // email/Person suppression and do-not-contact flag above.
+    if (
+      contact.profile_url &&
+      (await filterExcluded(db, workspaceId, [contact.profile_url])).excluded.length > 0
+    )
+      throw new CampaignEmailSendRefusal(
+        'recipient',
+        'Campaign recipient is on the Never Contact list; nothing sent.'
+      );
+    try {
+      await assertNotSuppressed(db, workspaceId, { channel: 'email', email: recipient, personId });
+    } catch (error) {
+      if (!(error instanceof SuppressionError)) throw error;
+      throw new CampaignEmailSendRefusal(
+        'recipient',
+        'Campaign recipient is suppressed; nothing sent.'
+      );
+    }
+  } else {
+    // Every legacy, reply and playbook path still reaches the email suppression.
+    await assertNotSuppressed(db, workspaceId, { channel: 'email', email: recipient });
+  }
 
   // A required (approval-bound) connection must still be the live, provider-
   // verified mailbox; re-authorization clears mailbox_address.
@@ -709,16 +838,104 @@ export async function executeConnectedAction(
   const provider = String(connection.provider);
   const providerConfigKey = String(connection.provider_config_key);
   const connectionId = String(connection.external_connection_id);
-  const structuredPayload = JSON.parse(String(action.structured_payload_json ?? '{}')) as Record<
-    string,
-    unknown
-  >;
   const idempotencyKey = String(action.payload_hash ?? '').trim();
   if (!idempotencyKey) throw new Error('Email action requires an idempotency key.');
   const purpose =
     structuredPayload.deliveryPurpose === 'reply' || structuredPayload.deliveryPurpose === 'other'
       ? structuredPayload.deliveryPurpose
       : ('outreach' as const);
+  if (campaignSend) {
+    const sourceAction =
+      typeof structuredPayload.deliverySourceId === 'string'
+        ? structuredPayload.deliverySourceId
+        : '';
+    const gate = await campaignEmailPolicyGate(db, workspaceId, sourceAction);
+    if (!gate.allowed) throw new CampaignEmailSendRefusal('workspace', gate.reason);
+    const reviewed = gate.review!;
+    if (
+      structuredPayload.approvalContentHash !== reviewed.contentHash ||
+      action.connection_id !== reviewed.connectionId ||
+      recipient.toLowerCase() !== reviewed.recipient.toLowerCase() ||
+      String(action.subject ?? '').trim() !== reviewed.subject ||
+      String(action.body ?? '').trim() !== `${reviewed.body}\n\n${reviewed.footer}` ||
+      structuredPayload.tracking !== reviewed.tracking ||
+      structuredPayload.threaded !== reviewed.threaded
+    )
+      throw new CampaignEmailSendRefusal(
+        'workspace',
+        'The outbound campaign email no longer matches the exact approved preview; nothing sent.'
+      );
+    // The HTML part is also external content. Recreate it from the immutable
+    // lead copy and persisted per-action tracking tokens, rather than trusting
+    // a caller's HTML string after the human reviewed only the plain message.
+    if (reviewed.tracking === 'off') {
+      if (structuredPayload.htmlBody)
+        throw new CampaignEmailSendRefusal(
+          'workspace',
+          'Unapproved campaign HTML was supplied while tracking is off.'
+        );
+    } else {
+      const origin = publicEmailOrigin();
+      const tokenRow = await db
+        .prepare(
+          'SELECT tracking_token FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND id=?'
+        )
+        .get<{ tracking_token: string | null }>(workspaceId, reviewed.actionId);
+      if (!origin || !tokenRow?.tracking_token)
+        throw new CampaignEmailSendRefusal(
+          'workspace',
+          'Campaign tracking configuration changed; nothing sent.'
+        );
+      const rows = await db
+        .prepare(
+          'SELECT token,target_url FROM linkedin_campaign_email_tracking_links WHERE workspace_id=? AND channel_action_id=?'
+        )
+        .all<{ token: string; target_url: string }>(workspaceId, reviewed.actionId);
+      const links = new Map<string, string>();
+      for (const row of rows)
+        links.set(
+          row.target_url,
+          `${origin}/t/e/${encodeURIComponent(tokenRow.tracking_token)}/c/${encodeURIComponent(row.token)}`
+        );
+      if (
+        reviewed.tracking === 'opens_clicks' &&
+        campaignTrackableUrls(reviewed.body).some((target) => !links.has(target))
+      )
+        throw new CampaignEmailSendRefusal(
+          'workspace',
+          'A required campaign tracking link was not prepared.'
+        );
+      const expected = renderCampaignHtmlWithFooter(
+        reviewed.body,
+        reviewed.footer,
+        origin,
+        tokenRow.tracking_token,
+        links
+      );
+      if (structuredPayload.htmlBody !== expected)
+        throw new CampaignEmailSendRefusal(
+          'workspace',
+          'Campaign HTML was altered after exact-message approval; nothing sent.'
+        );
+    }
+    const actualAddress = String(connection.mailbox_address ?? '')
+      .trim()
+      .toLowerCase();
+    const approvedAddress =
+      typeof structuredPayload.senderAddress === 'string'
+        ? structuredPayload.senderAddress.trim().toLowerCase()
+        : '';
+    if (
+      action.require_connection_id !== true ||
+      !actualAddress ||
+      !approvedAddress ||
+      actualAddress !== approvedAddress
+    )
+      throw new CampaignEmailSendRefusal(
+        'workspace',
+        'The selected campaign mailbox identity changed; nothing sent.'
+      );
+  }
   const sourceType =
     typeof structuredPayload.deliverySourceType === 'string' &&
     structuredPayload.deliverySourceType.trim()
@@ -731,6 +948,29 @@ export async function executeConnectedAction(
       : idempotencyKey;
   const requireListUnsubscribe = structuredPayload.requireListUnsubscribe === true;
   const unsubscribeMode = parseOutreachUnsubscribeMode(structuredPayload.unsubscribeMode);
+  if (campaignSend) {
+    if (
+      purpose !== 'outreach' ||
+      !requireListUnsubscribe ||
+      unsubscribeMode !== 'list_unsubscribe_headers'
+    )
+      throw new CampaignEmailSendRefusal(
+        'workspace',
+        'Campaign outreach must include RFC8058 one-click unsubscribe headers; nothing sent.'
+      );
+    const footer = (await emailComplianceProvider().footer(db, workspaceId))?.trim() ?? '';
+    if (
+      !footer ||
+      !footer.endsWith(OUTREACH_OPT_OUT_SENTENCE) ||
+      !String(action.body ?? '')
+        .trimEnd()
+        .endsWith(footer)
+    )
+      throw new CampaignEmailSendRefusal(
+        'workspace',
+        'The campaign compliance footer changed or is missing; nothing sent.'
+      );
+  }
   // The one provider-aware unsubscribe decision (src/server/email/unsubscribe-policy.ts),
   // enforced before any delivery row so a refusal leaves nothing to retry.
   assertUnsubscribeModeAllowed({
@@ -766,6 +1006,13 @@ export async function executeConnectedAction(
         'This Zoho Mail outreach does not end with the reply-to-unsubscribe line; nothing was sent. Prepare it again.'
       );
     }
+  }
+  if (campaignSend) {
+    await assertCampaignEmailClaimCurrent(
+      db,
+      workspaceId,
+      String(structuredPayload.deliverySourceId ?? '')
+    );
   }
   const localConnectionId = String(connection.id);
   const claimed = await claimEmailDelivery(db, {
@@ -849,6 +1096,110 @@ export async function executeConnectedAction(
     await markEmailDeliveryFailure(db, deliveryId, error);
     throw error;
   }
+  // A provider preflight can take time: thread lookups, Zoho account reads and
+  // Graph draft creation all introduce an opt-out window. This is the final
+  // local check before each actual send, using the same transaction boundary as
+  // suppression writers. Never hold a DB lock across a provider network call:
+  // an opt-out after this check may race an already in-flight provider request.
+  const assertBeforeProviderWrite = async (): Promise<void> => {
+    await withSuppressionBoundary(db, workspaceId, async (tx) => {
+      const boundPersonId =
+        campaignSend && typeof structuredPayload.personId === 'string'
+          ? structuredPayload.personId
+          : null;
+      if (campaignSend) {
+        const actionId = String(structuredPayload.deliverySourceId ?? '');
+        await assertCampaignEmailClaimCurrent(tx, workspaceId, actionId);
+        const contactId = String(structuredPayload.contactId ?? '');
+        const contact = await tx
+          .prepare(
+            'SELECT person_id,email,profile_url,do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?'
+          )
+          .get<{
+            person_id: string | null;
+            email: string | null;
+            profile_url: string | null;
+            do_not_contact: boolean;
+          }>(workspaceId, contactId);
+        if (
+          !contact ||
+          contact.do_not_contact ||
+          contact.person_id !== boundPersonId ||
+          contact.email?.trim().toLowerCase() !== recipient.toLowerCase()
+        )
+          throw new CampaignEmailSendRefusal(
+            'recipient',
+            'Campaign recipient identity or reachability changed before provider send; nothing sent.'
+          );
+        if (
+          contact.profile_url &&
+          (await filterExcluded(tx, workspaceId, [contact.profile_url])).excluded.length > 0
+        )
+          throw new CampaignEmailSendRefusal(
+            'recipient',
+            'Campaign recipient is on the Never Contact list; nothing sent.'
+          );
+        const gate = await campaignEmailPolicyGate(tx, workspaceId, actionId);
+        if (!gate.allowed) throw new CampaignEmailSendRefusal('workspace', gate.reason);
+        if (gate.review?.contentHash !== structuredPayload.approvalContentHash)
+          throw new CampaignEmailSendRefusal(
+            'workspace',
+            'Campaign approval changed during provider preparation; nothing sent.'
+          );
+      }
+      // A legacy/skill/reply email may bypass the managed-campaign contact
+      // preflight entirely. Do not let an explicit do-not-contact flag or a
+      // linked Never Contact profile become ineffective simply because a
+      // separate canonical suppression row was never materialized. The shared
+      // workspace lock orders this read with supported DNC/exclusion writers.
+      const emailLeads = await tx
+        .prepare(
+          `SELECT do_not_contact,profile_url FROM linkedin_lead_contacts
+           WHERE workspace_id=?
+             AND (LOWER(BTRIM(email))=LOWER(?)
+               OR person_id IN (
+                 SELECT id FROM contacts WHERE workspace_id=? AND email_normalized=LOWER(?)
+               ))`
+        )
+        .all<{ do_not_contact: boolean; profile_url: string | null }>(
+          workspaceId,
+          recipient,
+          workspaceId,
+          recipient
+        );
+      if (emailLeads.some((lead) => lead.do_not_contact))
+        throw Object.assign(new Error('Email recipient is marked do-not-contact; nothing sent.'), {
+          status: 409
+        });
+      const profiles = emailLeads
+        .map((lead) => lead.profile_url)
+        .filter((profile): profile is string => Boolean(profile));
+      if (profiles.length && (await filterExcluded(tx, workspaceId, profiles)).excluded.length)
+        throw Object.assign(
+          new Error('Email recipient is on the workspace Never Contact list; nothing sent.'),
+          { status: 409 }
+        );
+      try {
+        await assertNotSuppressed(tx, workspaceId, {
+          channel: 'email',
+          email: recipient,
+          personId: boundPersonId
+        });
+      } catch (error) {
+        if (!campaignSend || !(error instanceof SuppressionError)) throw error;
+        throw new CampaignEmailSendRefusal(
+          'recipient',
+          'Campaign recipient was suppressed before provider send; nothing sent.'
+        );
+      }
+    });
+  };
+  try {
+    await assertBeforeProviderWrite();
+  } catch (error) {
+    await markEmailDeliveryFailure(db, deliveryId, error);
+    throw error;
+  }
   const nango = getNango();
 
   const threadExternalRef =
@@ -900,6 +1251,7 @@ export async function executeConnectedAction(
         });
         const mimeDraftId = String(mimeDraft.data.id ?? '').trim();
         if (!mimeDraftId) throw new Error('Microsoft MIME draft returned no message id.');
+        await assertBeforeProviderWrite();
         await nango.post({
           endpoint: `/v1.0/me/messages/${encodeURIComponent(mimeDraftId)}/send`,
           providerConfigKey,
@@ -931,6 +1283,7 @@ export async function executeConnectedAction(
         });
         const replyId = String(replyDraft.data.id ?? '').trim();
         if (!replyId) throw new Error('Microsoft reply draft returned no message id.');
+        await assertBeforeProviderWrite();
         await nango.post({
           endpoint: `/v1.0/me/messages/${encodeURIComponent(replyId)}/send`,
           providerConfigKey,
@@ -965,6 +1318,7 @@ export async function executeConnectedAction(
       });
       const draftId = String(draft.data.id ?? '').trim();
       if (!draftId) throw new Error('Microsoft message draft returned no message id.');
+      await assertBeforeProviderWrite();
       await nango.post({
         endpoint: `/v1.0/me/messages/${encodeURIComponent(draftId)}/send`,
         providerConfigKey,
@@ -1009,6 +1363,7 @@ export async function executeConnectedAction(
           'This Zoho Mail connection now sends as a different address than the approved mailbox; nothing was sent. Reconnect it and prepare the email again.'
         );
       }
+      await assertBeforeProviderWrite();
       const sent = await sendZohoMessage(nango, zohoConnection, {
         accountId: account.accountId,
         fromAddress: approvedAddress,
@@ -1057,6 +1412,7 @@ export async function executeConnectedAction(
         extraHeaders: unsubscribeHeaders
       })
     ).toString('base64url');
+    await assertBeforeProviderWrite();
     const response = await nango.post<{ id?: string; threadId?: string }>({
       endpoint: '/gmail/v1/users/me/messages/send',
       providerConfigKey,

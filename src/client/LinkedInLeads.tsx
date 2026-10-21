@@ -419,8 +419,8 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
 
   const saveCap = async () => {
     const cap = Number(capDraft);
-    if (!Number.isInteger(cap) || cap < 0 || cap > 1000) {
-      setError('The daily lead limit is a whole number between 0 and 1000.');
+    if (!Number.isInteger(cap) || cap < 0 || cap > 100) {
+      setError('The daily lead limit is a whole number between 0 and 100.');
       return;
     }
     setSavingCap(true);
@@ -740,7 +740,7 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
                         <input
                           type="number"
                           min={0}
-                          max={1000}
+                          max={100}
                           value={capDraft}
                           // Off with everything else on this screen. A ceiling on
                           // collection is only a ceiling on something that can run, and

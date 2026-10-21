@@ -22,6 +22,7 @@ import {
 import { syncThreads } from './inbox.js';
 import { createLeadSource, TREVRA_PUBLISHED_POST_ORIGIN } from './leads.js';
 import { addPostImage, createPost, getPost, markPostPublished } from './posts.js';
+import { approveLinkedInPost, reviewLinkedInPost } from './post-policy.js';
 import { FLAT_DAY_SHAPE } from './pacing.js';
 import { parseBackgroundRunDetail, setSeatRestingUntil } from './seat-events.js';
 import { upsertSeat } from './seats.js';
@@ -69,6 +70,38 @@ beforeEach(async () => {
   await db
     .prepare('INSERT INTO workspaces (id,name,created_at) VALUES (?,?,?)')
     .run(WORKSPACE_ID, 'LinkedIn jobs test', NOW.toISOString());
+  // Explicitly allow publishing for established worker behavior tests.
+  // Dedicated negative tests delete this rule and verify approval-by-default.
+  await db
+    .prepare(
+      `INSERT INTO workspace_policies(id,workspace_id,name,priority,action_pattern,
+      effect,conditions_json,enabled,created_at,updated_at)
+      VALUES (?,?,?,?,?,'allow','{}'::jsonb,TRUE,?::timestamptz,?::timestamptz)`
+    )
+    .run(
+      id('policy'),
+      WORKSPACE_ID,
+      'Fixture post publish allow',
+      100,
+      'action:linkedin.post.publish',
+      NOW.toISOString(),
+      NOW.toISOString()
+    );
+  await db
+    .prepare(
+      `INSERT INTO workspace_policies(id,workspace_id,name,priority,action_pattern,
+      effect,conditions_json,enabled,created_at,updated_at)
+      VALUES (?,?,?,?,?,'allow','{}'::jsonb,TRUE,?::timestamptz,?::timestamptz)`
+    )
+    .run(
+      id('policy'),
+      WORKSPACE_ID,
+      'Fixture withdrawal allow',
+      100,
+      'action:linkedin.withdraw',
+      NOW.toISOString(),
+      NOW.toISOString()
+    );
   await upsertSeat(
     db,
     WORKSPACE_ID,
@@ -1079,6 +1112,148 @@ describe('runLinkedInPostTick', () => {
   }
 
   const CONFIG = { enabled: true } as unknown as Parameters<typeof runLinkedInPostTick>[1];
+
+  it('holds unapproved posts but still publishes a later approved post in the same tick', async () => {
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE_ID);
+    await upsertSeat(
+      db,
+      WORKSPACE_ID,
+      {
+        label: 'Owner',
+        timezone: 'UTC',
+        profileUrl: 'https://www.linkedin.com/in/connected/'
+      },
+      NOW
+    );
+    const first = await createPost(
+      db,
+      {
+        id: id('lipost'),
+        workspaceId: WORKSPACE_ID,
+        blocks: [{ runs: [{ type: 'text', text: 'Unapproved' }] }],
+        status: 'scheduled',
+        scheduledAt: NOW.toISOString()
+      },
+      NOW
+    );
+    const next = await createPost(
+      db,
+      {
+        id: id('lipost'),
+        workspaceId: WORKSPACE_ID,
+        blocks: [{ runs: [{ type: 'text', text: 'Approved' }] }],
+        status: 'scheduled',
+        scheduledAt: NOW.toISOString()
+      },
+      NOW
+    );
+    const review = (await reviewLinkedInPost(db, WORKSPACE_ID, next.id))!;
+    expect(review.policy.effect).toBe('require_approval');
+    await approveLinkedInPost(db, WORKSPACE_ID, next.id, review.contentHash, 'owner', NOW);
+    let sent = 0;
+    const driver = driverThatReturns({ ok: true, failureKind: null }, undefined, () => {
+      sent += 1;
+    });
+    const result = await runLinkedInPostTick(db, CONFIG, {
+      workspaceId: WORKSPACE_ID,
+      now: NOW,
+      page,
+      driver,
+      accountConfirmed: true,
+      log: () => {}
+    });
+    expect(result.published).toBe(1);
+    expect(sent).toBe(1);
+    expect((await getPost(db, WORKSPACE_ID, first.id))!.status).toBe('scheduled');
+    expect((await getPost(db, WORKSPACE_ID, next.id))!.status).toBe('posted');
+    const decisions = await db
+      .prepare(
+        'SELECT decision FROM linkedin_post_policy_events WHERE workspace_id=? AND post_id=?'
+      )
+      .all<{ decision: string }>(WORKSPACE_ID, first.id);
+    expect(decisions).toEqual([expect.objectContaining({ decision: 'held' })]);
+  });
+
+  it('invalidates approval on changed media and blocks a newly denied post', async () => {
+    await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE_ID);
+    await upsertSeat(
+      db,
+      WORKSPACE_ID,
+      {
+        label: 'Owner',
+        timezone: 'UTC',
+        profileUrl: 'https://www.linkedin.com/in/connected/'
+      },
+      NOW
+    );
+    const post = await createPost(
+      db,
+      {
+        id: id('lipost'),
+        workspaceId: WORKSPACE_ID,
+        blocks: [{ runs: [{ type: 'text', text: 'Photo' }] }],
+        status: 'scheduled',
+        scheduledAt: NOW.toISOString()
+      },
+      NOW
+    );
+    await addPostImage(
+      db,
+      WORKSPACE_ID,
+      post.id,
+      { name: 'photo.png', mimeType: 'image/png', bytes: Buffer.from([1, 2, 3]) },
+      NOW
+    );
+    const review = (await reviewLinkedInPost(db, WORKSPACE_ID, post.id))!;
+    await expect(
+      approveLinkedInPost(db, WORKSPACE_ID, post.id, '0'.repeat(64), 'owner', NOW)
+    ).rejects.toThrow('changed');
+    await approveLinkedInPost(db, WORKSPACE_ID, post.id, review.contentHash, 'owner', NOW);
+    await db
+      .prepare('UPDATE linkedin_post_media SET bytes=? WHERE workspace_id=? AND post_id=?')
+      .run(Buffer.from([4, 5, 6]), WORKSPACE_ID, post.id);
+    expect((await reviewLinkedInPost(db, WORKSPACE_ID, post.id))!.approved).toBe(false);
+    let calls = 0;
+    const driver = driverThatReturns({ ok: true, failureKind: null }, undefined, () => {
+      calls += 1;
+    });
+    expect(
+      (
+        await runLinkedInPostTick(db, CONFIG, {
+          workspaceId: WORKSPACE_ID,
+          now: NOW,
+          page,
+          driver,
+          accountConfirmed: true,
+          log: () => {}
+        })
+      ).published
+    ).toBe(0);
+    expect(calls).toBe(0);
+    const newReview = (await reviewLinkedInPost(db, WORKSPACE_ID, post.id))!;
+    await approveLinkedInPost(db, WORKSPACE_ID, post.id, newReview.contentHash, 'owner', NOW);
+    await db
+      .prepare(
+        `INSERT INTO workspace_policies
+      (id,workspace_id,name,priority,action_pattern,effect,conditions_json,enabled,created_at,updated_at)
+      VALUES (?,?,'Block posts',999,'action:linkedin.post.publish','deny','{}'::jsonb,TRUE,?,?)`
+      )
+      .run(id('pol'), WORKSPACE_ID, NOW.toISOString(), NOW.toISOString());
+    expect(
+      (
+        await runLinkedInPostTick(db, CONFIG, {
+          workspaceId: WORKSPACE_ID,
+          now: NOW,
+          page,
+          driver,
+          accountConfirmed: true,
+          log: () => {}
+        })
+      ).published
+    ).toBe(0);
+    expect(calls).toBe(0);
+    expect((await getPost(db, WORKSPACE_ID, post.id))!.status).toBe('scheduled');
+  });
 
   it('publishes a due post and marks it posted with the returned URL', async () => {
     await upsertSeat(

@@ -14,6 +14,7 @@ import { FLAT_DAY_SHAPE, type DayShapeFn } from './pacing.js';
 import { getSeat, upsertSeat } from './seats.js';
 import { recordSeatIdentity } from './identity.js';
 import { createSuppression } from '../suppressions.js';
+import { createLeadList, importLeadCsv } from './lead-lists.js';
 
 let db: Db;
 
@@ -147,6 +148,75 @@ describe('the every-check contract', () => {
     expect(verdict.allowed).toBe(false);
     expect(check(verdict, 'suppression')).toMatchObject({ passed: false });
     expect(check(verdict, 'suppression').detail).toContain('Do not contact');
+  });
+
+  it('blocks direct do-not-contact flags even before a suppression exists, including host/tracking variants', async () => {
+    await seat('2026-01-01');
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Opted out' }, NOW);
+    const imported = await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Acme,https://linkedin.com/in/fresh/?trk=feed'
+      },
+      NOW
+    );
+    expect(imported.inserted).toBe(1);
+    await db
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=? AND profile_url IS NOT NULL'
+      )
+      .run(WORKSPACE_ID);
+    expect(
+      (
+        await db
+          .prepare('SELECT count(*)::int AS count FROM suppressions WHERE workspace_id=?')
+          .get<{ count: number }>(WORKSPACE_ID)
+      )?.count
+    ).toBe(0);
+    const blocked = await guard({
+      manual: true,
+      targetRef: 'https://www.linkedin.com/in/fresh/#about'
+    });
+    expect(blocked.allowed).toBe(false);
+    expect(check(blocked, 'suppression')).toMatchObject({ passed: false });
+    expect(check(blocked, 'suppression').detail).toContain('do-not-contact');
+    const different = await guard({ targetRef: 'https://www.linkedin.com/in/another/' });
+    expect(check(different, 'suppression').passed).toBe(true);
+    await db
+      .prepare('UPDATE linkedin_lead_contacts SET do_not_contact=FALSE WHERE workspace_id=?')
+      .run(WORKSPACE_ID);
+    expect(check(await guard(), 'suppression').passed).toBe(true);
+  });
+
+  it('does not leak a different workspace contact do-not-contact flag across the same profile', async () => {
+    await seat('2026-01-01');
+    const other = 'ws_guard_dnc_isolated';
+    await db
+      .prepare(
+        'INSERT INTO workspaces(id,name,created_at) VALUES (?,?,?) ON CONFLICT(id) DO NOTHING'
+      )
+      .run(other, 'Isolated opt-out', NOW.toISOString());
+    try {
+      const list = await createLeadList(db, { workspaceId: other, name: 'Other workspace' }, NOW);
+      await importLeadCsv(
+        db,
+        {
+          workspaceId: other,
+          listId: list.id,
+          csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Acme,https://linkedin.com/in/fresh/?trk=other'
+        },
+        NOW
+      );
+      await db
+        .prepare('UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=?')
+        .run(other);
+      const verdict = await guard();
+      expect(check(verdict, 'suppression').passed).toBe(true);
+    } finally {
+      await db.prepare('DELETE FROM workspaces WHERE id=?').run(other);
+    }
   });
 
   it('allows a well-paced action, and still says LinkedIn is prepare-only', async () => {

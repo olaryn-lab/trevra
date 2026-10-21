@@ -5,7 +5,14 @@ import type { Express } from 'express';
 import { createApp } from '../app.js';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { openDatabase, type Db } from '../db.js';
-import { importLeadCsv } from './lead-lists.js';
+import { importLeadCsv, importLeadProfileUrls } from './lead-lists.js';
+import { recordAction } from './actions.js';
+import { ADDITIONAL_WORKFLOW_STARTERS } from '../../client/workflow-starter-recipes.js';
+import {
+  registerEmailComplianceProvider,
+  resetEmailComplianceProvider,
+  OUTREACH_OPT_OUT_SENTENCE
+} from '../email/compliance.js';
 import { upsertSeat } from './seats.js';
 
 let db: Db;
@@ -84,12 +91,100 @@ beforeEach(async () => {
     new Date('2026-06-01T09:00:00Z')
   );
 });
-afterEach(async () => db?.close());
+afterEach(async () => {
+  resetEmailComplianceProvider();
+  await db?.close();
+});
 
 describe('LinkedIn manager HTTP surface', () => {
   it('requires a Trevra session', async () => {
     await request(app).get('/api/linkedin/manager/lead-lists').expect(401);
     await request(app).get('/api/linkedin/manager/analytics').expect(401);
+  });
+
+  it('reviews browser actions only in their own workspace and rejects stale approval hashes', async () => {
+    const action = await recordAction(
+      db,
+      {
+        workspaceId: A,
+        kind: 'dm',
+        targetRef: 'https://linkedin.com/in/maya-review-http/',
+        status: 'planned',
+        source: 'manual',
+        plannedFor: NOW.toISOString()
+      },
+      NOW
+    );
+    await db
+      .prepare('UPDATE linkedin_actions SET body=? WHERE workspace_id=? AND id=?')
+      .run('First message', A, action.id);
+    const path = '/api/linkedin/manager/action-approvals';
+    await request(app).get(path).expect(401);
+    expect((await as(tokenB).get(path).expect(200)).body.reviews).toEqual([]);
+    await as(tokenB)
+      .post(`${path}/${action.id}`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(404);
+    const reviews = (await as(tokenA).get(path).expect(200)).body.reviews;
+    expect(reviews).toHaveLength(1);
+    expect(reviews[0]).toMatchObject({
+      actionId: action.id,
+      body: 'First message',
+      seatKey: 'owner',
+      policy: { effect: 'require_approval' },
+      approved: false
+    });
+    await as(tokenA)
+      .post(`${path}/${action.id}`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(409);
+    await as(tokenA)
+      .post(`${path}/${action.id}`)
+      .send({ contentHash: reviews[0].contentHash })
+      .expect(200);
+    await as(tokenB).get(`${path}/${action.id}/audit`).expect(404);
+    expect((await as(tokenA).get(`${path}/${action.id}/audit`).expect(200)).body.events).toEqual([
+      expect.objectContaining({
+        decision: 'approved',
+        contentHash: reviews[0].contentHash,
+        actorId: `usr_${A}`
+      })
+    ]);
+    expect((await as(tokenA).get(path).expect(200)).body.reviews).toEqual([]);
+    await db
+      .prepare('UPDATE linkedin_actions SET body=? WHERE workspace_id=? AND id=?')
+      .run('A different message', A, action.id);
+    expect((await as(tokenA).get(path).expect(200)).body.reviews).toMatchObject([
+      { actionId: action.id, body: 'A different message', approved: false }
+    ]);
+  });
+
+  it('saves all new starter templates through the real API without sending or leaking to another workspace', async () => {
+    const route = '/api/linkedin/manager/workflows';
+    for (const recipe of ADDITIONAL_WORKFLOW_STARTERS) {
+      let stepNo = 0;
+      const steps = recipe.build(() => `node-${++stepNo}`);
+      const created = (
+        await as(tokenA)
+          .post(route)
+          .send({ name: recipe.label, scope: 'workspace', steps })
+          .expect(201)
+      ).body.workflow;
+      expect(created.name).toBe(recipe.label);
+      expect(created.steps).toHaveLength(steps.length);
+    }
+    const own = (await as(tokenA).get(route).expect(200)).body.workflows;
+    expect(own.map((row: { name: string }) => row.name).sort()).toEqual(
+      ADDITIONAL_WORKFLOW_STARTERS.map((row) => row.label).sort()
+    );
+    expect((await as(tokenB).get(route).expect(200)).body.workflows).toEqual([]);
+    expect(
+      (
+        await db
+          .prepare('SELECT count(*) AS count FROM linkedin_actions WHERE workspace_id=?')
+          .get<{ count: number }>(A)
+      )?.count
+    ).toBe(0);
   });
 
   it('keeps list/workflow/campaign read models workspace-scoped', async () => {
@@ -107,6 +202,104 @@ describe('LinkedIn manager HTTP surface', () => {
       .lists as Array<{ id: string; name: string }>;
     expect(listsA.map((list) => list.name)).toEqual(['A leads']);
     await as(tokenB).get(`/api/linkedin/manager/lead-lists/${listA.id}/contacts`).expect(404);
+  });
+
+  it('pages lead review past the first response with strict bounds and tenant isolation', async () => {
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Page review' })
+        .expect(201)
+    ).body.list;
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: A,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,One,Acme,https://linkedin.com/in/api-paged-one/\nMaya,Two,Acme,https://linkedin.com/in/api-paged-two/\nMaya,Three,Acme,https://linkedin.com/in/api-paged-three/'
+      },
+      NOW
+    );
+    const url = `/api/linkedin/manager/lead-lists/${list.id}/contacts`;
+    const first = (await as(tokenA).get(`${url}?limit=2`).expect(200)).body;
+    const second = (await as(tokenA).get(`${url}?limit=2&offset=2`).expect(200)).body;
+    expect(first).toMatchObject({ total: 3, pageLimit: 2, offset: 0, hasMore: true });
+    expect(second).toMatchObject({ total: 3, pageLimit: 2, offset: 2, hasMore: false });
+    expect(
+      [...first.contacts, ...second.contacts].map((entry: { id: string }) => entry.id)
+    ).toHaveLength(3);
+    expect(
+      new Set([...first.contacts, ...second.contacts].map((entry: { id: string }) => entry.id)).size
+    ).toBe(3);
+    await as(tokenB).get(`${url}?limit=1&offset=2`).expect(404);
+    for (const params of [
+      'limit=0',
+      'limit=-1',
+      'limit=5001',
+      'offset=-1',
+      'offset=NaN',
+      'offset=99999999999999999',
+      'limit=1&limit=2'
+    ]) {
+      await as(tokenA).get(`${url}?${params}`).expect(400);
+    }
+    const past = (await as(tokenA).get(`${url}?offset=999&limit=2`).expect(200)).body;
+    expect(past).toMatchObject({ contacts: [], total: 3, hasMore: false });
+  });
+
+  it('searches and reviews all list members, with filtered totals and strict query validation', async () => {
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Filter review' })
+        .expect(201)
+    ).body.list;
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: A,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,Chen,Acme,https://linkedin.com/in/review-api-maya/\nJules,Stone,Percent%Works,https://linkedin.com/in/review-api-jules/'
+      },
+      NOW
+    );
+    const profiles = await importLeadProfileUrls(
+      db,
+      {
+        workspaceId: A,
+        listId: list.id,
+        urls: ['https://www.linkedin.com/in/review-api-unknown/']
+      },
+      NOW
+    );
+    expect(profiles.inserted).toBe(1);
+    const url = `/api/linkedin/manager/lead-lists/${list.id}/contacts`;
+    const searched = (await as(tokenA).get(`${url}?query=jules&limit=1`).expect(200)).body;
+    expect(searched).toMatchObject({
+      total: 1,
+      listTotal: 3,
+      identityReviewCount: 1,
+      hasMore: false
+    });
+    expect(searched.contacts[0].firstName).toBe('Jules');
+    const percent = (await as(tokenA).get(`${url}?query=%25`).expect(200)).body;
+    expect(percent.total).toBe(1);
+    expect(percent.contacts[0].company).toBe('Percent%Works');
+    const review = (await as(tokenA).get(`${url}?needsIdentityOnly=true`).expect(200)).body;
+    expect(review).toMatchObject({ total: 1, listTotal: 3, identityReviewCount: 1 });
+    expect(review.contacts[0].firstName).toBe('');
+    const noHit = (await as(tokenA).get(`${url}?query=maya&needsIdentityOnly=true`).expect(200))
+      .body;
+    expect(noHit).toMatchObject({ contacts: [], total: 0, listTotal: 3, identityReviewCount: 1 });
+    for (const invalid of [
+      `query=${'x'.repeat(201)}`,
+      'query=x&query=y',
+      'needsIdentityOnly=1',
+      'needsIdentityOnly=TRUE',
+      'needsIdentityOnly=true&needsIdentityOnly=false'
+    ])
+      await as(tokenA).get(`${url}?${invalid}`).expect(400);
+    await as(tokenB).get(`${url}?query=maya`).expect(404);
   });
 
   it('previews and automatches CSV without persisting a contact', async () => {
@@ -129,6 +322,56 @@ describe('LinkedIn manager HTTP surface', () => {
       .prepare('SELECT COUNT(*)::int AS total FROM linkedin_lead_contacts WHERE workspace_id=?')
       .get<{ total: number }>(A);
     expect(count?.total ?? 0).toBe(0);
+  });
+
+  it('previews and imports a full-name Sales Navigator-style CSV with a mapped Person, without scraping', async () => {
+    const csv = Buffer.from(
+      [
+        'Name,Current Company,Profile URL,Email Address',
+        'Maya Chen,Acme,https://linkedin.com/in/maya-export-api/,maya-export@acme.test'
+      ].join('\n')
+    );
+    const mapping = {
+      fullName: 'Name',
+      company: 'Current Company',
+      profileUrl: 'Profile URL',
+      email: 'Email Address'
+    };
+    const preview = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists/preview')
+        .field('mapping', JSON.stringify(mapping))
+        .attach('file', csv, { filename: 'sales.csv', contentType: 'text/csv' })
+        .expect(200)
+    ).body;
+    expect(preview).toMatchObject({
+      acceptedCount: 1,
+      mapping,
+      accepted: [expect.objectContaining({ firstName: 'Maya', lastName: 'Chen', company: 'Acme' })]
+    });
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Sales CSV', sourceKind: 'sales_navigator' })
+        .expect(201)
+    ).body.list;
+    const imported = (
+      await as(tokenA)
+        .post(`/api/linkedin/manager/lead-lists/${list.id}/import`)
+        .field('mapping', JSON.stringify(mapping))
+        .attach('file', csv, { filename: 'sales.csv', contentType: 'text/csv' })
+        .expect(201)
+    ).body;
+    expect(imported).toMatchObject({ inserted: 1, rejected: [] });
+    const other = (
+      await as(tokenB).get(`/api/linkedin/manager/lead-lists/${list.id}/contacts`).expect(404)
+    ).body;
+    expect(other).toBeDefined();
+    const own = (
+      await as(tokenA).get(`/api/linkedin/manager/lead-lists/${list.id}/contacts`).expect(200)
+    ).body;
+    expect(JSON.stringify(own)).toContain('Maya');
+    expect(JSON.stringify(own)).toContain('Chen');
   });
 
   it('supports strict reusable workflow CRUD and rejects unsupported variables', async () => {
@@ -179,6 +422,151 @@ describe('LinkedIn manager HTTP surface', () => {
         ]
       })
       .expect(400);
+  });
+
+  it('exposes exact email reviews to the right tenant and approves only the fresh owner-reviewed hash', async () => {
+    registerEmailComplianceProvider({
+      footer: async () =>
+        `Acme, 1 Market St\nPrivacy: https://acme.test/privacy\n${OUTREACH_OPT_OUT_SENTENCE}`,
+      blockers: async () => []
+    });
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Review targets', sourceKind: 'csv' })
+        .expect(201)
+    ).body.list;
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: A,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Review,Acme,maya-review@acme.test,https://linkedin.com/in/review-api\n'
+      },
+      NOW
+    );
+    const flow = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/workflows')
+        .send({
+          name: 'Review flow',
+          steps: [
+            {
+              id: 'email',
+              action: 'email',
+              delayBefore: { amount: 0, unit: 'hours' },
+              config: {
+                subject: 'Hello',
+                variants: [{ id: 'a', body: 'Hi {{first_name}}', weight: 100 }],
+                tracking: 'off',
+                threaded: false
+              }
+            }
+          ]
+        })
+        .expect(201)
+    ).body.workflow;
+    const camp = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/campaigns')
+        .send({
+          name: 'Human review',
+          leadListId: list.id,
+          workflowId: flow.id
+        })
+        .expect(201)
+    ).body.campaign;
+    await db
+      .prepare("UPDATE linkedin_campaigns SET status='running' WHERE workspace_id=? AND id=?")
+      .run(A, camp.id);
+    const member = await db
+      .prepare(
+        'SELECT id,contact_id FROM linkedin_campaign_members WHERE workspace_id=? AND campaign_id=? LIMIT 1'
+      )
+      .get<{ id: string; contact_id: string }>(A, camp.id);
+    await db
+      .prepare(
+        `INSERT INTO connections(id,workspace_id,provider,provider_config_key,
+         external_connection_id,display_name,status,is_demo,mailbox_address,created_at,updated_at)
+       VALUES ('conn_review_api',?,'gmail','trevra-gmail','external-mailbox','Review mailbox',
+        'connected',0,'founder@acme.test',?::timestamptz,?::timestamptz)`
+      )
+      .run(A, NOW.toISOString(), NOW.toISOString());
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+       (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,
+        payload_json,idempotency_key,connection_id,created_at,updated_at)
+       VALUES ('licha_review_api',?,?,?,?, 'email','email','planned',?::timestamptz,
+        ?::jsonb,'review-api-key','conn_review_api',?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        A,
+        camp.id,
+        member!.id,
+        member!.contact_id,
+        NOW.toISOString(),
+        JSON.stringify({
+          recipient: 'maya-review@acme.test',
+          subject: 'A specific subject',
+          body: 'Hello Maya',
+          tracking: 'off'
+        }),
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    const url = `/api/linkedin/manager/campaigns/${camp.id}/email-approvals`;
+    await request(app).get(url).expect(401);
+    await as(tokenB).get(url).expect(404);
+    await as(tokenB)
+      .post(`${url}/licha_review_api`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(404);
+    const listResponse = (await as(tokenA).get(url).expect(200)).body;
+    expect(listResponse.reviews).toHaveLength(1);
+    const review = listResponse.reviews[0];
+    expect(review).toMatchObject({
+      actionId: 'licha_review_api',
+      sender: 'founder@acme.test',
+      approved: false,
+      policy: { effect: 'require_approval' }
+    });
+    await as(tokenA)
+      .post(`${url}/licha_review_api`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(409);
+    await as(tokenA)
+      .post(`${url}/licha_review_api`)
+      .send({ contentHash: review.contentHash })
+      .expect(200);
+    expect((await as(tokenA).get(url).expect(200)).body.reviews[0].approved).toBe(true);
+    await db
+      .prepare(
+        "UPDATE linkedin_campaign_channel_actions SET payload_json=jsonb_set(payload_json,'{subject}',to_jsonb('CHANGED'::text)) WHERE id='licha_review_api'"
+      )
+      .run();
+    expect((await as(tokenA).get(url).expect(200)).body.reviews[0].approved).toBe(false);
+  });
+
+  it('renames a lead list via authenticated HTTP without altering tenant or campaign references', async () => {
+    const created = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Original name', sourceKind: 'csv' })
+        .expect(201)
+    ).body.list;
+    const path = `/api/linkedin/manager/lead-lists/${created.id}`;
+    await as(tokenB).patch(path).send({ name: 'Other workspace' }).expect(404);
+    await as(tokenA).patch(path).send({ name: '   ' }).expect(400);
+    const renamed = (await as(tokenA).patch(path).send({ name: '  Better name  ' }).expect(200))
+      .body.list;
+    expect(renamed).toMatchObject({ id: created.id, name: 'Better name', seatKey: 'owner' });
+    expect(
+      (await as(tokenA).get('/api/linkedin/manager/lead-lists').expect(200)).body.lists
+    ).toMatchObject([expect.objectContaining({ id: created.id, name: 'Better name' })]);
+    expect(
+      (await as(tokenB).get('/api/linkedin/manager/lead-lists').expect(200)).body.lists
+    ).toEqual([]);
   });
 
   it('creates a campaign draft with enrollment but zero ledger actions', async () => {

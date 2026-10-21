@@ -19,6 +19,7 @@ vi.mock('@nangohq/node', () => ({
 
 import { openDatabase, type Db } from '../db.js';
 import { executeConnectedAction } from '../integration-service.js';
+import { createSuppression } from '../suppressions.js';
 import { OUTREACH_REPLY_OPT_OUT_SENTENCE } from './unsubscribe-policy.js';
 
 const WORKSPACE = 'ws_email_zoho_send';
@@ -172,6 +173,34 @@ describe('Zoho Mail outreach send', () => {
     expect(nangoMock.post).toHaveBeenCalledTimes(1);
   });
 
+  it('refuses Zoho send when unsubscribe arrives during mailbox account lookup', async () => {
+    zohoProvider();
+    const originalGet = nangoMock.get.getMockImplementation()!;
+    let signalLookup!: () => void;
+    let releaseLookup!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => (signalLookup = resolve));
+    const lookupRelease = new Promise<void>((resolve) => (releaseLookup = resolve));
+    nangoMock.get.mockImplementation(async (config) => {
+      if (config.endpoint === '/api/accounts') {
+        signalLookup();
+        await lookupRelease;
+      }
+      return originalGet(config);
+    });
+    const sending = send({ key: 'zoho-late-suppression' });
+    await lookupStarted;
+    await createSuppression(db, {
+      workspaceId: WORKSPACE,
+      channel: 'all',
+      email: 'maya@prospect.test',
+      reason: 'Late unsubscribe during account lookup',
+      source: 'race_test'
+    });
+    releaseLookup();
+    await expect(sending).rejects.toThrow(/Late unsubscribe during account lookup/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(await deliveries()).toEqual([expect.objectContaining({ status: 'failed' })]);
+  });
   it('keeps the sent delivery with no Message-ID when the read-back fails', async () => {
     zohoProvider({ header: Object.assign(new Error('HTTP 500'), { status: 500 }) });
     await send();
@@ -223,7 +252,7 @@ describe('Zoho Mail outreach send', () => {
   it('refuses reply-to-unsubscribe on a Zoho send that is not approved email outreach, before any delivery row', async () => {
     zohoProvider();
     await expect(
-      send({ payload: { ...ZOHO_OUTREACH, deliverySourceType: 'campaign_email' } })
+      send({ payload: { ...ZOHO_OUTREACH, deliverySourceType: 'skill_draft' } })
     ).rejects.toMatchObject({
       status: 409,
       message: 'Reply-to-unsubscribe is allowed only for approved email outreach; nothing was sent.'

@@ -266,7 +266,11 @@ export const workflowStepSchema = z.discriminatedUnion('action', [
     .object({
       ...common,
       action: z.literal('endorse_skills'),
-      config: z.object({ maxSkills: z.number().int().min(1).max(10).default(3) }).strict()
+      config: z
+        .object({
+          maxSkills: z.number().int().min(1).max(10).default(1)
+        })
+        .strict()
     })
     .strict(),
   z
@@ -593,20 +597,28 @@ function isExpectedCommunityUrl(kind: 'company' | 'event' | 'group', raw: string
   }
 }
 
-function templatesOf(step: WorkflowStep): string[] {
+const MERGE_TOKEN_PATTERN = /\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)(?:\|([^{}\r\n]*))?\s*\}\}/g;
+const COMPLETE_MERGE_TOKEN_PATTERN = /^\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)(?:\|([^{}\r\n]*))?\s*\}\}$/;
+
+function templatesOf(step: WorkflowStep, selectedVariantId?: string): string[] {
+  const bodies = <T extends { id: string; body: string }>(variants: readonly T[]): string[] =>
+    variants
+      .filter((variant) => !selectedVariantId || variant.id === selectedVariantId)
+      .map((variant) => variant.body);
   if (step.action === 'connection_request')
-    return (
-      step.config.variants?.map((variant) => variant.body) ??
-      (step.config.message ? [step.config.message] : [])
-    );
+    return step.config.variants
+      ? bodies(step.config.variants)
+      : step.config.message
+        ? [step.config.message]
+        : [];
   if (
     step.action === 'message' ||
     step.action === 'group_message' ||
     step.action === 'event_message'
   )
-    return step.config.variants.map((variant) => variant.body);
+    return bodies(step.config.variants);
   if (step.action === 'email' || step.action === 'inmail')
-    return [step.config.subject, ...step.config.variants.map((variant) => variant.body)];
+    return [step.config.subject, ...bodies(step.config.variants)];
   if (step.action === 'manual_message' || step.action === 'manual_comment')
     return step.config.suggestedTemplate ? [step.config.suggestedTemplate] : [];
   return [];
@@ -643,7 +655,8 @@ export function workflowMergeVariables(steps: readonly WorkflowStep[]): string[]
   const found = new Set<string>();
   for (const step of steps) {
     for (const template of templatesOf(step)) {
-      for (const match of template.matchAll(/\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)\s*\}\}/g)) {
+      for (const match of template.matchAll(MERGE_TOKEN_PATTERN)) {
+        if (match[2] !== undefined && match[2].trim()) continue; // nonempty fallback makes this field optional
         const raw = match[1];
         if (raw.startsWith('custom.') && raw.length > 7) found.add(raw);
         else {
@@ -790,11 +803,27 @@ export function diagnoseWorkflow(
 
 export function unsupportedVariables(template: string): string[] {
   const found = new Set<string>();
-  for (const match of template.matchAll(/\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)\s*\}\}/g)) {
-    const name = match[1];
+  // Inspect every brace-delimited expression, not only the well-formed tokens
+  // the renderer happens to recognize. Otherwise {{first_name |there}} passes
+  // save-time validation, remains literal, and escapes into an outbound message.
+  for (const match of template.matchAll(/\{\{[\s\S]*?\}\}/g)) {
+    const exact = COMPLETE_MERGE_TOKEN_PATTERN.exec(match[0]);
+    if (!exact) {
+      found.add(match[0].slice(2, -2).trim() || 'malformed placeholder');
+      continue;
+    }
+    const name = exact[1];
+    if (exact[2] !== undefined && !exact[2].trim()) {
+      found.add(`${name}|empty fallback`);
+      continue;
+    }
     if (name.startsWith('custom.') && /^[A-Za-z][A-Za-z0-9_.-]*$/.test(name.slice(7))) continue;
     if (resolveManagerVariable(name) === null) found.add(name);
   }
+  // Also refuse unmatched brace pairs; a malformed token must not be treated
+  // as ordinary safe copy simply because it cannot match the merge regex.
+  const remainder = template.replace(/\{\{[\s\S]*?\}\}/g, '');
+  if (remainder.includes('{{') || remainder.includes('}}')) found.add('malformed placeholder');
   return [...found];
 }
 
@@ -816,12 +845,18 @@ export class BookingLinkMissingError extends LinkedInApiError {
   }
 }
 
-export function stepUsesBookingLink(step: WorkflowStep): boolean {
-  return workflowMergeVariables([step]).includes('booking_link');
+export function stepUsesBookingLink(step: WorkflowStep, selectedVariantId?: string): boolean {
+  return templatesOf(step, selectedVariantId).some((template) =>
+    [...template.matchAll(MERGE_TOKEN_PATTERN)].some(
+      (match) =>
+        resolveManagerVariable(match[1]) === 'booking_link' &&
+        !(match[2] !== undefined && match[2].trim())
+    )
+  );
 }
 
 export function workflowUsesBookingLink(steps: readonly WorkflowStep[]): boolean {
-  return steps.some(stepUsesBookingLink);
+  return steps.some((step) => stepUsesBookingLink(step));
 }
 
 export function delayMilliseconds(delay: WorkflowDelay): number {
@@ -861,6 +896,47 @@ export interface WorkflowMergeLead {
  * Both spellings resolve here, so a `{{firstName}}` copied out of a sequence
  * renders instead of arriving verbatim.
  */
+/**
+ * Fail closed on missing merge data before any action is placed on the queue.
+ * Waiting members can be rechecked after enrichment or contact edits.
+ */
+export function missingRequiredWorkflowVariables(
+  step: WorkflowStep,
+  lead: WorkflowMergeLead,
+  selectedVariantId?: string
+): string[] {
+  const values: Record<ManagerVariable, string> = {
+    first_name: lead.firstName ?? '',
+    last_name: lead.lastName ?? '',
+    company: lead.company ?? '',
+    email: lead.email ?? '',
+    phone: lead.phone ?? '',
+    country: lead.country ?? '',
+    booking_link: lead.bookingLink ?? ''
+  };
+  const missing = new Set<string>();
+  for (const template of templatesOf(step, selectedVariantId)) {
+    for (const match of template.matchAll(MERGE_TOKEN_PATTERN)) {
+      if (match[2] !== undefined && match[2].trim()) continue;
+      const name = match[1];
+      const canonical = resolveManagerVariable(name);
+      const value = name.startsWith('custom.')
+        ? lead.customFields?.[name.slice(7)]
+        : canonical === null
+          ? null
+          : values[canonical];
+      if (value === null || value === undefined || !String(value).trim())
+        missing.add(canonical ?? name);
+    }
+  }
+  // Old saved snapshots may predate today's validation. A token with malformed
+  // braces must still be a per-member hold, never an unexpanded outbound body.
+  for (const template of templatesOf(step, selectedVariantId)) {
+    for (const issue of unsupportedVariables(template)) missing.add(issue);
+  }
+  return [...missing].sort();
+}
+
 export function renderWorkflowTemplate(template: string, lead: WorkflowMergeLead): string {
   const values: Record<ManagerVariable, string> = {
     first_name: lead.firstName ?? '',
@@ -871,18 +947,23 @@ export function renderWorkflowTemplate(template: string, lead: WorkflowMergeLead
     country: lead.country ?? '',
     booking_link: lead.bookingLink?.trim() ?? ''
   };
-  return template.replace(/\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)\s*\}\}/g, (whole, name: string) => {
-    if (name.startsWith('custom.')) {
-      const value = lead.customFields?.[name.slice(7)];
-      return value === null || value === undefined ? '' : String(value);
+  return template.replace(
+    MERGE_TOKEN_PATTERN,
+    (whole, name: string, fallback: string | undefined) => {
+      if (name.startsWith('custom.')) {
+        const value = lead.customFields?.[name.slice(7)];
+        const rendered = value === null || value === undefined ? '' : String(value);
+        return rendered.trim() || (fallback === undefined ? '' : fallback.trim());
+      }
+      const canonical = resolveManagerVariable(name);
+      // A blank booking link is the one field that must never render as a gap:
+      // "grab a slot: " with nothing after it is worse than not sending.
+      if (canonical === 'booking_link' && !values.booking_link && fallback === undefined)
+        throw new BookingLinkMissingError();
+      const rendered = canonical === null ? '' : values[canonical];
+      return rendered.trim() || (fallback === undefined ? '' : fallback.trim());
     }
-    const canonical = resolveManagerVariable(name);
-    // A blank booking link is the one field that must never render as a gap:
-    // "grab a slot: " with nothing after it is worse than not sending.
-    if (canonical === 'booking_link' && !values.booking_link) throw new BookingLinkMissingError();
-    // Saved workflows reject unknown tokens; fail closed here too rather than sending raw {{tokens}}.
-    return canonical === null ? '' : values[canonical];
-  });
+  );
 }
 
 /**

@@ -13,6 +13,8 @@ import { registerPlaybook } from './playbooks/registry.js';
 import { LINKEDIN_LIMITS, PACED_KINDS, effectiveDailyCeiling } from './linkedin/limits.js';
 import { LEAD_CONTACT_READ_LIMIT } from './linkedin/lead-lists.js';
 import { campaignWarmupFraction } from './linkedin/managed-campaigns.js';
+import { COMMUNITY_POST_VERIFICATION, recordPost } from './outreach/store.js';
+import { listDomainEvents } from './control-plane/events.js';
 
 /** Any start works: the campaign ramp is relative to it, never to a calendar. */
 const RAMP_START = '2026-01-01T00:00:00.000Z';
@@ -201,6 +203,70 @@ async function ownerAndMember(app: ReturnType<typeof createApp>) {
 }
 
 describe('Trevra API on PostgreSQL', () => {
+  it('makes unknown community post resolution owner-only, workspace-scoped and auditable', async () => {
+    db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
+    const app = createApp(db);
+    const { owner, ownerAuth, member } = await ownerAndMember(app);
+    const outsider = await signUpAgent(app, 'other-owner');
+    const oldTime = new Date(Date.now() - 4 * 60_000);
+    const { id: postId } = await recordPost(
+      db,
+      {
+        workspaceId: ownerAuth.workspaceId,
+        platform: 'github',
+        community: 'example/repo',
+        threadExternalId: 'issue-1',
+        threadUrl: 'https://github.com/example/repo/issues/1',
+        payloadHash: 'api-unknown-community-post',
+        status: 'pending',
+        provider: null,
+        externalRef: null,
+        error: 'socket hang up',
+        body: 'Owner-approved reply content'
+      },
+      oldTime
+    );
+    const endpoint = `/api/outreach/posts/${postId}/resolve`;
+    const claim = {
+      outcome: 'posted',
+      verificationUrl: 'https://github.com/example/repo/issues/1#issuecomment-77',
+      confirmation: COMMUNITY_POST_VERIFICATION
+    };
+    await request(app).get('/api/outreach/posts/unresolved').expect(401);
+    await member.agent.get('/api/outreach/posts/unresolved').expect(403);
+    await member.agent.post(endpoint).send(claim).expect(403);
+    await outsider.agent.post(endpoint).send(claim).expect(404);
+    const pending = await owner.agent.get('/api/outreach/posts/unresolved').expect(200);
+    expect(pending.body.posts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ id: postId, readyForReview: true })])
+    );
+    await owner.agent
+      .post(endpoint)
+      .send({ ...claim, confirmation: 'yes' })
+      .expect(400);
+    await owner.agent
+      .post(endpoint)
+      .send({
+        ...claim,
+        verificationUrl: 'https://unrelated.example/post'
+      })
+      .expect(400);
+    const resolved = await owner.agent.post(endpoint).send(claim).expect(200);
+    expect(resolved.body.post).toMatchObject({ id: postId, status: 'posted' });
+    await owner.agent.post(endpoint).send(claim).expect(409);
+    const events = await listDomainEvents(db, ownerAuth.workspaceId, {
+      streamType: 'outreach_post',
+      streamId: postId
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      eventType: 'community_reply.unknown_resolved',
+      actorId: ownerAuth.userId
+    });
+    const remaining = await owner.agent.get('/api/outreach/posts/unresolved').expect(200);
+    expect(remaining.body.posts.some((post: { id: string }) => post.id === postId)).toBe(false);
+  });
+
   it('publishes canonical search, AI, and security discovery resources', async () => {
     process.env.PUBLIC_SITE_URL = 'https://trevra.example';
     process.env.INDEXNOW_KEY = 'trevra-indexnow-key-12345678';
@@ -1386,6 +1452,31 @@ describe('owner-only acts', () => {
     // their own teammate/assignment authorization contract and are tested in
     // manager-team-api.test.ts.
     await member.agent.delete('/api/linkedin/manager/lead-lists/lst_x').expect(403);
+    await member.agent
+      .patch('/api/linkedin/manager/lead-lists/list_x')
+      .send({ name: 'Should not rename' })
+      .expect(403);
+    await member.agent
+      .post('/api/reddit/comments/comment_x/approve')
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(403);
+    await member.agent.post('/api/reddit/comments/comment_x/execute').send({}).expect(403);
+    await member.agent
+      .post('/api/linkedin/withdrawals/approvals/withdrawal_x')
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(403);
+    await member.agent
+      .post('/api/linkedin/posts/post_x/approve')
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(403);
+    await member.agent
+      .post('/api/linkedin/manager/action-approvals/action_x')
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(403);
+    await member.agent
+      .post('/api/linkedin/manager/campaigns/cmp_x/email-approvals/email_x')
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(403);
 
     // Export and erasure of the whole workspace.
     await member.agent.get('/api/workspace/export').expect(403);

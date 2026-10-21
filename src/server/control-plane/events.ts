@@ -1,5 +1,6 @@
 import type { Db } from '../db.js';
 import { id } from '../db.js';
+import { enqueueOutboundWebhookEvent } from '../outbound-webhooks.js';
 
 export interface DomainEventInput {
   workspaceId: string;
@@ -33,9 +34,12 @@ export interface DomainEvent {
 }
 
 export async function appendDomainEvent(db: Db, input: DomainEventInput): Promise<DomainEvent> {
-  const eventId = id('evt');
-  const occurredAt = (input.occurredAt ?? new Date()).toISOString();
-  const row = await db.prepare(`
+  return db.transactionOrInline(async (tx) => {
+    const eventId = id('evt');
+    const occurredAt = (input.occurredAt ?? new Date()).toISOString();
+    const row = await tx
+      .prepare(
+        `
     WITH next_version AS (
       INSERT INTO event_streams (workspace_id,stream_type,stream_id,current_version,updated_at)
       VALUES (?,?,?,?,?)
@@ -50,46 +54,75 @@ export async function appendDomainEvent(db: Db, input: DomainEventInput): Promis
     SELECT ?,?,?,?,next_version.current_version,?,?,?,?,?,?,?,?
     FROM next_version
     RETURNING *
-  `).get<Record<string, unknown>>(
-    input.workspaceId,
-    input.streamType,
-    input.streamId,
-    1,
-    occurredAt,
-    eventId,
-    input.workspaceId,
-    input.streamType,
-    input.streamId,
-    input.eventType,
-    input.actorType,
-    input.actorId ?? null,
-    input.causationId ?? null,
-    input.correlationId ?? null,
-    JSON.stringify(input.payload ?? {}),
-    JSON.stringify(input.metadata ?? {}),
-    occurredAt
-  );
-  if (!row) throw new Error('Domain event could not be appended');
-  return serializeDomainEvent(row);
+  `
+      )
+      .get<Record<string, unknown>>(
+        input.workspaceId,
+        input.streamType,
+        input.streamId,
+        1,
+        occurredAt,
+        eventId,
+        input.workspaceId,
+        input.streamType,
+        input.streamId,
+        input.eventType,
+        input.actorType,
+        input.actorId ?? null,
+        input.causationId ?? null,
+        input.correlationId ?? null,
+        JSON.stringify(input.payload ?? {}),
+        JSON.stringify(input.metadata ?? {}),
+        occurredAt
+      );
+    if (!row) throw new Error('Domain event could not be appended');
+    const event = serializeDomainEvent(row);
+    // Event and matched delivery rows must appear together or not at all.
+    // Only a minimal safe lifecycle projection reaches the merchant outbox.
+    await enqueueOutboundWebhookEvent(tx, event);
+    return event;
+  });
 }
 
 export async function listDomainEvents(
   db: Db,
   workspaceId: string,
-  filters: { streamType?: string; streamId?: string; correlationId?: string; afterPosition?: number; limit?: number } = {}
+  filters: {
+    streamType?: string;
+    streamId?: string;
+    correlationId?: string;
+    afterPosition?: number;
+    limit?: number;
+  } = {}
 ): Promise<DomainEvent[]> {
   const clauses = ['workspace_id=?'];
   const params: unknown[] = [workspaceId];
-  if (filters.streamType) { clauses.push('stream_type=?'); params.push(filters.streamType); }
-  if (filters.streamId) { clauses.push('stream_id=?'); params.push(filters.streamId); }
-  if (filters.correlationId) { clauses.push('correlation_id=?'); params.push(filters.correlationId); }
-  if (filters.afterPosition !== undefined) { clauses.push('position>?'); params.push(filters.afterPosition); }
+  if (filters.streamType) {
+    clauses.push('stream_type=?');
+    params.push(filters.streamType);
+  }
+  if (filters.streamId) {
+    clauses.push('stream_id=?');
+    params.push(filters.streamId);
+  }
+  if (filters.correlationId) {
+    clauses.push('correlation_id=?');
+    params.push(filters.correlationId);
+  }
+  if (filters.afterPosition !== undefined) {
+    clauses.push('position>?');
+    params.push(filters.afterPosition);
+  }
   params.push(Math.max(1, Math.min(filters.limit ?? 100, 500)));
-  const rows = await db.prepare(`
+  const rows = await db
+    .prepare(
+      `
     SELECT * FROM domain_events
     WHERE ${clauses.join(' AND ')}
     ORDER BY position ASC LIMIT ?
-  `).all<Record<string, unknown>>(...params);
+  `
+    )
+    .all<Record<string, unknown>>(...params);
   return rows.map(serializeDomainEvent);
 }
 
@@ -113,11 +146,14 @@ function serializeDomainEvent(row: Record<string, unknown>): DomainEvent {
 }
 
 function parseObject(value: unknown): Record<string, unknown> {
-  if (typeof value === 'object' && value !== null && !Array.isArray(value)) return value as Record<string, unknown>;
+  if (typeof value === 'object' && value !== null && !Array.isArray(value))
+    return value as Record<string, unknown>;
   if (typeof value !== 'string') return {};
   try {
     const parsed = JSON.parse(value);
-    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+    return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : {};
   } catch {
     return {};
   }

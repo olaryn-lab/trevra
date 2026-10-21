@@ -17,6 +17,7 @@ import type {
   RecentConnectionList
 } from './driver-withdraw.js';
 import { evaluateLinkedInSafety, type LinkedInSafetyVerdict } from './guard.js';
+import { withdrawalPolicyGate } from './withdrawal-policy.js';
 import { bandFor } from './limits.js';
 import { actionGapSeconds } from './local-worker.js';
 import { OWNER_SEAT_KEY, getSeatPosture, upsertSeat, type SeatPosture } from './seats.js';
@@ -848,7 +849,8 @@ export async function claimNextWithdrawal(
   db: Db,
   seat: SeatRef,
   batchId: string,
-  now: Date
+  now: Date,
+  excludeIds: readonly string[] = []
 ): Promise<ClaimedWithdrawal | null> {
   const row = await db
     .prepare(
@@ -857,6 +859,7 @@ export async function claimNextWithdrawal(
     WHERE id = (
       SELECT id FROM linkedin_withdrawals
       WHERE workspace_id=? AND seat_key=? AND status='queued' AND claimed_at IS NULL
+        AND id <> ALL(?)
       ORDER BY queued_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
@@ -864,7 +867,7 @@ export async function claimNextWithdrawal(
     RETURNING id, workspace_id, seat_key, action_id, target_ref, pending_days
   `
     )
-    .get<ClaimedRow>(now.toISOString(), batchId, seat.workspaceId, seat.seatKey);
+    .get<ClaimedRow>(now.toISOString(), batchId, seat.workspaceId, seat.seatKey, [...excludeIds]);
   if (!row) return null;
   return {
     id: row.id,
@@ -1169,6 +1172,38 @@ export async function executeWithdrawal(
     };
   }
 
+  // The workspace rule is a second, independent gate after account safety.
+  // An approval is tied to this exact invite/seat/target; a changed or
+  // unapproved withdrawal releases the claim without touching the browser.
+  let policy: { allowed: boolean; reason: string };
+  try {
+    policy = await withdrawalPolicyGate(db, seat.workspaceId, claimed);
+  } catch (error) {
+    await releaseWithdrawalClaim(db, claimed.id, seat.workspaceId);
+    const detail = `Withdrawal policy could not be evaluated/audited: ${error instanceof Error ? error.message : String(error)}`;
+    return {
+      status: 'queued',
+      failureKind: null,
+      detail,
+      withdrawn: false,
+      blocked: true,
+      halt: true,
+      cooldown: false
+    };
+  }
+  if (!policy.allowed) {
+    await releaseWithdrawalClaim(db, claimed.id, seat.workspaceId);
+    return {
+      status: 'queued',
+      failureKind: null,
+      detail: policy.reason,
+      withdrawn: false,
+      blocked: true,
+      halt: false,
+      cooldown: false
+    };
+  }
+
   // --- 3. The driver re-reads LinkedIn and acts. ---
   const result = await deps.driver.withdrawInvite(deps.page, claimed.targetRef);
 
@@ -1359,6 +1394,7 @@ export async function runWithdrawalBatch(
   const refusal = postureRefusal(await getSeatPosture(db, seat.workspaceId, now(), seat.seatKey));
   if (refusal) return { ...result, halted: true, haltReason: refusal };
 
+  const deferredIds: string[] = [];
   for (let index = 0; index < maxActions; index += 1) {
     if (deps.stopRequested && (await deps.stopRequested())) {
       result.halted = true;
@@ -1376,7 +1412,7 @@ export async function runWithdrawalBatch(
       break;
     }
 
-    const claimed = await claimNextWithdrawal(db, seat, deps.batchId, now());
+    const claimed = await claimNextWithdrawal(db, seat, deps.batchId, now(), deferredIds);
     if (!claimed) break;
 
     if (index > 0)
@@ -1389,7 +1425,10 @@ export async function runWithdrawalBatch(
     else if (outcome.blocked) result.blocked += 1;
     else result.failed += 1;
 
-    if (outcome.blocked) log(`LinkedIn withdrawal ${claimed.id} was refused: ${outcome.detail}`);
+    if (outcome.blocked) {
+      deferredIds.push(claimed.id);
+      log(`LinkedIn withdrawal ${claimed.id} was refused: ${outcome.detail}`);
+    }
     // THE SEAT THAT HIT THE WALL IS THE SEAT THAT COOLS. `upsertSeat` also
     // defaults to the owner, so a limit wall on a secondary account used to put
     // the OWNER into cooldown -- stopping the account that was behaving and

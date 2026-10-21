@@ -1,15 +1,13 @@
 import { id, type Db } from '../db.js';
+import { withSuppressionBoundary } from '../suppressions.js';
 import { canonicalProfileUrl } from './driver-scrape.js';
 
 /**
  * The LinkedIn blacklist: people this workspace will not contact again.
  *
  * WHERE IT IS APPLIED IS THE WHOLE DESIGN. Exclusions are consulted before a
- * plan is produced and before a campaign starts, never at send time. An
- * exclusion enforced later would still have put the person into a payload a
- * founder read, approved and hash-bound -- so the person would have been
- * "excluded" from a campaign that already had their name in it, and the
- * approval record would say otherwise.
+ * plan is produced, when the exclusion is entered, and again at final send time.
+ * An opt-out overrides earlier campaign approval and cancels pending actions.
  *
  * `target_ref` is the same opaque handle-or-URL the ledger stores. Trevra never
  * resolves it against LinkedIn, so matching is textual, not a lookup -- but
@@ -108,25 +106,29 @@ export async function addExclusions(
   entries: readonly ExclusionInput[],
   now: Date
 ): Promise<{ exclusions: LinkedInExclusion[]; added: number; updated: number }> {
-  const timestamp = now.toISOString();
-  const seen = new Set<string>();
-  const exclusions: LinkedInExclusion[] = [];
-  let added = 0;
-  let updated = 0;
+  // This irreversible Never Contact write must be ordered with email pixel/
+  // click evidence. An exclusion committed while tracking is in flight must
+  // not be invisible to a stale telemetry permission decision.
+  return withSuppressionBoundary(db, workspaceId, async (tx) => {
+    const timestamp = now.toISOString();
+    const seen = new Set<string>();
+    const exclusions: LinkedInExclusion[] = [];
+    let added = 0;
+    let updated = 0;
 
-  for (const entry of entries) {
-    const targetRef = entry.targetRef.trim();
-    if (!targetRef) continue;
-    // Two spellings of one handle inside one request are one exclusion; the
-    // unique index would otherwise make the second one an error rather than a
-    // no-op, because ON CONFLICT cannot see a row this same statement inserted.
-    const key = normalize(targetRef);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    for (const entry of entries) {
+      const targetRef = entry.targetRef.trim();
+      if (!targetRef) continue;
+      // Two spellings of one handle inside one request are one exclusion; the
+      // unique index would otherwise make the second one an error rather than a
+      // no-op, because ON CONFLICT cannot see a row this same statement inserted.
+      const key = normalize(targetRef);
+      if (seen.has(key)) continue;
+      seen.add(key);
 
-    const row = await db
-      .prepare(
-        `
+      const row = await tx
+        .prepare(
+          `
       INSERT INTO linkedin_exclusions (id, workspace_id, target_ref, reason, source, created_at)
       VALUES (?,?,?,?,?,?)
       ON CONFLICT (workspace_id, LOWER(target_ref)) DO UPDATE SET
@@ -134,22 +136,66 @@ export async function addExclusions(
         source = EXCLUDED.source
       RETURNING id, target_ref, reason, source, created_at, (xmax = 0) AS inserted
     `
-      )
-      .get<ExclusionRow & { inserted: boolean }>(
-        id('lexc'),
-        workspaceId,
-        targetRef,
-        entry.reason?.trim() ?? '',
-        entry.source ?? 'manual',
-        timestamp
-      );
-    if (!row) continue;
-    if (row.inserted) added += 1;
-    else updated += 1;
-    exclusions.push(toExclusion(row));
-  }
+        )
+        .get<ExclusionRow & { inserted: boolean }>(
+          id('lexc'),
+          workspaceId,
+          targetRef,
+          entry.reason?.trim() ?? '',
+          entry.source ?? 'manual',
+          timestamp
+        );
+      if (!row) continue;
+      if (row.inserted) added += 1;
+      else updated += 1;
+      exclusions.push(toExclusion(row));
+    }
 
-  return { exclusions, added, updated };
+    // Retire all active matching memberships and their unclaimed sends atomically.
+    // Claimed work remains protected by the final send-time blacklist check.
+    const active = await tx
+      .prepare(
+        `SELECT m.id,c.profile_url FROM linkedin_campaign_members m
+       JOIN linkedin_lead_contacts c ON c.workspace_id=m.workspace_id AND c.id=m.contact_id
+       WHERE m.workspace_id=? AND m.status IN ('pending','active','waiting','manual','paused')
+         AND c.profile_url IS NOT NULL`
+      )
+      .all<{ id: string; profile_url: string }>(workspaceId);
+    const reasons = new Map(exclusions.map((entry) => [normalize(entry.targetRef), entry.reason]));
+    const blocked = active.filter((entry) => reasons.has(normalize(entry.profile_url)));
+    if (blocked.length > 0) {
+      const ids = blocked.map((entry) => entry.id);
+      const why = blocked.map(
+        (entry) =>
+          `Never contact: ${reasons.get(normalize(entry.profile_url)) || 'Excluded by workspace'}`
+      );
+      await tx
+        .prepare(
+          `UPDATE linkedin_campaign_members m
+       SET status='excluded', exclusion_reason=x.reason, ended_at=?::timestamptz,
+           next_eligible_at=NULL, updated_at=?::timestamptz
+       FROM unnest(?::text[],?::text[]) AS x(id,reason)
+       WHERE m.workspace_id=? AND m.id=x.id
+         AND m.status IN ('pending','active','waiting','manual','paused')`
+        )
+        .run(timestamp, timestamp, ids, why, workspaceId);
+      await tx
+        .prepare(
+          `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL
+       WHERE workspace_id=? AND campaign_member_id=ANY(?::text[])
+         AND status IN ('planned','held') AND claimed_at IS NULL`
+        )
+        .run(workspaceId, ids);
+      await tx
+        .prepare(
+          `UPDATE linkedin_campaign_channel_actions
+       SET status='skipped',claimed_at=NULL,updated_at=?::timestamptz
+       WHERE workspace_id=? AND member_id=ANY(?::text[]) AND status='planned'`
+        )
+        .run(timestamp, workspaceId, ids);
+    }
+    return { exclusions, added, updated };
+  });
 }
 
 export interface ExclusionSplit {

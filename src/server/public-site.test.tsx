@@ -15,6 +15,7 @@ import {
   SITE_TITLE
 } from '../shared/site-metadata.js';
 import { MarketingApp } from '../client/MarketingApp';
+import { EXECUTION_ACTION_TYPES } from './control-plane/execution.js';
 
 const HOSTED = 'https://app.usetrevra.example/#get-started';
 
@@ -22,6 +23,7 @@ const HOSTED = 'https://app.usetrevra.example/#get-started';
 // ships is that template with MarketingScreen's own markup rendered into it,
 // which is exactly what scripts/prerender-marketing.tsx does at build time.
 const template = await readFile(resolve('index.html'), 'utf8');
+const readme = await readFile(resolve('README.md'), 'utf8');
 const indexHtml = template.replace(
   '<div id="root"></div>',
   `<div id="root">${renderToStaticMarkup(<MarketingApp />)}</div>`
@@ -90,6 +92,20 @@ function styled(className: string): boolean {
     marketingCss
   );
 }
+
+describe('public claims and actual execution capabilities', () => {
+  it('does not present a repository without a published license as open source', () => {
+    expect(indexHtml).not.toMatch(/\bopen[- ]source\b|\bbuilt in the open\b/i);
+    expect(indexHtml).toContain('self-hosting guide');
+    expect(readme).not.toMatch(/^Trevra is the open-source/i);
+    expect(readme).toContain('No open-source license has been published');
+  });
+
+  it('lists exactly the actual named execution adapters in the README', () => {
+    for (const kind of EXECUTION_ACTION_TYPES) expect(readme).toContain(`\`${kind}\``);
+    expect(EXECUTION_ACTION_TYPES).toHaveLength(4);
+  });
+});
 
 describe('the hosted-workspace CTA in shipped HTML', () => {
   /**

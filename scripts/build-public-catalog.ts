@@ -4,10 +4,18 @@ import { dirname, resolve } from 'node:path';
 import { listSkills } from '../src/server/skills/registry.js';
 
 const sourceRevision = (() => {
-  try { return execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { return 'unknown'; }
+  try {
+    return execFileSync('git', ['rev-parse', '--short=12', 'HEAD'], { encoding: 'utf8' }).trim();
+  } catch {
+    return 'unknown';
+  }
 })();
 const generatedAt = (() => {
-  try { return execFileSync('git', ['log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim(); } catch { return '1970-01-01T00:00:00Z'; }
+  try {
+    return execFileSync('git', ['log', '-1', '--format=%cI'], { encoding: 'utf8' }).trim();
+  } catch {
+    return '1970-01-01T00:00:00Z';
+  }
 })();
 const modules = listSkills().map(({ manifest }) => ({
   id: manifest.id,
@@ -19,8 +27,21 @@ const modules = listSkills().map(({ manifest }) => ({
   runtime: 'builtin',
   sourceType: 'builtin',
   publisher: { slug: 'trevra', name: 'Trevra', verified: true },
-  trust: { signed: false, sbom: true, verifiedRelease: true },
-  popularity: { totalRuns: 0, successfulRuns: 0, failedRuns: 0, successRate: null, uniqueWorkspaces: 0, activeInstallations: 0, lastRunAt: null, rank: null },
+  // Bundled modules are reviewed source, not signed third-party releases.
+  // An existing/stale SBOM file is not verified build provenance: the local
+  // catalog build may succeed even when `npm sbom` fails. Release certification
+  // separately requires a fresh, valid CycloneDX dependency inventory.
+  trust: { signed: false, sbom: false, verifiedRelease: true },
+  popularity: {
+    totalRuns: 0,
+    successfulRuns: 0,
+    failedRuns: 0,
+    successRate: null,
+    uniqueWorkspaces: 0,
+    activeInstallations: 0,
+    lastRunAt: null,
+    rank: null
+  },
   source: `src/server/${manifest.id.startsWith('gtm.channel-') ? 'channels' : 'skills'}`
 }));
 

@@ -26,7 +26,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -57,7 +57,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -88,7 +88,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -119,7 +119,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -150,7 +150,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -181,7 +181,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -212,7 +212,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -243,7 +243,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -274,7 +274,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -305,7 +305,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -336,7 +336,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -367,7 +367,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -398,7 +398,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -429,7 +429,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -460,7 +460,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -491,7 +491,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -522,7 +522,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -553,7 +553,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -584,7 +584,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -615,7 +615,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {
@@ -646,7 +646,7 @@
       },
       "trust": {
         "signed": false,
-        "sbom": true,
+        "sbom": false,
         "verifiedRelease": true
       },
       "popularity": {

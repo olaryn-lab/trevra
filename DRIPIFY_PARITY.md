@@ -1,5 +1,7 @@
 # Dripify parity — Trevra LinkedIn outreach manager
 
+> **Historical audit, not the active tracker.** The August 2026 DONE claims are superseded by the [Dripify parity execution plan](docs/planning/2026-10-20-dripify-parity-execution-plan.md). Source import routes remain disabled; campaign-email compliance and some analytics were incomplete. Full Dripify parity has **not** been certified.
+
 Audited 2026-08-14, then closed. This file is the record of both: what was missing, and what now exists.
 
 Verdict scale: **DONE** = works end to end from the UI · **PARTIAL** · **MISSING**.
@@ -16,36 +18,36 @@ That is now closed. The list below is the current state.
 
 ## 1. LinkedIn integration
 
-| Spec | State | Where |
-|---|---|---|
-| Connect a LinkedIn account | **DONE** | Per-account sign-in: credentials → login → OTP → challenge → detect, with the 202 "your own worker will pick this up" path. `LinkedInAccounts.tsx`; routes `app.ts` `/api/linkedin/seat*`, now all seat-scoped. |
-| Without being blocked | **DONE** | Detection was already strong (`driver.ts` checkpoint + restriction regexes → release claim → cooldown → halt batch, manual resume). Prevention added: deterministic per-account userAgent/locale/timezone (`seatContextFingerprint`), per-account browser profile dir, optional per-account outbound proxy (`resolveSeatProxy`, hard-refuses rather than falling back to a direct connection), and human-cadence credential typing replacing instant `.fill()`. |
-| Randomize + space actions | **DONE** | `pacing.ts`: even grid over the account's own window + seeded jitter + enforced minimum gap; send-time gap in the worker; per-click jitter in the driver. All PRNG seeded — replayable, never `Math.random()`. |
+| Spec                       | State    | Where                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| -------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Connect a LinkedIn account | **DONE** | Per-account sign-in: credentials → login → OTP → challenge → detect, with the 202 "your own worker will pick this up" path. `LinkedInAccounts.tsx`; routes `app.ts` `/api/linkedin/seat*`, now all seat-scoped.                                                                                                                                                                                                                                                 |
+| Without being blocked      | **DONE** | Detection was already strong (`driver.ts` checkpoint + restriction regexes → release claim → cooldown → halt batch, manual resume). Prevention added: deterministic per-account userAgent/locale/timezone (`seatContextFingerprint`), per-account browser profile dir, optional per-account outbound proxy (`resolveSeatProxy`, hard-refuses rather than falling back to a direct connection), and human-cadence credential typing replacing instant `.fill()`. |
+| Randomize + space actions  | **DONE** | `pacing.ts`: even grid over the account's own window + seeded jitter + enforced minimum gap; send-time gap in the worker; per-click jitter in the driver. All PRNG seeded — replayable, never `Math.random()`.                                                                                                                                                                                                                                                  |
 
 ## 2. Workflow builder — **DONE**
 
 All six actions execute. The new `src/server/linkedin/runner.ts` is the missing runtime: it advances `step_index`, honours each step's delay, plans `linkedin_actions` rows carrying `campaign_member_id` / `workflow_step_id` / `variant_id`, and creates manual tasks.
 
-| Action | State | Notes |
-|---|---|---|
-| Connection request ± note | DONE | Renders the note through the merge fields; 300-char counter in the builder. |
-| Withdraw if unaccepted after X days | DONE | `afterDays` now reaches `withdraw.ts` via `selectWithdrawalCandidates({olderThanDays, actionIds})`. A not-yet-stale invite holds the member on the step with `next_eligible_at` set to the moment it goes stale; an accepted one advances immediately. |
-| Profile view | DONE | |
-| Send message + A/B | DONE | `chooseMessageVariant` assigns from a `member:step` seed — stable across retries — and the choice is persisted in `assigned_variants` and stamped on the ledger row as `variant_id`. Weights are editable in the UI. |
-| Manual message (stops the workflow) | DONE | Inserts a `linkedin_manual_tasks` row, member goes `manual`, nothing advances until `completeManualTask`. Routed at `POST /manager/tasks/:id/complete`, actionable from both the inbox and the campaign screen. |
-| Follow | DONE | |
-| Delay in hours or days | DONE | Every step, not just the first. `next_eligible_at = plannedFor + delayBefore(next step)`. |
-| Variables first/last/company | DONE | Rendered at plan time; insert buttons + live preview against a sample lead in the builder; unsupported variables flagged before save. |
+| Action                              | State | Notes                                                                                                                                                                                                                                                  |
+| ----------------------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Connection request ± note           | DONE  | Renders the note through the merge fields; 300-char counter in the builder.                                                                                                                                                                            |
+| Withdraw if unaccepted after X days | DONE  | `afterDays` now reaches `withdraw.ts` via `selectWithdrawalCandidates({olderThanDays, actionIds})`. A not-yet-stale invite holds the member on the step with `next_eligible_at` set to the moment it goes stale; an accepted one advances immediately. |
+| Profile view                        | DONE  |                                                                                                                                                                                                                                                        |
+| Send message + A/B                  | DONE  | `chooseMessageVariant` assigns from a `member:step` seed — stable across retries — and the choice is persisted in `assigned_variants` and stamped on the ledger row as `variant_id`. Weights are editable in the UI.                                   |
+| Manual message (stops the workflow) | DONE  | Inserts a `linkedin_manual_tasks` row, member goes `manual`, nothing advances until `completeManualTask`. Routed at `POST /manager/tasks/:id/complete`, actionable from both the inbox and the campaign screen.                                        |
+| Follow                              | DONE  |                                                                                                                                                                                                                                                        |
+| Delay in hours or days              | DONE  | Every step, not just the first. `next_eligible_at = plannedFor + delayBefore(next step)`.                                                                                                                                                              |
+| Variables first/last/company        | DONE  | Rendered at plan time; insert buttons + live preview against a sample lead in the builder; unsupported variables flagged before save.                                                                                                                  |
 
 Builder UI rebuilt: numbered timeline with cumulative "Day 3, +2h", reorder (buttons + drag), per-action add, A/B weights with a split bar, merge-field insertion at the caret, character counters, starter templates, inline per-step validation. The step-id collision bug (remove-then-add regenerating a live id → server 400) is fixed.
 
 ## 3. Upload leads — **DONE**
 
-| Path | State | Notes |
-|---|---|---|
-| Basic LinkedIn search link | DONE | Real Playwright walk with pagination and wall detection. |
-| Sales Navigator link | DONE | New `salesNavigatorUrlFor` + `scrapeSalesNavigatorResults` over a shared result-list walker — its own selectors and page parameter, because it is a different product on the same host. |
-| CSV upload | DONE | `POST /manager/lead-lists/:id/import` now persists through the same parser the preview uses. |
+| Path                       | State | Notes                                                                                                                                                                                   |
+| -------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Basic LinkedIn search link | DONE  | Real Playwright walk with pagination and wall detection.                                                                                                                                |
+| Sales Navigator link       | DONE  | New `salesNavigatorUrlFor` + `scrapeSalesNavigatorResults` over a shared result-list walker — its own selectors and page parameter, because it is a different product on the same host. |
+| CSV upload                 | DONE  | `POST /manager/lead-lists/:id/import` now persists through the same parser the preview uses.                                                                                            |
 
 Field automatch was already complete (alias table, normalized headers, required-trio enforcement at both mapping and row level). What was missing was the UI: there is now a real column mapper — every field, the header automatch chose, a select to override it, live re-preview, and the rejected rows with reasons.
 
@@ -59,27 +61,27 @@ The gap was placement, not coverage: it ran only on CSV import. `splitAndScrubNa
 
 ## 5. Rules to protect the account — **DONE**
 
-| Spec | State | Notes |
-|---|---|---|
-| Working days + hours | DONE | The planner ignored them and planned slots the gate then refused — a silent stall. `planPacing` now reads `workingDays`/`workStartMinute`/`workEndMinute` in the account's timezone, and planner and gate share one predicate (`weekdayVolumeFactor`) so they cannot disagree. A configured Saturday is no longer vetoed by `WEEKEND_FACTOR`. |
-| Invites 30 (0–75) | DONE | DB CHECK + zod + `min(band.perDay, operatorLimit)` in the gate. |
-| Messages 25 (0–75) | DONE | Pooled across dm/reply/inmail, as the gate counts them. |
-| Profile views 25 (0–100) | DONE | |
-| Follows 20 (0–50) | DONE | |
-| Campaign warm-up 20/40/60/80/100 | DONE | Was correct code with zero callers. Now enforced twice: as a budget in the runner before anything is planned, and as a `campaign-warmup` check in the gate before anything is performed. The per-account weekly ramp still applies; the stricter of the two binds. |
-| A lead in only 1 campaign | DONE | The partial unique index held, but contacts deduped per-list, so the same person in two lists got two ids and two campaigns. Migration 048 adds a workspace-wide unique index on `LOWER(profile_url)`, de-duplicating existing data oldest-wins and repointing campaign members first. |
+| Spec                             | State | Notes                                                                                                                                                                                                                                                                                                                                         |
+| -------------------------------- | ----- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Working days + hours             | DONE  | The planner ignored them and planned slots the gate then refused — a silent stall. `planPacing` now reads `workingDays`/`workStartMinute`/`workEndMinute` in the account's timezone, and planner and gate share one predicate (`weekdayVolumeFactor`) so they cannot disagree. A configured Saturday is no longer vetoed by `WEEKEND_FACTOR`. |
+| Invites 30 (0–75)                | DONE  | DB CHECK + zod + `min(band.perDay, operatorLimit)` in the gate.                                                                                                                                                                                                                                                                               |
+| Messages 25 (0–75)               | DONE  | Pooled across dm/reply/inmail, as the gate counts them.                                                                                                                                                                                                                                                                                       |
+| Profile views 25 (0–100)         | DONE  |                                                                                                                                                                                                                                                                                                                                               |
+| Follows 20 (0–50)                | DONE  |                                                                                                                                                                                                                                                                                                                                               |
+| Campaign warm-up 20/40/60/80/100 | DONE  | Was correct code with zero callers. Now enforced twice: as a budget in the runner before anything is planned, and as a `campaign-warmup` check in the gate before anything is performed. The per-account weekly ramp still applies; the stricter of the two binds.                                                                            |
+| A lead in only 1 campaign        | DONE  | The partial unique index held, but contacts deduped per-list, so the same person in two lists got two ids and two campaigns. Migration 048 adds a workspace-wide unique index on `LOWER(profile_url)`, de-duplicating existing data oldest-wins and repointing campaign members first.                                                        |
 
 ## 6. Campaigns — **DONE**
 
-| Spec | State |
-|---|---|
-| Lead list + workflow + name | DONE — guided create showing which account sends, how many leads enrol, and how long the sequence runs end to end. |
-| Start / stop | DONE — Start, Pause, Resume, Stop, with Stop behind a confirm because it is terminal. |
-| Connected to the LinkedIn inbox | DONE — real per-account sync. |
-| Answer messages in the tool | DONE — replies queue and the UI now reports where each one is: waiting to send, due now, sending, delivered, or held back by a safety limit (message shown verbatim). Execution stays on the operator's own worker, which is the honest boundary. |
-| Remove a lead | DONE |
-| Pause **or continue** a lead | DONE — the route hardcoded `true`; it now takes the boolean and there is a resume control. |
-| Manual tasks in the inbox | DONE — first-class inbox items with a composer, with "queue this message" and "mark as sent" kept separate so Trevra never claims to have sent bytes it did not send. |
+| Spec                            | State                                                                                                                                                                                                                                             |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lead list + workflow + name     | DONE — guided create showing which account sends, how many leads enrol, and how long the sequence runs end to end.                                                                                                                                |
+| Start / stop                    | DONE — Start, Pause, Resume, Stop, with Stop behind a confirm because it is terminal.                                                                                                                                                             |
+| Connected to the LinkedIn inbox | DONE — real per-account sync.                                                                                                                                                                                                                     |
+| Answer messages in the tool     | DONE — replies queue and the UI now reports where each one is: waiting to send, due now, sending, delivered, or held back by a safety limit (message shown verbatim). Execution stays on the operator's own worker, which is the honest boundary. |
+| Remove a lead                   | DONE                                                                                                                                                                                                                                              |
+| Pause **or continue** a lead    | DONE — the route hardcoded `true`; it now takes the boolean and there is a resume control.                                                                                                                                                        |
+| Manual tasks in the inbox       | DONE — first-class inbox items with a composer, with "queue this message" and "mark as sent" kept separate so Trevra never claims to have sent bytes it did not send.                                                                             |
 
 Also: per-lead timeline (steps done / current / next fire time / assigned variant), member search + status filter + sort + paging, per-campaign progress by status, warm-up day, and a "Run now" that ticks the runner immediately.
 

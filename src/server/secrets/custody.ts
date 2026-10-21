@@ -48,14 +48,17 @@
  *
  * ## THE HOSTED REFUSAL IS NOT RELAXED FOR MAINTENANCE
  *
- * `secrets/linkedin.ts` and `secrets/reddit.ts` refuse to open a LinkedIn or
- * Reddit password on a hosted deployment, unconditionally and with no
- * override, including for rows a dump may have left behind. Re-encryption is a
- * read followed by a write, so a re-encrypt loop that touched those rows would
- * be a way to decrypt them on hosted -- an override, arrived at sideways, in a
- * maintenance script. It does not get one. Those rows are SKIPPED, with a
- * reason, and counted separately, so the report is honest about what it did
- * not convert rather than quietly reporting completion.
+ * This maintenance API refuses to open LinkedIn or Reddit credentials on
+ * hosted deployments, unconditionally and with no maintenance override.
+ * IMPORTANT: this is stricter than `secrets/linkedin.ts`, whose runtime
+ * custody gate allows a hosted workspace with explicit authorisation and a
+ * configured remote browser to read its own credentials. That mismatch means
+ * a hosted deployment with such authorised rows CANNOT finish key rotation
+ * via `resealSecrets` today. This is an unresolved security/product decision,
+ * not proof that hosted runtime credential decryption is impossible. Do not
+ * weaken the maintenance refusal without a security-reviewed policy and an
+ * explicit authorisation contract for key rotation. Skipped rows remain in the
+ * report and prevent a false completion verdict.
  */
 import { linkedInWorkerConfig, redditWorkerConfig } from '../config.js';
 import type { Db } from '../db.js';

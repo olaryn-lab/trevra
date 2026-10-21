@@ -28,3 +28,5 @@ spike/
 nango-integrations/build/
 nango-integrations/.nango/*
 !nango-integrations/.nango/.gitkeep
+# Generated only when the currently installed dependency tree passes npm SBOM validation.
+public/catalog/trevra.sbom.cdx.json

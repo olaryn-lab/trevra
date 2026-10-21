@@ -43,6 +43,9 @@ const {
 } = await import('./integration-service.js');
 const { createSuppression, findSuppression } = await import('./suppressions.js');
 const { resolveContact } = await import('./lead-capture/people.js');
+const { upsertSeat } = await import('./linkedin/seats.js');
+const { createLeadList, importLeadCsv } = await import('./linkedin/lead-lists.js');
+const { addExclusions } = await import('./linkedin/exclusions.js');
 const { findUnsubscribeDelivery } = await import('./email/unsubscribe.js');
 
 type DbQueryable = ConstructorParameters<typeof Db>[0];
@@ -378,6 +381,117 @@ describe('connected mailbox threading', () => {
       );
     return { database, workspaceId: tenant.workspaceId, connectionId };
   }
+
+  async function seedLinkedInRecipient(database: LiveDb, workspaceId: string) {
+    await upsertSeat(
+      database,
+      workspaceId,
+      { label: 'Owner', timezone: 'Europe/Zurich' },
+      new Date()
+    );
+    const list = await createLeadList(database, { workspaceId, name: 'Import only' });
+    await importLeadCsv(database, {
+      workspaceId,
+      listId: list.id,
+      csv: 'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Smith,Acme,lead@example.test,https://linkedin.com/in/maya-optout\n'
+    });
+  }
+
+  it('blocks noncampaign email when a linked lead is DNC without a suppression row', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await seedLinkedInRecipient(database, workspaceId);
+    await database
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=? AND email=?'
+      )
+      .run(workspaceId, 'lead@example.test');
+    expect(
+      await findSuppression(database, workspaceId, { channel: 'email', email: 'lead@example.test' })
+    ).toBeNull();
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test',
+        subject: 'Should be held',
+        body: 'No send',
+        structured_payload_json: '{}',
+        payload_hash: 'legacy-lead-dnc'
+      })
+    ).rejects.toThrow(/do-not-contact/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(
+      await database
+        .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+        .get<{ status: string }>(workspaceId, 'legacy-lead-dnc')
+    ).toEqual({ status: 'failed' });
+  });
+
+  it('blocks a noncampaign send to a Person whose canonical email changed but whose imported lead is DNC', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await seedLinkedInRecipient(database, workspaceId);
+    await database
+      .prepare(
+        `UPDATE contacts SET email='alias@example.test', email_normalized='alias@example.test'
+       WHERE workspace_id=? AND id=(SELECT person_id FROM linkedin_lead_contacts WHERE workspace_id=? AND email=?)`
+      )
+      .run(workspaceId, workspaceId, 'lead@example.test');
+    await database
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=? AND email=?'
+      )
+      .run(workspaceId, 'lead@example.test');
+    expect(
+      await findSuppression(database, workspaceId, {
+        channel: 'email',
+        email: 'alias@example.test'
+      })
+    ).toBeNull();
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'alias@example.test',
+        subject: 'Alternate address',
+        body: 'Must not send',
+        structured_payload_json: '{}',
+        payload_hash: 'same-person-new-address-dnc'
+      })
+    ).rejects.toThrow(/do-not-contact/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
+  it('blocks noncampaign email for a linked Never Contact profile without a suppression row', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await seedLinkedInRecipient(database, workspaceId);
+    await addExclusions(
+      database,
+      workspaceId,
+      [
+        {
+          targetRef: 'https://www.linkedin.com/in/maya-optout/?trk=operator',
+          reason: 'Asked not to be contacted',
+          source: 'test'
+        }
+      ],
+      new Date()
+    );
+    expect(
+      await findSuppression(database, workspaceId, { channel: 'email', email: 'lead@example.test' })
+    ).toBeNull();
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'lead@example.test',
+        subject: 'Should be held',
+        body: 'No send',
+        structured_payload_json: '{}',
+        payload_hash: 'legacy-lead-never-contact'
+      })
+    ).rejects.toThrow(/Never Contact/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
   it('refuses a globally suppressed email before contacting the provider', async () => {
     const { database, workspaceId, connectionId } = await mailbox('gmail');
     await createSuppression(database, {
@@ -400,6 +514,89 @@ describe('connected mailbox threading', () => {
       })
     ).rejects.toThrow(/Unsubscribed/);
     expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
+  it('blocks a Gmail send when suppression arrives during thread lookup', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    let signalLookup!: () => void;
+    let releaseLookup!: () => void;
+    const lookupStarted = new Promise<void>((resolve) => (signalLookup = resolve));
+    const lookupRelease = new Promise<void>((resolve) => (releaseLookup = resolve));
+    nangoMock.get.mockImplementation(async (config: Record<string, unknown>) => {
+      if ((config.params as { format?: string } | undefined)?.format === 'minimal') {
+        signalLookup();
+        await lookupRelease;
+        return { data: { threadId: 'existing-thread' }, headers: {} };
+      }
+      return { data: {}, headers: {} };
+    });
+    const sending = executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Follow-up',
+      body: 'Checking back',
+      structured_payload_json: JSON.stringify({ threaded: true, threadExternalRef: 'old-message' }),
+      payload_hash: 'race-gmail-thread-suppression'
+    });
+    await lookupStarted;
+    await createSuppression(database, {
+      workspaceId,
+      channel: 'all',
+      email: 'lead@example.test',
+      reason: 'Opted out during lookup',
+      source: 'race_test'
+    });
+    releaseLookup();
+    await expect(sending).rejects.toThrow(/Opted out during lookup/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    expect(
+      await database
+        .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+        .get<{ status: string }>(workspaceId, 'race-gmail-thread-suppression')
+    ).toEqual({ status: 'failed' });
+  });
+
+  it('prevents Microsoft send when suppression arrives after a draft was created', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('microsoft');
+    let signalDraft!: () => void;
+    let releaseDraft!: () => void;
+    const draftStarted = new Promise<void>((resolve) => (signalDraft = resolve));
+    const draftRelease = new Promise<void>((resolve) => (releaseDraft = resolve));
+    nangoMock.post.mockImplementation(async (config: Record<string, unknown>) => {
+      if (config.endpoint === '/v1.0/me/messages') {
+        signalDraft();
+        await draftRelease;
+        return { data: { id: 'prepared-draft' }, headers: {} };
+      }
+      throw new Error('Unexpected provider send after suppression');
+    });
+    const sending = executeConnectedAction(database, workspaceId, {
+      type: 'email_draft',
+      connection_id: connectionId,
+      recipient: 'lead@example.test',
+      subject: 'Draft',
+      body: 'Must not send',
+      structured_payload_json: '{}',
+      payload_hash: 'race-ms-draft-suppression'
+    });
+    await draftStarted;
+    await createSuppression(database, {
+      workspaceId,
+      channel: 'email',
+      email: 'lead@example.test',
+      reason: 'Opted out while drafting',
+      source: 'race_test'
+    });
+    releaseDraft();
+    await expect(sending).rejects.toThrow(/Opted out while drafting/);
+    expect(nangoMock.post).toHaveBeenCalledTimes(1);
+    expect(nangoMock.post.mock.calls[0]?.[0]).toMatchObject({ endpoint: '/v1.0/me/messages' });
+    expect(
+      await database
+        .prepare('SELECT status FROM gtm_deliveries WHERE workspace_id=? AND idempotency_key=?')
+        .get<{ status: string }>(workspaceId, 'race-ms-draft-suppression')
+    ).toEqual({ status: 'failed' });
   });
 
   it('threads Gmail follow-ups with threadId and RFC reply headers', async () => {
@@ -816,43 +1013,26 @@ describe('connected mailbox threading', () => {
     ).toEqual({ status: 'sent', internet_message_id: '<gmail-readback-hang-key@trevra.app>' });
   }, 10_000);
 
-  it('keeps the pre-Phase-D path for outreach not approved with one-click unsubscribe', async () => {
+  it('blocks legacy campaign email without Person binding, consent-safe header and verified sender', async () => {
     vi.stubEnv('TREVRA_PUBLIC_API_URL', 'https://api.trevra.test');
     vi.stubEnv('TREVRA_SECRETS_KEY', 'legacy-path-secrets-key');
     const ms = await mailbox('microsoft');
-    nangoMock.post
-      .mockResolvedValueOnce({ data: { id: 'ms-campaign' }, headers: {} })
-      .mockResolvedValueOnce({ data: {}, headers: {} });
-
-    await executeConnectedAction(ms.database, ms.workspaceId, {
-      type: 'email_draft',
-      connection_id: ms.connectionId,
-      recipient: 'lead@example.test',
-      subject: 'Campaign step',
-      body: 'Hello from the campaign',
-      structured_payload_json: JSON.stringify({
-        deliveryPurpose: 'outreach',
-        deliverySourceType: 'campaign_email',
-        deliverySourceId: 'lcca_legacy_path'
-      }),
-      payload_hash: 'ms-campaign-legacy-key'
-    });
-
-    expect(nangoMock.post.mock.calls[0]?.[0]).toEqual({
-      endpoint: '/v1.0/me/messages',
-      providerConfigKey: 'trevra-microsoft',
-      connectionId: 'microsoft-external',
-      retries: 0,
-      data: {
+    await expect(
+      executeConnectedAction(ms.database, ms.workspaceId, {
+        type: 'email_draft',
+        connection_id: ms.connectionId,
+        recipient: 'lead@example.test',
         subject: 'Campaign step',
-        body: { contentType: 'Text', content: 'Hello from the campaign' },
-        toRecipients: [{ emailAddress: { address: 'lead@example.test' } }],
-        internetMessageHeaders: [
-          { name: 'x-trevra-idempotency-key', value: 'ms-campaign-legacy-key' }
-        ]
-      }
-    });
-    expect(JSON.stringify(nangoMock.post.mock.calls)).not.toContain('List-Unsubscribe');
+        body: 'Hello from the campaign',
+        structured_payload_json: JSON.stringify({
+          deliveryPurpose: 'outreach',
+          deliverySourceType: 'campaign_email',
+          deliverySourceId: 'lcca_legacy_path'
+        }),
+        payload_hash: 'ms-campaign-legacy-key'
+      })
+    ).rejects.toThrow('Campaign email has no bound Person and contact identity');
+    expect(nangoMock.post).not.toHaveBeenCalled();
   });
 
   it('adds no List-Unsubscribe header to Gmail outreach not approved with it', async () => {

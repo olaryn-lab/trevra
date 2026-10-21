@@ -224,12 +224,12 @@ export function LinkedInFunnel({
               </p>
               <p>
                 <b>Invite acceptance</b> is accepted out of invites sent — the same figure Campaigns
-                shows. The acceptance meter on{' '}
-                <a className="li-link" href="/outreach/safety">
-                  account safety
-                </a>{' '}
-                counts only answered invites because that is what Trevra throttles on. Rates stay “
-                {NOT_ENOUGH_DATA}” until the denominator reaches {RATE_MIN_SAMPLE}.
+                shows. The safety throttle instead uses only answered invites, because unanswered
+                ones have no acceptance outcome yet. Account limits are configured in{' '}
+                <a className="li-link" href="/setup/workspace">
+                  Workspace setup
+                </a>
+                . Rates stay “{NOT_ENOUGH_DATA}” until the denominator reaches {RATE_MIN_SAMPLE}.
               </p>
             </div>
           </details>
