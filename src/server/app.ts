@@ -9506,11 +9506,19 @@ function requireSession(db: Db, unattributedLimiter: RequestHandler) {
  * better-auth's, whose name that library prefixes and suffixes rather than
  * this file fixing it.
  */
-function carriesSessionCredential(req: Request): boolean {
+export function carriesSessionCredential(req: Request): boolean {
   const cookies = (req as Request & { cookies?: Record<string, unknown> }).cookies;
   if (!cookies || typeof cookies !== 'object') return false;
+  // Better Auth is configured with cookiePrefix="trevra" in auth-service.ts.
+  // Both local and production-secure variants must skip the anonymous IP
+  // bucket; requireSession still validates them and charges invalid cookies
+  // back to that bucket. Do not accept arbitrary cookie names as a bypass.
   return Object.keys(cookies).some(
-    (name) => name === SESSION_COOKIE || name.includes('better-auth')
+    (name) =>
+      name === SESSION_COOKIE ||
+      name === 'trevra.session_token' ||
+      name === '__Secure-trevra.session_token' ||
+      name.includes('better-auth')
   );
 }
 

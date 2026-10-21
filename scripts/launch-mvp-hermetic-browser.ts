@@ -6,9 +6,10 @@
  *   npx tsx scripts/launch-mvp-hermetic-browser.ts
  */
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 import { createServer as createTcpServer } from 'node:net';
 import { once } from 'node:events';
-import { chromium } from 'playwright';
+import { chromium, type BrowserContext, type Page } from 'playwright';
 import { createServer as createViteServer } from 'vite';
 import type { Server } from 'node:http';
 
@@ -71,6 +72,8 @@ async function main() {
   let listener: Server | undefined;
   let vite: Awaited<ReturnType<typeof createViteServer>> | undefined;
   let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined;
+  let traceContext: BrowserContext | undefined;
+  let evidencePage: Page | undefined;
   let db: Awaited<ReturnType<typeof import('../src/server/db.js').openDatabase>> | undefined;
   let closeAuthDb: (() => Promise<void>) | undefined;
   try {
@@ -137,7 +140,12 @@ async function main() {
     await once(listener, 'listening');
     browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
     const ctx = await browser.newContext();
+    traceContext = ctx;
+    if (process.env.LAUNCH_ACCEPTANCE_REPORT_DIR) {
+      await ctx.tracing.start({ screenshots: true, snapshots: true, sources: false });
+    }
     const page = await ctx.newPage();
+    evidencePage = page;
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message.slice(0, 200)));
     const first = await page.goto(origin + '/login', {
@@ -145,7 +153,14 @@ async function main() {
       timeout: 20000
     });
     check('L1 local app shell loads', first?.status() === 200);
-    await page.getByRole('button', { name: 'Create an account' }).waitFor({ timeout: 20000 });
+    try {
+      await page.getByRole('button', { name: 'Create an account' }).waitFor({ timeout: 25000 });
+    } catch {
+      // First Vite dependency optimize on a cold checkout can interrupt the
+      // initial app load. Retry once; persistent failures remain hard failures.
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
+      await page.getByRole('button', { name: 'Create an account' }).waitFor({ timeout: 25000 });
+    }
     check('L1 real unauthenticated auth view shown', true);
     await page.getByRole('button', { name: 'Create an account' }).click();
     const email = 'isolated-first-user-' + Date.now() + '@example.test';
@@ -162,6 +177,7 @@ async function main() {
     check('L1 local browser registration succeeds', res.status() === 200, 'status=' + res.status());
     const sessionRes = await page.request.get(origin + '/api/auth/session');
     const sessionBody = await sessionRes.json();
+
     check(
       'L1 owner workspace session created',
       sessionRes.status() === 200 &&
@@ -264,6 +280,185 @@ async function main() {
     await page.waitForTimeout(500);
     check('L5 stop status persisted', (await campaignStatus()) === 'stopped');
 
+    // L5/L6: Build a second campaign with the REAL tenant-scoped API, using
+    // an explicit invite workflow so the planner creates deterministic exact
+    // action approvals. We exercise review and dispatch through the real UI.
+    const postJson = async (path: string, data: object) => {
+      const response = await page.request.post(origin + path, { data });
+      if (response.status() < 200 || response.status() >= 300) {
+        throw new Error('Isolated API fixture failed: ' + path + ' HTTP ' + response.status());
+      }
+      try {
+        return await response.json();
+      } catch {
+        throw new Error('Fixture returned non-JSON: ' + path + ' HTTP ' + response.status());
+      }
+    };
+    const list = (
+      await postJson('/api/linkedin/manager/lead-lists', {
+        name: 'Owned test lead list',
+        sourceKind: 'csv'
+      })
+    ).list;
+    const importResponse = await page.request.post(
+      origin + '/api/linkedin/manager/lead-lists/' + list.id + '/import',
+      {
+        multipart: {
+          file: { name: 'owned-people.csv', mimeType: 'text/csv', buffer: Buffer.from(csv) }
+        }
+      }
+    );
+    check(
+      'L5 approval workflow fixture imports only synthetic CSV',
+      importResponse.status() === 201
+    );
+    const workflow = (
+      await postJson('/api/linkedin/manager/workflows', {
+        name: 'Test-only personalized invite',
+        steps: [
+          {
+            id: 'invite',
+            action: 'connection_request',
+            delayBefore: { amount: 0, unit: 'hours' },
+            config: { message: 'Hello {{first_name}} at {{company}}' }
+          }
+        ]
+      })
+    ).workflow;
+
+    const reviewCampaign = (
+      await postJson('/api/linkedin/manager/campaigns', {
+        name: 'Review acceptance (never live)',
+        leadListId: list.id,
+        workflowId: workflow.id,
+        senderKeys: ['owner']
+      })
+    ).campaign;
+
+    await page.goto(origin + '/outreach/campaign/' + reviewCampaign.id, {
+      waitUntil: 'domcontentloaded'
+    });
+    await page.getByRole('button', { name: /^Start$/ }).click();
+    await page.getByRole('button', { name: 'Start this campaign' }).click();
+    await page.getByRole('button', { name: /^Pause$/ }).waitFor({ timeout: 20000 });
+
+    const now = new Date();
+    const { runManagedCampaigns } = await import('../src/server/linkedin/runner.js');
+    await runManagedCampaigns(
+      db,
+      sessionBody.auth.workspaceId,
+      new Date(now.getTime() + 2 * 3600000)
+    );
+
+    const reviewUrl = origin + '/api/linkedin/manager/action-approvals';
+    const reviewResponse = await page.request.get(reviewUrl);
+
+    check(
+      'L5 review API is reachable within rate limits',
+      reviewResponse.status() === 200,
+      'status=' + reviewResponse.status()
+    );
+    check(
+      'L6 authenticated traffic uses the per-workspace rate bucket',
+      (reviewResponse.headers()['ratelimit-policy'] ?? '').startsWith('1200;')
+    );
+    const reviews = (await reviewResponse.json()).reviews ?? [];
+    check(
+      'L5 planner creates real tenant-scoped personalized approvals',
+      reviewResponse.status() === 200 && reviews.length > 0,
+      'pendingCount=' + reviews.length
+    );
+    check(
+      'L5 preview interpolates actual recipient tokens',
+      reviews.some((review: { body?: string }) =>
+        /Hello (Maya|Jon) at (Acme|Beta)/.test(review.body ?? '')
+      )
+    );
+    const tampered = await page.request.post(reviewUrl + '/' + reviews[0].actionId, {
+      data: { contentHash: '0'.repeat(64) }
+    });
+    check('L6 altered message content hash is rejected', tampered.status() === 409);
+    const { postgresLocalWorkerStore, runLinkedInLocalBatch } =
+      await import('../src/server/linkedin/local-worker.js');
+    const { linkedinActionPolicyGate } = await import('../src/server/linkedin/action-policy.js');
+    let driverCalls = 0;
+    const runSafeWorker = async () =>
+      runLinkedInLocalBatch(postgresLocalWorkerStore(db!, sessionBody.auth.workspaceId, 'owner'), {
+        driver: {
+          sendInvite: async () => {
+            driverCalls++;
+            return { ok: true, externalRef: 'test-only-' + driverCalls, failureKind: null };
+          }
+        } as any,
+        page: {} as any,
+        now: () => new Date(now.getTime() + 3 * 3600000),
+        sleep: async () => {},
+        log: () => {},
+        maxActions: 5,
+        evaluate: async () => ({
+          allowed: true,
+          reason: null,
+          checks: [],
+          automationMode: 'prepare-only',
+          automationReason: 'Disposable provider double; never a live approval'
+        }),
+        authorizeAction: (action) =>
+          linkedinActionPolicyGate(db!, sessionBody.auth.workspaceId, action.id)
+      });
+    const beforeApproval = await runSafeWorker();
+    check(
+      'L6 unapproved side effects are blocked',
+      beforeApproval.executed === 0 && driverCalls === 0
+    );
+    await page.goto(origin + '/outreach', { waitUntil: 'domcontentloaded' });
+    const approve = page.getByRole('button', { name: 'Approve this action' });
+    await approve.first().waitFor({ timeout: 25000 });
+    check('L5 exact-message approval is visible to the browser operator', true);
+    for (let i = 0; i < reviews.length; i++) {
+      const approved = page.waitForResponse(
+        (response) =>
+          response.request().method() === 'POST' &&
+          response.url().includes('/api/linkedin/manager/action-approvals/')
+      );
+      await approve.first().click();
+      const result = await approved;
+      check(
+        'L5 exact approval POST succeeds',
+        result.status() === 200,
+        'status=' + result.status()
+      );
+    }
+    await approve.first().waitFor({ state: 'hidden', timeout: 15000 });
+    const afterApproval = (await (await page.request.get(reviewUrl)).json()).reviews;
+    check('L5 owner approvals persist through real HTTP and UI', afterApproval.length === 0);
+    const firstDelivery = await runSafeWorker();
+    check(
+      'L5 approved actions use controlled provider double',
+      firstDelivery.executed > 0 && firstDelivery.executed === driverCalls
+    );
+    const secondDelivery = await runSafeWorker();
+    check(
+      'L6 retry does not duplicate a completed dispatch',
+      secondDelivery.executed === 0 && driverCalls === firstDelivery.executed
+    );
+
+    // Shared Never Contact state comes from authenticated API; it may not
+    // affect an action already executed. Separate provider-double tests cover
+    // suppression before a send is permitted.
+    const neverContact = await page.request.post(origin + '/api/suppressions', {
+      data: { channel: 'email', email: 'jon@example.com', reason: 'Never Contact' }
+    });
+    check('L6 browser owner can record Never Contact restriction', neverContact.status() === 201);
+    const suppressionRows = (await (await page.request.get(origin + '/api/suppressions')).json())
+      .suppressions;
+    check(
+      'L6 suppression is durably readable by the authorized tenant',
+      suppressionRows.some(
+        (row: { email?: string; reason?: string }) =>
+          row.email === 'jon@example.com' && row.reason === 'Never Contact'
+      )
+    );
+
     // A second separate owner must receive a different workspace; first
     // session must remain pinned to its original workspace.
     const secondContext = await browser.newContext();
@@ -292,6 +487,18 @@ async function main() {
         secondSession.auth.workspaceId !== sessionBody.auth.workspaceId &&
         firstAgain.auth?.workspaceId === sessionBody.auth.workspaceId
     );
+    const foreignCampaign = await secondPage.request.get(
+      origin + '/api/linkedin/manager/campaigns/' + reviewCampaign.id
+    );
+    check('L6 other tenant cannot read first tenant campaign', foreignCampaign.status() === 404);
+    const foreignApproval = await secondPage.request.post(reviewUrl + '/' + reviews[0].actionId, {
+      data: { contentHash: reviews[0].contentHash }
+    });
+    check('L6 other tenant cannot approve private action', foreignApproval.status() === 404);
+    const foreignSuppressions = (
+      await (await secondPage.request.get(origin + '/api/suppressions')).json()
+    ).suppressions;
+    check('L6 Never Contact entries do not leak across tenants', foreignSuppressions.length === 0);
     await secondContext.close();
 
     const fresh = await browser.newContext();
@@ -301,10 +508,26 @@ async function main() {
       unauth.status() === 401,
       'status=' + unauth.status()
     );
+    const forged = await fresh.request.get(origin + '/api/suppressions', {
+      headers: { Cookie: 'trevra.session_token=synthetic-invalid-session' }
+    });
+    check(
+      'L6 forged session is still charged to the anonymous IP rate bucket',
+      forged.status() === 401 && (forged.headers()['ratelimit-policy'] ?? '').startsWith('300;')
+    );
     await fresh.close();
     check('L1 UI has no uncaught page exception', errors.length === 0, errors.join('; '));
-    await ctx.close();
   } finally {
+    const evidence = process.env.LAUNCH_ACCEPTANCE_REPORT_DIR;
+    if (evidence && traceContext) {
+      await evidencePage
+        ?.screenshot({ path: join(evidence, 'browser-final.png'), fullPage: false })
+        .catch(() => undefined);
+      await traceContext.tracing
+        .stop({ path: join(evidence, 'browser-trace.zip') })
+        .catch(() => undefined);
+    }
+    await traceContext?.close();
     await browser?.close();
     if (listener) await new Promise<void>((resolve) => listener!.close(() => resolve()));
     await vite?.close();

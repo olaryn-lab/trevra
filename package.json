@@ -44,7 +44,8 @@
     "sandbox:start": "node dist-server/sandbox-gateway/index.js",
     "start:worker": "NODE_ENV=production node dist-server/worker/index.js",
     "module": "tsx src/cli/trevra-module.ts",
-    "sbom:build": "tsx scripts/build-sbom.ts"
+    "sbom:build": "tsx scripts/build-sbom.ts",
+    "launch:acceptance": "node scripts/launch-mvp-acceptance.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.20",
