@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { buildFreshSbom } from '../../scripts/build-sbom.js';
 import { evaluateParityRelease, validateCycloneDx } from '../../scripts/check-parity-release.js';
 
 const verifiedPlan = () => `
@@ -81,6 +85,52 @@ describe('production parity release assertions', () => {
   it('does not claim a verified built-in catalog SBOM when the build allows SBOM generation failures', () => {
     const generator = readFileSync('scripts/build-public-catalog.ts', 'utf8');
     expect(generator).toContain('trust: { signed: false, sbom: false, verifiedRelease: true }');
+  });
+
+  it('removes a stale published inventory on npm SBOM failure without substituting a partial one', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'trevra-sbom-fail-'));
+    const output = join(directory, 'catalog', 'trevra.sbom.cdx.json');
+    try {
+      await import('node:fs/promises').then(({ mkdir }) => mkdir(join(directory, 'catalog')));
+      await writeFile(output, '{"old":"unqualified"}');
+      const result = await buildFreshSbom(output, () => ({
+        status: 1,
+        stdout: '',
+        stderr: 'ESBOMPROBLEMS: missing optional dependencies'
+      }));
+      expect(result).toMatchObject({ published: false });
+      await expect(readFile(output, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('only publishes a newly generated, parseable CycloneDX dependency graph', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'trevra-sbom-valid-'));
+    const output = join(directory, 'catalog', 'trevra.sbom.cdx.json');
+    try {
+      const invalid = await buildFreshSbom(output, () => ({ status: 0, stdout: '{' }));
+      expect(invalid.reason).toMatch(/invalid JSON/);
+      await expect(readFile(output, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+      const bom = {
+        bomFormat: 'CycloneDX',
+        specVersion: '1.5',
+        metadata: { timestamp: '2026-10-21T00:00:00Z' },
+        components: [{ type: 'library', name: 'example-dependency', version: '1.0.0' }]
+      };
+      expect(
+        await buildFreshSbom(output, () => ({ status: 0, stdout: JSON.stringify(bom) }))
+      ).toEqual({ published: true });
+      expect(JSON.parse(await readFile(output, 'utf8'))).toEqual(bom);
+      const rejected = await buildFreshSbom(output, () => ({
+        status: 0,
+        stdout: JSON.stringify({ bomFormat: 'CycloneDX', components: [] })
+      }));
+      expect(rejected.published).toBe(false);
+      await expect(readFile(output, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it('reports current repository capabilities as blocked rather than production-ready', () => {

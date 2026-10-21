@@ -18,6 +18,7 @@ import {
   listPublicRegistryModules,
   moduleReleaseSigningPayload,
   publishModuleRelease,
+  seedBuiltinModuleRegistry,
   setPublisherVerification
 } from './service.js';
 
@@ -108,6 +109,36 @@ async function openRegistryDb(): Promise<Db> {
 }
 
 describe('hosted module registry', () => {
+  it('clears persisted built-in SBOM evidence when the refreshed build has no valid inventory', async () => {
+    const database = await openRegistryDb();
+    const builtin = {
+      id: 'gtm.test-sbom-refresh',
+      name: 'SBOM reseed regression',
+      version: '1.0.0',
+      description: 'Checks fail-closed built-in SBOM reseeding.',
+      sideEffect: 'none' as const,
+      requiresApproval: false,
+      inputSchema: {},
+      outputSchema: {}
+    };
+    const fresh = {
+      bomFormat: 'CycloneDX',
+      specVersion: '1.5',
+      metadata: { timestamp: '2026-10-21T00:00:00Z' },
+      components: [{ type: 'library', name: 'example', version: '1.0.0' }]
+    };
+    await seedBuiltinModuleRegistry(database, [builtin], fresh);
+    expect(
+      (await listPublicRegistryModules(database)).find((item) => item.id === builtin.id)?.trust
+        .sbom
+    ).toBe(true);
+
+    await seedBuiltinModuleRegistry(database, [builtin], {});
+    const after = (await listPublicRegistryModules(database)).find((item) => item.id === builtin.id);
+    expect(after?.trust.sbom).toBe(false);
+    expect(after?.sbom).toEqual({});
+  });
+
   it('publishes privacy-safe popularity from actual module runs', async () => {
     const database = await openRegistryDb();
     const before = (await listPublicRegistryModules(database)).find(
