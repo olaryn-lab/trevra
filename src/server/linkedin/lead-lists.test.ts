@@ -1017,6 +1017,64 @@ describe('one person, one contact row, per workspace', () => {
     ).toBeNull();
   });
 
+  it('rolls back a manual identity/DNC edit if its suppression cannot be committed', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Atomic DNC' }, NOW);
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Chen,Acme,maya-atomic@example.com,https://www.linkedin.com/in/maya-atomic/'
+      },
+      NOW
+    );
+    const original = (await listLeadContacts(db, WORKSPACE_ID, list.id))[0]!;
+    await db.exec(`
+      CREATE OR REPLACE FUNCTION trevra_test_refuse_atomic_dnc() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.workspace_id='${WORKSPACE_ID}' AND NEW.source_ref='${original.id}' THEN
+          RAISE EXCEPTION 'injected suppression persistence failure';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER trevra_test_refuse_atomic_dnc_trigger BEFORE INSERT ON suppressions
+        FOR EACH ROW EXECUTE FUNCTION trevra_test_refuse_atomic_dnc();
+    `);
+    try {
+      await expect(
+        updateLeadContact(
+          db,
+          {
+            workspaceId: WORKSPACE_ID,
+            contactId: original.id,
+            firstName: 'Maya',
+            lastName: 'Chen',
+            company: 'Acme',
+            email: original.email,
+            profileUrl: 'https://www.linkedin.com/in/maya-atomic-edited/',
+            doNotContact: true
+          },
+          NOW
+        )
+      ).rejects.toThrow(/injected suppression persistence failure/);
+    } finally {
+      await db.exec(`DROP TRIGGER trevra_test_refuse_atomic_dnc_trigger ON suppressions;
+        DROP FUNCTION trevra_test_refuse_atomic_dnc();`);
+    }
+    const after = (await listLeadContacts(db, WORKSPACE_ID, list.id))[0]!;
+    expect(after).toMatchObject({
+      id: original.id,
+      profileUrl: original.profileUrl,
+      doNotContact: false
+    });
+    expect(
+      await findSuppression(db, WORKSPACE_ID, {
+        channel: 'linkedin',
+        linkedinUrl: original.profileUrl
+      })
+    ).toBeNull();
+  });
+
   it('records imported and manual email provenance explicitly', async () => {
     const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Provenance' }, NOW);
     await importLeadCsv(

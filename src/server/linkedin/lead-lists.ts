@@ -1,7 +1,11 @@
 import { id, type Db } from '../db.js';
 import { normalizeExplicitPhone, resolveContact } from '../lead-capture/people.js';
 import { LeadCaptureError } from '../lead-capture/types.js';
-import { createSuppression, liftSuppressionsBySource } from '../suppressions.js';
+import {
+  createSuppression,
+  liftSuppressionsBySource,
+  withSuppressionBoundary
+} from '../suppressions.js';
 // `LinkedInApiError` and not a bare Error, for `deleteLeadList`'s refusal
 // alone: it is the only thing in this file a route must turn into a 409 rather
 // than a 400, and carrying the status on the error is how every other refusal
@@ -1080,110 +1084,124 @@ export async function updateLeadContact(
       profileUrl: 'profileUrl'
     }
   );
-  // A WORKSPACE-WIDE INDEX WOULD RAISE A BARE 23505 HERE, which the API layer
-  // cannot tell apart from any other unique violation and reports as the
-  // generic "that LinkedIn manager name or active lead claim already exists" --
-  // a 409 that names neither the field nor the row and leaves an operator
-  // guessing which of six inputs was the problem.
-  //
-  // BOTH INDEXES ARE CHECKED, NOT JUST THE PROFILE ONE. The old pre-check
-  // covered `profile_url` alone, so editing a NAME or a COMPANY into another
-  // row's `dedupe_key` -- which is exactly what an operator does when they fix
-  // a typo in a duplicate they just spotted -- skipped it entirely and fell
-  // through to the raw constraint. One lookup covers the same ground both
-  // indexes do, and the refusal names what actually clashed.
-  const clash = await db
-    .prepare(
-      `
+  // Atomically publish the edited identity/DNC flag, canonical Person link,
+  // source suppression, and campaign re-evaluation. The same workspace lock
+  // protects public tracking evidence against an edit that was otherwise
+  // visible for a short period without its matching suppression.
+  return withSuppressionBoundary(db, input.workspaceId, async (tx) => {
+    // A WORKSPACE-WIDE INDEX WOULD RAISE A BARE 23505 HERE, which the API layer
+    // cannot tell apart from any other unique violation and reports as the
+    // generic "that LinkedIn manager name or active lead claim already exists" --
+    // a 409 that names neither the field nor the row and leaves an operator
+    // guessing which of six inputs was the problem.
+    //
+    // BOTH INDEXES ARE CHECKED, NOT JUST THE PROFILE ONE. The old pre-check
+    // covered `profile_url` alone, so editing a NAME or a COMPANY into another
+    // row's `dedupe_key` -- which is exactly what an operator does when they fix
+    // a typo in a duplicate they just spotted -- skipped it entirely and fell
+    // through to the raw constraint. One lookup covers the same ground both
+    // indexes do, and the refusal names what actually clashed.
+    const clash = await tx
+      .prepare(
+        `
     SELECT id,first_name,last_name FROM linkedin_lead_contacts
     WHERE workspace_id=? AND id<>? AND (dedupe_key=? OR (?::text IS NOT NULL AND LOWER(profile_url)=LOWER(?)))
     LIMIT 1
   `
-    )
-    .get<{ id: string; first_name: string; last_name: string }>(
+      )
+      .get<{ id: string; first_name: string; last_name: string }>(
+        input.workspaceId,
+        input.contactId,
+        normalized.dedupeKey,
+        normalized.profileUrl,
+        normalized.profileUrl
+      );
+    if (clash)
+      throw new Error(
+        leadClashMessage(normalized, `${clash.first_name} ${clash.last_name}`.trim())
+      );
+    const row = await tx
+      .prepare(
+        `UPDATE linkedin_lead_contacts SET first_name=?,last_name=?,company=?,email=?,email_source=CASE WHEN ?::boolean THEN 'manual' ELSE email_source END,email_provenance=CASE WHEN ?::boolean THEN 'manual' ELSE email_provenance END,phone=?,country=?,profile_url=?,dedupe_key=?,do_not_contact=COALESCE(?,do_not_contact),updated_at=? WHERE workspace_id=? AND id=? RETURNING ${CONTACT_SELECT}`
+      )
+      .get<ContactRow>(
+        normalized.firstName,
+        normalized.lastName,
+        normalized.company,
+        normalized.email,
+        input.email !== undefined,
+        input.email !== undefined,
+        normalized.phone,
+        normalized.country,
+        normalized.profileUrl,
+        normalized.dedupeKey,
+        input.doNotContact === undefined ? null : input.doNotContact,
+        now.toISOString(),
+        input.workspaceId,
+        input.contactId
+      );
+    if (!row) throw new Error('Lead not found.');
+    await linkCanonicalPerson(
+      tx,
       input.workspaceId,
       input.contactId,
-      normalized.dedupeKey,
-      normalized.profileUrl,
-      normalized.profileUrl
+      normalized,
+      now.toISOString()
     );
-  if (clash)
-    throw new Error(leadClashMessage(normalized, `${clash.first_name} ${clash.last_name}`.trim()));
-  const row = await db
-    .prepare(
-      `UPDATE linkedin_lead_contacts SET first_name=?,last_name=?,company=?,email=?,email_source=CASE WHEN ?::boolean THEN 'manual' ELSE email_source END,email_provenance=CASE WHEN ?::boolean THEN 'manual' ELSE email_provenance END,phone=?,country=?,profile_url=?,dedupe_key=?,do_not_contact=COALESCE(?,do_not_contact),updated_at=? WHERE workspace_id=? AND id=? RETURNING ${CONTACT_SELECT}`
-    )
-    .get<ContactRow>(
-      normalized.firstName,
-      normalized.lastName,
-      normalized.company,
-      normalized.email,
-      input.email !== undefined,
-      input.email !== undefined,
-      normalized.phone,
-      normalized.country,
-      normalized.profileUrl,
-      normalized.dedupeKey,
-      input.doNotContact === undefined ? null : input.doNotContact,
-      now.toISOString(),
-      input.workspaceId,
-      input.contactId
-    );
-  if (!row) throw new Error('Lead not found.');
-  await linkCanonicalPerson(db, input.workspaceId, input.contactId, normalized, now.toISOString());
-  const refreshed = await db
-    .prepare(`SELECT ${CONTACT_SELECT} FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?`)
-    .get<ContactRow>(input.workspaceId, input.contactId);
-  if (!refreshed) throw new Error('Lead disappeared after Person convergence.');
-  const updated = toContact(refreshed);
-  if (input.doNotContact === true) {
-    if (updated.personId || updated.email || updated.profileUrl) {
-      await createSuppression(
-        db,
+    const refreshed = await tx
+      .prepare(`SELECT ${CONTACT_SELECT} FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?`)
+      .get<ContactRow>(input.workspaceId, input.contactId);
+    if (!refreshed) throw new Error('Lead disappeared after Person convergence.');
+    const updated = toContact(refreshed);
+    if (input.doNotContact === true) {
+      if (updated.personId || updated.email || updated.profileUrl) {
+        await createSuppression(
+          tx,
+          {
+            workspaceId: input.workspaceId,
+            channel: 'linkedin',
+            personId: updated.personId,
+            email: updated.email,
+            linkedinUrl: updated.profileUrl,
+            reason: 'Marked do-not-contact in LinkedIn lead manager',
+            source: 'linkedin_lead',
+            sourceRef: input.contactId,
+            actorType: 'system'
+          },
+          now
+        );
+      }
+    } else if (input.doNotContact === false) {
+      await liftSuppressionsBySource(
+        tx,
         {
           workspaceId: input.workspaceId,
-          channel: 'linkedin',
-          personId: updated.personId,
-          email: updated.email,
-          linkedinUrl: updated.profileUrl,
-          reason: 'Marked do-not-contact in LinkedIn lead manager',
           source: 'linkedin_lead',
           sourceRef: input.contactId,
+          channel: 'linkedin',
           actorType: 'system'
         },
         now
       );
     }
-  } else if (input.doNotContact === false) {
-    await liftSuppressionsBySource(
-      db,
-      {
-        workspaceId: input.workspaceId,
-        source: 'linkedin_lead',
-        sourceRef: input.contactId,
-        channel: 'linkedin',
-        actorType: 'system'
-      },
-      now
-    );
-  }
-  // Pasted-URL contacts have no name/company. They stay excluded until an
-  // operator completes identity; restoring eligibility must run the *whole*
-  // campaign policy again, not blindly flip excluded -> pending.
-  const awaitingIdentity = await db
-    .prepare(
-      `SELECT DISTINCT campaign_id FROM linkedin_campaign_members
+    // Pasted-URL contacts have no name/company. They stay excluded until an
+    // operator completes identity; restoring eligibility must run the *whole*
+    // campaign policy again, not blindly flip excluded -> pending.
+    const awaitingIdentity = await tx
+      .prepare(
+        `SELECT DISTINCT campaign_id FROM linkedin_campaign_members
        WHERE workspace_id=? AND contact_id=? AND admitted_at IS NULL
          AND status='excluded'
          AND exclusion_reason IN ('Missing lead identity','Workspace suppression','Do not contact')`
-    )
-    .all<{ campaign_id: string }>(input.workspaceId, input.contactId);
-  if (awaitingIdentity.length > 0) {
-    const { reevaluateCampaignExclusions } = await import('./managed-campaigns.js');
-    for (const member of awaitingIdentity)
-      await reevaluateCampaignExclusions(db, input.workspaceId, member.campaign_id, now);
-  }
-  return updated;
+      )
+      .all<{ campaign_id: string }>(input.workspaceId, input.contactId);
+    if (awaitingIdentity.length > 0) {
+      const { reevaluateCampaignExclusions } = await import('./managed-campaigns.js');
+      for (const member of awaitingIdentity)
+        await reevaluateCampaignExclusions(tx, input.workspaceId, member.campaign_id, now);
+    }
+    return updated;
+  });
 }
 
 /**
