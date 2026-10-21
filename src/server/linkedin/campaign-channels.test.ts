@@ -20,7 +20,7 @@ vi.mock('@nangohq/node', () => ({
 import { openDatabase, type Db } from '../db.js';
 import { putWorkspaceSecret } from '../secrets/store.js';
 import { queueEnrichmentRun } from '../enrichment/runs.js';
-import { findSuppression } from '../suppressions.js';
+import { createSuppression, findSuppression } from '../suppressions.js';
 import { executeConnectedAction } from '../integration-service.js';
 import { addExclusions } from './exclusions.js';
 import {
@@ -88,6 +88,8 @@ beforeEach(async () => {
       .run(WORKSPACE)
       .catch(() => undefined);
   }
+  // This suite creates durable opt-out records; isolate each recipient fixture.
+  await db.prepare('DELETE FROM suppressions WHERE workspace_id=?').run(WORKSPACE);
   await db.prepare('DELETE FROM email_inbound_mailboxes WHERE workspace_id=?').run(WORKSPACE);
   await db.prepare('DELETE FROM email_deliverability_checks WHERE workspace_id=?').run(WORKSPACE);
   await db.prepare('DELETE FROM connections WHERE workspace_id=?').run(WORKSPACE);
@@ -2431,7 +2433,7 @@ describe('campaign channel executor', () => {
       .prepare(
         `INSERT INTO linkedin_campaign_channel_actions
          (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,completed_at,external_ref,provider,tracking_token,created_at,updated_at)
-         VALUES ('licha_track',?,?,?,?,?,'email','sent',?::timestamptz,'{}'::jsonb,'track-key',?::timestamptz,'mail-track','gmail','opaque-open-token',?::timestamptz,?::timestamptz)`
+         VALUES ('licha_track',?,?,?,?,?,'email','sent',?::timestamptz,'{"tracking":"off"}'::jsonb,'track-key',?::timestamptz,'mail-track','gmail','opaque-open-token',?::timestamptz,?::timestamptz)`
       )
       .run(
         WORKSPACE,
@@ -2452,7 +2454,35 @@ describe('campaign channel executor', () => {
       )
       .run(WORKSPACE, NOW.toISOString());
 
+    // A random token alone cannot enable telemetry: an old prepared link may
+    // survive an action whose persisted settings say tracking is off.
+    expect(await recordCampaignEmailTrackingOpen(db, 'opaque-open-token', NOW)).toBe(false);
+    expect(
+      await recordCampaignEmailTrackingClick(db, 'opaque-open-token', 'opaque-link-token', NOW)
+    ).toBe('https://example.com/demo');
+    const eventCount = async () =>
+      Number(
+        (
+          await db
+            .prepare(
+              "SELECT COUNT(*)::int AS count FROM linkedin_campaign_email_events WHERE workspace_id=? AND channel_action_id='licha_track'"
+            )
+            .get<{ count: number }>(WORKSPACE)
+        )?.count ?? 0
+      );
+    expect(await eventCount()).toBe(0);
+
+    await db
+      .prepare('UPDATE linkedin_campaign_channel_actions SET payload_json=?::jsonb WHERE id=?')
+      .run(JSON.stringify({ tracking: 'opens' }), 'licha_track');
     expect(await recordCampaignEmailTrackingOpen(db, 'opaque-open-token', NOW)).toBe(true);
+    expect(
+      await recordCampaignEmailTrackingClick(db, 'opaque-open-token', 'opaque-link-token', NOW)
+    ).toBe('https://example.com/demo');
+    expect(await eventCount()).toBe(1); // opens-only cannot record clicks.
+    await db
+      .prepare('UPDATE linkedin_campaign_channel_actions SET payload_json=?::jsonb WHERE id=?')
+      .run(JSON.stringify({ tracking: 'opens_clicks' }), 'licha_track');
     expect(
       await recordCampaignEmailTrackingClick(db, 'opaque-open-token', 'opaque-link-token', NOW)
     ).toBe('https://example.com/demo');
@@ -2468,6 +2498,139 @@ describe('campaign channel executor', () => {
     const refreshed = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
     expect(refreshed.branchState['external:email_opened']).toBe(true);
     expect(refreshed.branchState['external:email_clicked']).toBe(true);
+  });
+  it('stops tracking after do-not-contact or email suppression, but preserves link destinations', async () => {
+    const campaignId = await campaignFor(
+      [
+        {
+          id: 'wait',
+          action: 'wait',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { duration: { amount: 1, unit: 'days' } }
+        },
+        {
+          id: 'end',
+          action: 'end',
+          delayBefore: { amount: 0, unit: 'hours' },
+          config: { outcome: 'completed' }
+        }
+      ],
+      'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Smith,Acme,maya@example.com,https://linkedin.com/in/maya-private-tracking\n'
+    );
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const member = (await listCampaignMembers(db, WORKSPACE, campaignId))[0]!;
+    const action = 'licha_private_tracking';
+    const token = 'opaque-private-tracking-token';
+    const linkToken = 'opaque-private-link-token';
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_channel_actions
+      (id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,status,planned_for,payload_json,idempotency_key,completed_at,external_ref,provider,tracking_token,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,'email','sent',?::timestamptz,?::jsonb,?,?::timestamptz,'mail-private','gmail',?,?::timestamptz,?::timestamptz)`
+      )
+      .run(
+        action,
+        WORKSPACE,
+        campaignId,
+        member.id,
+        member.contactId,
+        'email-private-step',
+        NOW.toISOString(),
+        JSON.stringify({ tracking: 'opens_clicks' }),
+        'private-tracking-key',
+        NOW.toISOString(),
+        token,
+        NOW.toISOString(),
+        NOW.toISOString()
+      );
+    await db
+      .prepare(
+        `INSERT INTO linkedin_campaign_email_tracking_links
+      (token,workspace_id,channel_action_id,target_url,created_at)
+      VALUES (?,?,?,?,?::timestamptz)`
+      )
+      .run(
+        linkToken,
+        WORKSPACE,
+        action,
+        'https://example.com/recipient-resource',
+        NOW.toISOString()
+      );
+    const eventCount = async () =>
+      Number(
+        (
+          await db
+            .prepare(
+              'SELECT COUNT(*)::int AS count FROM linkedin_campaign_email_events WHERE workspace_id=? AND channel_action_id=?'
+            )
+            .get<{ count: number }>(WORKSPACE, action)
+        )?.count ?? 0
+      );
+
+    // An insert failure in the optional telemetry sink must never break a
+    // tracked link sent earlier. It must also leave no half-written event.
+    await db.exec(`
+      CREATE OR REPLACE FUNCTION trevra_test_fail_tracking_event() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.workspace_id = '${WORKSPACE}' AND NEW.channel_action_id = '${action}' THEN
+          RAISE EXCEPTION 'injected telemetry database failure';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER trevra_test_fail_tracking_event BEFORE INSERT
+        ON linkedin_campaign_email_events FOR EACH ROW
+        EXECUTE FUNCTION trevra_test_fail_tracking_event();
+    `);
+    try {
+      expect(await recordCampaignEmailTrackingClick(db, token, linkToken, NOW)).toBe(
+        'https://example.com/recipient-resource'
+      );
+      expect(await eventCount()).toBe(0);
+    } finally {
+      await db.exec(`DROP TRIGGER trevra_test_fail_tracking_event ON linkedin_campaign_email_events;
+        DROP FUNCTION trevra_test_fail_tracking_event();`);
+    }
+
+    await db
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=? AND id=?'
+      )
+      .run(WORKSPACE, member.contactId);
+    expect(await recordCampaignEmailTrackingOpen(db, token, NOW)).toBe(false);
+    expect(await recordCampaignEmailTrackingClick(db, token, linkToken, NOW)).toBe(
+      'https://example.com/recipient-resource'
+    );
+    expect(await eventCount()).toBe(0);
+
+    await db
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=FALSE WHERE workspace_id=? AND id=?'
+      )
+      .run(WORKSPACE, member.contactId);
+    await createSuppression(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        channel: 'email',
+        email: 'maya@example.com',
+        reason: 'Recipient unsubscribed',
+        source: 'test_opt_out'
+      },
+      NOW
+    );
+    expect(
+      await findSuppression(db, WORKSPACE, { channel: 'email', email: 'maya@example.com' })
+    ).not.toBeNull();
+    expect(await recordCampaignEmailTrackingOpen(db, token, NOW)).toBe(false);
+    expect(await recordCampaignEmailTrackingClick(db, token, linkToken, NOW)).toBe(
+      'https://example.com/recipient-resource'
+    );
+    expect(await eventCount()).toBe(0);
+    expect(
+      (await listCampaignMembers(db, WORKSPACE, campaignId))[0]?.branchState[
+        'external:email_opened'
+      ]
+    ).not.toBe(true);
   });
 
   it('polls past temporary delivery failures so a later reply still stops queued work', async () => {

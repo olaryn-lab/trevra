@@ -28,7 +28,7 @@ import {
   escapeCampaignHtml,
   renderCampaignTrackedContent
 } from './campaign-email-html.js';
-import { assertNotSuppressed, SuppressionError } from '../suppressions.js';
+import { assertNotSuppressed, findSuppression, SuppressionError } from '../suppressions.js';
 export type CampaignChannelKind = 'email' | 'find_email';
 export type CampaignChannelStatus =
   'planned' | 'claimed' | 'sent' | 'failed' | 'unknown' | 'skipped';
@@ -1354,7 +1354,37 @@ export async function recordCampaignEmailEvent(
   });
 }
 
-/** Public tracking pixel target. The opaque token reveals no workspace/action id. */
+/**
+ * A public tracking URL proves only possession of a token, not ongoing permission
+ * to record recipient behavior. Verify the *sent action's* persisted opt-in mode
+ * and the recipient's current do-not-contact/suppression state for every hit.
+ * This cannot authenticate a human (mail security scanners also fetch links).
+ */
+interface EmailTrackingTarget {
+  workspace_id: string;
+  id: string;
+  payload_json: unknown;
+  email: string | null;
+  person_id: string | null;
+  do_not_contact: boolean;
+}
+
+async function mayRecordEmailTracking(
+  db: Db,
+  row: EmailTrackingTarget,
+  kind: 'opened' | 'clicked'
+): Promise<boolean> {
+  const tracking = objectOf(row.payload_json).tracking;
+  if (tracking !== 'opens_clicks' && !(kind === 'opened' && tracking === 'opens')) return false;
+  if (row.do_not_contact) return false;
+  return !(await findSuppression(db, row.workspace_id, {
+    channel: 'email',
+    personId: row.person_id,
+    email: row.email
+  }));
+}
+
+/** Public pixel: an invalid/disallowed event writes nothing, and reveals nothing. */
 export async function recordCampaignEmailTrackingOpen(
   db: Db,
   token: string,
@@ -1362,12 +1392,14 @@ export async function recordCampaignEmailTrackingOpen(
 ): Promise<boolean> {
   const row = await db
     .prepare(
-      `SELECT workspace_id,id FROM linkedin_campaign_channel_actions
-       WHERE tracking_token=? AND kind='email' AND status='sent'`
+      `SELECT a.workspace_id,a.id,a.payload_json,c.email,c.person_id,c.do_not_contact
+       FROM linkedin_campaign_channel_actions a
+       JOIN linkedin_lead_contacts c ON c.id=a.contact_id AND c.workspace_id=a.workspace_id
+       WHERE a.tracking_token=? AND a.kind='email' AND a.status='sent'`
     )
-    .get<{ workspace_id: string; id: string }>(token);
-  if (!row) return false;
-  await recordCampaignEmailEvent(
+    .get<EmailTrackingTarget>(token);
+  if (!row || !(await mayRecordEmailTracking(db, row, 'opened'))) return false;
+  const event = await recordCampaignEmailEvent(
     db,
     row.workspace_id,
     {
@@ -1378,10 +1410,10 @@ export async function recordCampaignEmailTrackingOpen(
     },
     now
   );
-  return true;
+  return event.recorded;
 }
 
-/** Public click redirect. Returns null for an invalid token pair, otherwise the stored safe URL. */
+/** Keep pre-existing link destinations usable after tracking is disabled or opted out. */
 export async function recordCampaignEmailTrackingClick(
   db: Db,
   actionToken: string,
@@ -1390,13 +1422,14 @@ export async function recordCampaignEmailTrackingClick(
 ): Promise<string | null> {
   const row = await db
     .prepare(
-      `SELECT a.workspace_id,a.id,l.target_url
+      `SELECT a.workspace_id,a.id,a.payload_json,c.email,c.person_id,c.do_not_contact,l.target_url
        FROM linkedin_campaign_channel_actions a
        JOIN linkedin_campaign_email_tracking_links l
          ON l.workspace_id=a.workspace_id AND l.channel_action_id=a.id
+       JOIN linkedin_lead_contacts c ON c.id=a.contact_id AND c.workspace_id=a.workspace_id
        WHERE a.tracking_token=? AND l.token=? AND a.kind='email' AND a.status='sent'`
     )
-    .get<{ workspace_id: string; id: string; target_url: string }>(actionToken, linkToken);
+    .get<EmailTrackingTarget & { target_url: string }>(actionToken, linkToken);
   if (!row) return null;
   let target: URL;
   try {
@@ -1405,17 +1438,26 @@ export async function recordCampaignEmailTrackingClick(
     return null;
   }
   if (!['http:', 'https:'].includes(target.protocol)) return null;
-  await recordCampaignEmailEvent(
-    db,
-    row.workspace_id,
-    {
-      channelActionId: row.id,
-      eventKind: 'clicked',
-      providerEventId: `tracking-click:${linkToken}`,
-      metadata: { source: 'trevra-redirect' }
-    },
-    now
-  );
+  // Tracking is optional metadata, not the content the recipient asked to open.
+  // A suppression lookup or telemetry write failure must fail closed for data
+  // collection while preserving the already-issued destination URL.
+  try {
+    if (await mayRecordEmailTracking(db, row, 'clicked')) {
+      await recordCampaignEmailEvent(
+        db,
+        row.workspace_id,
+        {
+          channelActionId: row.id,
+          eventKind: 'clicked',
+          providerEventId: `tracking-click:${linkToken}`,
+          metadata: { source: 'trevra-redirect' }
+        },
+        now
+      );
+    }
+  } catch {
+    // No event is recorded here as a fallback; the public redirect still works.
+  }
   return target.toString();
 }
 
