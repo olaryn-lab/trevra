@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { DEMO_WORKSPACE_ID, openDatabase, resetDemoData, type Db } from '../db.js';
+import { DEMO_WORKSPACE_ID, id, openDatabase, resetDemoData, type Db } from '../db.js';
 import type { CredentialAccessor } from '../research/types.js';
 import type { FetchLike } from '../skills/guard.js';
-import { assertPostingWindow, handoffReason, publishCommunityReply, type CommunityReplyPayload } from './publish.js';
+import {
+  assertPostingWindow,
+  handoffReason,
+  publishCommunityReply,
+  type CommunityReplyPayload
+} from './publish.js';
 import { recordPost } from './store.js';
 
 let db: Db;
@@ -76,7 +81,183 @@ describe('handoffReason', () => {
   });
 });
 
+async function setCommunityPolicy(input: {
+  actionPattern?: string;
+  effect: 'deny' | 'allow' | 'require_approval';
+  actorTypes?: string[];
+  name?: string;
+}): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO workspace_policies (
+      id,workspace_id,name,priority,action_pattern,effect,conditions_json,enabled,created_at,updated_at
+    ) VALUES (?,?,?,?,?,?,?::jsonb,TRUE,?::timestamptz,?::timestamptz)`
+    )
+    .run(
+      id('pol'),
+      DEMO_WORKSPACE_ID,
+      input.name ?? 'No community replies',
+      500,
+      input.actionPattern ?? 'action:community.reply',
+      input.effect,
+      JSON.stringify(input.actorTypes ? { actorTypes: input.actorTypes } : {}),
+      NOW.toISOString(),
+      NOW.toISOString()
+    );
+}
+
 describe('publishCommunityReply', () => {
+  it('serializes the daily limit across simultaneous distinct manual handoffs', async () => {
+    const submissions = Array.from({ length: 8 }, (_, index) =>
+      publishCommunityReply(
+        db,
+        DEMO_WORKSPACE_ID,
+        {
+          ...payload,
+          threadExternalId: `concurrent-${index}`,
+          threadUrl: `https://www.reddit.com/r/community${index}/comments/${index}/`,
+          community: `community${index}`
+        },
+        `handoff-concurrent-${index}`,
+        NOW
+      )
+    );
+    const results = await Promise.allSettled(submissions);
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(5);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(3);
+    for (const result of results) {
+      if (result.status === 'rejected') expect(String(result.reason)).toMatch(/Daily cap reached/);
+    }
+    const counts = await db
+      .prepare(
+        "SELECT COUNT(*)::int AS total FROM outreach_posts WHERE workspace_id=? AND platform='reddit' AND status='manual_handoff'"
+      )
+      .get<{ total: number }>(DEMO_WORKSPACE_ID);
+    expect(counts?.total).toBe(5);
+  });
+
+  it('reserves the community cooldown before an in-flight API reply finishes', async () => {
+    let unblock!: () => void;
+    let contacted!: () => void;
+    const received = new Promise<void>((resolve) => {
+      contacted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      unblock = resolve;
+    });
+    const calls: string[] = [];
+    const fetchImpl: FetchLike = async (input) => {
+      calls.push(input);
+      contacted();
+      await blocked;
+      return new Response(
+        JSON.stringify({ id: 4, html_url: 'https://github.com/a/b/issues/1#reply' }),
+        { status: 201 }
+      );
+    };
+    const options = { fetchImpl, credentials: credentials({ GITHUB_TOKEN: 'tok' }) };
+    const first = publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      githubPayload,
+      'inflight-one',
+      NOW,
+      options
+    );
+    try {
+      await received;
+      await expect(
+        publishCommunityReply(
+          db,
+          DEMO_WORKSPACE_ID,
+          {
+            ...githubPayload,
+            threadExternalId: 'other-issue',
+            threadUrl: 'https://github.com/a/b/issues/2'
+          },
+          'inflight-two',
+          NOW,
+          options
+        )
+      ).rejects.toThrow(/Cooldown active/);
+      expect(calls).toHaveLength(1);
+      const held = await db
+        .prepare(
+          "SELECT status FROM outreach_posts WHERE workspace_id=? AND payload_hash='inflight-one'"
+        )
+        .get<{ status: string }>(DEMO_WORKSPACE_ID);
+      expect(held?.status).toBe('pending');
+    } finally {
+      unblock();
+    }
+    expect((await first).status).toBe('posted');
+  });
+
+  it('honors a workspace deny added after approval before an API write or handoff', async () => {
+    const { fetchImpl, calls } = stubFetch(
+      () => new Response(JSON.stringify({ id: 1 }), { status: 201 })
+    );
+    await setCommunityPolicy({ effect: 'deny' });
+    const options = { fetchImpl, credentials: credentials({ GITHUB_TOKEN: 'tok' }) };
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'deny-github', NOW, options)
+    ).rejects.toThrow('Workspace policy denies community reply');
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, payload, 'deny-handoff', NOW, options)
+    ).rejects.toThrow('Workspace policy denies community reply');
+    expect(calls).toEqual([]);
+    const count = await db
+      .prepare(
+        "SELECT COUNT(*)::int AS total FROM outreach_posts WHERE workspace_id=? AND payload_hash IN ('deny-github','deny-handoff')"
+      )
+      .get<{ total: number }>(DEMO_WORKSPACE_ID);
+    expect(count?.total).toBe(0);
+  });
+
+  it('matches actor-scoped late policies against the original playbook actor', async () => {
+    const { fetchImpl, calls } = stubFetch(
+      () => new Response(JSON.stringify({ id: 2 }), { status: 201 })
+    );
+    await setCommunityPolicy({ effect: 'deny', actorTypes: ['agent'], name: 'Deny agents only' });
+    const options = { fetchImpl, credentials: credentials({ GITHUB_TOKEN: 'tok' }) };
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'agent-denied', NOW, {
+        ...options,
+        actorType: 'agent'
+      })
+    ).rejects.toThrow('Deny agents only');
+    expect(calls).toEqual([]);
+    const permitted = await publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      githubPayload,
+      'system-allowed',
+      NOW,
+      { ...options, actorType: 'system' }
+    );
+    expect(permitted.status).toBe('posted');
+    expect(calls).toHaveLength(1);
+  });
+
+  it('respects deny on the shared community action dispatcher with no outgoing effect', async () => {
+    await setCommunityPolicy({ effect: 'deny' });
+    const { executePreparedPlaybookAction } = await import('../control-plane/execution.js');
+    await expect(
+      executePreparedPlaybookAction(db, {
+        workspaceId: DEMO_WORKSPACE_ID,
+        actionType: 'community.reply',
+        payload,
+        payloadHash: 'dispatcher-policy-deny',
+        actorType: 'agent'
+      })
+    ).rejects.toThrow('Workspace policy denies community reply');
+    const count = await db
+      .prepare(
+        "SELECT COUNT(*)::int AS total FROM outreach_posts WHERE workspace_id=? AND payload_hash='dispatcher-policy-deny'"
+      )
+      .get<{ total: number }>(DEMO_WORKSPACE_ID);
+    expect(count?.total).toBe(0);
+  });
   it('never touches the network for a prepare-only platform', async () => {
     const { fetchImpl, calls } = stubFetch(() => new Response('{}', { status: 200 }));
     const result = await publishCommunityReply(db, DEMO_WORKSPACE_ID, payload, 'hash-1', NOW, {
@@ -103,12 +284,26 @@ describe('publishCommunityReply', () => {
 
     // The guard said no.
     await expect(
-      publishCommunityReply(db, DEMO_WORKSPACE_ID, { ...githubPayload, metadata: { safetyAllowed: false } }, 'h-blocked', NOW, options)
+      publishCommunityReply(
+        db,
+        DEMO_WORKSPACE_ID,
+        { ...githubPayload, metadata: { safetyAllowed: false } },
+        'h-blocked',
+        NOW,
+        options
+      )
     ).rejects.toThrow(/does not carry a passing safety verdict/);
 
     // A hand-built action that skipped the guard step entirely: fail closed.
     await expect(
-      publishCommunityReply(db, DEMO_WORKSPACE_ID, { ...githubPayload, metadata: undefined }, 'h-absent', NOW, options)
+      publishCommunityReply(
+        db,
+        DEMO_WORKSPACE_ID,
+        { ...githubPayload, metadata: undefined },
+        'h-absent',
+        NOW,
+        options
+      )
     ).rejects.toThrow(/does not carry a passing safety verdict/);
 
     expect(calls).toEqual([]);
@@ -116,12 +311,23 @@ describe('publishCommunityReply', () => {
 
   it('posts to GitHub and logs the delivery', async () => {
     const { fetchImpl, calls } = stubFetch(
-      () => new Response(JSON.stringify({ id: 99, html_url: 'https://github.com/a/b/issues/1#issuecomment-99' }), { status: 201 })
+      () =>
+        new Response(
+          JSON.stringify({ id: 99, html_url: 'https://github.com/a/b/issues/1#issuecomment-99' }),
+          { status: 201 }
+        )
     );
-    const result = await publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-gh', NOW, {
-      credentials: credentials({ GITHUB_TOKEN: 'tok' }),
-      fetchImpl
-    });
+    const result = await publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      githubPayload,
+      'hash-gh',
+      NOW,
+      {
+        credentials: credentials({ GITHUB_TOKEN: 'tok' }),
+        fetchImpl
+      }
+    );
 
     expect(calls).toEqual(['https://api.github.com/repos/a/b/issues/1/comments']);
     expect(result.status).toBe('posted');
@@ -129,11 +335,30 @@ describe('publishCommunityReply', () => {
   });
 
   it('is idempotent per approved payload: a retried action does not comment twice', async () => {
-    const { fetchImpl, calls } = stubFetch(() => new Response(JSON.stringify({ id: 99, html_url: 'https://example.test/c' }), { status: 201 }));
+    const { fetchImpl, calls } = stubFetch(
+      () =>
+        new Response(JSON.stringify({ id: 99, html_url: 'https://example.test/c' }), {
+          status: 201
+        })
+    );
     const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
 
-    const first = await publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-same', NOW, options);
-    const second = await publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-same', NOW, options);
+    const first = await publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      githubPayload,
+      'hash-same',
+      NOW,
+      options
+    );
+    const second = await publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      githubPayload,
+      'hash-same',
+      NOW,
+      options
+    );
 
     expect(first.duplicate).toBe(false);
     expect(second.duplicate).toBe(true);
@@ -148,11 +373,15 @@ describe('publishCommunityReply', () => {
       attempt += 1;
       return attempt === 1
         ? new Response('rate limited', { status: 403 })
-        : new Response(JSON.stringify({ id: 5, html_url: 'https://example.test/ok' }), { status: 201 });
+        : new Response(JSON.stringify({ id: 5, html_url: 'https://example.test/ok' }), {
+            status: 201
+          });
     };
     const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
 
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-retry', NOW, options)).rejects.toThrow(/403/);
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-retry', NOW, options)
+    ).rejects.toThrow(/403/);
 
     const failed = await db
       .prepare('SELECT status FROM outreach_posts WHERE workspace_id=? AND payload_hash=?')
@@ -160,7 +389,14 @@ describe('publishCommunityReply', () => {
     // A 403 means nothing was published, so the claim is released.
     expect(failed?.status).toBe('failed');
 
-    const retried = await publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-retry', NOW, options);
+    const retried = await publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      githubPayload,
+      'hash-retry',
+      NOW,
+      options
+    );
     expect(retried.status).toBe('posted');
     expect(attempt).toBe(2);
   });
@@ -175,9 +411,9 @@ describe('publishCommunityReply', () => {
     };
     const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
 
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-lost', NOW, options)).rejects.toThrow(
-      /outcome is unknown/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-lost', NOW, options)
+    ).rejects.toThrow(/outcome is unknown/);
 
     const held = await db
       .prepare('SELECT status, error FROM outreach_posts WHERE workspace_id=? AND payload_hash=?')
@@ -187,9 +423,9 @@ describe('publishCommunityReply', () => {
 
     // The decisive assertion: the retry makes no second request, and it does
     // NOT report a handoff -- that would send a human to post the same reply.
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-lost', NOW, options)).rejects.toThrow(
-      /is unresolved .*settle post/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-lost', NOW, options)
+    ).rejects.toThrow(/is unresolved .*settle post/);
     expect(attempt).toBe(1);
   });
 
@@ -201,9 +437,9 @@ describe('publishCommunityReply', () => {
     };
     const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
 
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-502', NOW, options)).rejects.toThrow(
-      /outcome is unknown/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-502', NOW, options)
+    ).rejects.toThrow(/outcome is unknown/);
 
     const held = await db
       .prepare('SELECT status FROM outreach_posts WHERE workspace_id=? AND payload_hash=?')
@@ -211,30 +447,38 @@ describe('publishCommunityReply', () => {
     // A gateway error is not evidence the origin skipped the comment.
     expect(held?.status).toBe('pending');
 
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-502', NOW, options)).rejects.toThrow(
-      /unresolved/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-502', NOW, options)
+    ).rejects.toThrow(/unresolved/);
     expect(attempt).toBe(1);
   });
 
   it('does not release the claim when recording a SUCCESSFUL post fails', async () => {
     // The comment is public; only the bookkeeping failed. Releasing the claim
     // here is what would let the engine's retry post a second one.
-    const { fetchImpl, calls } = stubFetch(() => new Response(JSON.stringify({ id: 7, html_url: 'https://gh.test/c7' }), { status: 201 }));
+    const { fetchImpl, calls } = stubFetch(
+      () => new Response(JSON.stringify({ id: 7, html_url: 'https://gh.test/c7' }), { status: 201 })
+    );
     const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
 
     const realPrepare = db.prepare.bind(db);
     let broken = true;
     db.prepare = ((sql: string) => {
       if (broken && sql.includes('UPDATE outreach_posts SET status=')) {
-        return { get: async () => undefined, all: async () => [], run: async () => { throw new Error('connection terminated unexpectedly'); } };
+        return {
+          get: async () => undefined,
+          all: async () => [],
+          run: async () => {
+            throw new Error('connection terminated unexpectedly');
+          }
+        };
       }
       return realPrepare(sql);
     }) as typeof db.prepare;
 
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-settle', NOW, options)).rejects.toThrow(
-      /connection terminated/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-settle', NOW, options)
+    ).rejects.toThrow(/connection terminated/);
     broken = false;
 
     const row = await db
@@ -243,9 +487,9 @@ describe('publishCommunityReply', () => {
     expect(row?.status).toBe('pending');
 
     // The decisive assertion: the retry refuses rather than posting again.
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-settle', NOW, options)).rejects.toThrow(
-      /unresolved/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-settle', NOW, options)
+    ).rejects.toThrow(/unresolved/);
     expect(calls).toHaveLength(1);
   });
 
@@ -256,13 +500,16 @@ describe('publishCommunityReply', () => {
     const posted: string[] = [];
     const fetchImpl: FetchLike = async (input, init) => {
       posted.push(String(init?.body ?? ''));
-      return new Response('', { status: 307, headers: { location: 'https://api.github.com/repos/a/b/issues/1/comments?v=2' } });
+      return new Response('', {
+        status: 307,
+        headers: { location: 'https://api.github.com/repos/a/b/issues/1/comments?v=2' }
+      });
     };
     const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
 
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-redirect', NOW, options)).rejects.toThrow(
-      /outcome is unknown/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-redirect', NOW, options)
+    ).rejects.toThrow(/outcome is unknown/);
 
     // Exactly one write escaped the process.
     expect(posted).toHaveLength(1);
@@ -273,16 +520,20 @@ describe('publishCommunityReply', () => {
     // A redirect means the request went out; the outcome is unknown, so hold.
     expect(held?.status).toBe('pending');
 
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-redirect', NOW, options)).rejects.toThrow(
-      /unresolved/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-redirect', NOW, options)
+    ).rejects.toThrow(/unresolved/);
     expect(posted).toHaveLength(1);
   });
 
   it('holds the claim when an accepted write returns a body that is not an object', async () => {
     // `null` parses as valid JSON, then reading `.id` off it throws a bare
     // TypeError -- which must not be mistaken for "the platform refused".
-    for (const [label, body] of [['null', 'null'], ['array', '[]'], ['number', '7']] as const) {
+    for (const [label, body] of [
+      ['null', 'null'],
+      ['array', '[]'],
+      ['number', '7']
+    ] as const) {
       const calls: string[] = [];
       const fetchImpl: FetchLike = async (input) => {
         calls.push(input);
@@ -292,17 +543,23 @@ describe('publishCommunityReply', () => {
       const hash = `hash-body-${label}`;
       // A distinct community per case: the held claim from the previous
       // iteration would otherwise trip the 48h cooldown and mask the result.
-      const target = { ...githubPayload, community: `acme/${label}`, threadUrl: `https://github.com/acme/${label}/issues/1` };
+      const target = {
+        ...githubPayload,
+        community: `acme/${label}`,
+        threadUrl: `https://github.com/acme/${label}/issues/1`
+      };
 
-      await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, target, hash, NOW, options)).rejects.toThrow(
-        /outcome is unknown/
-      );
+      await expect(
+        publishCommunityReply(db, DEMO_WORKSPACE_ID, target, hash, NOW, options)
+      ).rejects.toThrow(/outcome is unknown/);
       const row = await db
         .prepare('SELECT status FROM outreach_posts WHERE workspace_id=? AND payload_hash=?')
         .get<{ status: string }>(DEMO_WORKSPACE_ID, hash);
       expect(row?.status, `2xx body ${label} must hold the claim`).toBe('pending');
 
-      await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, target, hash, NOW, options)).rejects.toThrow(/unresolved/);
+      await expect(
+        publishCommunityReply(db, DEMO_WORKSPACE_ID, target, hash, NOW, options)
+      ).rejects.toThrow(/unresolved/);
       expect(calls, `2xx body ${label} must not be retried`).toHaveLength(1);
     }
   });
@@ -315,9 +572,9 @@ describe('publishCommunityReply', () => {
     };
     const options = { credentials: credentials({ GITHUB_TOKEN: 'tok' }), fetchImpl };
 
-    await expect(publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-408', NOW, options)).rejects.toThrow(
-      /outcome is unknown/
-    );
+    await expect(
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-408', NOW, options)
+    ).rejects.toThrow(/outcome is unknown/);
     const row = await db
       .prepare('SELECT status FROM outreach_posts WHERE workspace_id=? AND payload_hash=?')
       .get<{ status: string }>(DEMO_WORKSPACE_ID, 'hash-408');
@@ -329,13 +586,27 @@ describe('publishCommunityReply', () => {
     const { fetchImpl } = stubFetch(() => new Response('{}', { status: 200 }));
     const options = { credentials: credentials({}), fetchImpl };
 
-    const first = await publishCommunityReply(db, DEMO_WORKSPACE_ID, payload, 'hash-hand', NOW, options);
+    const first = await publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      payload,
+      'hash-hand',
+      NOW,
+      options
+    );
     expect(first.status).toBe('manual_handoff');
 
     // Second execution of the same approved payload: the existingPost branch
     // catches it. A person pasting the reply twice is as much a duplicate as a
     // process posting it twice.
-    const second = await publishCommunityReply(db, DEMO_WORKSPACE_ID, payload, 'hash-hand', NOW, options);
+    const second = await publishCommunityReply(
+      db,
+      DEMO_WORKSPACE_ID,
+      payload,
+      'hash-hand',
+      NOW,
+      options
+    );
     expect(second.duplicate).toBe(true);
     expect(second.postId).toBe(first.postId);
   });
@@ -343,7 +614,10 @@ describe('publishCommunityReply', () => {
   it('requires the platform credential before it will post', async () => {
     const { fetchImpl } = stubFetch(() => new Response('{}', { status: 201 }));
     await expect(
-      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-nocred', NOW, { credentials: credentials({}), fetchImpl })
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, githubPayload, 'hash-nocred', NOW, {
+        credentials: credentials({}),
+        fetchImpl
+      })
     ).rejects.toThrow(/GITHUB_TOKEN is required/);
   });
 
@@ -370,7 +644,10 @@ describe('publishCommunityReply', () => {
     }
     const { fetchImpl } = stubFetch(() => new Response('{}', { status: 200 }));
     await expect(
-      publishCommunityReply(db, DEMO_WORKSPACE_ID, payload, 'hash-capped', NOW, { credentials: credentials({}), fetchImpl })
+      publishCommunityReply(db, DEMO_WORKSPACE_ID, payload, 'hash-capped', NOW, {
+        credentials: credentials({}),
+        fetchImpl
+      })
     ).rejects.toThrow(/Daily cap reached/);
   });
 });
@@ -387,7 +664,11 @@ describe('community.reply action routing', () => {
       payloadHash: 'hash-routed'
     });
 
-    expect(result).toEqual({ provider: 'manual-handoff', externalRef: payload.threadUrl, actionType: 'community.reply' });
+    expect(result).toEqual({
+      provider: 'manual-handoff',
+      externalRef: payload.threadUrl,
+      actionType: 'community.reply'
+    });
     const row = await db
       .prepare('SELECT status FROM outreach_posts WHERE workspace_id=? AND payload_hash=?')
       .get<{ status: string }>(DEMO_WORKSPACE_ID, 'hash-routed');
@@ -406,7 +687,9 @@ describe('community.reply action routing', () => {
     ).rejects.toThrow();
 
     const row = await db
-      .prepare('SELECT COUNT(*)::int AS total FROM outreach_posts WHERE workspace_id=? AND payload_hash=?')
+      .prepare(
+        'SELECT COUNT(*)::int AS total FROM outreach_posts WHERE workspace_id=? AND payload_hash=?'
+      )
       .get<{ total: number }>(DEMO_WORKSPACE_ID, 'hash-bad');
     expect(row?.total).toBe(0);
   });
@@ -433,7 +716,9 @@ describe('assertPostingWindow', () => {
         NOW
       );
     }
-    await expect(assertPostingWindow(db, DEMO_WORKSPACE_ID, 'github', 'a/b', NOW)).rejects.toThrow(/Daily cap reached/);
+    await expect(assertPostingWindow(db, DEMO_WORKSPACE_ID, 'github', 'a/b', NOW)).rejects.toThrow(
+      /Daily cap reached/
+    );
   });
 
   it('refuses to post into a community whose cooldown started after approval', async () => {
@@ -454,10 +739,14 @@ describe('assertPostingWindow', () => {
       },
       new Date(NOW.getTime() - 3_600_000)
     );
-    await expect(assertPostingWindow(db, DEMO_WORKSPACE_ID, 'github', 'a/b', NOW)).rejects.toThrow(/Cooldown active/);
+    await expect(assertPostingWindow(db, DEMO_WORKSPACE_ID, 'github', 'a/b', NOW)).rejects.toThrow(
+      /Cooldown active/
+    );
   });
 
   it('allows a post inside both windows', async () => {
-    await expect(assertPostingWindow(db, DEMO_WORKSPACE_ID, 'github', 'a/b', NOW)).resolves.toBeUndefined();
+    await expect(
+      assertPostingWindow(db, DEMO_WORKSPACE_ID, 'github', 'a/b', NOW)
+    ).resolves.toBeUndefined();
   });
 });

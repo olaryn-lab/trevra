@@ -44,6 +44,10 @@ export async function executePreparedPlaybookAction(
     actionType: ExecutionActionType | string;
     payload: unknown;
     payloadHash: string;
+    /** Original run context is required for actor-scoped last-boundary policy. */
+    actorType?: string;
+    actorId?: string | null;
+    playbookId?: string;
   }
 ): Promise<{ provider: string; externalRef: string; actionType: ExecutionActionType }> {
   const actionType = actionTypeSchema.parse(input.actionType);
@@ -141,7 +145,8 @@ export async function executePreparedPlaybookAction(
       input.workspaceId,
       payload,
       input.payloadHash,
-      now
+      now,
+      { actorType: input.actorType, actorId: input.actorId, playbookId: input.playbookId }
     );
 
     // CRM mirroring happens after the public reply. It is best-effort so a CRM
