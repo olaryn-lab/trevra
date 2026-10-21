@@ -225,7 +225,8 @@ export type SecretStore =
   | 'linkedin_seat_sessions'
   | 'linkedin_seat_proxy_secrets'
   | 'capture_source_secrets'
-  | 'provider_webhook_endpoints';
+  | 'provider_webhook_endpoints'
+  | 'outbound_webhook_subscriptions';
 
 /**
  * The seat component for a row with no seat dimension.

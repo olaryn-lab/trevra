@@ -990,6 +990,51 @@ describe('inbox routes (031)', () => {
     expect(read.messages).toEqual([]);
   });
 
+  it('searches names, URLs and snippets server-side with paging and strict workspace scope', async () => {
+    await thread(WORKSPACE_A, 'urn:alpha');
+    await thread(WORKSPACE_A, 'urn:beta');
+    await thread(WORKSPACE_B, 'urn:foreign');
+    await db
+      .prepare(
+        `UPDATE linkedin_threads SET name=CASE WHEN thread_urn='urn:alpha' THEN 'Dripify Switcher'
+        ELSE 'Other Person' END, snippet='pricing request'
+       WHERE workspace_id=?`
+      )
+      .run(WORKSPACE_A);
+    const first = (
+      await as(sessionA)
+        .get('/api/linkedin/inbox/threads')
+        .query({ search: 'pricing', limit: 1, offset: 0 })
+        .expect(200)
+    ).body as {
+      threads: Array<{ threadUrn: string }>;
+    };
+    const second = (
+      await as(sessionA)
+        .get('/api/linkedin/inbox/threads')
+        .query({ search: 'pricing', limit: 1, offset: 1 })
+        .expect(200)
+    ).body as {
+      threads: Array<{ threadUrn: string }>;
+    };
+    expect(first.threads).toHaveLength(1);
+    expect(second.threads).toHaveLength(1);
+    expect(first.threads[0]?.threadUrn).not.toBe(second.threads[0]?.threadUrn);
+    const name = (
+      await as(sessionA).get('/api/linkedin/inbox/threads').query({ search: 'dripify' }).expect(200)
+    ).body as { threads: Array<{ threadUrn: string }> };
+    expect(name.threads.map((t) => t.threadUrn)).toEqual(['urn:alpha']);
+    const foreign = (
+      await as(sessionB).get('/api/linkedin/inbox/threads').query({ search: 'Dripify' }).expect(200)
+    ).body as { threads: unknown[] };
+    expect(foreign.threads).toEqual([]);
+    await as(sessionA).get('/api/linkedin/inbox/threads').query({ offset: -1 }).expect(400);
+    await as(sessionA)
+      .get('/api/linkedin/inbox/threads')
+      .query({ search: 'a'.repeat(121) })
+      .expect(400);
+  });
+
   it("cannot read, sync or answer another workspace's conversation", async () => {
     await thread(WORKSPACE_A, '2-maya==');
     await as(sessionB).get('/api/linkedin/inbox/threads/2-maya==').expect(404);
@@ -1960,6 +2005,71 @@ describe('account (seat) scoping', () => {
   });
 });
 
+describe('Withdrawal policy approvals', () => {
+  it('requires exact owner review and never exposes another workspace invite', async () => {
+    const tokenA = await seedSession(WORKSPACE_A, 'Withdraw approval A');
+    const tokenB = await seedSession(WORKSPACE_B, 'Withdraw approval B');
+    await seat(WORKSPACE_A);
+    await seat(WORKSPACE_B);
+    const target = 'https://www.linkedin.com/in/withdraw-review-http/';
+    const written = await recordAction(
+      db,
+      {
+        workspaceId: WORKSPACE_A,
+        kind: 'invite',
+        targetRef: target,
+        status: 'sent',
+        source: 'export'
+      },
+      new Date(NOW.getTime() - 40 * 86400000)
+    );
+    const withdrawalId = `lwd_api_${randomBytes(6).toString('hex')}`;
+    await db
+      .prepare(
+        `INSERT INTO linkedin_withdrawals(
+        id,workspace_id,seat_key,action_id,target_ref,status,pending_days)
+       VALUES (?,?,'owner',?,?,'queued',40)`
+      )
+      .run(withdrawalId, WORKSPACE_A, written.id, target);
+    const path = '/api/linkedin/withdrawals/approvals';
+    expect((await as(tokenB).get(path).expect(200)).body.reviews).toEqual([]);
+    await as(tokenB)
+      .post(`${path}/${withdrawalId}`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(404);
+    await as(tokenB).get(`${path}/${withdrawalId}/audit`).expect(404);
+    const review = (await as(tokenA).get(path).expect(200)).body.reviews[0];
+    expect(review).toMatchObject({
+      withdrawalId,
+      targetRef: target,
+      approved: false,
+      policy: { effect: 'require_approval' }
+    });
+    await as(tokenA)
+      .post(`${path}/${withdrawalId}`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(409);
+    await as(tokenA)
+      .post(`${path}/${withdrawalId}`)
+      .send({ contentHash: review.contentHash })
+      .expect(200);
+    expect((await as(tokenA).get(path).expect(200)).body.reviews).toEqual([]);
+    expect((await as(tokenA).get(`${path}/${withdrawalId}/audit`).expect(200)).body.events).toEqual(
+      [
+        expect.objectContaining({
+          decision: 'approved',
+          contentHash: review.contentHash,
+          actorId: `usr_${WORKSPACE_A}`
+        })
+      ]
+    );
+    await db
+      .prepare('UPDATE linkedin_actions SET status=? WHERE workspace_id=? AND id=?')
+      .run('accepted', WORKSPACE_A, written.id);
+    expect((await as(tokenA).get(path).expect(200)).body.reviews).toEqual([]);
+  });
+});
+
 describe('LinkedIn posts', () => {
   const BLOCKS = [{ runs: [{ type: 'text', text: 'Hello world' }] }];
 
@@ -1994,6 +2104,63 @@ describe('LinkedIn posts', () => {
       .post('/api/linkedin/posts')
       .send({ blocks: [{ runs: [{ type: 'text', text: 'x'.repeat(3001) }] }] });
     expect(tooLong.status).toBe(400);
+  });
+
+  it('scopes scheduled-post approval, rejects stale hashes and invalidates after edit', async () => {
+    const tokenA = await seedSession(WORKSPACE_A, 'Post owner A');
+    const tokenB = await seedSession(WORKSPACE_B, 'Post owner B');
+    await seat(WORKSPACE_A);
+    await seat(WORKSPACE_B);
+    const created = await as(tokenA)
+      .post('/api/linkedin/posts')
+      .send({
+        blocks: [{ runs: [{ type: 'text', text: 'Exact approved content' }] }],
+        status: 'scheduled',
+        scheduledAt: new Date(Date.now() + 600000).toISOString()
+      })
+      .expect(200);
+    const postId = created.body.post.id as string;
+    const path = `/api/linkedin/posts/${postId}`;
+    await as(tokenB).get(`${path}/review`).expect(404);
+    await as(tokenB).get(`${path}/audit`).expect(404);
+    await as(tokenB)
+      .post(`${path}/approve`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(404);
+    const review = (await as(tokenA).get(`${path}/review`).expect(200)).body.review;
+    expect(review).toMatchObject({
+      body: 'Exact approved content',
+      approved: false,
+      policy: { effect: 'require_approval' }
+    });
+    await as(tokenA)
+      .post(`${path}/approve`)
+      .send({ contentHash: '0'.repeat(64) })
+      .expect(409);
+    await as(tokenA).post(`${path}/approve`).send({ contentHash: review.contentHash }).expect(200);
+    expect((await as(tokenA).get(`${path}/review`).expect(200)).body.review.approved).toBe(true);
+    expect((await as(tokenA).get(`${path}/audit`).expect(200)).body.events).toEqual([
+      expect.objectContaining({ decision: 'approved', contentHash: review.contentHash })
+    ]);
+    await as(tokenA)
+      .patch(path)
+      .send({ blocks: [{ runs: [{ type: 'text', text: 'Changed after approval' }] }] })
+      .expect(200);
+    expect((await as(tokenA).get(`${path}/review`).expect(200)).body.review.approved).toBe(false);
+    const media = (
+      await as(tokenA)
+        .post(`${path}/media`)
+        .set('Content-Type', 'image/png')
+        .send(Buffer.from([1, 2, 3]))
+        .expect(201)
+    ).body.post.media;
+    expect(media).toHaveLength(1);
+    const imageId = media[0].id as string;
+    await as(tokenB).get(`${path}/media/${imageId}`).expect(404);
+    const own = await as(tokenA).get(`${path}/media/${imageId}`).expect(200);
+    expect(own.headers['content-type']).toContain('image/png');
+    expect(own.headers['cache-control']).toContain('no-store');
+    expect(Buffer.from(own.body).equals(Buffer.from([1, 2, 3]))).toBe(true);
   });
 
   it('publish-now sets scheduledAt to now and status to scheduled -- never synchronously posted', async () => {

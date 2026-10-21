@@ -25,6 +25,7 @@ import {
   runManagedCampaignsForAllWorkspaces
 } from './runner.js';
 import { postgresLocalWorkerStore } from './local-worker.js';
+import { addExclusions } from './exclusions.js';
 import { upsertSeat } from './seats.js';
 import { BOOKING_LINK_MISSING_MESSAGE, getWorkflow, saveWorkflow } from './workflows.js';
 import { setBookingUrl } from '../meetings/booking-link.js';
@@ -221,6 +222,63 @@ describe('managed campaign runner', () => {
         ])
       )
     ).toEqual({ high: 0, low: 0, normal: 1 });
+  });
+
+  it('holds the assigned A/B arm when its merge data is missing, then queues a safe selected arm', async () => {
+    const listId = await seededList('Variant variable coverage', [
+      { first: 'Maya', last: 'Smith', company: 'Acme', slug: 'variant-maya' }
+    ]);
+    const workflowId = (
+      await saveWorkflow(
+        db,
+        {
+          workspaceId: WORKSPACE,
+          name: 'Variable-specific A/B gating',
+          steps: [
+            {
+              id: 'invite',
+              action: 'connection_request',
+              delayBefore: { amount: 0, unit: 'hours' },
+              config: {
+                variants: [
+                  { id: 'safe', body: 'Hi {{first_name}}', weight: 50 },
+                  { id: 'needs-phone', body: 'Call {{phone}}', weight: 50 }
+                ]
+              }
+            }
+          ]
+        },
+        NOW
+      )
+    ).id;
+    const campaignId = await runningCampaign(listId, workflowId, 'Variable-specific A/B gating');
+    const [member] = await members(campaignId);
+    expect(member).toBeDefined();
+    await db
+      .prepare(
+        'UPDATE linkedin_campaign_members SET assigned_variants=?::jsonb WHERE workspace_id=? AND id=?'
+      )
+      .run(JSON.stringify({ invite: 'needs-phone' }), WORKSPACE, member.id);
+
+    expect((await runManagedCampaigns(db, WORKSPACE, NOW)).actionsPlanned).toBe(0);
+    expect(await actions()).toHaveLength(0);
+    const blocked = await db
+      .prepare(
+        'SELECT branch_state_json FROM linkedin_campaign_members WHERE workspace_id=? AND id=?'
+      )
+      .get<{ branch_state_json: Record<string, unknown> }>(WORKSPACE, member.id);
+    expect(JSON.stringify(blocked?.branch_state_json)).toContain('missing_variable:phone');
+
+    // An operator changes the selected variant while the action is not queued.
+    // The next tick must not inherit the unselected arm's phone requirement.
+    await db
+      .prepare(
+        'UPDATE linkedin_campaign_members SET assigned_variants=?::jsonb WHERE workspace_id=? AND id=?'
+      )
+      .run(JSON.stringify({ invite: 'safe' }), WORKSPACE, member.id);
+    expect((await runManagedCampaigns(db, WORKSPACE, at(HOUR))).actionsPlanned).toBe(1);
+    const planned = (await actions()).find((item) => item.workflow_step_id === 'invite');
+    expect(planned).toMatchObject({ body: 'Hi Maya', variant_id: 'safe', status: 'planned' });
   });
 
   it('queues a small amount of active outreach during the first account warm-up week', async () => {
@@ -1807,6 +1865,97 @@ describe('managed campaign runner', () => {
       )
       .all<{ status: string; reason: string | null }>(WORKSPACE, made.campaign.id);
     expect(blocked).toEqual([{ status: 'waiting', reason: BOOKING_LINK_MISSING_MESSAGE }]);
+  });
+
+  it('cancels already queued outreach when a lead is added to Never contact', async () => {
+    const listId = await seededList('Late never contact', [
+      { first: 'Luca', last: 'NoContact', company: 'Acme', slug: 'luca-nevercontact' }
+    ]);
+    const workflow = await saveWorkflow(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        name: 'Never contact gate',
+        steps: [
+          {
+            id: 'invite',
+            action: 'connection_request',
+            delayBefore: { amount: 0, unit: 'hours' },
+            config: { message: 'Hello {{first_name}}' }
+          }
+        ]
+      },
+      NOW
+    );
+    const campaignId = await runningCampaign(listId, workflow.id, 'Never contact runtime');
+    await runManagedCampaigns(db, WORKSPACE, NOW);
+    const planned = (await actions()).filter(
+      (action) => action.campaign_member_id && action.kind === 'invite'
+    );
+    expect(planned).toHaveLength(1);
+    expect(planned[0].status).toBe('planned');
+    await addExclusions(
+      db,
+      WORKSPACE,
+      [
+        {
+          targetRef: 'https://linkedin.com/in/luca-nevercontact/?tracking=1',
+          reason: 'Asked to be left alone'
+        }
+      ],
+      NOW
+    );
+    const members = await listCampaignMembers(db, WORKSPACE, campaignId);
+    expect(members[0]?.status).toBe('excluded');
+    expect((await actions()).find((action) => action.id === planned[0].id)?.status).toBe('skipped');
+    const tick = await runManagedCampaigns(db, WORKSPACE, at(HOUR));
+    expect(tick.actionsPlanned).toBe(0);
+  });
+
+  it('holds a missing personalization value and resumes when the contact is enriched', async () => {
+    const listId = await seededList('Missing phone', [
+      { first: 'Maya', last: 'Phone', company: 'Acme', slug: 'maya-phone' }
+    ]);
+    const workflow = await saveWorkflow(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        name: 'Required phone',
+        steps: [
+          {
+            id: 'manual',
+            action: 'manual_message',
+            delayBefore: { amount: 0, unit: 'hours' },
+            config: { suggestedTemplate: 'Hi {{first_name}}, call {{phone}}.' }
+          }
+        ]
+      },
+      NOW
+    );
+    const campaignId = await runningCampaign(listId, workflow.id, 'No blank phone');
+    const first = await runManagedCampaigns(db, WORKSPACE, NOW);
+    expect(first.manualTasksCreated).toBe(0);
+    expect(first.membersBlocked).toBe(1);
+    expect(await listManualTasks(db, WORKSPACE)).toEqual([]);
+    const blocked = await db
+      .prepare(
+        `SELECT branch_state_json->'blocked:manual'->>'reason' AS reason
+       FROM linkedin_campaign_members WHERE workspace_id=? AND campaign_id=?`
+      )
+      .all<{ reason: string | null }>(WORKSPACE, campaignId);
+    expect(blocked).toEqual([{ reason: 'missing_variable:phone' }]);
+    await db
+      .prepare(
+        `UPDATE linkedin_lead_contacts SET phone='+41 555 0100' WHERE workspace_id=?
+       AND id=(SELECT contact_id FROM linkedin_campaign_members WHERE workspace_id=? AND campaign_id=? LIMIT 1)`
+      )
+      .run(WORKSPACE, WORKSPACE, campaignId);
+    const resumed = await runManagedCampaigns(db, WORKSPACE, at(HOUR + 60_000));
+    expect(resumed.manualTasksCreated).toBe(1);
+    const tasks = await listManualTasks(db, WORKSPACE);
+    expect(tasks.find((task) => task.campaignId === campaignId)?.suggestedBody).toBe(
+      'Hi Maya, call +41 555 0100.'
+    );
   });
 
   it('checks the booking link against the steps the campaign runs, not the library workflow', async () => {

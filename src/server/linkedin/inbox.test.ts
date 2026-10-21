@@ -184,6 +184,81 @@ describe('targetRefCandidates', () => {
 });
 
 describe('syncThreads', () => {
+  it('searches the entire stored inbox beyond 500, scopes tenants and pages without duplicates', async () => {
+    const records = Array.from({ length: 505 }, (_, index) =>
+      summary({
+        threadUrn: `urn:search-${index}`,
+        profileUrl: `https://www.linkedin.com/in/search-person-${index}/`,
+        name: index === 504 ? 'Hidden Dripify Switcher' : `Prospect ${index}`,
+        snippet: index === 504 ? 'Please discuss pricing soon' : 'Just a routine message',
+        lastMessageAt: new Date(NOW.getTime() - index * 60_000).toISOString()
+      })
+    );
+    await syncThreads(db, { workspaceId: WORKSPACE_ID, threads: records }, NOW);
+    expect(await listThreads(db, WORKSPACE_ID, { limit: 500 })).toHaveLength(500);
+    expect(
+      (await listThreads(db, WORKSPACE_ID, { limit: 500 })).some(
+        (thread) => thread.name === 'Hidden Dripify Switcher'
+      )
+    ).toBe(false);
+
+    const name = await listThreads(db, WORKSPACE_ID, { search: 'dRiPiFy' });
+    expect(name.map((thread) => thread.name)).toEqual(['Hidden Dripify Switcher']);
+    expect(
+      (await listThreads(db, WORKSPACE_ID, { search: 'search-person-504' })).map(
+        (thread) => thread.threadUrn
+      )
+    ).toEqual(['urn:search-504']);
+    expect(
+      (await listThreads(db, WORKSPACE_ID, { search: 'pricing soon' })).map(
+        (thread) => thread.threadUrn
+      )
+    ).toEqual(['urn:search-504']);
+
+    const first = await listThreads(db, WORKSPACE_ID, {
+      search: 'Prospect',
+      limit: 100,
+      offset: 0
+    });
+    const second = await listThreads(db, WORKSPACE_ID, {
+      search: 'Prospect',
+      limit: 100,
+      offset: 100
+    });
+    expect(first).toHaveLength(100);
+    expect(second).toHaveLength(100);
+    expect(first[99].threadUrn).not.toBe(second[0].threadUrn);
+    expect(new Set([...first, ...second].map((thread) => thread.threadUrn)).size).toBe(200);
+    expect(await listThreads(db, OTHER_WORKSPACE_ID, { search: 'Dripify' })).toEqual([]);
+  });
+
+  it('treats percent and underscore in a search query literally', async () => {
+    await syncThreads(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        threads: [
+          summary({
+            threadUrn: 'urn:literal',
+            name: '100%_customer',
+            profileUrl: 'https://linkedin.com/in/literal/'
+          }),
+          summary({
+            threadUrn: 'urn:other',
+            name: '100XXcustomer',
+            profileUrl: 'https://linkedin.com/in/other/'
+          })
+        ]
+      },
+      NOW
+    );
+    expect(
+      (await listThreads(db, WORKSPACE_ID, { search: '100%_customer' })).map(
+        (thread) => thread.threadUrn
+      )
+    ).toEqual(['urn:literal']);
+  });
+
   it('is keyed by conversation id, so a second sync updates instead of duplicating', async () => {
     const first = await syncThreads(db, { workspaceId: WORKSPACE_ID, threads: [summary()] }, NOW);
     expect(first.created).toBe(1);

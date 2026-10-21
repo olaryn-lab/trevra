@@ -937,6 +937,9 @@ export interface ThreadFilters {
   campaignId?: string;
   seatKey?: string;
   limit?: number;
+  /** Search all stored threads before pagination, never the first 500 only. */
+  search?: string;
+  offset?: number;
 }
 
 /**
@@ -971,7 +974,16 @@ export async function listThreads(
       `${filters.hasReply ? 'EXISTS' : 'NOT EXISTS'} (SELECT 1 FROM linkedin_messages m WHERE m.thread_id = t.id AND m.direction = 'in')`
     );
   }
+  const search = filters.search?.trim().slice(0, 120) ?? '';
+  if (search) {
+    // Escape LIKE wildcards to treat an imported name containing % or _ literally.
+    const escaped = search.toLowerCase().replace(/[\\%_]/g, '\\$&');
+    clauses.push(`LOWER(COALESCE(t.name,'') || ' ' ||
+      COALESCE(t.profile_url,'') || ' ' || COALESCE(t.snippet,'')) LIKE ?`);
+    params.push(`%${escaped}%`);
+  }
   params.push(Math.max(1, Math.min(filters.limit ?? 100, 500)));
+  params.push(Math.max(0, Math.min(filters.offset ?? 0, 100_000)));
 
   const rows = await db
     .prepare(
@@ -979,7 +991,7 @@ export async function listThreads(
     SELECT ${THREAD_COLUMNS} FROM linkedin_threads t
     WHERE ${clauses.join(' AND ')}
     ORDER BY t.last_message_at DESC NULLS LAST, t.id DESC
-    LIMIT ?
+    LIMIT ? OFFSET ?
   `
     )
     .all<ThreadRow>(...params);

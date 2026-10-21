@@ -4,7 +4,8 @@ import {
   HUNTER_CREDIT_PRICE,
   type ContactEnrichmentProvider,
   type EnrichmentCandidate,
-  type EmailVerificationStatus
+  type EmailVerificationStatus,
+  type PersonEmailFinderResult
 } from './provider.js';
 
 /**
@@ -174,6 +175,60 @@ export function createHunterProvider(
         if (candidates.length >= cap) break;
       }
       return { credits: raw.length * HUNTER_CREDIT_PRICE.perEmailFound, candidates };
+    },
+
+    async findEmail(input): Promise<PersonEmailFinderResult> {
+      const first = input.firstName.trim();
+      const last = input.lastName.trim();
+      const company = input.company.trim();
+      let linkedinHandle = '';
+      if (input.profileUrl) {
+        try {
+          const url = new URL(input.profileUrl);
+          if (['linkedin.com', 'www.linkedin.com'].includes(url.hostname.toLowerCase()))
+            linkedinHandle = url.pathname.match(/^\/in\/([^/]+)/i)?.[1] ?? '';
+        } catch {
+          /* treat unrecognized profiles as absent, never forward arbitrary URLs */
+        }
+      }
+      if (!linkedinHandle && (!first || !last || !company))
+        return { email: null, confidence: null, verificationStatus: null, credits: 0 };
+      // Found-only endpoint: never silently persist Hunter's inferred emails.
+      // The customer's API key stays only in X-API-KEY, never the query string.
+      const params: Record<string, string> = linkedinHandle
+        ? { linkedin_handle: linkedinHandle }
+        : { company, first_name: first, last_name: last };
+      const { status, body } = await call('/email-finder/found', params, [451]);
+      if (status === 451)
+        return { email: null, confidence: null, verificationStatus: null, credits: 0 };
+      const data = body && typeof body === 'object' ? (body as { data?: unknown }).data : null;
+      if (!data || typeof data !== 'object')
+        return { email: null, confidence: null, verificationStatus: null, credits: 0 };
+      const result = data as {
+        email?: unknown;
+        score?: unknown;
+        confidence?: unknown;
+        source_type?: unknown;
+        verification?: { status?: unknown };
+      };
+      const email = typeof result.email === 'string' ? result.email.trim().toLowerCase() : '';
+      if (!email || !EMAIL_SHAPE.test(email))
+        return { email: null, confidence: null, verificationStatus: null, credits: 0 };
+      const score = typeof result.score === 'number' ? result.score : result.confidence;
+      const confidence =
+        typeof score === 'number' && Number.isFinite(score)
+          ? Math.max(0, Math.min(1, score / 100))
+          : null;
+      const accepted =
+        confidence !== null &&
+        confidence >= 0.7 &&
+        (result.source_type === undefined || result.source_type === 'found');
+      const state = result.verification?.status;
+      const verificationStatus =
+        accepted && (state === 'valid' || state === 'accept_all' || state === 'unknown')
+          ? state
+          : null;
+      return { email: accepted ? email : null, confidence, verificationStatus, credits: 1 };
     },
 
     async verifyEmail(email) {

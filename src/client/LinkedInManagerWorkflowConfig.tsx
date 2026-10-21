@@ -29,6 +29,7 @@ import type { LinkedInWorkflow, WorkflowDelay, WorkflowStep } from '../server/li
 import { errorMessage } from './LinkedInSafety';
 import { useIsWorkspaceOwner } from './auth-client';
 import { Select } from './ui/primitives';
+import { ADDITIONAL_WORKFLOW_STARTERS } from './workflow-starter-recipes';
 /* ---------------------------------------------------------------------------
  * The reusable workflow builder.
  *
@@ -162,7 +163,7 @@ const SAMPLE_LEAD: Record<ManagerVariable, string> = {
   booking_link: 'https://cal.com/you/intro'
 };
 
-const MERGE_TOKEN = /\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)\s*\}\}/g;
+const MERGE_TOKEN = /\{\{\s*([A-Za-z][A-Za-z0-9_.-]*)(?:\|([^{}\r\n]*))?\s*\}\}/g;
 
 interface ActionMeta {
   label: string;
@@ -447,22 +448,16 @@ function unsupportedVariables(template: string): string[] {
 }
 
 /**
- * Mirrors `renderWorkflowTemplate`.
- *
- * EMPTY-SAFE, and the distinction matters for the three new fields: a lead with
- * no phone renders a blank, never the word "null" and never the literal
- * `{{phone}}`. Only an UNKNOWN token is left standing, on purpose, so a name
- * that somehow got past the refusal above is VISIBLE in the preview rather than
- * silently swallowed. The sample lead below carries all six, so the preview
- * shows the sentence an operator is actually writing; a real lead missing one
- * takes the blank path on the server, which reads as the same sentence with a
- * gap rather than as a broken template.
+ * Preview uses sample lead data, including fallback expressions. Real campaign
+ * execution never blanks a required value: the server holds the member until
+ * missing required variables are supplied or a fallback is configured.
  */
 function renderSample(template: string): string {
-  return template.replace(MERGE_TOKEN, (whole, name: string) => {
+  return template.replace(MERGE_TOKEN, (whole, name: string, fallback: string | undefined) => {
     if (name.startsWith('custom.')) return `sample ${name.slice(7).replaceAll('_', ' ')}`;
     const canonical = resolveManagerVariable(name);
-    return canonical === null ? whole : SAMPLE_LEAD[canonical];
+    if (canonical === null) return whole;
+    return SAMPLE_LEAD[canonical]?.trim() || fallback?.trim() || '';
   });
 }
 
@@ -691,7 +686,7 @@ function blankStep(action: Action, stepId: string, delayBefore: WorkflowDelay): 
         variants: [{ id: 'a', body: '', weight: 100 }]
       }
     };
-  if (action === 'endorse_skills') return { ...base, action, config: { maxSkills: 3 } };
+  if (action === 'endorse_skills') return { ...base, action, config: { maxSkills: 1 } };
   if (action === 'message')
     return {
       ...base,
@@ -750,7 +745,7 @@ function blankStep(action: Action, stepId: string, delayBefore: WorkflowDelay): 
       }
     };
   if (action === 'find_email')
-    return { ...base, action, config: { providerId: null, refresh: false } };
+    return { ...base, action, config: { providerId: 'hunter', refresh: false } };
   if (action === 'add_tag' || action === 'remove_tag')
     return { ...base, action, config: { tag: 'prospect' } };
   const exhaustive: never = action;
@@ -1171,7 +1166,8 @@ const STARTERS: readonly Starter[] = [
         }
       ];
     }
-  }
+  },
+  ...ADDITIONAL_WORKFLOW_STARTERS
 ];
 
 /* ---------------------------------------------------------------------------
@@ -1220,6 +1216,10 @@ export function LinkedInManagerWorkflowConfig({
 }) {
   const isOwner = useIsWorkspaceOwner();
   const [library, setLibrary] = useState<LinkedInWorkflow[]>([]);
+  const [starterQuery, setStarterQuery] = useState('');
+  const visibleStarters = STARTERS.filter((starter) =>
+    (starter.label + ' ' + starter.blurb).toLowerCase().includes(starterQuery.trim().toLowerCase())
+  );
   const [id, setId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [scope, setScope] = useState<'workspace' | 'personal'>(() =>
@@ -1723,8 +1723,18 @@ export function LinkedInManagerWorkflowConfig({
     return (
       <div className="li-wf-compact li-polished">
         {error && <div className="error-banner">{error}</div>}
+        <label className="li-wf-starter-filter">
+          Find a workflow template
+          <input
+            type="search"
+            aria-label="Search workflow templates"
+            placeholder={`Search ${STARTERS.length} workflows by objective`}
+            value={starterQuery}
+            onChange={(event) => setStarterQuery(event.target.value)}
+          />
+        </label>
         <div className="li-wf-starters">
-          {STARTERS.map((starter) => (
+          {visibleStarters.map((starter) => (
             <button
               className="li-wf-starter"
               type="button"
@@ -1842,8 +1852,18 @@ export function LinkedInManagerWorkflowConfig({
             it runs. Start from one of these and edit it, or pick any of the six actions below as
             the first step.
           </p>
+          <label className="li-wf-starter-filter">
+            Find a workflow template
+            <input
+              type="search"
+              aria-label="Search workflow templates"
+              placeholder={`Search ${STARTERS.length} workflows by objective`}
+              value={starterQuery}
+              onChange={(event) => setStarterQuery(event.target.value)}
+            />
+          </label>
           <div className="li-wf-starters">
-            {STARTERS.map((starter) => (
+            {visibleStarters.map((starter) => (
               <button
                 className="li-wf-starter"
                 type="button"
@@ -2581,7 +2601,7 @@ function WorkflowStepCard({
 
         {step.action === 'endorse_skills' && (
           <label>
-            Maximum skills to endorse
+            Skills to endorse (1–10 per action)
             <input
               type="number"
               min={1}
@@ -2591,9 +2611,9 @@ function WorkflowStepCard({
                 onChange({
                   ...step,
                   config: {
-                    maxSkills: Math.min(
-                      10,
-                      Math.max(1, Math.trunc(Number(event.target.value) || 1))
+                    maxSkills: Math.max(
+                      1,
+                      Math.min(10, Math.trunc(Number(event.target.value) || 1))
                     )
                   }
                 })
@@ -2927,10 +2947,9 @@ function WorkflowStepCard({
                     <option value="opens_clicks">Opens + clicks</option>
                   </Select>
                   <small className="li-acct-range">
-                    Trevra does not inject a tracking pixel or rewrite links here. Open/click
-                    conditions change only when a configured provider sends a signed event for this
-                    exact campaign email; use Off unless that provider behavior and your policy
-                    permit tracking.
+                    Off adds no tracking. Opens inserts a tracking pixel; Opens + clicks also
+                    rewrites links through Trevra's tracking endpoint. Tracking requires an
+                    appropriate privacy notice and lawful basis; leave Off unless authorized.
                   </small>
                 </label>
               </div>
@@ -2955,17 +2974,19 @@ function WorkflowStepCard({
         {step.action === 'find_email' && (
           <div className="li-span-2 li-form-grid">
             <label>
-              Enrichment provider ID (optional)
-              <input
-                value={step.config.providerId ?? ''}
+              Email finder provider
+              <Select
+                value={step.config.providerId ?? 'environment'}
                 onChange={(event) =>
                   onChange({
                     ...step,
-                    config: { ...step.config, providerId: event.target.value || null }
+                    config: { ...step.config, providerId: event.target.value }
                   })
                 }
-                placeholder="Configured default"
-              />
+              >
+                <option value="hunter">Hunter — workspace key, found-only (70%+ confidence)</option>
+                <option value="environment">Legacy server-configured provider</option>
+              </Select>
             </label>
             <label className="li-check-row">
               <input

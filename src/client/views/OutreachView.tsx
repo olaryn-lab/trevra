@@ -12,6 +12,7 @@ import { OutreachManagerBuilder } from '../LinkedInManagerBuilder';
 import { OutreachManagerRead } from '../LinkedInManagerRead';
 import { LinkedInManagerWorkflowConfig } from '../LinkedInManagerWorkflowConfig';
 import { LinkedInPosts } from '../LinkedInPosts';
+import { CommunityPostRecovery } from '../CommunityPostRecovery';
 import { InboundPeople } from '../InboundPeople';
 import { Opportunities } from '../Opportunities';
 import { ActionMenu } from '../ui/action-menu';
@@ -257,7 +258,12 @@ export function OutreachView({
         </div>
       )}
       {sub === 'opportunities' && <Opportunities setToast={setToast} />}
-      {sub === 'posts' && <LinkedInPosts setToast={setToast} />}
+      {sub === 'posts' && (
+        <div className="page-stack">
+          <CommunityPostRecovery setToast={setToast} />
+          <LinkedInPosts setToast={setToast} />
+        </div>
+      )}
       {sub === 'new' && <OutreachManagerBuilder setToast={setToast} onNavigate={onNavigate} />}
       {sub === 'campaign' && route.id && (
         <OutreachManagerRead

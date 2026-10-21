@@ -61,6 +61,7 @@ import {
   sweepStalePublishing
 } from './posts.js';
 import { runManagedCampaigns, type RunnerResult } from './runner.js';
+import { linkedInPostPolicyGate } from './post-policy.js';
 import type { DayShapeFn } from './pacing.js';
 import { encodeBackgroundRunDetail, recordSeatEvent } from './seat-events.js';
 import { OWNER_SEAT_KEY, effectivePosture, getSeat } from './seats.js';
@@ -1639,6 +1640,7 @@ export async function runLinkedInPostTick(
   // left `scheduled` for the next tick rather than reclaimed and failed again
   // this same pass.
   const failedSeats = new Set<string>();
+  const deferredPosts = new Set<string>();
 
   await sweepStalePublishing(db, workspaceId, now);
 
@@ -1648,7 +1650,13 @@ export async function runLinkedInPostTick(
     claims < MAX_POST_CLAIMS_PER_TICK && attempted < POSTS_PER_WORKSPACE_TICK;
     claims += 1
   ) {
-    const claimed = await claimNextDuePost(db, workspaceId, now, [...failedSeats]);
+    const claimed = await claimNextDuePost(
+      db,
+      workspaceId,
+      now,
+      [...failedSeats],
+      [...deferredPosts]
+    );
     if (!claimed) break;
 
     const scheduledAt = claimed.scheduledAt ? new Date(claimed.scheduledAt) : now;
@@ -1684,6 +1692,23 @@ export async function runLinkedInPostTick(
       continue;
     }
 
+    // Always rehash text and binary media after claiming, before the browser
+    // publishes. A policy hold is reversible; it must not be marked failed.
+    let policyGate: { allowed: boolean; reason: string };
+    try {
+      policyGate = await linkedInPostPolicyGate(db, workspaceId, claimed);
+    } catch (error) {
+      policyGate = {
+        allowed: false,
+        reason: `Could not evaluate/audit post policy: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+    if (!policyGate.allowed) {
+      await releasePostToScheduled(db, claimed.id, now);
+      deferredPosts.add(claimed.id);
+      log(`LinkedIn post ${claimed.id} held: ${policyGate.reason}`);
+      continue;
+    }
     attempted += 1;
     const body = renderPostBody(claimed.blocks);
     const images = await loadPostImages(db, workspaceId, claimed.id);

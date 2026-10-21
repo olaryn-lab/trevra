@@ -148,6 +148,118 @@ afterEach(async () => {
   else process.env.TREVRA_SECRETS_KEY = previousKey;
   delete process.env.TREVRA_DEPLOYMENT_MODE;
 });
+/** Real PostgreSQL fault injection: prevent writing the second credential half. */
+async function blockPasswordWrites(table: 'workspace_secrets' | 'linkedin_seat_credentials') {
+  const functionName = 'trevra_test_block_linkedin_password_write';
+  const triggerName = 'trevra_test_block_linkedin_password_write';
+  await db.exec(`
+    CREATE OR REPLACE FUNCTION ${functionName}() RETURNS TRIGGER AS $$
+    BEGIN
+      IF NEW.workspace_id = '${WORKSPACE_ID}' AND NEW.kind = 'linkedin.password' THEN
+        RAISE EXCEPTION 'injected credential pair write failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    CREATE TRIGGER ${triggerName} BEFORE INSERT OR UPDATE ON ${table}
+      FOR EACH ROW EXECUTE FUNCTION ${functionName}();
+  `);
+  return async () => {
+    await db.exec(
+      `DROP TRIGGER IF EXISTS ${triggerName} ON ${table}; DROP FUNCTION IF EXISTS ${functionName}();`
+    );
+  };
+}
+
+/** A separate failure after deleting the first half must roll back the deletion. */
+async function blockPasswordDeletes(table: 'workspace_secrets' | 'linkedin_seat_credentials') {
+  const functionName = 'trevra_test_block_linkedin_password_delete';
+  const triggerName = 'trevra_test_block_linkedin_password_delete';
+  await db.exec(`
+    CREATE OR REPLACE FUNCTION ${functionName}() RETURNS TRIGGER AS $$
+    BEGIN
+      IF OLD.workspace_id = '${WORKSPACE_ID}' AND OLD.kind = 'linkedin.password' THEN
+        RAISE EXCEPTION 'injected credential pair delete failure';
+      END IF;
+      RETURN OLD;
+    END;
+    $$ LANGUAGE plpgsql;
+    CREATE TRIGGER ${triggerName} BEFORE DELETE ON ${table}
+      FOR EACH ROW EXECUTE FUNCTION ${functionName}();
+  `);
+  return async () => {
+    await db.exec(
+      `DROP TRIGGER IF EXISTS ${triggerName} ON ${table}; DROP FUNCTION IF EXISTS ${functionName}();`
+    );
+  };
+}
+
+describe('atomic LinkedIn credential pairs', () => {
+  for (const seatKey of ['owner', 'second']) {
+    const table = seatKey === 'owner' ? 'workspace_secrets' : 'linkedin_seat_credentials';
+    const identity = { workspaceId: WORKSPACE_ID, seatKey };
+
+    it(`rolls back failed ${seatKey} replacement and deletion, including audit history`, async () => {
+      if (seatKey !== 'owner')
+        await upsertSeat(db, WORKSPACE_ID, { label: 'Second', timezone: 'UTC' }, NOW, seatKey);
+      const old = { email: `${seatKey}-old@example.com`, password: `${seatKey}-old-password` };
+      await putLinkedInCredentials(db, { ...identity, ...old });
+      const auditCount = async () =>
+        Number(
+          (
+            await db
+              .prepare('SELECT COUNT(*)::int AS total FROM audit_events WHERE workspace_id=?')
+              .get<{ total: number }>(WORKSPACE_ID)
+          )?.total ?? 0
+        );
+      const before = await auditCount();
+
+      const allowWrites = await blockPasswordWrites(table);
+      try {
+        await expect(
+          putLinkedInCredentials(db, {
+            ...identity,
+            email: `${seatKey}-replacement@example.com`,
+            password: 'replacement-password'
+          })
+        ).rejects.toThrow(/injected credential pair write failure/);
+      } finally {
+        await allowWrites();
+      }
+      expect(await readLinkedInCredentials(db, WORKSPACE_ID, process.env, seatKey)).toEqual(old);
+      expect(await auditCount()).toBe(before);
+
+      const allowDeletes = await blockPasswordDeletes(table);
+      try {
+        await expect(deleteLinkedInCredentials(db, WORKSPACE_ID, null, seatKey)).rejects.toThrow(
+          /injected credential pair delete failure/
+        );
+      } finally {
+        await allowDeletes();
+      }
+      expect(await readLinkedInCredentials(db, WORKSPACE_ID, process.env, seatKey)).toEqual(old);
+      expect(await auditCount()).toBe(before);
+      expect((await describeLinkedInCredentials(db, WORKSPACE_ID, seatKey)).maskedEmail).toContain(
+        'example.com'
+      );
+    });
+
+    it(`serializes overlapping ${seatKey} credential rotations into complete pairs`, async () => {
+      if (seatKey !== 'owner')
+        await upsertSeat(db, WORKSPACE_ID, { label: 'Second', timezone: 'UTC' }, NOW, seatKey);
+      const pairs = Array.from({ length: 6 }, (_, index) => ({
+        email: `rotate-${index}@example.com`,
+        password: `rotation-password-${index}`
+      }));
+      await Promise.all(pairs.map((pair) => putLinkedInCredentials(db, { ...identity, ...pair })));
+      const final = await readLinkedInCredentials(db, WORKSPACE_ID, process.env, seatKey);
+      expect(pairs).toContainEqual(final);
+      const stored = await describeLinkedInCredentials(db, WORKSPACE_ID, seatKey);
+      expect(stored.hasCredentials).toBe(true);
+      expect(stored.maskedEmail).toContain('@example.com');
+    });
+  }
+});
 
 describe('the store', () => {
   it('seals both halves, and gives back a boolean and a mask', async () => {

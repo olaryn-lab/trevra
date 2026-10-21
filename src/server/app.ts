@@ -19,6 +19,14 @@ import type { Db } from './db.js';
 import { DEMO_USER_ID, DEMO_WORKSPACE_ID, id, resetDemoData } from './db.js';
 import { listConnections } from './serializers.js';
 import {
+  OUTBOUND_WEBHOOK_EVENTS,
+  OutboundWebhookInputError,
+  createOutboundWebhookSubscription,
+  deactivateOutboundWebhookSubscription,
+  listOutboundWebhookSubscriptions,
+  listOutboundWebhookDeliveries
+} from './outbound-webhooks.js';
+import {
   applyUnsubscribeToken,
   findUnsubscribeDelivery,
   renderUnsubscribePage
@@ -78,6 +86,12 @@ import {
   SkillApiError
 } from './skill-api.js';
 import { loadThreadFeed } from './outreach/feed.js';
+import {
+  COMMUNITY_POST_VERIFICATION,
+  CommunityPostResolutionError,
+  listUnresolvedCommunityPosts,
+  resolveCommunityUnknownPost
+} from './outreach/store.js';
 import { getScout } from './outreach/registry.js';
 import {
   createWatch,
@@ -252,6 +266,14 @@ import {
 } from './secrets/reddit.js';
 import { getRedditAccount } from './reddit/account.js';
 import { RedditApiError } from './reddit/errors.js';
+import {
+  prepareRedditComment,
+  getRedditCommentReview,
+  listRedditComments,
+  approveRedditComment,
+  executeRedditComment,
+  listRedditCommentEvents
+} from './reddit/comment-actions.js';
 import { REDDIT_SORTS, MAX_READ_LIMIT as REDDIT_MAX_READ_LIMIT } from './reddit/driver.js';
 import {
   commentOnRedditThread,
@@ -361,6 +383,7 @@ import {
   cancelPost,
   createPost,
   getPost,
+  getPostImage,
   LINKEDIN_POST_IMAGE_MAX_BYTES,
   LINKEDIN_POST_IMAGE_TYPES,
   LinkedInPostsApiError,
@@ -369,6 +392,17 @@ import {
   type LinkedInPostStatus
 } from './linkedin/posts.js';
 import { plainTextLength, renderPostBody } from '../shared/linkedin-post-format.js';
+import {
+  approveLinkedInPost,
+  reviewLinkedInPost,
+  listLinkedInPostPolicyEvents
+} from './linkedin/post-policy.js';
+import {
+  approveWithdrawal,
+  listPendingWithdrawalReviews,
+  listWithdrawalPolicyEvents,
+  reviewWithdrawal
+} from './linkedin/withdrawal-policy.js';
 import {
   INVITE_NOTE_MAX_CHARS,
   MAX_SEQUENCE_STEPS,
@@ -419,7 +453,6 @@ import { addExclusions, filterExcluded, listExclusions } from './linkedin/exclus
 import { parseLeadCsv } from './linkedin/lead-import.js';
 import {
   LEAD_CONTACT_READ_LIMIT,
-  countLeadContacts,
   createLeadList,
   deleteLeadList,
   getLeadList,
@@ -427,8 +460,9 @@ import {
   importLeadProfileUrls,
   importLeadSourceContacts,
   ingestLeadSignal,
-  listLeadContacts,
   listLeadLists,
+  readLeadContactReviewPage,
+  renameLeadList,
   removeLeadContact,
   updateLeadContact,
   type LeadListSourceKind
@@ -452,6 +486,17 @@ import {
   upsertCampaignMailboxSettings
 } from './linkedin/campaign-channels.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
+import {
+  approveCampaignEmail,
+  listCampaignEmailReviews,
+  previewCampaignEmail
+} from './linkedin/campaign-email-approval.js';
+import {
+  approveLinkedInAction,
+  listLinkedInActionReviews,
+  listLinkedInActionPolicyEvents,
+  reviewLinkedInAction
+} from './linkedin/action-policy.js';
 import {
   guardSeatSendModeChange,
   handoffResolutionSchema,
@@ -1338,6 +1383,93 @@ export function createApp(db: Db) {
   // workspace spending its own minute; nothing below it can spend anyone
   // else's.
   app.use('/api', workspaceLimiter);
+
+  // Merchant outbound event notifications. Mutations are owner-only; event
+  // type allowlist and destination host allowlist are also server-enforced.
+  // Signing secret is returned ONLY at initial creation, never on GET.
+  app.get(
+    '/api/outbound-webhooks',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+          subscriptions: await listOutboundWebhookSubscriptions(db, req.auth!.workspaceId)
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.post(
+    '/api/outbound-webhooks',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            url: z.string().trim().url().max(1500),
+            eventTypes: z
+              .array(z.enum(OUTBOUND_WEBHOOK_EVENTS))
+              .min(1)
+              .max(OUTBOUND_WEBHOOK_EVENTS.length)
+          })
+          .strict()
+          .parse(req.body ?? {});
+        const result = await createOutboundWebhookSubscription(db, {
+          workspaceId: req.auth!.workspaceId,
+          url: input.url,
+          eventTypes: input.eventTypes,
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(201).json(result);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.get(
+    '/api/outbound-webhooks/:id/deliveries',
+    ownerOnly('inspect outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const limit = z.coerce.number().int().min(1).max(100).default(50).parse(req.query.limit);
+        const deliveries = await listOutboundWebhookDeliveries(
+          db,
+          req.auth!.workspaceId,
+          subscriptionId,
+          limit
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        if (!deliveries) return res.status(404).json({ error: 'Subscription not found' });
+        res.json({ deliveries });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.delete(
+    '/api/outbound-webhooks/:id',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const changed = await deactivateOutboundWebhookSubscription(
+          db,
+          req.auth!.workspaceId,
+          subscriptionId
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        res
+          .status(changed ? 200 : 404)
+          .json(changed ? { deactivated: true } : { error: 'Subscription not found or inactive' });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
 
   app.get('/api/billing', async (req: AuthedRequest, res, next) => {
     try {
@@ -3452,6 +3584,53 @@ export function createApp(db: Db) {
       next(error);
     }
   });
+
+  // Unknown community-provider writes are held, not blindly retried. Only an
+  // owner who inspected the original public thread can settle their outcome.
+  app.get(
+    '/api/outreach/posts/unresolved',
+    ownerOnly('review unresolved community replies'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+          posts: await listUnresolvedCommunityPosts(db, req.auth!.workspaceId, new Date())
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.post(
+    '/api/outreach/posts/:id/resolve',
+    ownerOnly('resolve an uncertain community reply'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            outcome: z.enum(['posted', 'not_posted']),
+            verificationUrl: z.string().trim().url().max(2048),
+            confirmation: z.literal(COMMUNITY_POST_VERIFICATION)
+          })
+          .strict()
+          .parse(req.body ?? {});
+        const post = await resolveCommunityUnknownPost(db, {
+          workspaceId: req.auth!.workspaceId,
+          postId: String(req.params.id),
+          actorUserId: req.auth!.userId,
+          ...input
+        });
+        if (!post) return res.status(404).json({ error: 'Unresolved community post not found.' });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ post });
+      } catch (error) {
+        if (error instanceof CommunityPostResolutionError)
+          return res.status(error.status).json({ error: error.message });
+        next(error);
+      }
+    }
+  );
 
   app.get('/api/content/opportunities', async (req: AuthedRequest, res, next) => {
     try {
@@ -5807,6 +5986,67 @@ export function createApp(db: Db) {
     })
   );
 
+  app.get(
+    '/api/linkedin/posts/:id/review',
+    linkedinRoute(async (req, res) => {
+      const review = await reviewLinkedInPost(db, req.auth!.workspaceId, String(req.params.id));
+      if (!review) throw new LinkedInPostsApiError('Scheduled post not available for review.', 404);
+      res.json({ review });
+    })
+  );
+  app.post(
+    '/api/linkedin/posts/:id/approve',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve a LinkedIn scheduled post');
+      const input = z
+        .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .parse(req.body ?? {});
+      const postId = String(req.params.id);
+      if (!(await reviewLinkedInPost(db, req.auth!.workspaceId, postId)))
+        throw new LinkedInPostsApiError('Scheduled post not found', 404);
+      try {
+        res.json({
+          review: await approveLinkedInPost(
+            db,
+            req.auth!.workspaceId,
+            postId,
+            input.contentHash,
+            req.auth!.userId
+          )
+        });
+      } catch (error) {
+        throw new LinkedInPostsApiError(
+          error instanceof Error ? error.message : 'Approval failed',
+          409
+        );
+      }
+    })
+  );
+  app.get(
+    '/api/linkedin/posts/:id/audit',
+    linkedinRoute(async (req, res) => {
+      const postId = String(req.params.id);
+      if (!(await getPost(db, req.auth!.workspaceId, postId)))
+        throw new LinkedInPostsApiError('Post not found.', 404);
+      res.json({ events: await listLinkedInPostPolicyEvents(db, req.auth!.workspaceId, postId) });
+    })
+  );
+  app.get(
+    '/api/linkedin/posts/:id/media/:imageId',
+    linkedinRoute(async (req, res) => {
+      const image = await getPostImage(
+        db,
+        req.auth!.workspaceId,
+        String(req.params.id),
+        String(req.params.imageId)
+      );
+      if (!image) throw new LinkedInPostsApiError('Post image not found.', 404);
+      res.setHeader('Cache-Control', 'private, no-store');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.type(image.mimeType).send(image.bytes);
+    })
+  );
   app.post(
     '/api/linkedin/posts/:id/media',
     express.raw({ type: [...LINKEDIN_POST_IMAGE_TYPES], limit: LINKEDIN_POST_IMAGE_MAX_BYTES }),
@@ -6090,21 +6330,7 @@ export function createApp(db: Db) {
     })
   );
 
-  /**
-   * One lead list and a page of the people on it.
-   *
-   * THE TOTAL IS COUNTED, NOT INFERRED FROM THE PAGE. `listLeadContacts` clamps
-   * to `LEAD_CONTACT_READ_LIMIT` whatever it is handed, so a longer list came
-   * back silently short and the only number the screen had was the length of
-   * what it received -- which is how it came to announce "the first 1,000 are
-   * shown" about a list nobody had measured.
-   *
-   * THE CEILING AND THE COUNT BOTH COME FROM `lead-lists.ts`. A literal here
-   * would be a third copy of a number the reader already clamps to and the UI
-   * already prints a sentence about, and an inline `COUNT(*)` would be this
-   * file's own opinion of which table a list's people are in -- which the
-   * membership schema has already changed once.
-   */
+  /** Return any bounded page, not just the oldest 5,000 people in a list. */
   app.get(
     '/api/linkedin/manager/lead-lists/:id/contacts',
     linkedinRoute(async (req, res) => {
@@ -6113,13 +6339,44 @@ export function createApp(db: Db) {
       const { seatKey } = linkedinSeatSelectorSchema.parse(req.query);
       const list = await getLeadList(db, workspaceId, listId, seatKey);
       if (!list) throw new LinkedInApiError('Lead list not found', 404);
-      const [contacts, total] = await Promise.all([
-        listLeadContacts(db, workspaceId, listId, LEAD_CONTACT_READ_LIMIT),
-        countLeadContacts(db, workspaceId, listId)
-      ]);
-      // The page bound, so the screen can say "the first N of M" without holding
-      // its own copy of N.
-      res.json({ list, contacts, total, pageLimit: LEAD_CONTACT_READ_LIMIT });
+      const pageNumber = (value: unknown, label: string, defaultValue: number, max: number) => {
+        if (value === undefined) return defaultValue;
+        if (typeof value !== 'string' || !/^\d+$/.test(value))
+          throw new LinkedInApiError(`${label} must be a nonnegative integer`, 400);
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed > max)
+          throw new LinkedInApiError(`${label} is outside the supported range`, 400);
+        return parsed;
+      };
+      const limit = pageNumber(
+        req.query.limit,
+        'limit',
+        LEAD_CONTACT_READ_LIMIT,
+        LEAD_CONTACT_READ_LIMIT
+      );
+      if (limit === 0) throw new LinkedInApiError('limit must be at least 1', 400);
+      const offset = pageNumber(req.query.offset, 'offset', 0, 2_000_000_000);
+      if (
+        req.query.query !== undefined &&
+        (typeof req.query.query !== 'string' || req.query.query.length > 200)
+      )
+        throw new LinkedInApiError('query must be a string of 200 characters or fewer', 400);
+      const reviewFlag = req.query.needsIdentityOnly;
+      if (reviewFlag !== undefined && reviewFlag !== 'true' && reviewFlag !== 'false')
+        throw new LinkedInApiError('needsIdentityOnly must be true or false', 400);
+      const results = await readLeadContactReviewPage(db, workspaceId, listId, {
+        limit,
+        offset,
+        query: typeof req.query.query === 'string' ? req.query.query : undefined,
+        needsIdentityOnly: reviewFlag === 'true'
+      });
+      res.json({
+        list,
+        ...results,
+        pageLimit: limit,
+        offset,
+        hasMore: offset + results.contacts.length < results.total
+      });
     })
   );
 
@@ -6206,6 +6463,98 @@ export function createApp(db: Db) {
         campaign,
         members: await listCampaignMembers(db, req.auth!.workspaceId, campaignId)
       });
+    })
+  );
+
+  // Exact LinkedIn browser-action approvals, including individual replies.
+  app.get(
+    '/api/linkedin/manager/action-approvals',
+    linkedinRoute(async (req, res) => {
+      const input = z.object({ campaignId: z.string().min(1).optional() }).parse(req.query);
+      res.json({
+        reviews: await listLinkedInActionReviews(db, req.auth!.workspaceId, input.campaignId)
+      });
+    })
+  );
+  app.get(
+    '/api/linkedin/manager/action-approvals/:actionId/audit',
+    linkedinRoute(async (req, res) => {
+      const actionId = String(req.params.actionId);
+      const row = await db
+        .prepare('SELECT id FROM linkedin_actions WHERE workspace_id=? AND id=?')
+        .get<{ id: string }>(req.auth!.workspaceId, actionId);
+      if (!row) throw new LinkedInApiError('LinkedIn action not found', 404);
+      res.json({
+        events: await listLinkedInActionPolicyEvents(db, req.auth!.workspaceId, actionId)
+      });
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/action-approvals/:actionId',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve a LinkedIn browser action');
+      const input = z
+        .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .parse(req.body ?? {});
+      const actionId = String(req.params.actionId);
+      if (!(await reviewLinkedInAction(db, req.auth!.workspaceId, actionId)))
+        throw new LinkedInApiError('LinkedIn action not found or no longer pending', 404);
+      try {
+        res.json({
+          review: await approveLinkedInAction(
+            db,
+            req.auth!.workspaceId,
+            actionId,
+            input.contentHash,
+            req.auth!.userId
+          )
+        });
+      } catch (error) {
+        throw new LinkedInApiError(error instanceof Error ? error.message : 'Approval failed', 409);
+      }
+    })
+  );
+
+  // An approval grants permission for one exact sender/message/recipient.
+  // The worker independently re-evaluates workspace policy and the content hash.
+  app.get(
+    '/api/linkedin/manager/campaigns/:id/email-approvals',
+    linkedinRoute(async (req, res) => {
+      const campaignId = String(req.params.id);
+      const campaign = await getManagedCampaign(db, req.auth!.workspaceId, campaignId);
+      if (!campaign) throw new LinkedInApiError('Managed campaign not found', 404);
+      res.json({ reviews: await listCampaignEmailReviews(db, req.auth!.workspaceId, campaignId) });
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/email-approvals/:actionId',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve an outbound campaign email');
+      const campaignId = String(req.params.id);
+      const actionId = String(req.params.actionId);
+      const input = z
+        .object({ contentHash: z.string().regex(/^[0-9a-f]{64}$/) })
+        .strict()
+        .parse(req.body ?? {});
+      const candidate = await previewCampaignEmail(db, req.auth!.workspaceId, actionId);
+      if (!candidate || candidate.campaignId !== campaignId)
+        throw new LinkedInApiError('Campaign email not found or no longer pending', 404);
+      try {
+        const review = await approveCampaignEmail(
+          db,
+          req.auth!.workspaceId,
+          actionId,
+          input.contentHash,
+          req.auth!.userId
+        );
+        res.json({ review });
+      } catch (error) {
+        throw new LinkedInApiError(
+          error instanceof Error ? error.message : 'Campaign email approval failed',
+          409
+        );
+      }
     })
   );
 
@@ -7311,6 +7660,24 @@ export function createApp(db: Db) {
    * Owner-only: this is the delete that removes a workspace's contact data
    * rather than a row about it.
    */
+  app.patch(
+    '/api/linkedin/manager/lead-lists/:id',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'rename a lead list');
+      const input = z
+        .object({ name: z.string().trim().min(1).max(200) })
+        .strict()
+        .parse(req.body ?? {});
+      const renamed = await renameLeadList(
+        db,
+        req.auth!.workspaceId,
+        String(req.params.id),
+        input.name
+      );
+      if (!renamed) throw new LinkedInApiError('Lead list not found', 404);
+      res.json({ list: renamed });
+    })
+  );
   app.delete(
     '/api/linkedin/manager/lead-lists/:id',
     linkedinRoute(async (req, res) => {
@@ -7835,6 +8202,54 @@ export function createApp(db: Db) {
   );
 
   app.get(
+    '/api/linkedin/withdrawals/approvals',
+    linkedinRoute(async (req, res) => {
+      res.json({ reviews: await listPendingWithdrawalReviews(db, req.auth!.workspaceId) });
+    })
+  );
+  app.get(
+    '/api/linkedin/withdrawals/approvals/:id/audit',
+    linkedinRoute(async (req, res) => {
+      const withdrawalId = String(req.params.id);
+      const row = await db
+        .prepare('SELECT id FROM linkedin_withdrawals WHERE workspace_id=? AND id=?')
+        .get<{ id: string }>(req.auth!.workspaceId, withdrawalId);
+      if (!row) throw new LinkedInApiError('Withdrawal not found', 404);
+      res.json({
+        events: await listWithdrawalPolicyEvents(db, req.auth!.workspaceId, withdrawalId)
+      });
+    })
+  );
+  app.post(
+    '/api/linkedin/withdrawals/approvals/:id',
+    linkedinRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve a LinkedIn withdrawal');
+      const withdrawalId = String(req.params.id);
+      const input = z
+        .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .parse(req.body ?? {});
+      if (!(await reviewWithdrawal(db, req.auth!.workspaceId, withdrawalId)))
+        throw new LinkedInApiError('Withdrawal not found or no longer pending', 404);
+      try {
+        res.json({
+          review: await approveWithdrawal(
+            db,
+            req.auth!.workspaceId,
+            withdrawalId,
+            input.contentHash,
+            req.auth!.userId
+          )
+        });
+      } catch (error) {
+        throw new LinkedInApiError(
+          error instanceof Error ? error.message : 'Withdrawal approval failed',
+          409
+        );
+      }
+    })
+  );
+  app.get(
     '/api/linkedin/withdrawals',
     linkedinRoute(async (req, res) => {
       const filters = linkedinWithdrawalListSchema.parse(req.query);
@@ -8194,44 +8609,97 @@ export function createApp(db: Db) {
   );
 
   /**
-   * Post one comment, in one thread, right now.
-   *
-   * NO QUEUE AND NO APPROVAL STEP, because there is no Reddit pacing engine to
-   * hand it to: the operator is the pacing engine, and they wrote the words.
-   * When a queue arrives this route becomes the thing that files a row instead
-   * of the thing that clicks.
-   *
-   * AN `unknown` OUTCOME IS RETURNED, NOT RETRIED. Once the button is pressed
-   * the comment may exist; a retry posts it twice, and a duplicate comment
-   * cannot be un-posted. The operator gets the sentence and checks the thread.
+   * Preparing a comment is NOT publication. The previous POST endpoint
+   * performed an unapproved browser write; it now files an idempotent,
+   * canonical, immutable draft and returns its policy state.
    */
   app.post(
     '/api/reddit/comment',
     redditRoute(async (req, res) => {
       const input = redditCommentSchema.parse(req.body ?? {});
-      const config = assertRedditWorkerOn();
-
-      const outcome = await commentOnRedditThread(db, config, {
-        workspaceId: req.auth!.workspaceId,
-        threadUrl: input.url,
-        body: input.body,
-        now: new Date()
-      });
-      if (outcome.ok) {
-        res.json({
-          posted: true,
-          url: outcome.result.externalRef ?? input.url,
-          detail: outcome.result.detail ?? null
-        });
-        return;
+      try {
+        const comment = await prepareRedditComment(db, req.auth!.workspaceId, input);
+        res.status(201).json({ prepared: true, posted: comment.status === 'posted', comment });
+      } catch (error) {
+        throw new RedditApiError(
+          error instanceof Error ? error.message : 'Could not prepare comment.',
+          400
+        );
       }
-      // 409 rather than 500 for every one of them: a locked thread, a rate limit
-      // and a dead session are things to go and deal with, not faults.
-      res.status(409).json({
-        posted: false,
-        failureKind: outcome.result?.failureKind ?? null,
-        error: outcome.blocked
-      });
+    })
+  );
+  app.get(
+    '/api/reddit/comments',
+    redditRoute(async (req, res) => {
+      res.json({ comments: await listRedditComments(db, req.auth!.workspaceId) });
+    })
+  );
+  app.get(
+    '/api/reddit/comments/:id',
+    redditRoute(async (req, res) => {
+      const comment = await getRedditCommentReview(
+        db,
+        req.auth!.workspaceId,
+        String(req.params.id)
+      );
+      if (!comment) throw new RedditApiError('Comment not found.', 404);
+      res.json({ comment });
+    })
+  );
+  app.get(
+    '/api/reddit/comments/:id/audit',
+    redditRoute(async (req, res) => {
+      const commentId = String(req.params.id);
+      if (!(await getRedditCommentReview(db, req.auth!.workspaceId, commentId)))
+        throw new RedditApiError('Comment not found.', 404);
+      res.json({ events: await listRedditCommentEvents(db, req.auth!.workspaceId, commentId) });
+    })
+  );
+  app.post(
+    '/api/reddit/comments/:id/approve',
+    redditRoute(async (req, res) => {
+      if (req.auth!.role !== 'owner')
+        throw new RedditApiError('Only the workspace owner can approve a Reddit comment.', 403);
+      const contentHash = z
+        .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
+        .strict()
+        .parse(req.body ?? {}).contentHash;
+      const commentId = String(req.params.id);
+      if (!(await getRedditCommentReview(db, req.auth!.workspaceId, commentId)))
+        throw new RedditApiError('Comment not found.', 404);
+      try {
+        res.json({
+          comment: await approveRedditComment(
+            db,
+            req.auth!.workspaceId,
+            commentId,
+            contentHash,
+            req.auth!.userId
+          )
+        });
+      } catch (error) {
+        throw new RedditApiError(error instanceof Error ? error.message : 'Approval failed.', 409);
+      }
+    })
+  );
+  app.post(
+    '/api/reddit/comments/:id/execute',
+    redditRoute(async (req, res) => {
+      if (req.auth!.role !== 'owner')
+        throw new RedditApiError('Only the workspace owner can post a Reddit comment.', 403);
+      const commentId = String(req.params.id);
+      if (!(await getRedditCommentReview(db, req.auth!.workspaceId, commentId)))
+        throw new RedditApiError('Comment not found.', 404);
+      const config = assertRedditWorkerOn();
+      const result = await executeRedditComment(db, req.auth!.workspaceId, commentId, (payload) =>
+        commentOnRedditThread(db, config, {
+          workspaceId: req.auth!.workspaceId,
+          threadUrl: payload.threadUrl,
+          body: payload.body,
+          now: new Date()
+        })
+      );
+      res.status(result.posted ? 200 : 409).json(result);
     })
   );
 
@@ -8633,7 +9101,8 @@ export function createApp(db: Db) {
       error instanceof LeadCaptureError ||
       error instanceof ProviderWebhookError ||
       error instanceof GitHubRepoError ||
-      error instanceof ComplianceError
+      error instanceof ComplianceError ||
+      error instanceof OutboundWebhookInputError
     )
       return res.status(error.status).json({ error: error.message });
     if (error instanceof z.ZodError)
@@ -9049,11 +9518,19 @@ function requireSession(db: Db, unattributedLimiter: RequestHandler) {
  * better-auth's, whose name that library prefixes and suffixes rather than
  * this file fixing it.
  */
-function carriesSessionCredential(req: Request): boolean {
+export function carriesSessionCredential(req: Request): boolean {
   const cookies = (req as Request & { cookies?: Record<string, unknown> }).cookies;
   if (!cookies || typeof cookies !== 'object') return false;
+  // Better Auth is configured with cookiePrefix="trevra" in auth-service.ts.
+  // Both local and production-secure variants must skip the anonymous IP
+  // bucket; requireSession still validates them and charges invalid cookies
+  // back to that bucket. Do not accept arbitrary cookie names as a bypass.
   return Object.keys(cookies).some(
-    (name) => name === SESSION_COOKIE || name.includes('better-auth')
+    (name) =>
+      name === SESSION_COOKIE ||
+      name === 'trevra.session_token' ||
+      name === '__Secure-trevra.session_token' ||
+      name.includes('better-auth')
   );
 }
 
@@ -10137,7 +10614,8 @@ const linkedinLeadFieldMappingSchema = z
     email: z.string().min(1).optional(),
     phone: z.string().min(1).optional(),
     country: z.string().min(1).optional(),
-    profileUrl: z.string().min(1).optional()
+    profileUrl: z.string().min(1).optional(),
+    fullName: z.string().min(1).optional()
   })
   .strict();
 
@@ -10635,6 +11113,8 @@ const linkedinInboxFiltersSchema = z.object({
   hasReply: queryBoolean.optional(),
   campaignId: z.string().trim().min(1).max(120).optional(),
   seatKey: z.string().trim().min(1).max(64).optional(),
+  search: z.string().trim().max(120).optional(),
+  offset: z.coerce.number().int().min(0).max(100000).default(0),
   limit: z.coerce.number().int().min(1).max(500).default(100)
 });
 

@@ -137,6 +137,26 @@ export async function assertNotSuppressed(
   if (suppression) throw new SuppressionError(suppression);
 }
 
+/** The SAME transaction-scoped gate is held by public email telemetry and
+ * opt-out writers. A new opt-out can neither commit between telemetry's
+ * eligibility read and its event write, nor be skipped once it has committed.
+ * The shared key is workspace-scoped deliberately: a domain/all-channel or
+ * Person suppression can cover multiple email addresses at once. Never hold
+ * this gate across a third-party network call.
+ */
+export async function withSuppressionBoundary<T>(
+  db: Db,
+  workspaceId: string,
+  work: (tx: Db) => Promise<T>
+): Promise<T> {
+  return db.transactionOrInline(async (tx) => {
+    await tx
+      .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?, 0))')
+      .get(`gtm-suppression-boundary:${workspaceId}`);
+    return work(tx);
+  });
+}
+
 export async function createSuppression(
   db: Db,
   input: {
@@ -154,55 +174,56 @@ export async function createSuppression(
   },
   now: Date = new Date()
 ): Promise<SuppressionRecord> {
-  const email = normalizeContactEmail(input.email);
-  const domain = normalizeDomain(input.domain);
-  const linkedinUrl = normalizeLinkedInProfileUrl(input.linkedinUrl);
-  const personIds = await personIdsForIdentity(
-    db,
-    input.workspaceId,
-    email,
-    linkedinUrl,
-    input.personId
-  );
-  if (personIds.length > 1) {
-    throw new Error(
-      'Suppression identities resolve to different People; review before suppressing.'
+  return withSuppressionBoundary(db, input.workspaceId, async (tx) => {
+    const email = normalizeContactEmail(input.email);
+    const domain = normalizeDomain(input.domain);
+    const linkedinUrl = normalizeLinkedInProfileUrl(input.linkedinUrl);
+    const personIds = await personIdsForIdentity(
+      tx,
+      input.workspaceId,
+      email,
+      linkedinUrl,
+      input.personId
     );
-  }
-  const personId = personIds[0] ?? input.personId?.trim() ?? null;
-  if (!personId && !email && !domain && !linkedinUrl)
-    throw new Error('Suppression requires a Person, email, domain, or LinkedIn profile.');
-  const timestamp = now.toISOString();
-  const suppressionId = id('sup');
-  const inserted = await db
-    .prepare(
-      `
+    if (personIds.length > 1) {
+      throw new Error(
+        'Suppression identities resolve to different People; review before suppressing.'
+      );
+    }
+    const personId = personIds[0] ?? input.personId?.trim() ?? null;
+    if (!personId && !email && !domain && !linkedinUrl)
+      throw new Error('Suppression requires a Person, email, domain, or LinkedIn profile.');
+    const timestamp = now.toISOString();
+    const suppressionId = id('sup');
+    const inserted = await tx
+      .prepare(
+        `
       INSERT INTO suppressions (
         id,workspace_id,person_id,email_normalized,domain_normalized,linkedin_url,channel,
         reason,source,source_ref,created_by_type,created_by_id,created_at
       ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT DO NOTHING RETURNING *
     `
-    )
-    .get<Record<string, unknown>>(
-      suppressionId,
-      input.workspaceId,
-      personId,
-      email,
-      domain,
-      linkedinUrl,
-      input.channel,
-      input.reason.trim(),
-      input.source.trim(),
-      input.sourceRef?.trim() || null,
-      input.actorType ?? 'system',
-      input.actorId?.trim() || null,
-      timestamp
-    );
-  if (inserted) return toSuppression(inserted);
-  const existing = await db
-    .prepare(
-      `
+      )
+      .get<Record<string, unknown>>(
+        suppressionId,
+        input.workspaceId,
+        personId,
+        email,
+        domain,
+        linkedinUrl,
+        input.channel,
+        input.reason.trim(),
+        input.source.trim(),
+        input.sourceRef?.trim() || null,
+        input.actorType ?? 'system',
+        input.actorId?.trim() || null,
+        timestamp
+      );
+    if (inserted) return toSuppression(inserted);
+    const existing = await tx
+      .prepare(
+        `
       SELECT * FROM suppressions
       WHERE workspace_id=? AND channel=? AND lifted_at IS NULL
         AND COALESCE(person_id,'')=COALESCE(?,'')
@@ -211,17 +232,18 @@ export async function createSuppression(
         AND COALESCE(LOWER(linkedin_url),'')=COALESCE(LOWER(?),'')
       LIMIT 1
     `
-    )
-    .get<Record<string, unknown>>(
-      input.workspaceId,
-      input.channel,
-      personId,
-      email,
-      domain,
-      linkedinUrl
-    );
-  if (!existing) throw new Error('Suppression could not be stored.');
-  return toSuppression(existing);
+      )
+      .get<Record<string, unknown>>(
+        input.workspaceId,
+        input.channel,
+        personId,
+        email,
+        domain,
+        linkedinUrl
+      );
+    if (!existing) throw new Error('Suppression could not be stored.');
+    return toSuppression(existing);
+  });
 }
 
 export async function liftSuppressionsBySource(
@@ -236,26 +258,28 @@ export async function liftSuppressionsBySource(
   },
   now: Date = new Date()
 ): Promise<number> {
-  const result = await db
-    .prepare(
-      `
+  return withSuppressionBoundary(db, input.workspaceId, async (tx) => {
+    const result = await tx
+      .prepare(
+        `
       UPDATE suppressions
       SET lifted_at=?,lifted_by_type=?,lifted_by_id=?
       WHERE workspace_id=? AND source=? AND source_ref=? AND lifted_at IS NULL
         AND (?::text IS NULL OR channel=?)
     `
-    )
-    .run(
-      now.toISOString(),
-      input.actorType ?? 'system',
-      input.actorId?.trim() || null,
-      input.workspaceId,
-      input.source,
-      input.sourceRef,
-      input.channel ?? null,
-      input.channel ?? null
-    );
-  return result.changes;
+      )
+      .run(
+        now.toISOString(),
+        input.actorType ?? 'system',
+        input.actorId?.trim() || null,
+        input.workspaceId,
+        input.source,
+        input.sourceRef,
+        input.channel ?? null,
+        input.channel ?? null
+      );
+    return result.changes;
+  });
 }
 
 export async function liftSuppression(
@@ -268,23 +292,25 @@ export async function liftSuppression(
   },
   now: Date = new Date()
 ): Promise<SuppressionRecord | null> {
-  const row = await db
-    .prepare(
-      `
+  return withSuppressionBoundary(db, input.workspaceId, async (tx) => {
+    const row = await tx
+      .prepare(
+        `
       UPDATE suppressions
       SET lifted_at=?,lifted_by_type=?,lifted_by_id=?
       WHERE workspace_id=? AND id=? AND lifted_at IS NULL
       RETURNING *
     `
-    )
-    .get<Record<string, unknown>>(
-      now.toISOString(),
-      input.actorType,
-      input.actorId?.trim() || null,
-      input.workspaceId,
-      input.suppressionId
-    );
-  return row ? toSuppression(row) : null;
+      )
+      .get<Record<string, unknown>>(
+        now.toISOString(),
+        input.actorType,
+        input.actorId?.trim() || null,
+        input.workspaceId,
+        input.suppressionId
+      );
+    return row ? toSuppression(row) : null;
+  });
 }
 
 export async function listSuppressions(

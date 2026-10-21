@@ -552,7 +552,8 @@ export async function seedBuiltinModuleRegistry(
         ON CONFLICT (module_id,version) DO UPDATE SET
           manifest_json=excluded.manifest_json,input_schema_json=excluded.input_schema_json,
           output_schema_json=excluded.output_schema_json,side_effect=excluded.side_effect,
-          requires_approval=excluded.requires_approval,signature_payload_hash=excluded.signature_payload_hash
+          requires_approval=excluded.requires_approval,signature_payload_hash=excluded.signature_payload_hash,
+          sbom_json=excluded.sbom_json
       `).run(module.id,module.version,`builtin:${module.id}@${module.version}`,JSON.stringify(manifest),JSON.stringify({}),
         JSON.stringify(module.inputSchema),JSON.stringify(module.outputSchema),module.sideEffect,module.requiresApproval,payloadHash,JSON.stringify(sbom),now);
       await tx.prepare(`INSERT INTO module_usage_metrics (module_id,updated_at) VALUES (?,?) ON CONFLICT (module_id) DO NOTHING`)

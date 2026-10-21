@@ -1,6 +1,15 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DEMO_WORKSPACE_ID, openDatabase, resetDemoData, type Db } from '../db.js';
-import { isThreadReplied, listOutreachThreads, recordPost, recordSeenThreads } from './store.js';
+import {
+  COMMUNITY_POST_VERIFICATION,
+  isThreadReplied,
+  listOutreachThreads,
+  listUnresolvedCommunityPosts,
+  recordPost,
+  recordSeenThreads,
+  resolveCommunityUnknownPost
+} from './store.js';
+import { listDomainEvents } from '../control-plane/events.js';
 import type { OutreachThread } from './types.js';
 
 let db: Db;
@@ -51,6 +60,148 @@ async function reply(externalId: string, platform = 'reddit'): Promise<void> {
     NOW
   );
 }
+
+describe('unknown community write reconciliation', () => {
+  async function pending(): Promise<string> {
+    return (
+      await recordPost(
+        db,
+        {
+          workspaceId: DEMO_WORKSPACE_ID,
+          platform: 'github',
+          community: 'example/repo',
+          threadExternalId: 'issue-1',
+          threadUrl: 'https://github.com/example/repo/issues/1',
+          payloadHash: 'unknown-write',
+          status: 'pending',
+          provider: null,
+          externalRef: null,
+          error: 'Provider response lost',
+          body: 'An approved reply'
+        },
+        NOW
+      )
+    ).id;
+  }
+
+  it('never allows a still-in-flight claim to be manually settled', async () => {
+    const postId = await pending();
+    const listed = await listUnresolvedCommunityPosts(db, DEMO_WORKSPACE_ID, NOW);
+    expect(listed).toMatchObject([{ id: postId, readyForReview: false }]);
+    await expect(
+      resolveCommunityUnknownPost(
+        db,
+        {
+          workspaceId: DEMO_WORKSPACE_ID,
+          postId,
+          actorUserId: 'owner',
+          outcome: 'not_posted',
+          verificationUrl: 'https://github.com/example/repo/issues/1',
+          confirmation: COMMUNITY_POST_VERIFICATION
+        },
+        new Date(NOW.getTime() + 30_000)
+      )
+    ).rejects.toThrow('may still be in flight');
+    expect(
+      await db
+        .prepare('SELECT status FROM outreach_posts WHERE id=?')
+        .get<{ status: string }>(postId)
+    ).toEqual({ status: 'pending' });
+  });
+
+  it('requires explicit same-host verification and records an immutable owner resolution event', async () => {
+    const postId = await pending();
+    const later = new Date(NOW.getTime() + 3 * 60_000);
+    const input = {
+      workspaceId: DEMO_WORKSPACE_ID,
+      postId,
+      actorUserId: 'owner',
+      outcome: 'posted' as const,
+      verificationUrl: 'https://github.com/example/repo/issues/1#issuecomment-111',
+      confirmation: COMMUNITY_POST_VERIFICATION
+    };
+    await expect(
+      resolveCommunityUnknownPost(db, { ...input, confirmation: '' }, later)
+    ).rejects.toThrow('Confirm you inspected');
+    await expect(
+      resolveCommunityUnknownPost(
+        db,
+        {
+          ...input,
+          verificationUrl: 'https://attacker.example/fake'
+        },
+        later
+      )
+    ).rejects.toThrow('same platform host');
+    expect(await resolveCommunityUnknownPost(db, input, later)).toMatchObject({
+      id: postId,
+      status: 'posted',
+      verificationUrl: input.verificationUrl
+    });
+    const events = await listDomainEvents(db, DEMO_WORKSPACE_ID, {
+      streamType: 'outreach_post',
+      streamId: postId
+    });
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      actorType: 'user',
+      actorId: 'owner',
+      eventType: 'community_reply.unknown_resolved',
+      payload: { outcome: 'posted', verificationUrl: input.verificationUrl }
+    });
+    await expect(resolveCommunityUnknownPost(db, input, later)).rejects.toThrow(
+      'no longer awaiting resolution'
+    );
+    expect(
+      (await listUnresolvedCommunityPosts(db, DEMO_WORKSPACE_ID, later)).some(
+        (post) => post.id === postId
+      )
+    ).toBe(false);
+  });
+
+  it('an owner-confirmed absence releases only its own claim and never triggers a send', async () => {
+    const postId = await pending();
+    const later = new Date(NOW.getTime() + 3 * 60_000);
+    expect(
+      await resolveCommunityUnknownPost(
+        db,
+        {
+          workspaceId: DEMO_WORKSPACE_ID,
+          postId,
+          actorUserId: 'owner',
+          outcome: 'not_posted',
+          verificationUrl: 'https://github.com/example/repo/issues/1',
+          confirmation: COMMUNITY_POST_VERIFICATION
+        },
+        later
+      )
+    ).toMatchObject({ status: 'failed' });
+    const row = await db
+      .prepare(
+        'SELECT status,provider,external_ref FROM outreach_posts WHERE workspace_id=? AND id=?'
+      )
+      .get<{ status: string; provider: string | null; external_ref: string | null }>(
+        DEMO_WORKSPACE_ID,
+        postId
+      );
+    expect(row).toEqual({ status: 'failed', provider: null, external_ref: null });
+    expect(
+      await resolveCommunityUnknownPost(
+        db,
+        {
+          workspaceId: 'ws_other',
+          postId,
+          actorUserId: 'other',
+          outcome: 'posted',
+          verificationUrl: 'https://github.com/example/repo/issues/1',
+          confirmation: COMMUNITY_POST_VERIFICATION
+        },
+        later
+      )
+    ).toBeNull();
+    expect(await isThreadReplied(db, DEMO_WORKSPACE_ID, 'github', 'issue-1')).toBe(false);
+  });
+});
 
 describe('recordSeenThreads', () => {
   it('keeps returning a discovered thread until we have actually replied to it', async () => {

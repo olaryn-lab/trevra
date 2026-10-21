@@ -1,14 +1,35 @@
 import { createHash } from 'node:crypto';
 import { id, type Db } from '../db.js';
-import { createSuppression } from '../suppressions.js';
-import type { VerifiedEmailOutcome } from '../email-outcomes.js';
+import { createHunterProvider } from '../enrichment/hunter.js';
+import { readWorkspaceSecretPlaintext } from '../secrets/store.js';
+import { enrichmentUsage } from '../enrichment/settings.js';
+import { createSuppression, withSuppressionBoundary } from '../suppressions.js';
+import { emailEventBranchKeys, type CampaignEmailEventKind } from './email-event-kind.js';
 import { projectCampaignEmailDelivery, projectCampaignEmailReply } from '../conversations.js';
-import { executeConnectedAction, readConnectedEmailThreadEvents } from '../integration-service.js';
+import {
+  CampaignEmailSendRefusal,
+  executeConnectedAction,
+  readConnectedEmailThreadEvents
+} from '../integration-service.js';
 import { evaluateEmailLawfulBasis } from '../compliance/lawful-basis.js';
 import { JURISDICTION_RULES_DISCLAIMER } from '../compliance/jurisdiction-rules.js';
 import { campaignSnapshotSteps } from './managed-campaigns.js';
 import { delayMilliseconds } from './workflows.js';
+import { filterExcluded } from './exclusions.js';
 import { publicEmailOrigin } from '../email/public-origin.js';
+import { emailComplianceProvider, OUTREACH_OPT_OUT_SENTENCE } from '../email/compliance.js';
+import { emailDomainOf } from '../email/deliverability.js';
+import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-address.js';
+import { getSenderDeliverability } from '../email/sender-deliverability.js';
+import { unsubscribeConfigured } from '../email/unsubscribe.js';
+import { campaignEmailPolicyGate } from './campaign-email-approval.js';
+import {
+  campaignTrackableUrls,
+  escapeCampaignHtml,
+  renderCampaignTrackedContent
+} from './campaign-email-html.js';
+import { assertNotSuppressed, findSuppression, SuppressionError } from '../suppressions.js';
+import { normalizeContactEmail } from '../lead-capture/people.js';
 export type CampaignChannelKind = 'email' | 'find_email';
 export type CampaignChannelStatus =
   'planned' | 'claimed' | 'sent' | 'failed' | 'unknown' | 'skipped';
@@ -57,32 +78,6 @@ function sha(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#39;');
-}
-
-function trackableUrls(body: string): string[] {
-  const found = body.match(/https?:\/\/[^\s<>"']+/gi) ?? [];
-  return [
-    ...new Set(
-      found
-        .map((value) => value.replace(/[),.;!?]+$/g, ''))
-        .filter((value) => {
-          try {
-            return ['http:', 'https:'].includes(new URL(value).protocol);
-          } catch {
-            return false;
-          }
-        })
-    )
-  ];
-}
-
 async function trackedHtmlBody(
   db: Db,
   row: ChannelRow,
@@ -123,7 +118,7 @@ async function trackedHtmlBody(
 
   const replacements = new Map<string, string>();
   if (policy === 'opens_clicks') {
-    for (const target of trackableUrls(body)) {
+    for (const target of campaignTrackableUrls(body)) {
       let link = await db
         .prepare(
           `SELECT token FROM linkedin_campaign_email_tracking_links
@@ -152,66 +147,69 @@ async function trackedHtmlBody(
     }
   }
 
-  let escaped = escapeHtml(body);
-  for (const [target, tracked] of replacements) {
-    escaped = escaped.replaceAll(
-      escapeHtml(target),
-      `<a href="${escapeHtml(tracked)}">${escapeHtml(target)}</a>`
-    );
-  }
-  escaped = escaped.replaceAll('\n', '<br>');
-  return `${escaped}<img src="${origin}/t/e/${encodeURIComponent(token)}/open.gif" width="1" height="1" alt="" style="display:none" />`;
+  return renderCampaignTrackedContent(body, origin, token, replacements);
 }
 
+/**
+ * Reserve channel work under one short workspace lock. A claimed email consumes
+ * its mailbox's daily capacity until it settles: counting only confirmed sends
+ * lets two workers both pass the cap before either provider call returns.
+ * Unknown outcomes also reserve today's slot until explicitly reconciled.
+ * This lock covers only the database claim, never the external provider call.
+ */
 async function claimNext(db: Db, workspaceId: string, now: Date): Promise<ChannelRow | null> {
-  return (
-    (await db
-      .prepare(
-        `UPDATE linkedin_campaign_channel_actions SET status='claimed',claimed_at=?::timestamptz,attempt_count=attempt_count+1,updated_at=?::timestamptz
-         WHERE id=(
-           SELECT q.id
-           FROM linkedin_campaign_channel_actions q
-           JOIN linkedin_campaigns c
-             ON c.workspace_id=q.workspace_id AND c.id=q.campaign_id
-           JOIN linkedin_campaign_members m
-             ON m.workspace_id=q.workspace_id AND m.id=q.member_id
-           WHERE q.workspace_id=? AND q.status='planned' AND q.planned_for<=?::timestamptz
-             AND q.claimed_at IS NULL AND c.status='running'
-             AND m.status IN ('active','waiting')
-             AND m.current_step_id=q.workflow_step_id
-             AND NOT EXISTS (
-               SELECT 1 FROM linkedin_actions r
-               WHERE r.workspace_id=q.workspace_id AND r.campaign_member_id=q.member_id
-                 AND r.status='replied'
-             )
-           ORDER BY q.planned_for ASC,q.created_at ASC,q.id ASC
-           FOR UPDATE OF q SKIP LOCKED LIMIT 1
-         )
-         RETURNING id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,payload_json,variant_id,idempotency_key,connection_id,attempt_count,credits_used,tracking_token`
-      )
-      .get<ChannelRow>(now.toISOString(), now.toISOString(), workspaceId, now.toISOString())) ??
-    null
-  );
-}
-
-async function ensureEmailConnectionId(db: Db, row: ChannelRow, now: Date): Promise<void> {
-  if (row.kind !== 'email' || row.connection_id) return;
-  const connection = await db
-    .prepare(
-      `SELECT id FROM connections
-       WHERE workspace_id=? AND status='connected'
-         AND provider IN ('gmail','google-mail','microsoft','outlook')
-       ORDER BY is_demo ASC,updated_at DESC LIMIT 1`
-    )
-    .get<{ id: string }>(row.workspace_id);
-  if (!connection) return;
-  await db
-    .prepare(
-      `UPDATE linkedin_campaign_channel_actions SET connection_id=?,updated_at=?::timestamptz
-       WHERE workspace_id=? AND id=? AND connection_id IS NULL`
-    )
-    .run(connection.id, now.toISOString(), row.workspace_id, row.id);
-  row.connection_id = connection.id;
+  const timestamp = now.toISOString();
+  const dayStart = new Date(now.getTime() - 86_400_000).toISOString();
+  return db.transaction(async (tx) => {
+    await tx
+      .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))')
+      .get(`${workspaceId}:campaign-mailbox-cap`);
+    return (
+      (await tx
+        .prepare(
+          `UPDATE linkedin_campaign_channel_actions SET status='claimed',claimed_at=?::timestamptz,attempt_count=attempt_count+1,updated_at=?::timestamptz
+           WHERE id=(
+             SELECT q.id
+             FROM linkedin_campaign_channel_actions q
+             JOIN linkedin_campaigns c
+               ON c.workspace_id=q.workspace_id AND c.id=q.campaign_id
+             JOIN linkedin_campaign_members m
+               ON m.workspace_id=q.workspace_id AND m.id=q.member_id
+             WHERE q.workspace_id=? AND q.status='planned' AND q.planned_for<=?::timestamptz
+               AND q.claimed_at IS NULL AND c.status='running'
+               AND m.status IN ('active','waiting')
+               AND m.current_step_id=q.workflow_step_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM linkedin_actions r
+                 WHERE r.workspace_id=q.workspace_id AND r.campaign_member_id=q.member_id
+                   AND r.status='replied'
+               )
+               AND (
+                 q.kind<>'email' OR q.connection_id IS NULL OR NOT EXISTS (
+                   SELECT 1 FROM linkedin_campaign_mailbox_settings setting
+                   WHERE setting.workspace_id=q.workspace_id
+                     AND setting.connection_id=q.connection_id
+                     AND (
+                       SELECT COUNT(*) FROM linkedin_campaign_channel_actions reserved
+                       WHERE reserved.workspace_id=q.workspace_id
+                         AND reserved.connection_id=q.connection_id
+                         AND reserved.kind='email'
+                         AND (
+                           reserved.status='claimed'
+                           OR (reserved.status='sent' AND reserved.completed_at>=?::timestamptz)
+                           OR (reserved.status='unknown' AND reserved.updated_at>=?::timestamptz)
+                         )
+                     ) >= setting.daily_limit
+                 )
+               )
+             ORDER BY q.planned_for ASC,q.created_at ASC,q.id ASC
+             FOR UPDATE OF q SKIP LOCKED LIMIT 1
+           )
+           RETURNING id,workspace_id,campaign_id,member_id,contact_id,workflow_step_id,kind,payload_json,variant_id,idempotency_key,connection_id,attempt_count,credits_used,tracking_token`
+        )
+        .get<ChannelRow>(timestamp, timestamp, workspaceId, timestamp, dayStart, dayStart)) ?? null
+    );
+  });
 }
 
 async function mailboxMaySend(
@@ -287,6 +285,160 @@ async function mailboxMaySend(
   return { allowed: true, nextAt: null };
 }
 
+/** An expected workspace setup problem never becomes an unknown provider outcome. */
+class CampaignEmailSetupHold extends Error {}
+class CampaignEmailPolicyHold extends Error {}
+class CampaignEmailRecipientBlocked extends Error {}
+
+/**
+ * Final workspace-level safety boundary for sequenced emails.
+ * No connection fallbacks, demo credentials, unverified sender identities,
+ * unsynced replies, unknown DNS or missing RFC 8058 capability.
+ * Checked on every attempt before writing tracking links or touching a provider.
+ */
+async function campaignEmailSenderReady(
+  db: Db,
+  workspaceId: string,
+  connectionId: string | null,
+  now: Date
+): Promise<{ address: string; footer: string }> {
+  if (!connectionId)
+    throw new CampaignEmailSetupHold(
+      'Connect and select a sending mailbox before campaign email can run.'
+    );
+  const mailbox = (await listSendingMailboxes(db, workspaceId)).find(
+    (candidate) => candidate.connectionId === connectionId
+  );
+  if (!mailbox)
+    throw new CampaignEmailSetupHold(
+      'The selected campaign mailbox is not an active, verified live connection.'
+    );
+  // Zoho REST cannot supply RFC 8058 headers; it must use the dedicated
+  // approval-bound reply-unsubscribe adapter, not this Gmail/Graph path.
+  if (mailbox.providerKey === 'zoho')
+    throw new CampaignEmailSetupHold(
+      'Zoho campaign email is unavailable until reply-unsubscribe approval is supported.'
+    );
+  const address = await resolveMailboxAddress(db, workspaceId, mailbox);
+  const domain = address ? emailDomainOf(address) : null;
+  if (!address || !domain)
+    throw new CampaignEmailSetupHold(
+      'Cannot verify the selected mailbox sender address. Reconnect the mailbox.'
+    );
+  const inbound = await db
+    .prepare('SELECT connection_id,sync_status FROM email_inbound_mailboxes WHERE workspace_id=?')
+    .get<{ connection_id: string; sync_status: string }>(workspaceId);
+  if (inbound?.connection_id !== mailbox.connectionId || inbound.sync_status !== 'syncing')
+    throw new CampaignEmailSetupHold('Replies are not syncing from the selected sending mailbox.');
+  if (!unsubscribeConfigured())
+    throw new CampaignEmailSetupHold(
+      'Configure HTTPS TREVRA_PUBLIC_API_URL and TREVRA_SECRETS_KEY for one-click unsubscribe.'
+    );
+  const deliverability = await getSenderDeliverability(
+    db,
+    workspaceId,
+    { domain, provider: mailbox.providerKey, markOutreach: true },
+    { now }
+  );
+  if (deliverability.status !== 'pass')
+    throw new CampaignEmailSetupHold(
+      'Sender SPF, DKIM and DMARC must all pass before campaign email can run.'
+    );
+  const footer = (await emailComplianceProvider().footer(db, workspaceId))?.trim() ?? '';
+  if (!footer || !footer.endsWith(OUTREACH_OPT_OUT_SENTENCE))
+    throw new CampaignEmailSetupHold(
+      'Sender postal address, privacy policy and opt-out compliance footer are required.'
+    );
+  return { address, footer };
+}
+
+async function holdCampaignEmailSetup(
+  db: Db,
+  row: ChannelRow,
+  error: Error,
+  now: Date,
+  holdMailboxLeg = false
+) {
+  const next = new Date(now.getTime() + 60 * 60_000);
+  await db.transaction(async (tx) => {
+    if (holdMailboxLeg && row.kind === 'email') {
+      // A missing reply sync, sender identity, DNS proof or footer applies to the
+      // whole mailbox leg, not to one recipient. Hold its other due emails at once
+      // instead of burning each worker tick on the same setup failure. A policy
+      // review/denial is action-specific and must never pause approved peers.
+      await tx
+        .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))')
+        .get(`${row.workspace_id}:campaign-mailbox-cap`);
+      await tx
+        .prepare(
+          `UPDATE linkedin_campaign_channel_actions
+           SET planned_for=?::timestamptz,last_error=?,updated_at=?::timestamptz
+           WHERE workspace_id=? AND kind='email' AND status='planned'
+             AND connection_id IS NOT DISTINCT FROM ?
+             AND planned_for<=?::timestamptz`
+        )
+        .run(
+          next.toISOString(),
+          error.message,
+          now.toISOString(),
+          row.workspace_id,
+          row.connection_id,
+          now.toISOString()
+        );
+    }
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+         SET status='planned', claimed_at=NULL, planned_for=?::timestamptz,
+             last_error=?, updated_at=?::timestamptz
+         WHERE workspace_id=? AND id=? AND status='claimed'`
+      )
+      .run(next.toISOString(), error.message, now.toISOString(), row.workspace_id, row.id);
+  });
+}
+
+/** A recipient-level pre-send refusal is terminal, never an unknown side effect. */
+async function skipBlockedCampaignRecipient(
+  db: Db,
+  row: ChannelRow,
+  error: CampaignEmailRecipientBlocked,
+  now: Date
+): Promise<void> {
+  const when = now.toISOString();
+  await db.transaction(async (tx) => {
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+       SET status='skipped', claimed_at=NULL, outcome_known=TRUE,
+           last_error=?, updated_at=?::timestamptz
+       WHERE workspace_id=? AND id=? AND status='claimed'`
+      )
+      .run(error.message, when, row.workspace_id, row.id);
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_members
+       SET status='excluded', exclusion_reason=?, next_eligible_at=NULL,
+           ended_at=?::timestamptz, updated_at=?::timestamptz
+       WHERE workspace_id=? AND id=? AND status IN ('active','waiting','manual','pending')`
+      )
+      .run(error.message, when, when, row.workspace_id, row.member_id);
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+       SET status='skipped',claimed_at=NULL,updated_at=?::timestamptz
+       WHERE workspace_id=? AND member_id=? AND status='planned'`
+      )
+      .run(when, row.workspace_id, row.member_id);
+    await tx
+      .prepare(
+        `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL
+       WHERE workspace_id=? AND campaign_member_id=? AND status IN ('planned','held')
+         AND claimed_at IS NULL`
+      )
+      .run(row.workspace_id, row.member_id);
+  });
+}
+
 async function executeEmail(
   db: Db,
   row: ChannelRow,
@@ -302,8 +454,44 @@ async function executeEmail(
   // country requires one. Checked BEFORE tracking tokens exist, so a refused
   // send leaves nothing behind. Not legal advice; verify with counsel.
   const lead = await db
-    .prepare('SELECT person_id, country FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?')
-    .get<{ person_id: string | null; country: string | null }>(row.workspace_id, row.contact_id);
+    .prepare(
+      'SELECT person_id,country,profile_url,do_not_contact FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?'
+    )
+    .get<{
+      person_id: string | null;
+      country: string | null;
+      profile_url: string | null;
+      do_not_contact: boolean;
+    }>(row.workspace_id, row.contact_id);
+  if (!lead || lead.do_not_contact)
+    throw new CampaignEmailRecipientBlocked(
+      'Campaign email recipient is missing or marked do-not-contact; nothing was sent.'
+    );
+  if (lead.profile_url) {
+    const blacklist = await filterExcluded(db, row.workspace_id, [lead.profile_url]);
+    if (blacklist.excluded.length > 0)
+      throw new CampaignEmailRecipientBlocked(
+        'Recipient is on the Never contact list; nothing was sent.'
+      );
+  }
+  // Suppressions are workspace-wide and may match the canonical Person,
+  // not merely the email address on this campaign's lead contact.
+  try {
+    await assertNotSuppressed(db, row.workspace_id, {
+      channel: 'email',
+      email: recipient,
+      personId: lead.person_id ?? undefined
+    });
+  } catch (error) {
+    if (!(error instanceof SuppressionError)) throw error;
+    throw new CampaignEmailRecipientBlocked(
+      'Campaign email recipient is suppressed; nothing was sent.'
+    );
+  }
+  if (!lead.person_id)
+    throw new CampaignEmailRecipientBlocked(
+      'Campaign email requires a resolved Person identity; nothing was sent.'
+    );
   const lawfulBasis = await evaluateEmailLawfulBasis(db, row.workspace_id, {
     email: recipient,
     personId: lead?.person_id ?? null,
@@ -311,15 +499,24 @@ async function executeEmail(
     purpose: 'outreach'
   });
   if (lawfulBasis.status === 'missing')
-    throw new Error(
+    throw new CampaignEmailRecipientBlocked(
       `Lawful basis missing for cold email: ${lawfulBasis.reason} ${JURISDICTION_RULES_DISCLAIMER}`
     );
+  const sender = await campaignEmailSenderReady(db, row.workspace_id, row.connection_id, now);
+  const gate = await campaignEmailPolicyGate(db, row.workspace_id, row.id);
+  if (!gate.allowed) throw new CampaignEmailPolicyHold(gate.reason);
+  const bodyWithFooter = `${body}\n\n${sender.footer}`;
   const threaded = payload.threaded === true;
   const tracking =
     payload.tracking === 'opens' || payload.tracking === 'opens_clicks'
       ? payload.tracking
       : ('off' as const);
-  const htmlBody = await trackedHtmlBody(db, row, body, tracking, now);
+  // Only user-authored content may be click-tracked. Never rewrite the
+  // legally required privacy-policy/opt-out footer into a tracking redirect.
+  const trackedBody = await trackedHtmlBody(db, row, body, tracking, now);
+  const htmlBody = trackedBody
+    ? `${trackedBody}<br><br>${escapeCampaignHtml(sender.footer).replaceAll('\n', '<br>')}`
+    : null;
   const prior = threaded
     ? await db
         .prepare(
@@ -339,18 +536,25 @@ async function executeEmail(
     : undefined;
   return executeConnectedAction(db, row.workspace_id, {
     type: 'email_draft',
-    connection_id: row.connection_id ?? payload.connectionId ?? undefined,
+    connection_id: row.connection_id,
+    require_connection_id: true,
     recipient,
     subject,
-    body,
+    body: bodyWithFooter,
     structured_payload_json: JSON.stringify({
       threaded,
       threadExternalRef: prior?.external_ref ?? null,
       threadIdempotencyKey: prior?.idempotency_key ?? null,
       tracking: payload.tracking ?? 'off',
       deliveryPurpose: 'outreach',
+      requireListUnsubscribe: true,
+      unsubscribeMode: 'list_unsubscribe_headers',
+      senderAddress: sender.address,
+      personId: lead.person_id,
+      contactId: row.contact_id,
       deliverySourceType: 'campaign_email',
       deliverySourceId: row.id,
+      approvalContentHash: gate.review!.contentHash,
       campaignId: row.campaign_id,
       memberId: row.member_id,
       workflowStepId: row.workflow_step_id,
@@ -360,35 +564,73 @@ async function executeEmail(
   });
 }
 
+async function reserveCampaignCreditTx(tx: Db, row: ChannelRow, now: Date): Promise<void> {
+  const campaign = await tx
+    .prepare(
+      `SELECT enrichment_credit_cap FROM linkedin_campaigns WHERE workspace_id=? AND id=? FOR UPDATE`
+    )
+    .get<{ enrichment_credit_cap: number | null }>(row.workspace_id, row.campaign_id);
+  if (!campaign) throw new Error('Campaign no longer exists.');
+  const cap =
+    campaign.enrichment_credit_cap === null
+      ? 0
+      : Math.max(0, Number(campaign.enrichment_credit_cap));
+  const used = await tx
+    .prepare(
+      `SELECT COALESCE(SUM(credits_used),0)::int AS total
+       FROM linkedin_campaign_channel_actions
+       WHERE workspace_id=? AND campaign_id=? AND kind='find_email'`
+    )
+    .get<{ total: number }>(row.workspace_id, row.campaign_id);
+  if (Number(used?.total ?? 0) >= cap)
+    throw new Error('Campaign enrichment credit cap reached; no provider lookup was attempted.');
+  await tx
+    .prepare(
+      `UPDATE linkedin_campaign_channel_actions SET credits_used=1,updated_at=?::timestamptz
+       WHERE workspace_id=? AND id=? AND credits_used=0`
+    )
+    .run(now.toISOString(), row.workspace_id, row.id);
+}
 async function reserveEnrichmentCredit(db: Db, row: ChannelRow, now: Date): Promise<void> {
   if (row.credits_used > 0) return;
+  await db.transaction((tx) => reserveCampaignCreditTx(tx, row, now));
+  row.credits_used = 1;
+}
+async function reserveHunterCampaignCredit(db: Db, row: ChannelRow, now: Date): Promise<void> {
+  if (row.credits_used > 0) return;
   await db.transaction(async (tx) => {
-    const campaign = await tx
+    // Share the same workspace reservation lock as queueEnrichmentRun. Otherwise
+    // an approved domain-search estimate and a finder can both see the last
+    // credit before either transaction commits, oversubscribing the monthly cap.
+    await tx
+      .prepare('SELECT pg_advisory_xact_lock(hashtextextended(?::text, 0))')
+      .get(`${row.workspace_id}:enrichment-cap`);
+    const settings = await tx
       .prepare(
-        `SELECT enrichment_credit_cap FROM linkedin_campaigns WHERE workspace_id=? AND id=? FOR UPDATE`
+        'SELECT monthly_credit_cap,key_status FROM enrichment_settings WHERE workspace_id=? FOR UPDATE'
       )
-      .get<{ enrichment_credit_cap: number | null }>(row.workspace_id, row.campaign_id);
-    if (!campaign) throw new Error('Campaign no longer exists.');
-    const cap =
-      campaign.enrichment_credit_cap === null
-        ? 0
-        : Math.max(0, Number(campaign.enrichment_credit_cap));
-    const used = await tx
+      .get<{ monthly_credit_cap: number; key_status: string }>(row.workspace_id);
+    if (settings?.key_status !== 'valid')
+      throw new CampaignEmailSetupHold(
+        'Hunter workspace key must be verified before campaign enrichment.'
+      );
+    const available =
+      Number(settings.monthly_credit_cap) -
+      (await enrichmentUsage(tx, row.workspace_id, now)).usedCredits;
+    if (available < 1)
+      throw new CampaignEmailSetupHold(
+        'Workspace Hunter monthly credit cap reached; no lookup attempted.'
+      );
+    await reserveCampaignCreditTx(tx, row, now);
+    await tx
       .prepare(
-        `SELECT COALESCE(SUM(credits_used),0)::int AS total FROM linkedin_campaign_channel_actions
-        WHERE workspace_id=? AND campaign_id=? AND kind='find_email'`
+        `INSERT INTO enrichment_usage_ledger
+       (id,workspace_id,run_id,provider,operation,credits,occurred_at)
+       VALUES (?,?,?,'hunter','email_finder',1,?::timestamptz)`
       )
-      .get<{ total: number }>(row.workspace_id, row.campaign_id);
-    if (Number(used?.total ?? 0) >= cap)
-      throw new Error('Campaign enrichment credit cap reached; no provider lookup was attempted.');
-    const reserved = await tx
-      .prepare(
-        `UPDATE linkedin_campaign_channel_actions SET credits_used=1,updated_at=?::timestamptz
-        WHERE workspace_id=? AND id=? AND credits_used=0 RETURNING id`
-      )
-      .get<{ id: string }>(now.toISOString(), row.workspace_id, row.id);
-    if (reserved) row.credits_used = 1;
+      .run(id('enl'), row.workspace_id, row.id, now.toISOString());
   });
+  row.credits_used = 1;
 }
 
 async function executeFindEmail(
@@ -399,7 +641,7 @@ async function executeFindEmail(
 ): Promise<{ provider: string; externalRef: string }> {
   const contact = await db
     .prepare(
-      `SELECT email,email_source,email_provenance,email_confidence,email_verification_status,first_name,last_name,company,profile_url
+      `SELECT email,email_source,email_provenance,email_confidence,email_verification_status,first_name,last_name,company,profile_url,do_not_contact
        FROM linkedin_lead_contacts WHERE workspace_id=? AND id=?`
     )
     .get<{
@@ -412,8 +654,20 @@ async function executeFindEmail(
       last_name: string;
       company: string;
       profile_url: string | null;
+      do_not_contact: boolean;
     }>(row.workspace_id, row.contact_id);
   if (!contact) throw new Error('Campaign contact no longer exists.');
+  if (contact.do_not_contact)
+    throw new CampaignEmailRecipientBlocked(
+      'Campaign contact is marked do-not-contact; no enrichment lookup attempted.'
+    );
+  if (contact.profile_url) {
+    const excluded = await filterExcluded(db, row.workspace_id, [contact.profile_url]);
+    if (excluded.excluded.length)
+      throw new CampaignEmailRecipientBlocked(
+        'Recipient is on the Never Contact list; no enrichment lookup attempted.'
+      );
+  }
   if (contact.email && payload.refresh !== true) {
     return {
       provider: contact.email_source ?? contact.email_provenance ?? 'existing',
@@ -424,6 +678,68 @@ async function executeFindEmail(
   const providerId = String(
     payload.providerId ?? process.env.TREVRA_EMAIL_ENRICHMENT_PROVIDER ?? 'environment'
   );
+  if (providerId === 'hunter') {
+    const apiKey = await readWorkspaceSecretPlaintext(db, row.workspace_id, 'hunter_api_key');
+    if (!apiKey)
+      throw new CampaignEmailSetupHold(
+        'Hunter API key not connected for this workspace; no lookup attempted.'
+      );
+    const finder = createHunterProvider(apiKey).findEmail;
+    if (!finder) throw new CampaignEmailSetupHold('Hunter Email Finder is not configured.');
+    // Reserve atomically before the provider call. An explicit no-result is free
+    // and releases the reservation; ambiguous failures retain it for review.
+    await reserveHunterCampaignCredit(db, row, now);
+    const result = await finder({
+      firstName: contact.first_name,
+      lastName: contact.last_name,
+      company: contact.company,
+      profileUrl: contact.profile_url
+    });
+    if (result.credits === 0) {
+      // Known zero-cost response settles the pre-call reservation to zero in
+      // both the campaign budget and the workspace usage total atomically.
+      await db.transaction(async (tx) => {
+        await tx
+          .prepare(
+            `UPDATE linkedin_campaign_channel_actions
+           SET credits_used=0,updated_at=?::timestamptz
+           WHERE workspace_id=? AND id=? AND credits_used=1`
+          )
+          .run(now.toISOString(), row.workspace_id, row.id);
+        await tx
+          .prepare(
+            `UPDATE enrichment_usage_ledger SET credits=0
+           WHERE workspace_id=? AND run_id=? AND operation='email_finder'`
+          )
+          .run(row.workspace_id, row.id);
+      });
+      row.credits_used = 0;
+    }
+    if (!result.email) {
+      return {
+        provider: 'hunter',
+        externalRef: contact.email ? `email:${contact.email}` : 'email:not-found'
+      };
+    }
+    const update = await db
+      .prepare(
+        `UPDATE linkedin_lead_contacts
+       SET email=?,email_source='hunter',email_provenance='enriched',
+           email_confidence=?,email_verification_status=?,updated_at=?
+       WHERE workspace_id=? AND id=? AND do_not_contact=FALSE RETURNING id`
+      )
+      .get<{ id: string }>(
+        result.email,
+        result.confidence,
+        result.verificationStatus,
+        now.toISOString(),
+        row.workspace_id,
+        row.contact_id
+      );
+    if (!update) throw new Error('Campaign contact is do-not-contact or no longer exists.');
+    return { provider: 'hunter', externalRef: `email:${result.email}` };
+  }
+
   const endpoint = process.env.TREVRA_EMAIL_ENRICHMENT_URL?.trim();
   if (!endpoint) {
     // A definite no-provider result is not an unknown external side effect. It can branch cleanly.
@@ -482,12 +798,15 @@ async function executeFindEmail(
 
 function definiteFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
+  if (error instanceof CampaignEmailSendRefusal) return true;
   return (
-    /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|enrichment credit cap reached/i.test(
+    /HTTP 4\d\d|requires recipient|no longer exists|Connect Gmail|Connect Microsoft|Hunter rejected the API key|Hunter rate limit reached|Hunter account has no credits|Hunter API key not connected|Hunter Email Finder is not configured|Hunter workspace key must be verified|Workspace Hunter monthly credit cap reached|Campaign contact is do-not-contact|enrichment credit cap reached/i.test(
       error.message
     ) ||
     // Anchored: only our own pre-send refusal, never text a provider error echoes.
-    /^Lawful basis missing for cold email:/.test(error.message)
+    /^(?:Lawful basis missing for cold email:|Campaign email recipient is missing or marked do-not-contact;|Recipient is on the Never contact list;)/.test(
+      error.message
+    )
   );
 }
 
@@ -695,10 +1014,9 @@ export async function runCampaignChannelActions(
     const payload = objectOf(row.payload_json);
     try {
       if (row.kind === 'email') {
-        // Pin the fallback mailbox onto the action before pacing/sending so the
-        // provider thread can be polled later for replies/bounces and retries
-        // cannot drift to a different mailbox.
-        await ensureEmailConnectionId(db, row, now);
+        // The planner pins the selected sending mailbox. Do not silently pick
+        // a different sender on retry or after a campaign configuration edit.
+        // An absent binding remains held by campaignEmailSenderReady.
         const mailbox = await mailboxMaySend(db, workspaceId, row.connection_id, now);
         if (!mailbox.allowed) {
           await db
@@ -741,12 +1059,36 @@ export async function runCampaignChannelActions(
       }
       result.sent += 1;
     } catch (error) {
+      if (error instanceof CampaignEmailSendRefusal && row.kind === 'email') {
+        if (error.scope === 'recipient') {
+          await skipBlockedCampaignRecipient(
+            db,
+            row,
+            new CampaignEmailRecipientBlocked(error.message),
+            now
+          );
+        } else {
+          await holdCampaignEmailSetup(db, row, new CampaignEmailSetupHold(error.message), now);
+        }
+        continue;
+      }
+      if (error instanceof CampaignEmailRecipientBlocked) {
+        await skipBlockedCampaignRecipient(db, row, error, now);
+        continue;
+      }
+      if (error instanceof CampaignEmailPolicyHold) {
+        await holdCampaignEmailSetup(db, row, error, now);
+        continue;
+      }
+      if (error instanceof CampaignEmailSetupHold) {
+        await holdCampaignEmailSetup(db, row, error, now, true);
+        continue;
+      }
       const status = await settleFailure(db, row, error, now);
       if (status === 'failed') result.failed += 1;
       else result.unknown += 1;
     }
   }
-  return result;
   return result;
 }
 /** Resolve a provider side effect whose outcome was unknown without guessing or duplicating it. */
@@ -843,56 +1185,87 @@ export async function recordCampaignEmailEvent(
   input: {
     channelActionId?: string;
     externalRef?: string;
-    eventKind: 'opened' | 'clicked' | VerifiedEmailOutcome;
+    eventKind: CampaignEmailEventKind;
     providerEventId?: string | null;
     metadata?: Record<string, unknown>;
     occurredAt?: string;
   },
-  now: Date = new Date()
+  now: Date = new Date(),
+  trackingGate?: { kind: 'opened' | 'clicked'; token: string; linkToken?: string }
 ): Promise<{ recorded: boolean; memberId: string | null }> {
-  const row = input.channelActionId
-    ? await db
+  return withSuppressionBoundary(db, workspaceId, async (tx) => {
+    // The same transaction-scoped lock serializes telemetry with suppression
+    // writers. Re-read eligibility *after* acquiring it, in this transaction,
+    // rather than trusting a pre-lock public token lookup or prior consent.
+    if (trackingGate) {
+      if (!input.channelActionId) return { recorded: false, memberId: null };
+      const target = await tx
         .prepare(
-          `SELECT a.id,a.member_id,a.campaign_id,a.contact_id,c.email,c.person_id
-           FROM linkedin_campaign_channel_actions a
-           JOIN linkedin_lead_contacts c ON c.workspace_id=a.workspace_id AND c.id=a.contact_id
-          WHERE a.workspace_id=? AND a.id=? AND a.kind='email'`
+          `SELECT a.workspace_id,a.id,a.payload_json,
+          c.email,c.person_id,c.profile_url,c.do_not_contact
+          FROM linkedin_campaign_channel_actions a
+          JOIN linkedin_lead_contacts c ON c.id=a.contact_id AND c.workspace_id=a.workspace_id
+          WHERE a.workspace_id=? AND a.id=? AND a.tracking_token=?
+            AND a.kind='email' AND a.status='sent'
+            AND (?::text IS NULL OR EXISTS (
+              SELECT 1 FROM linkedin_campaign_email_tracking_links l
+              WHERE l.workspace_id=a.workspace_id AND l.channel_action_id=a.id AND l.token=?))`
         )
-        .get<{
-          id: string;
-          member_id: string;
-          campaign_id: string;
-          contact_id: string;
-          email: string | null;
-          person_id: string | null;
-        }>(workspaceId, input.channelActionId)
-    : await db
-        .prepare(
-          `SELECT a.id,a.member_id,a.campaign_id,a.contact_id,c.email,c.person_id
+        .get<EmailTrackingTarget>(
+          workspaceId,
+          input.channelActionId,
+          trackingGate.token,
+          trackingGate.linkToken ?? null,
+          trackingGate.linkToken ?? null
+        );
+      if (!target || !(await mayRecordEmailTracking(tx, target, trackingGate.kind)))
+        return { recorded: false, memberId: null };
+    }
+    const row = input.channelActionId
+      ? await tx
+          .prepare(
+            `SELECT a.id,a.member_id,a.campaign_id,a.contact_id,c.email,c.person_id
            FROM linkedin_campaign_channel_actions a
            JOIN linkedin_lead_contacts c ON c.workspace_id=a.workspace_id AND c.id=a.contact_id
-          WHERE a.workspace_id=? AND a.external_ref=? AND a.kind='email'
+          WHERE a.workspace_id=? AND a.id=? AND a.kind='email' AND a.status='sent'`
+          )
+          .get<{
+            id: string;
+            member_id: string;
+            campaign_id: string;
+            contact_id: string;
+            email: string | null;
+            person_id: string | null;
+          }>(workspaceId, input.channelActionId)
+      : await tx
+          .prepare(
+            `SELECT a.id,a.member_id,a.campaign_id,a.contact_id,c.email,c.person_id
+           FROM linkedin_campaign_channel_actions a
+           JOIN linkedin_lead_contacts c ON c.workspace_id=a.workspace_id AND c.id=a.contact_id
+          WHERE a.workspace_id=? AND a.external_ref=? AND a.kind='email' AND a.status='sent'
           ORDER BY a.completed_at DESC LIMIT 1`
-        )
-        .get<{
-          id: string;
-          member_id: string;
-          campaign_id: string;
-          contact_id: string;
-          email: string | null;
-          person_id: string | null;
-        }>(workspaceId, input.externalRef ?? '');
-  if (!row) return { recorded: false, memberId: null };
-  const eventId = input.providerEventId
-    ? `lice_${sha(`${workspaceId}:${input.providerEventId}`).slice(0, 32)}`
-    : id('lice');
-  try {
-    await db
+          )
+          .get<{
+            id: string;
+            member_id: string;
+            campaign_id: string;
+            contact_id: string;
+            email: string | null;
+            person_id: string | null;
+          }>(workspaceId, input.externalRef ?? '');
+    if (!row) return { recorded: false, memberId: null };
+    const eventId = input.providerEventId
+      ? `lice_${sha(`${workspaceId}:${input.providerEventId}`).slice(0, 32)}`
+      : id('lice');
+    // Persist event and all derived safety effects atomically; dedup must not
+    // skip a suppression or campaign stop after a partial write.
+    const inserted = await tx
       .prepare(
         `INSERT INTO linkedin_campaign_email_events (id,workspace_id,channel_action_id,event_kind,provider_event_id,occurred_at,metadata_json,created_at)
-         VALUES (?,?,?,?,?,?::timestamptz,?::jsonb,?::timestamptz)`
+       VALUES (?,?,?,?,?,?::timestamptz,?::jsonb,?::timestamptz)
+       ON CONFLICT DO NOTHING RETURNING id`
       )
-      .run(
+      .get<{ id: string }>(
         eventId,
         workspaceId,
         row.id,
@@ -902,59 +1275,55 @@ export async function recordCampaignEmailEvent(
         JSON.stringify(input.metadata ?? {}),
         now.toISOString()
       );
-  } catch (error) {
-    const code =
-      error && typeof error === 'object' && 'code' in error
-        ? String((error as { code?: unknown }).code)
-        : '';
-    if (code === '23505') return { recorded: false, memberId: row.member_id };
-    throw error;
-  }
+    if (!inserted) return { recorded: false, memberId: row.member_id };
 
-  await db
-    .prepare(
-      `UPDATE linkedin_campaign_members SET branch_state_json=COALESCE(branch_state_json,'{}'::jsonb) || ?::jsonb,updated_at=?::timestamptz
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_members SET branch_state_json=COALESCE(branch_state_json,'{}'::jsonb) || ?::jsonb,updated_at=?::timestamptz
        WHERE workspace_id=? AND id=?`
-    )
-    .run(
-      JSON.stringify({ [`external:email_${input.eventKind}`]: true }),
-      now.toISOString(),
-      workspaceId,
-      row.member_id
-    );
-
-  if ((input.eventKind === 'bounce' || input.eventKind === 'unsubscribe') && row.email) {
-    const unsubscribe = input.eventKind === 'unsubscribe';
-    // Verified unsubscribe intent and provider-confirmed hard bounce are durable
-    // GTM safety state, not campaign-local telemetry. Generic delivery failures
-    // do not suppress: a temporary/provider failure is not evidence that the
-    // address must never be contacted again.
-    await createSuppression(
-      db,
-      {
+      )
+      .run(
+        JSON.stringify(
+          Object.fromEntries(emailEventBranchKeys(input.eventKind).map((key) => [key, true]))
+        ),
+        now.toISOString(),
         workspaceId,
-        channel: 'email',
-        personId: row.person_id,
-        email: row.email,
-        reason: unsubscribe
-          ? 'Recipient requested email unsubscribe'
-          : 'Email delivery hard-bounced',
-        source: unsubscribe ? 'campaign_email_unsubscribe' : 'campaign_email_bounce',
-        sourceRef: input.providerEventId ?? row.id,
-        actorType: 'system'
-      },
-      now
-    );
-  }
+        row.member_id
+      );
 
-  if (input.eventKind === 'reply' || input.eventKind === 'unsubscribe') {
-    await db.transaction(async (tx) => {
+    if ((input.eventKind === 'bounce' || input.eventKind === 'unsubscribe') && row.email) {
+      const unsubscribe = input.eventKind === 'unsubscribe';
+      // Verified unsubscribe intent and provider-confirmed hard bounce are durable
+      // GTM safety state, not campaign-local telemetry. Generic delivery failures
+      // do not suppress: a temporary/provider failure is not evidence that the
+      // address must never be contacted again.
+      await createSuppression(
+        tx,
+        {
+          workspaceId,
+          channel: 'email',
+          personId: row.person_id,
+          email: row.email,
+          reason: unsubscribe
+            ? 'Recipient requested email unsubscribe'
+            : 'Email delivery hard-bounced',
+          source: unsubscribe ? 'campaign_email_unsubscribe' : 'campaign_email_bounce',
+          sourceRef: input.providerEventId ?? row.id,
+          actorType: 'system'
+        },
+        now
+      );
+    }
+
+    if (['reply', 'unsubscribe', 'bounce'].includes(input.eventKind)) {
+      // Hard bounce is terminal; ordinary delivery_failure is not hard-bounce evidence.
+      const newStatus = input.eventKind === 'reply' ? 'replied' : 'excluded';
       await tx
         .prepare(
-          `UPDATE linkedin_campaign_members SET status='replied',next_eligible_at=NULL,ended_at=?::timestamptz,updated_at=?::timestamptz
-           WHERE workspace_id=? AND id=? AND status IN ('pending','active','waiting','manual','paused')`
+          `UPDATE linkedin_campaign_members SET status=?,next_eligible_at=NULL,ended_at=?::timestamptz,updated_at=?::timestamptz
+           WHERE workspace_id=? AND id=? AND status IN ('pending','active','waiting','manual','paused','completed')`
         )
-        .run(now.toISOString(), now.toISOString(), workspaceId, row.member_id);
+        .run(newStatus, now.toISOString(), now.toISOString(), workspaceId, row.member_id);
       await tx
         .prepare(
           `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL WHERE workspace_id=? AND campaign_member_id=? AND status IN ('planned','held') AND claimed_at IS NULL`
@@ -966,12 +1335,116 @@ export async function recordCampaignEmailEvent(
            WHERE workspace_id=? AND member_id=? AND status='planned'`
         )
         .run(now.toISOString(), workspaceId, row.member_id);
-    });
-  }
-  return { recorded: true, memberId: row.member_id };
+
+      // A Person can be enrolled in several campaigns. The originating member
+      // owns this event and its reply attribution. Other active memberships
+      // must stop, but must not be falsely counted as having replied here.
+      if (row.person_id) {
+        const others = await tx
+          .prepare(
+            `UPDATE linkedin_campaign_members m
+             SET status='excluded',exclusion_reason=?,next_eligible_at=NULL,
+                 ended_at=?::timestamptz,updated_at=?::timestamptz
+             FROM linkedin_lead_contacts contact
+             WHERE m.workspace_id=? AND contact.workspace_id=m.workspace_id
+               AND contact.id=m.contact_id AND contact.person_id=?
+               AND m.id<>? AND m.status IN ('pending','active','waiting','manual','paused')
+             RETURNING m.id`
+          )
+          .all<{ id: string }>(
+            input.eventKind === 'reply'
+              ? 'A reply was received in another campaign.'
+              : 'An email opt-out or hard bounce was received in another campaign.',
+            now.toISOString(),
+            now.toISOString(),
+            workspaceId,
+            row.person_id,
+            row.member_id
+          );
+        const otherIds = others.map((item) => item.id);
+        if (otherIds.length > 0) {
+          await tx
+            .prepare(
+              `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL
+               WHERE workspace_id=? AND campaign_member_id=ANY(?::text[])
+                 AND status IN ('planned','held') AND claimed_at IS NULL`
+            )
+            .run(workspaceId, otherIds);
+          await tx
+            .prepare(
+              `UPDATE linkedin_campaign_channel_actions
+               SET status='skipped',claimed_at=NULL,updated_at=?::timestamptz
+               WHERE workspace_id=? AND member_id=ANY(?::text[]) AND status='planned'`
+            )
+            .run(now.toISOString(), workspaceId, otherIds);
+        }
+      }
+    }
+    return { recorded: true, memberId: row.member_id };
+  });
 }
 
-/** Public tracking pixel target. The opaque token reveals no workspace/action id. */
+/**
+ * A public tracking URL proves only possession of a token, not ongoing permission
+ * to record recipient behavior. Verify the *sent action's* persisted opt-in mode
+ * and the recipient's current do-not-contact/suppression state for every hit.
+ * This cannot authenticate a human (mail security scanners also fetch links).
+ */
+interface EmailTrackingTarget {
+  workspace_id: string;
+  id: string;
+  payload_json: unknown;
+  email: string | null;
+  person_id: string | null;
+  profile_url: string | null;
+  do_not_contact: boolean;
+}
+
+async function mayRecordEmailTracking(
+  db: Db,
+  row: EmailTrackingTarget,
+  kind: 'opened' | 'clicked'
+): Promise<boolean> {
+  const payload = objectOf(row.payload_json);
+  const tracking = payload.tracking;
+  if (tracking !== 'opens_clicks' && !(kind === 'opened' && tracking === 'opens')) return false;
+  if (row.do_not_contact) return false;
+
+  // The original recipient owns this token. Contact enrichment/editing can
+  // change c.email after delivery; consulting only the live lead lets a later
+  // unsubscribe for the *sent-to* address be missed. Legacy actions that lack
+  // a persisted recipient cannot prove whom the token was sent to: fail closed.
+  const sentTo = normalizeContactEmail(
+    typeof payload.recipient === 'string' ? payload.recipient : null
+  );
+  if (!sentTo) return false;
+  if (
+    row.profile_url &&
+    (await filterExcluded(db, row.workspace_id, [row.profile_url])).excluded.length
+  )
+    return false;
+  if (
+    await findSuppression(db, row.workspace_id, {
+      channel: 'email',
+      personId: row.person_id,
+      email: sentTo
+    })
+  )
+    return false;
+  // Also respect a canonical Person or current-address opt-out after an edit.
+  const currentEmail = normalizeContactEmail(row.email);
+  return (
+    !currentEmail ||
+    currentEmail === sentTo ||
+    !(await findSuppression(db, row.workspace_id, {
+      channel: 'email',
+      personId: row.person_id,
+      email: currentEmail
+    }))
+  );
+}
+
+/** Public pixel: an invalid/disallowed event writes nothing, and reveals nothing. */
 export async function recordCampaignEmailTrackingOpen(
   db: Db,
   token: string,
@@ -979,12 +1452,14 @@ export async function recordCampaignEmailTrackingOpen(
 ): Promise<boolean> {
   const row = await db
     .prepare(
-      `SELECT workspace_id,id FROM linkedin_campaign_channel_actions
-       WHERE tracking_token=? AND kind='email' AND status='sent'`
+      `SELECT a.workspace_id,a.id,a.payload_json,c.email,c.person_id,c.profile_url,c.do_not_contact
+       FROM linkedin_campaign_channel_actions a
+       JOIN linkedin_lead_contacts c ON c.id=a.contact_id AND c.workspace_id=a.workspace_id
+       WHERE a.tracking_token=? AND a.kind='email' AND a.status='sent'`
     )
-    .get<{ workspace_id: string; id: string }>(token);
+    .get<EmailTrackingTarget>(token);
   if (!row) return false;
-  await recordCampaignEmailEvent(
+  const event = await recordCampaignEmailEvent(
     db,
     row.workspace_id,
     {
@@ -993,12 +1468,13 @@ export async function recordCampaignEmailTrackingOpen(
       providerEventId: `tracking-open:${token}`,
       metadata: { source: 'trevra-pixel' }
     },
-    now
+    now,
+    { kind: 'opened', token }
   );
-  return true;
+  return event.recorded;
 }
 
-/** Public click redirect. Returns null for an invalid token pair, otherwise the stored safe URL. */
+/** Keep pre-existing link destinations usable after tracking is disabled or opted out. */
 export async function recordCampaignEmailTrackingClick(
   db: Db,
   actionToken: string,
@@ -1007,13 +1483,14 @@ export async function recordCampaignEmailTrackingClick(
 ): Promise<string | null> {
   const row = await db
     .prepare(
-      `SELECT a.workspace_id,a.id,l.target_url
+      `SELECT a.workspace_id,a.id,a.payload_json,c.email,c.person_id,c.profile_url,c.do_not_contact,l.target_url
        FROM linkedin_campaign_channel_actions a
        JOIN linkedin_campaign_email_tracking_links l
          ON l.workspace_id=a.workspace_id AND l.channel_action_id=a.id
+       JOIN linkedin_lead_contacts c ON c.id=a.contact_id AND c.workspace_id=a.workspace_id
        WHERE a.tracking_token=? AND l.token=? AND a.kind='email' AND a.status='sent'`
     )
-    .get<{ workspace_id: string; id: string; target_url: string }>(actionToken, linkToken);
+    .get<EmailTrackingTarget & { target_url: string }>(actionToken, linkToken);
   if (!row) return null;
   let target: URL;
   try {
@@ -1022,17 +1499,25 @@ export async function recordCampaignEmailTrackingClick(
     return null;
   }
   if (!['http:', 'https:'].includes(target.protocol)) return null;
-  await recordCampaignEmailEvent(
-    db,
-    row.workspace_id,
-    {
-      channelActionId: row.id,
-      eventKind: 'clicked',
-      providerEventId: `tracking-click:${linkToken}`,
-      metadata: { source: 'trevra-redirect' }
-    },
-    now
-  );
+  // Tracking is optional metadata, not the content the recipient asked to open.
+  // A suppression lookup or telemetry write failure must fail closed for data
+  // collection while preserving the already-issued destination URL.
+  try {
+    await recordCampaignEmailEvent(
+      db,
+      row.workspace_id,
+      {
+        channelActionId: row.id,
+        eventKind: 'clicked',
+        providerEventId: `tracking-click:${linkToken}`,
+        metadata: { source: 'trevra-redirect' }
+      },
+      now,
+      { kind: 'clicked', token: actionToken, linkToken }
+    );
+  } catch {
+    // No event is recorded here as a fallback; the public redirect still works.
+  }
   return target.toString();
 }
 
@@ -1071,7 +1556,7 @@ export async function syncCampaignEmailProviderEvents(
          AND NOT EXISTS (
            SELECT 1 FROM linkedin_campaign_email_events e
            WHERE e.workspace_id=q.workspace_id AND e.channel_action_id=q.id
-             AND e.event_kind IN ('reply','unsubscribe','bounce','delivery_failure')
+             AND e.event_kind IN ('reply','unsubscribe','bounce')
          )
        ORDER BY COALESCE(q.telemetry_checked_at,q.completed_at) ASC,q.id ASC
        LIMIT ?`

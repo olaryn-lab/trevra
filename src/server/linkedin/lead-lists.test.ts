@@ -10,6 +10,8 @@ import {
   importLeadSourceContacts,
   listLeadContacts,
   listLeadLists,
+  readLeadContactReviewPage,
+  renameLeadList,
   removeLeadContact,
   updateLeadContact
 } from './lead-lists.js';
@@ -121,6 +123,130 @@ afterEach(async () => {
 });
 
 describe('account-scoped lead lists', () => {
+  it('reads later bounded pages in stable membership order, including after the old first-page ceiling', async () => {
+    const list = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'Paged contacts' },
+      NOW
+    );
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nA,One,Acme,https://linkedin.com/in/paged-one/\nB,Two,Acme,https://linkedin.com/in/paged-two/\nC,Three,Acme,https://linkedin.com/in/paged-three/'
+      },
+      NOW
+    );
+    const full = await listLeadContacts(db, WORKSPACE_ID, list.id);
+    const first = await listLeadContacts(db, WORKSPACE_ID, list.id, 2, 0);
+    const next = await listLeadContacts(db, WORKSPACE_ID, list.id, 2, 2);
+    expect(full).toHaveLength(3);
+    expect([...first, ...next].map((contact) => contact.id)).toEqual(
+      full.map((contact) => contact.id)
+    );
+    expect(await listLeadContacts(db, WORKSPACE_ID, list.id, 2, 3)).toEqual([]);
+    expect(await listLeadContacts(db, 'foreign_workspace', list.id, 2, 2)).toEqual([]);
+    expect(await countLeadContacts(db, WORKSPACE_ID, list.id)).toBe(3);
+  });
+  it('searches every member before paging and reports full-list identity reviews', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Full review' }, NOW);
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,Chen,Acme,https://linkedin.com/in/review-maya/\nAlex,Smith,Percent%Works,https://linkedin.com/in/review-alex/\nJules,Stone,Under_score,https://linkedin.com/in/review-jules/'
+      },
+      NOW
+    );
+    await importLeadProfileUrls(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        urls: ['https://linkedin.com/in/review-incomplete/']
+      },
+      NOW
+    );
+    const page = (query: string, needsIdentityOnly = false, offset = 0) =>
+      readLeadContactReviewPage(db, WORKSPACE_ID, list.id, {
+        limit: 1,
+        offset,
+        query,
+        needsIdentityOnly
+      });
+    const late = await page('jules');
+    expect(late).toMatchObject({ total: 1, listTotal: 4, identityReviewCount: 1 });
+    expect(late.contacts).toHaveLength(1);
+    expect(late.contacts[0].firstName).toBe('Jules');
+    expect((await page('%')).contacts.map((c) => c.company)).toEqual(['Percent%Works']);
+    expect((await page('_')).contacts.map((c) => c.company)).toEqual(['Under_score']);
+    expect(await page('jules', false, 1)).toMatchObject({ contacts: [], total: 1 });
+    const incomplete = await page('', true);
+    expect(incomplete).toMatchObject({ total: 1, listTotal: 4, identityReviewCount: 1 });
+    expect(incomplete.contacts[0].profileUrl).toContain('/review-incomplete/');
+    expect((await page('MAYA', true)).total).toBe(0);
+    expect((await page('  ', false)).total).toBe(4);
+    expect(
+      (
+        await readLeadContactReviewPage(db, 'other_workspace', list.id, {
+          limit: 1,
+          offset: 0,
+          query: 'Maya'
+        })
+      ).contacts
+    ).toEqual([]);
+    await expect(page('x'.repeat(201))).rejects.toMatchObject({ status: 400 });
+  });
+
+  it('finds and reviews contact 5,001 beyond the default page boundary', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Large review' }, NOW);
+    const prefix = `test_${list.id}_`;
+    const timestamp = NOW.toISOString();
+    await db
+      .prepare(
+        `
+      WITH created AS (
+        INSERT INTO linkedin_lead_contacts
+          (id,workspace_id,list_id,first_name,last_name,company,dedupe_key,original_json,custom_fields_json,created_at,updated_at)
+        SELECT ? || LPAD(n::text,5,'0'), ?, ?,
+               CASE WHEN n=5001 THEN 'Late' ELSE 'Known' END,
+               'Person', CASE WHEN n=5001 THEN '' ELSE 'Acme' END,
+               ? || LPAD(n::text,5,'0'), '{}'::jsonb, '{}'::jsonb, ?::timestamptz, ?::timestamptz
+        FROM generate_series(1,5001) n
+        RETURNING id
+      )
+      INSERT INTO linkedin_lead_list_members(workspace_id,list_id,contact_id,created_at)
+      SELECT ?, ?, id, ?::timestamptz FROM created
+    `
+      )
+      .run(
+        prefix,
+        WORKSPACE_ID,
+        list.id,
+        prefix,
+        timestamp,
+        timestamp,
+        WORKSPACE_ID,
+        list.id,
+        timestamp
+      );
+    expect(await countLeadContacts(db, WORKSPACE_ID, list.id)).toBe(5001);
+    const finalPage = await listLeadContacts(db, WORKSPACE_ID, list.id, 2, 5000);
+    expect(finalPage).toHaveLength(1);
+    expect(finalPage[0].firstName).toBe('Late');
+    const review = await readLeadContactReviewPage(db, WORKSPACE_ID, list.id, {
+      limit: 5,
+      offset: 0,
+      query: 'late',
+      needsIdentityOnly: true
+    });
+    expect(review).toMatchObject({ total: 1, listTotal: 5001, identityReviewCount: 1 });
+    expect(review.contacts).toHaveLength(1);
+    expect(review.contacts[0].firstName).toBe('Late');
+  }, 20_000);
+
   it('allows the same list name on two LinkedIn accounts and only lists the selected account', async () => {
     await upsertSeat(db, WORKSPACE_ID, { label: 'Second', timezone: 'UTC' }, NOW, 'second');
     const owner = await createLeadList(
@@ -145,6 +271,54 @@ describe('account-scoped lead lists', () => {
       second.id
     );
     expect(await getLeadList(db, WORKSPACE_ID, second.id, 'owner')).toBeUndefined();
+  });
+
+  it('renames only the account-scoped list label, preserving identity, members and collisions', async () => {
+    await upsertSeat(db, WORKSPACE_ID, { label: 'Second', timezone: 'UTC' }, NOW, 'second');
+    const owner = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Prospects' }, NOW);
+    const other = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Existing' }, NOW);
+    const second = await createLeadList(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Referred',
+        seatKey: 'second'
+      },
+      NOW
+    );
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: owner.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,Smith,Acme,https://linkedin.com/in/maya-listrename'
+      },
+      NOW
+    );
+    const renamed = await renameLeadList(
+      db,
+      WORKSPACE_ID,
+      owner.id,
+      '  Referred  ',
+      new Date(NOW.getTime() + 1000)
+    );
+    expect(renamed).toMatchObject({
+      id: owner.id,
+      name: 'Referred',
+      seatKey: 'owner',
+      leadCount: 1
+    });
+    expect((await listLeadContacts(db, WORKSPACE_ID, owner.id)).length).toBe(1);
+    expect((await getLeadList(db, WORKSPACE_ID, second.id, 'second'))?.name).toBe('Referred');
+    await expect(renameLeadList(db, WORKSPACE_ID, owner.id, 'existing', NOW)).rejects.toMatchObject(
+      { status: 409 }
+    );
+    expect((await getLeadList(db, WORKSPACE_ID, owner.id))?.name).toBe('Referred');
+    expect((await getLeadList(db, WORKSPACE_ID, other.id))?.name).toBe('Existing');
+    expect(await renameLeadList(db, 'other_workspace', owner.id, 'Stolen', NOW)).toBeUndefined();
+    await expect(renameLeadList(db, WORKSPACE_ID, owner.id, '   ', NOW)).rejects.toMatchObject({
+      status: 400
+    });
   });
 
   it('imports a CSV into a list created under a non-owner seat', async () => {
@@ -201,6 +375,261 @@ describe('pasted LinkedIn profile URLs', () => {
       lastName: '',
       company: ''
     });
+  });
+
+  it('holds pasted profiles outside campaigns until manual identity review, then rechecks all exclusions', async () => {
+    const list = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'Manual identity review', sourceKind: 'profile_urls' },
+      NOW
+    );
+    await importLeadProfileUrls(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        urls: ['https://linkedin.com/in/manual-review/']
+      },
+      NOW
+    );
+    const initial = (await listLeadContacts(db, WORKSPACE_ID, list.id))[0]!;
+    const workflow = await saveWorkflow(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Review required campaign',
+        steps: [
+          {
+            id: 'invite',
+            action: 'connection_request',
+            delayBefore: { amount: 0, unit: 'hours' },
+            config: { message: 'Hello {{first_name}}' }
+          }
+        ]
+      },
+      NOW
+    );
+    const created = await createManagedCampaign(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Profiles require review',
+        leadListId: list.id,
+        workflowId: workflow.id
+      },
+      NOW
+    );
+    expect(created.enrolled).toBe(0);
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]).toMatchObject({
+      status: 'excluded',
+      exclusionReason: 'Missing lead identity',
+      admittedAt: null
+    });
+    await expect(
+      updateLeadContact(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          contactId: initial.id,
+          firstName: 'Maya',
+          lastName: '',
+          company: 'Acme',
+          profileUrl: initial.profileUrl
+        },
+        NOW
+      )
+    ).rejects.toThrow(/last name/i);
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]?.status).toBe(
+      'excluded'
+    );
+
+    // Changing the same contact through another workspace is not an identity review.
+    await expect(
+      updateLeadContact(
+        db,
+        {
+          workspaceId: 'other_workspace',
+          contactId: initial.id,
+          firstName: 'Maya',
+          lastName: 'Chen',
+          company: 'Acme',
+          profileUrl: initial.profileUrl
+        },
+        NOW
+      )
+    ).rejects.toThrow('Lead not found.');
+    const reviewed = await updateLeadContact(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        contactId: initial.id,
+        firstName: 'Maya',
+        lastName: 'Chen',
+        company: 'Acme',
+        profileUrl: initial.profileUrl,
+        doNotContact: true
+      },
+      NOW
+    );
+    expect(reviewed).toMatchObject({ firstName: 'Maya', lastName: 'Chen', company: 'Acme' });
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]).toMatchObject({
+      status: 'excluded',
+      exclusionReason: 'Workspace suppression'
+    });
+    // Releasing the lead-specific opt-out is an explicit edit; no recipient gets
+    // automatically admitted by bypassing the existing suppression policies.
+    await updateLeadContact(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        contactId: initial.id,
+        firstName: 'Maya',
+        lastName: 'Chen',
+        company: 'Acme',
+        profileUrl: initial.profileUrl,
+        doNotContact: false
+      },
+      new Date(NOW.getTime() + 1_000)
+    );
+    // Removing a contact-specific suppression reruns every other eligibility check.
+    // No unsafe blind status flip is allowed while any other exclusion remains.
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]?.status).toBe(
+      'pending'
+    );
+    const { reevaluateCampaignExclusions } = await import('./managed-campaigns.js');
+    expect(
+      await reevaluateCampaignExclusions(db, WORKSPACE_ID, created.campaign.id, NOW)
+    ).toMatchObject({ pending: 1, excluded: 0 });
+    expect((await listCampaignMembers(db, WORKSPACE_ID, created.campaign.id))[0]?.status).toBe(
+      'pending'
+    );
+  });
+});
+
+describe('profile URL import limit reporting', () => {
+  it('reports unique overflow as rejected rather than fabricated duplicates', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'URL overflow' }, NOW);
+    const unique = Array.from(
+      { length: 10_001 },
+      (_, index) => `https://unrelated.test/in/profile-${index}`
+    );
+    const outcome = await importLeadProfileUrls(
+      db,
+      { workspaceId: WORKSPACE_ID, listId: list.id, urls: [...unique, unique[0]!] },
+      NOW
+    );
+    expect(outcome).toMatchObject({ inserted: 0, duplicates: 1, reused: 0 });
+    expect(outcome.rejected).toHaveLength(10_001);
+    expect(outcome.rejected.find((item) => item.value === unique[10_000])).toMatchObject({
+      value: unique[10_000],
+      reason: expect.stringContaining('10,000 unique items')
+    });
+    expect(await contactCount()).toBe(0);
+  });
+});
+
+describe('concurrent CSV import identity and membership', () => {
+  it('deduplicates reversed overlapping CSV uploads across lists without deadlocking', async () => {
+    const first = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Batch A' }, NOW);
+    const second = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Batch B' }, NOW);
+    const rows = Array.from(
+      { length: 24 },
+      (_, index) =>
+        `First${index},Last${index},Acme,reverse${index}@example.test,https://linkedin.com/in/reverse${index}-overlap`
+    );
+    const header = 'First Name,Last Name,Company,Email,LinkedIn URL';
+    const csvA = [header, ...rows].join('\n');
+    const csvB = [header, ...[...rows].reverse()].join('\n');
+    const results = await Promise.all([
+      importLeadCsv(db, { workspaceId: WORKSPACE_ID, listId: first.id, csv: csvA }, NOW),
+      importLeadCsv(db, { workspaceId: WORKSPACE_ID, listId: second.id, csv: csvB }, NOW)
+    ]);
+    expect(results.reduce((sum, result) => sum + result.inserted, 0)).toBe(24);
+    expect(results.reduce((sum, result) => sum + result.reused, 0)).toBe(24);
+    expect(await contactCount()).toBe(24);
+    expect(await countLeadContacts(db, WORKSPACE_ID, first.id)).toBe(24);
+    expect(await countLeadContacts(db, WORKSPACE_ID, second.id)).toBe(24);
+  });
+
+  it('shares deterministic lock order between concurrent CSV and pasted-profile imports', async () => {
+    const csvList = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'CSV Profiles' },
+      NOW
+    );
+    const pastedList = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'Pasted Profiles' },
+      NOW
+    );
+    const urls = Array.from(
+      { length: 24 },
+      (_, index) => `https://linkedin.com/in/mixed-${index}-overlap`
+    );
+    const csv = [
+      'First Name,Last Name,Company,Email,LinkedIn URL',
+      ...urls.map(
+        (url, index) => `First${index},Last${index},Acme,mixed${index}@example.test,${url}`
+      )
+    ].join('\n');
+    const [fromCsv, fromPaste] = await Promise.all([
+      importLeadCsv(db, { workspaceId: WORKSPACE_ID, listId: csvList.id, csv }, NOW),
+      importLeadProfileUrls(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          listId: pastedList.id,
+          urls: [...urls].reverse()
+        },
+        NOW
+      )
+    ]);
+    expect(fromCsv.inserted + fromPaste.inserted).toBe(24);
+    expect(fromCsv.reused + fromPaste.reused).toBe(24);
+    expect(await contactCount()).toBe(24);
+    expect(await countLeadContacts(db, WORKSPACE_ID, csvList.id)).toBe(24);
+    expect(await countLeadContacts(db, WORKSPACE_ID, pastedList.id)).toBe(24);
+    expect(fromCsv.rejected).toEqual([]);
+    expect(fromPaste.rejected).toEqual([]);
+  });
+
+  it('deduplicates overlapping simultaneous uploads without losing memberships', async () => {
+    const target = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'Concurrent CSV' },
+      NOW
+    );
+    const rows = Array.from(
+      { length: 20 },
+      (_, index) =>
+        `First${index},Last${index},Acme,person${index}@example.test,https://linkedin.com/in/person${index}-concurrent`
+    );
+    const csv = ['First Name,Last Name,Company,Email,LinkedIn URL', ...rows].join('\n');
+    const attempts = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        importLeadCsv(db, { workspaceId: WORKSPACE_ID, listId: target.id, csv }, NOW)
+      )
+    );
+    expect(attempts.reduce((sum, result) => sum + result.inserted, 0)).toBe(20);
+    expect(attempts.reduce((sum, result) => sum + result.duplicates, 0)).toBe(60);
+    expect(attempts.every((result) => result.reused === 0 && result.rejected.length === 0)).toBe(
+      true
+    );
+    expect(await contactCount()).toBe(20);
+    expect(await countLeadContacts(db, WORKSPACE_ID, target.id)).toBe(20);
+    const identities = await db
+      .prepare(
+        `SELECT COUNT(DISTINCT person_id)::int AS total
+         FROM linkedin_lead_contacts WHERE workspace_id=? AND person_id IS NOT NULL`
+      )
+      .get<{ total: number }>(WORKSPACE_ID);
+    expect(identities?.total).toBe(20);
+    const replay = await importLeadCsv(
+      db,
+      { workspaceId: WORKSPACE_ID, listId: target.id, csv },
+      NOW
+    );
+    expect(replay).toMatchObject({ inserted: 0, duplicates: 20, reused: 0 });
   });
 });
 
@@ -287,6 +716,90 @@ describe('materialising a harvest into a campaign-usable list', () => {
 
 describe('one person, one contact row, per workspace', () => {
   const csv = (url: string) => `First Name,Last Name,Company,LinkedIn URL\nMaya,Chen,Acme,${url}`;
+
+  it('imports a named sales-export list with a combined name into real canonical People without duplicates', async () => {
+    const list = await createLeadList(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Authorized export',
+        sourceKind: 'sales_navigator'
+      },
+      NOW
+    );
+    const input = [
+      'Name,Current Company,Profile URL,Title',
+      'Maya Chen,Acme,https://www.linkedin.com/in/maya-sales-import/,VP Revenue',
+      'Jonas Keller,Northwind,https://www.linkedin.com/in/jonas-sales-import/,CEO'
+    ].join('\n');
+    const first = await importLeadCsv(
+      db,
+      { workspaceId: WORKSPACE_ID, listId: list.id, csv: input },
+      NOW
+    );
+    expect(first).toMatchObject({ inserted: 2, reused: 0, duplicates: 0, rejected: [] });
+    const again = await importLeadCsv(
+      db,
+      { workspaceId: WORKSPACE_ID, listId: list.id, csv: input },
+      NOW
+    );
+    expect(again.inserted).toBe(0);
+    expect(again.duplicates).toBe(2);
+    const contacts = await listLeadContacts(db, WORKSPACE_ID, list.id);
+    expect(contacts).toHaveLength(2);
+    expect(contacts[0]?.personId).toBeTruthy();
+    expect(contacts[1]?.personId).toBeTruthy();
+    expect((await getLeadList(db, WORKSPACE_ID, list.id))?.sourceKind).toBe('sales_navigator');
+    expect(await contactCount()).toBe(2);
+  });
+
+  it('allows an authorized manual Sales Navigator CSV without source URL but still refuses forged search URLs', async () => {
+    const noUrl = await createLeadList(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        name: 'Uploaded prospect export',
+        sourceKind: 'sales_navigator'
+      },
+      NOW
+    );
+    expect(noUrl.sourceRef).toBeNull();
+    await expect(
+      createLeadList(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          name: 'Invalid Sales Navigator source',
+          sourceKind: 'sales_navigator',
+          sourceRef: 'https://attacker.example/sales/search/people/'
+        },
+        NOW
+      )
+    ).rejects.toThrow(/linkedin.com/);
+    await expect(
+      createLeadList(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          name: 'Wrong path',
+          sourceKind: 'sales_navigator',
+          sourceRef: 'https://www.linkedin.com/in/maya/'
+        },
+        NOW
+      )
+    ).rejects.toThrow(/people-search URL/);
+    await expect(
+      createLeadList(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          name: 'Unscoped basic search',
+          sourceKind: 'linkedin_search'
+        },
+        NOW
+      )
+    ).rejects.toThrow(/absolute LinkedIn URL/);
+  });
 
   it('links LinkedIn leads to the canonical Person spine and reuses an existing Person by email', async () => {
     const canonical = await resolveContact(db, WORKSPACE_ID, {
@@ -500,6 +1013,64 @@ describe('one person, one contact row, per workspace', () => {
       await findSuppression(db, WORKSPACE_ID, {
         channel: 'linkedin',
         linkedinUrl: lead.profileUrl
+      })
+    ).toBeNull();
+  });
+
+  it('rolls back a manual identity/DNC edit if its suppression cannot be committed', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Atomic DNC' }, NOW);
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,Email,LinkedIn URL\nMaya,Chen,Acme,maya-atomic@example.com,https://www.linkedin.com/in/maya-atomic/'
+      },
+      NOW
+    );
+    const original = (await listLeadContacts(db, WORKSPACE_ID, list.id))[0]!;
+    await db.exec(`
+      CREATE OR REPLACE FUNCTION trevra_test_refuse_atomic_dnc() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.workspace_id='${WORKSPACE_ID}' AND NEW.source_ref='${original.id}' THEN
+          RAISE EXCEPTION 'injected suppression persistence failure';
+        END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER trevra_test_refuse_atomic_dnc_trigger BEFORE INSERT ON suppressions
+        FOR EACH ROW EXECUTE FUNCTION trevra_test_refuse_atomic_dnc();
+    `);
+    try {
+      await expect(
+        updateLeadContact(
+          db,
+          {
+            workspaceId: WORKSPACE_ID,
+            contactId: original.id,
+            firstName: 'Maya',
+            lastName: 'Chen',
+            company: 'Acme',
+            email: original.email,
+            profileUrl: 'https://www.linkedin.com/in/maya-atomic-edited/',
+            doNotContact: true
+          },
+          NOW
+        )
+      ).rejects.toThrow(/injected suppression persistence failure/);
+    } finally {
+      await db.exec(`DROP TRIGGER trevra_test_refuse_atomic_dnc_trigger ON suppressions;
+        DROP FUNCTION trevra_test_refuse_atomic_dnc();`);
+    }
+    const after = (await listLeadContacts(db, WORKSPACE_ID, list.id))[0]!;
+    expect(after).toMatchObject({
+      id: original.id,
+      profileUrl: original.profileUrl,
+      doNotContact: false
+    });
+    expect(
+      await findSuppression(db, WORKSPACE_ID, {
+        channel: 'linkedin',
+        linkedinUrl: original.profileUrl
       })
     ).toBeNull();
   });

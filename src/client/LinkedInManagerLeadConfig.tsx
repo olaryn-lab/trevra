@@ -20,6 +20,7 @@ import {
   importLinkedInManagerLeadCsv,
   importLinkedInManagerProfileUrls,
   previewLinkedInManagerLeadCsv,
+  renameLinkedInManagerLeadList,
   updateLinkedInManagerLeadContact,
   type LinkedInLeadCsvPreview
 } from './api';
@@ -29,6 +30,8 @@ import type {
   LinkedInLeadList
 } from '../server/linkedin/lead-lists';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
+import { useIsWorkspaceOwner } from './auth-client';
+import { salesNavigatorCsvMapping } from './leadCsvPresets';
 import { errorMessage } from './LinkedInSafety';
 import { ActionMenu } from './ui/action-menu';
 import { Select } from './ui/primitives';
@@ -63,6 +66,7 @@ type ImportReport = Awaited<ReturnType<typeof importLinkedInManagerLeadCsv>> & {
 const FIELDS: ReadonlyArray<{ field: LeadField; label: string; required: boolean }> = [
   { field: 'firstName', label: 'First name', required: true },
   { field: 'lastName', label: 'Last name', required: true },
+  { field: 'fullName', label: 'Full name (alternative)', required: false },
   { field: 'company', label: 'Company', required: true },
   { field: 'email', label: 'Email', required: false },
   { field: 'phone', label: 'Phone', required: false },
@@ -212,6 +216,7 @@ export function LinkedInManagerLeadConfig({
   onImported?: (list: LinkedInLeadList) => void;
 }) {
   const [activeSeatKey] = useActiveSeatKey();
+  const isOwner = useIsWorkspaceOwner();
   const [lists, setLists] = useState<LinkedInLeadList[]>([]);
   const [listsLoading, setListsLoading] = useState(true);
 
@@ -227,6 +232,7 @@ export function LinkedInManagerLeadConfig({
   /** What the automatch chose on its own, kept so a change can be named as one. */
   const [autoMapping, setAutoMapping] = useState<FieldMapping>({});
   const [overrides, setOverrides] = useState<FieldMapping>({});
+  const [salesNavigatorPreset, setSalesNavigatorPreset] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState<'' | 'preview' | 'import'>('');
   const [report, setReport] = useState<{
@@ -242,24 +248,25 @@ export function LinkedInManagerLeadConfig({
   /* -- the list half ----------------------------------------------------- */
   const [openListId, setOpenListId] = useState('');
   const [contacts, setContacts] = useState<LinkedInLeadContact[]>([]);
-  /**
-   * How many people are in the open list, counted by the server.
-   *
-   * NOT `contacts.length`, which is the size of one page. The read clamps at
-   * 5000 whatever it is asked for, so the page length answers "how many came
-   * back" and never "how many there are" -- which is how this screen came to
-   * announce "the first 1,000 are shown" about a list nobody had measured,
-   * true for no list at all: a 1,500-lead list showed every one of them under
-   * that notice, and a 6,000-lead list lost 1,000 people in silence.
-   */
+  const [nextContactOffset, setNextContactOffset] = useState(0);
+  const [contactsMoreLoading, setContactsMoreLoading] = useState(false);
+  /** Every new list/filter request invalidates earlier page responses. */
+  const contactReadVersion = useRef(0);
+  /** Number matching the current server-side filter, before pagination. */
   const [contactTotal, setContactTotal] = useState(0);
+  const [listTotal, setListTotal] = useState(0);
+  const [identityReviewCount, setIdentityReviewCount] = useState(0);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [filter, setFilter] = useState('');
+  const [needsIdentityOnly, setNeedsIdentityOnly] = useState(false);
   const [visible, setVisible] = useState(PAGE);
   const [draft, setDraft] = useState<ContactDraft | null>(null);
   const [armed, setArmed] = useState('');
   const [rowBusy, setRowBusy] = useState('');
   const [listError, setListError] = useState('');
+  const [renamingList, setRenamingList] = useState(false);
+  const [renameName, setRenameName] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
   const editorRef = useRef<HTMLDivElement | null>(null);
   /** The confirmation is brought to the operator for the same reason the editor is. */
   const confirmRef = useRef<HTMLDivElement | null>(null);
@@ -278,31 +285,101 @@ export function LinkedInManagerLeadConfig({
     }
   }, [activeSeatKey]);
 
-  const openList = useCallback(
-    async (listId: string) => {
-      setOpenListId(listId);
-      setContacts([]);
-      setContactTotal(0);
-      setDraft(null);
-      setArmed('');
-      setFilter('');
-      setVisible(PAGE);
-      if (!listId) return;
-      setContactsLoading(true);
+  const readContacts = useCallback(
+    async (listId: string, query: string, needsReview: boolean, version: number) => {
       try {
-        const result = await getLinkedInManagerLeadContacts(listId, activeSeatKey);
+        const result = await getLinkedInManagerLeadContacts(listId, activeSeatKey, {
+          query,
+          needsIdentityOnly: needsReview
+        });
+        if (contactReadVersion.current !== version) return;
         setContacts(result.contacts);
         setContactTotal(result.total);
+        setListTotal(result.listTotal);
+        setIdentityReviewCount(result.identityReviewCount);
+        setNextContactOffset(result.offset + result.contacts.length);
         setListError('');
       } catch (err) {
-        setListError(errorMessage(err, 'Unable to read the leads in that list.'));
+        if (contactReadVersion.current === version)
+          setListError(errorMessage(err, 'Unable to read the leads in that list.'));
       } finally {
-        setContactsLoading(false);
+        if (contactReadVersion.current === version) setContactsLoading(false);
       }
     },
     [activeSeatKey]
   );
 
+  const openList = useCallback(
+    async (listId: string) => {
+      const version = ++contactReadVersion.current;
+      setOpenListId(listId);
+      setRenamingList(false);
+      setContacts([]);
+      setContactTotal(0);
+      setListTotal(0);
+      setIdentityReviewCount(0);
+      setNextContactOffset(0);
+      setContactsMoreLoading(false);
+      setDraft(null);
+      setArmed('');
+      setFilter('');
+      setNeedsIdentityOnly(false);
+      setVisible(PAGE);
+      if (!listId) return;
+      setContactsLoading(true);
+      await readContacts(listId, '', false, version);
+    },
+    [readContacts]
+  );
+
+  // Search all list members on the server; debounce keystrokes and invalidate
+  // in-flight older queries before they can overwrite a newer filter.
+  useEffect(() => {
+    if (!openListId) return;
+    const version = ++contactReadVersion.current;
+    setContactsLoading(true);
+    setContactsMoreLoading(false);
+    // A failed new search must never leave stale contacts actionable as though
+    // they matched the current server-side filter.
+    setContacts([]);
+    setContactTotal(0);
+    setNextContactOffset(0);
+    const timer = setTimeout(() => {
+      setVisible(PAGE);
+      void readContacts(openListId, filter, needsIdentityOnly, version);
+    }, 250);
+    return () => clearTimeout(timer);
+    // Opening a new list starts its own default read; this effect is for filter changes.
+  }, [filter, needsIdentityOnly]);
+  const loadMoreContacts = async () => {
+    if (!openListId || contactsLoading || contactsMoreLoading || nextContactOffset >= contactTotal)
+      return;
+    const version = contactReadVersion.current;
+    const listId = openListId;
+    setContactsMoreLoading(true);
+    try {
+      const page = await getLinkedInManagerLeadContacts(listId, activeSeatKey, {
+        offset: nextContactOffset,
+        query: filter,
+        needsIdentityOnly
+      });
+      if (contactReadVersion.current !== version) return;
+      setContacts((current) => {
+        const known = new Set(current.map((contact) => contact.id));
+        return [...current, ...page.contacts.filter((contact) => !known.has(contact.id))];
+      });
+      setContactTotal(page.total);
+      setListTotal(page.listTotal);
+      setIdentityReviewCount(page.identityReviewCount);
+      setNextContactOffset(page.hasMore ? page.offset + page.contacts.length : page.total);
+      setListError('');
+    } catch (err) {
+      if (contactReadVersion.current === version)
+        setListError(errorMessage(err, 'Could not load the next page of leads.'));
+    } finally {
+      if (contactReadVersion.current === version) setContactsMoreLoading(false);
+    }
+  };
   useEffect(() => {
     // COMPACT MODE READS NOTHING ON MOUNT. The bug this shape exists to avoid:
     // opening some unrelated existing list's contacts here is exactly what
@@ -339,7 +416,13 @@ export function LinkedInManagerLeadConfig({
   );
 
   const missingRequired = useMemo(
-    () => FIELDS.filter((entry) => entry.required && !chosenHeader(entry.field)),
+    () =>
+      FIELDS.filter(
+        (entry) =>
+          entry.required &&
+          !chosenHeader(entry.field) &&
+          !(chosenHeader('fullName') && (entry.field === 'firstName' || entry.field === 'lastName'))
+      ),
     [chosenHeader]
   );
 
@@ -361,7 +444,7 @@ export function LinkedInManagerLeadConfig({
       setPreview(null);
       const message = errorMessage(err, 'Unable to read that CSV.');
       // "Could not map required field" is not a fault to report twice: the
-      // mapper below already shows which three columns are still unanswered.
+      // mapper below already shows which identity columns are still unanswered.
       setError(/Could not map required field/i.test(message) ? '' : message);
     } finally {
       if (previewToken.current === token) setBusy('');
@@ -382,6 +465,7 @@ export function LinkedInManagerLeadConfig({
       setPreview(null);
       setAutoMapping({});
       setOverrides({});
+      setSalesNavigatorPreset(false);
       setSample(null);
       // Compact mode has no destination picker, so the list name has to come
       // from somewhere other than an operator typing it first -- the file's
@@ -411,14 +495,25 @@ export function LinkedInManagerLeadConfig({
     setOverrides(next);
     if (!file) return;
     const mapping = mappingToSend(next);
-    // A mapping missing one of the three the server insists on would come back
-    // as an error, not a preview. It is a half-finished form, so it waits.
-    if (REQUIRED_FIELDS.every((required) => mapping[required]))
+    // A mapping without a company and a usable name source would come back as
+    // an error, not a preview. It is a half-finished form, so it waits.
+    if (
+      mapping.company &&
+      (mapping.fullName || REQUIRED_FIELDS.every((required) => mapping[required]))
+    )
       void runPreview(file, mapping, false);
     else {
       setPreview(null);
       setError('');
     }
+  };
+
+  const applySalesNavigatorPreset = () => {
+    if (!file || !headers.length) return;
+    const mapping = salesNavigatorCsvMapping(headers);
+    setOverrides(mapping);
+    setSalesNavigatorPreset(true);
+    void runPreview(file, mapping, false);
   };
 
   /**
@@ -433,6 +528,7 @@ export function LinkedInManagerLeadConfig({
     const rejectedRows = new Set(preview.rejected.map((entry) => entry.row));
     const firstHeader = chosenHeader('firstName');
     const lastHeader = chosenHeader('lastName');
+    const fullHeader = chosenHeader('fullName');
     const pairs: Array<{ before: string; after: string; changed: boolean }> = [];
     let acceptedIndex = 0;
     sample.rows.forEach((row, index) => {
@@ -440,10 +536,15 @@ export function LinkedInManagerLeadConfig({
       const clean = preview.accepted[acceptedIndex];
       acceptedIndex += 1;
       if (!clean) return;
-      const before =
-        `${firstHeader ? (row[firstHeader] ?? '') : ''} ${lastHeader ? (row[lastHeader] ?? '') : ''}`
-          .replace(/\s+/g, ' ')
-          .trim();
+      const before = (
+        firstHeader || lastHeader
+          ? `${firstHeader ? (row[firstHeader] ?? '') : ''} ${lastHeader ? (row[lastHeader] ?? '') : ''}`
+          : fullHeader
+            ? (row[fullHeader] ?? '')
+            : ''
+      )
+        .replace(/\s+/g, ' ')
+        .trim();
       const after = `${clean.firstName} ${clean.lastName}`.trim();
       if (before) pairs.push({ before, after, changed: before !== after });
     });
@@ -464,11 +565,11 @@ export function LinkedInManagerLeadConfig({
   const blocker = !file
     ? ''
     : missingRequired.length > 0
-      ? 'Point first name, last name and company at a column before importing.'
+      ? 'Map company and either a full-name column or separate first and last names before importing.'
       : !preview
         ? ''
         : preview.acceptedCount === 0
-          ? 'No row in this file has all three of first name, last name and company, so there is nothing to import yet.'
+          ? 'No row has usable first and last names plus a company; correct the source data or mapping.'
           : destination === 'new' && !newName.trim()
             ? 'Name the new list before importing.'
             : '';
@@ -483,7 +584,7 @@ export function LinkedInManagerLeadConfig({
           ? await createLinkedInManagerLeadList({
               seatKey: activeSeatKey,
               name: newName.trim(),
-              sourceKind: 'csv'
+              sourceKind: salesNavigatorPreset ? 'sales_navigator' : 'csv'
             })
           : destinationList!;
       const counts = (await importLinkedInManagerLeadCsv(
@@ -503,6 +604,7 @@ export function LinkedInManagerLeadConfig({
       setSample(null);
       setOverrides({});
       setAutoMapping({});
+      setSalesNavigatorPreset(false);
       setNewName('');
       if (compact) {
         // No report panel, no reopening a contacts browser this mode doesn't
@@ -598,11 +700,10 @@ export function LinkedInManagerLeadConfig({
         profileUrl: draft.profileUrl.trim() || null,
         doNotContact: draft.doNotContact
       });
-      setContacts((current) =>
-        current.map((contact) => (contact.id === updated.id ? updated : contact))
-      );
       setDraft(null);
-      setListError('');
+      setVisible(PAGE);
+      setContactsLoading(true);
+      await readContacts(openListId, filter, needsIdentityOnly, ++contactReadVersion.current);
       setToast(`${updated.firstName} ${updated.lastName} updated.`);
       await onChanged();
     } catch (err) {
@@ -627,11 +728,12 @@ export function LinkedInManagerLeadConfig({
   const removeContact = async (contact: LinkedInLeadContact) => {
     setRowBusy(contact.id);
     try {
+      // The success state follows an authenticated, affirmative deletion reply.
       await deleteLinkedInManagerLeadContact(contact.id);
-      setContacts((current) => current.filter((entry) => entry.id !== contact.id));
-      setContactTotal((current) => Math.max(0, current - 1));
       setArmed('');
-      setListError('');
+      setVisible(PAGE);
+      setContactsLoading(true);
+      await readContacts(openListId, filter, needsIdentityOnly, ++contactReadVersion.current);
       setToast(
         `${contact.firstName} ${contact.lastName} removed. Their place in every campaign they were in went with them, along with any message a campaign was waiting on you to write for them. What Trevra already sent stays in the ledger.`
       );
@@ -647,14 +749,10 @@ export function LinkedInManagerLeadConfig({
   const openMeta = lists.find((list) => list.id === openListId) ?? null;
   /** The lead a Remove press has armed, so the consequences can be read before the second press. */
   const armedContact = contacts.find((contact) => contact.id === armed) ?? null;
-  const term = filter.trim().toLowerCase();
-  const filtered = term
-    ? contacts.filter((contact) =>
-        `${contact.firstName} ${contact.lastName} ${contact.company} ${contact.email ?? ''}`
-          .toLowerCase()
-          .includes(term)
-      )
-    : contacts;
+  const needsIdentity = (contact: LinkedInLeadContact) =>
+    !contact.firstName.trim() || !contact.lastName.trim() || !contact.company.trim();
+  /** The server filters the whole list; these are only the currently loaded matching rows. */
+  const filtered = contacts;
   const shown = filtered.slice(0, visible);
   const draftValid =
     draft !== null &&
@@ -672,7 +770,7 @@ export function LinkedInManagerLeadConfig({
   const mappingRows = FIELDS.map((entry) => {
     const chosen = chosenHeader(entry.field);
     const auto = autoMapping[entry.field] ?? '';
-    const missing = entry.required && !chosen;
+    const missing = missingRequired.some((item) => item.field === entry.field);
     const guessed = chosen === auto && preview?.mappingConfidence?.[entry.field] === 'guessed';
     return (
       <label
@@ -683,16 +781,15 @@ export function LinkedInManagerLeadConfig({
       >
         <span className="lead-map-name">
           {entry.label}
-          {entry.required && <em>Required</em>}
+          {entry.required && !chosenHeader('fullName') && <em>Required</em>}
+          {entry.field === 'company' && chosenHeader('fullName') && <em>Required</em>}
         </span>
         <Select
           value={chosen}
           disabled={busy !== ''}
           onChange={(event) => changeMapping(entry.field, event.target.value)}
         >
-          {!chosen && (
-            <option value="">{entry.required ? 'Choose a column…' : 'Not imported'}</option>
-          )}
+          {!chosen && <option value="">{missing ? 'Choose a column…' : 'Not imported'}</option>}
           {!entry.required && !auto && chosen && <option value="">Not imported</option>}
           {headers.map((header) => (
             <option key={header} value={header}>
@@ -741,9 +838,9 @@ export function LinkedInManagerLeadConfig({
               <Users size={18} className="li-heading-icon" /> Add leads from a CSV
             </h3>
             <p>
-              Names, companies and contact details from a file you already have. Nothing is stored
-              until you import, and what you confirm here is exactly what lands — campaigns enrol
-              people from these lists.
+              Import a CSV you are authorized to use, including a Sales Navigator-style lead export.
+              Map separate names or a full name, then review before importing. No scraping or
+              contact action happens on upload.
             </p>
           </div>
         </div>
@@ -753,9 +850,10 @@ export function LinkedInManagerLeadConfig({
         <details className="mgr-advanced">
           <summary>Paste LinkedIn profile URLs instead</summary>
           <p className="li-hint">
-            One /in/ profile per line. Trevra stores only canonical profile identity here; names and
-            company stay blank until you edit or enrich them, so no fake personalization data is
-            created.
+            One /in/ profile per line. Trevra imports the canonical URL without guessing identity or
+            reading restricted profile data. Imported profiles enter the identity-review queue and
+            cannot join a campaign until you complete first name, last name and company in Lead
+            lists.
           </p>
           <textarea
             rows={5}
@@ -842,6 +940,26 @@ export function LinkedInManagerLeadConfig({
           </label>
         </div>
 
+        {file && headers.length > 0 && (
+          <div className="lead-section">
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={busy !== ''}
+              onClick={applySalesNavigatorPreset}
+            >
+              {salesNavigatorPreset ? <Check size={14} /> : <FileUp size={14} />}
+              {salesNavigatorPreset
+                ? ' Sales Navigator CSV mapping applied'
+                : ' Use Sales Navigator CSV mapping'}
+            </button>
+            <p className="li-hint">
+              For a lead CSV you already have permission to export or use. Maps Name, Current
+              Company, profile URL and contact columns; it does not scrape or import directly from
+              LinkedIn. Review the detected fields before submitting.
+            </p>
+          </div>
+        )}
         {file &&
           headers.length > 0 &&
           (missingRequired.length > 0 ? (
@@ -849,8 +967,8 @@ export function LinkedInManagerLeadConfig({
               <h4>Which column is which</h4>
               <p className="li-hint">
                 Matched from your headings. Change any of them and the rows below are read again.
-                First name, last name and company have to point at a column — a lead without them is
-                not a lead a campaign can write to.
+                Company is required, plus either Full name or separate first and last name columns.
+                Rows with insufficient names remain excluded from import.
               </p>
               <div className="li-form-grid lead-map-grid">{mappingRows}</div>
             </div>
@@ -1047,8 +1165,9 @@ export function LinkedInManagerLeadConfig({
             <div>
               <h3 aria-level={2}>Leads in a list</h3>
               <p>
-                Read a list, fix a row, drop somebody who left. Editing a lead here changes them
-                everywhere, including in campaigns they are already in.
+                Review pasted URLs, complete missing identity, edit existing leads and manage
+                exclusions. Incomplete identities cannot be admitted to campaigns; saving the
+                required fields rechecks campaign eligibility.
               </p>
             </div>
             <button
@@ -1108,42 +1227,131 @@ export function LinkedInManagerLeadConfig({
                   Find someone
                   <input
                     value={filter}
-                    placeholder="Name, company or email"
+                    maxLength={200}
+                    placeholder="Name, company, email or profile URL"
                     onChange={(event) => {
                       setFilter(event.target.value);
                       setVisible(PAGE);
                     }}
                   />
                 </label>
+                <label className="li-check-row">
+                  <input
+                    type="checkbox"
+                    checked={needsIdentityOnly}
+                    onChange={(event) => {
+                      setNeedsIdentityOnly(event.target.checked);
+                      setVisible(PAGE);
+                    }}
+                  />
+                  Needs identity review ({identityReviewCount.toLocaleString()})
+                </label>
                 {openMeta && (
                   <span className="li-chip">From {SOURCE_LABELS[openMeta.sourceKind]}</span>
                 )}
+                {openMeta && isOwner && !renamingList && (
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={renameBusy || contactsLoading}
+                    onClick={() => {
+                      setRenameName(openMeta.name);
+                      setRenamingList(true);
+                    }}
+                  >
+                    <Pencil size={14} /> Rename list
+                  </button>
+                )}
               </div>
 
+              {renamingList && openMeta && (
+                <form
+                  className="li-filter-row"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    if (!renameName.trim()) return;
+                    setRenameBusy(true);
+                    setListError('');
+                    void (async () => {
+                      try {
+                        const updated = await renameLinkedInManagerLeadList(
+                          openMeta.id,
+                          renameName
+                        );
+                        await loadLists();
+                        await onChanged();
+                        setToast(
+                          `Lead list renamed to “${updated.name}”. Membership and campaigns are unchanged.`
+                        );
+                        setRenamingList(false);
+                      } catch (error) {
+                        setListError(errorMessage(error, 'Could not rename this lead list.'));
+                      } finally {
+                        setRenameBusy(false);
+                      }
+                    })();
+                  }}
+                >
+                  <label>
+                    New list name
+                    <input
+                      value={renameName}
+                      maxLength={200}
+                      required
+                      onChange={(event) => setRenameName(event.target.value)}
+                    />
+                  </label>
+                  <button
+                    className="primary-button"
+                    type="submit"
+                    disabled={renameBusy || !renameName.trim()}
+                  >
+                    Save name
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    disabled={renameBusy}
+                    onClick={() => setRenamingList(false)}
+                  >
+                    Cancel
+                  </button>
+                </form>
+              )}
               {contactsLoading ? (
-                <p className="empty-copy">Reading this list…</p>
+                <p className="empty-copy">Searching this list…</p>
               ) : contacts.length === 0 ? (
                 <p className="empty-copy">
-                  Nothing in this list yet. Import a CSV above and it fills up.
+                  {listTotal === 0
+                    ? 'Nothing in this list yet. Import a CSV above and it fills up.'
+                    : `No leads match ${filter.trim() ? `“${filter.trim()}”` : 'this review filter'} in this list.`}
                 </p>
               ) : (
                 <>
-                  {/* The truncation notice is the server's count against the page
-                    it actually returned, so it appears exactly when a page was
-                    short and says by how much. Contacts come back oldest first,
-                    which is what makes "the first" the right word for them. */}
-                  <p className="li-hint">
-                    {pluralGrouped(filtered.length, 'lead')}
-                    {term ? ` of ${pluralGrouped(contacts.length, 'lead')} read` : ''} in “
-                    {openMeta?.name ?? 'this list'}”.
+                  <p className="li-hint" role="status">
+                    {pluralGrouped(contactTotal, 'matching lead')} in “
+                    {openMeta?.name ?? 'this list'}”
+                    {listTotal !== contactTotal
+                      ? ` (of ${pluralGrouped(listTotal, 'lead')} total)`
+                      : ''}
+                    .
                     {contactTotal > contacts.length &&
-                      ` The first ${contacts.length.toLocaleString()} of ${pluralGrouped(contactTotal, 'lead')} are shown — one read of a list returns no more than that, and Find someone searches the ones it returned.`}
+                      ` ${contacts.length.toLocaleString()} matching leads loaded; load later pages to review the rest.`}
                   </p>
+                  {identityReviewCount > 0 && (
+                    <p className="li-hint">
+                      {pluralGrouped(identityReviewCount, 'profile')} need first name, last name and
+                      company confirmed before campaign admission across the entire list.
+                    </p>
+                  )}
                   {draft && (
                     <div className="lead-editor" ref={editorRef}>
                       <h4>
-                        Editing {contacts.find((contact) => contact.id === draft.id)?.firstName}{' '}
-                        {contacts.find((contact) => contact.id === draft.id)?.lastName}
+                        {contacts.find(
+                          (contact) => contact.id === draft.id && needsIdentity(contact)
+                        )
+                          ? 'Complete profile identity'
+                          : 'Edit lead identity'}
                       </h4>
                       <div className="li-form-grid lead-edit-grid">
                         <label>
@@ -1219,8 +1427,9 @@ export function LinkedInManagerLeadConfig({
                         </label>
                       </div>
                       <p className="li-hint">
-                        Names are cleaned on save the same way they are on import. First name, last
-                        name and company are required.
+                        Confirm names and company from an authorized source. Trevra never infers
+                        them from the LinkedIn URL. After saving, pending campaign eligibility is
+                        rechecked with all workspace exclusions and policies.
                       </p>
                       <div className="mgr-actions">
                         <button
@@ -1323,9 +1532,20 @@ export function LinkedInManagerLeadConfig({
                               className={editing ? 'lead-row-editing' : undefined}
                             >
                               <td>
-                                <strong>
-                                  {contact.firstName} {contact.lastName}
-                                </strong>
+                                {needsIdentity(contact) ? (
+                                  <button
+                                    type="button"
+                                    className="secondary-button"
+                                    disabled={rowBusy !== ''}
+                                    onClick={() => startEdit(contact)}
+                                  >
+                                    Complete identity
+                                  </button>
+                                ) : (
+                                  <strong>
+                                    {contact.firstName} {contact.lastName}
+                                  </strong>
+                                )}
                               </td>
                               <td>{contact.company || '—'}</td>
                               <td>{contact.email || '—'}</td>
@@ -1361,7 +1581,7 @@ export function LinkedInManagerLeadConfig({
                                           onSelect: () => startEdit(contact)
                                         },
                                         {
-                                          label: 'Remove from list',
+                                          label: 'Remove lead permanently',
                                           icon: <Trash2 size={12} />,
                                           disabled: rowBusy !== '',
                                           danger: true,
@@ -1397,8 +1617,19 @@ export function LinkedInManagerLeadConfig({
                       </button>
                     </div>
                   )}
-                  {filtered.length === 0 && (
-                    <p className="empty-copy">Nobody in this list matches “{filter.trim()}”.</p>
+                  {nextContactOffset < contactTotal && (
+                    <div className="mgr-actions">
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        disabled={contactsMoreLoading}
+                        onClick={() => void loadMoreContacts()}
+                      >
+                        {contactsMoreLoading
+                          ? 'Loading next page…'
+                          : `Load next page (${pluralGrouped(contactTotal - nextContactOffset, 'lead')} remain)`}
+                      </button>
+                    </div>
                   )}
                 </>
               )}

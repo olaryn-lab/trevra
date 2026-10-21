@@ -150,11 +150,35 @@ export function maskEmail(email: string): string {
  *
  * A HOSTED DEPLOYMENT WITH NO PROVIDER GETS THE OLD SENTENCE, VERBATIM.
  */
-async function custodyGate(db: Db, workspaceId: string, env: NodeJS.ProcessEnv): Promise<HostedExecutionVerdict> {
+async function custodyGate(
+  db: Db,
+  workspaceId: string,
+  env: NodeJS.ProcessEnv
+): Promise<HostedExecutionVerdict> {
   if (!linkedInWorkerConfig(env).hosted) return { allowed: true };
   return hostedExecutionGate(db, workspaceId, env);
 }
 
+/**
+ * A credential update owns both halves and their audit rows as one unit.
+ *
+ * The advisory key exists even for owner credentials before any rows exist;
+ * row locks alone cannot serialize first-time writes, deletion and rotation.
+ * Keeping the lock transaction-scoped prevents leaking a lease across requests.
+ */
+async function mutateCredentialPair<T>(
+  db: Db,
+  workspaceId: string,
+  seatKey: string,
+  work: (tx: Db) => Promise<T>
+): Promise<T> {
+  return db.transaction(async (tx) => {
+    await tx
+      .prepare('SELECT pg_advisory_xact_lock(hashtext(?),hashtext(?))')
+      .get(`trevra:linkedin-credential:${workspaceId}`, seatKey);
+    return work(tx);
+  });
+}
 /** The two halves, named once so no call site spells a kind by hand. */
 type CredentialHalf = 'linkedin.email' | 'linkedin.password';
 
@@ -181,7 +205,11 @@ function assertSeatKey(seatKey: string): void {
  * 'owner'. The two never collide, which is the same split the table's CHECK
  * enforces from the database's side.
  */
-export function seatCredentialContext(workspaceId: string, seatKey: string, kind: CredentialHalf): SecretContext {
+export function seatCredentialContext(
+  workspaceId: string,
+  seatKey: string,
+  kind: CredentialHalf
+): SecretContext {
   return { store: 'linkedin_seat_credentials', workspaceId, seatKey, kind };
 }
 
@@ -215,7 +243,9 @@ async function putSeatSecret(
     input.env
   );
   const now = new Date().toISOString();
-  await db.prepare(`
+  await db
+    .prepare(
+      `
     INSERT INTO linkedin_seat_credentials (
       id, workspace_id, seat_key, kind, ciphertext, iv, auth_tag, key_version, key_id, label, created_at, updated_at
     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
@@ -227,20 +257,22 @@ async function putSeatSecret(
       key_id=EXCLUDED.key_id,
       label=EXCLUDED.label,
       updated_at=EXCLUDED.updated_at
-  `).run(
-    id('lsec'),
-    input.workspaceId,
-    input.seatKey,
-    input.kind,
-    sealed.ciphertext,
-    sealed.iv,
-    sealed.authTag,
-    sealed.keyVersion,
-    sealed.keyId,
-    input.label,
-    now,
-    now
-  );
+  `
+    )
+    .run(
+      id('lsec'),
+      input.workspaceId,
+      input.seatKey,
+      input.kind,
+      sealed.ciphertext,
+      sealed.iv,
+      sealed.authTag,
+      sealed.keyVersion,
+      sealed.keyId,
+      input.label,
+      now,
+      now
+    );
   await writeCredentialAudit(db, {
     workspaceId: input.workspaceId,
     actorUserId: input.actorUserId,
@@ -260,7 +292,9 @@ async function describeSeatSecret(
   kind: CredentialHalf
 ): Promise<{ label: string | null } | null> {
   const row = await db
-    .prepare('SELECT label FROM linkedin_seat_credentials WHERE workspace_id=? AND seat_key=? AND kind=?')
+    .prepare(
+      'SELECT label FROM linkedin_seat_credentials WHERE workspace_id=? AND seat_key=? AND kind=?'
+    )
     .get<{ label: string | null }>(workspaceId, seatKey, kind);
   return row ? { label: row.label } : null;
 }
@@ -274,8 +308,16 @@ async function readSeatSecret(
   env: NodeJS.ProcessEnv
 ): Promise<string | null> {
   const row = await db
-    .prepare('SELECT ciphertext, iv, auth_tag, key_version, key_id FROM linkedin_seat_credentials WHERE workspace_id=? AND seat_key=? AND kind=?')
-    .get<{ ciphertext: Buffer; iv: Buffer; auth_tag: Buffer; key_version: number; key_id: string | null }>(workspaceId, seatKey, kind);
+    .prepare(
+      'SELECT ciphertext, iv, auth_tag, key_version, key_id FROM linkedin_seat_credentials WHERE workspace_id=? AND seat_key=? AND kind=?'
+    )
+    .get<{
+      ciphertext: Buffer;
+      iv: Buffer;
+      auth_tag: Buffer;
+      key_version: number;
+      key_id: string | null;
+    }>(workspaceId, seatKey, kind);
   if (!row) return null;
   // Context from the arguments the row was FOUND by: a ciphertext moved here
   // from another workspace or another seat fails to open rather than signing
@@ -302,7 +344,9 @@ async function deleteSeatSecret(
   actorUserId: string | null
 ): Promise<boolean> {
   const row = await db
-    .prepare('DELETE FROM linkedin_seat_credentials WHERE workspace_id=? AND seat_key=? AND kind=? RETURNING label')
+    .prepare(
+      'DELETE FROM linkedin_seat_credentials WHERE workspace_id=? AND seat_key=? AND kind=? RETURNING label'
+    )
     .get<{ label: string | null }>(workspaceId, seatKey, kind);
   if (!row) return false;
   await writeCredentialAudit(db, {
@@ -339,21 +383,25 @@ async function writeCredentialAudit(
     now: string;
   }
 ): Promise<void> {
-  await db.prepare(`
+  await db
+    .prepare(
+      `
     INSERT INTO audit_events (
       id,workspace_id,actor_type,actor_id,event_type,entity_type,entity_id,metadata_json,created_at
     ) VALUES (?,?,?,?,?,?,?,?,?)
-  `).run(
-    id('audit'),
-    event.workspaceId,
-    event.actorUserId ? 'user' : 'system',
-    event.actorUserId,
-    event.eventType,
-    'workspace_secret',
-    `${event.workspaceId}:${event.seatKey}:${event.kind}`,
-    JSON.stringify({ kind: event.kind, seatKey: event.seatKey, label: event.label }),
-    event.now
-  );
+  `
+    )
+    .run(
+      id('audit'),
+      event.workspaceId,
+      event.actorUserId ? 'user' : 'system',
+      event.actorUserId,
+      event.eventType,
+      'workspace_secret',
+      `${event.workspaceId}:${event.seatKey}:${event.kind}`,
+      JSON.stringify({ kind: event.kind, seatKey: event.seatKey, label: event.label }),
+      event.now
+    );
 }
 
 /**
@@ -392,51 +440,46 @@ export async function putLinkedInCredentials(
 
   const maskedEmail = maskEmail(email);
 
-  if (seatKey === OWNER_SEAT_KEY) {
-    // UNCHANGED, DELIBERATELY. Same table, same kinds, same store.ts calls as
-    // before the seat dimension existed, so nothing already stored has to move
-    // and nothing already stored can fail to be found afterwards.
-    await putWorkspaceSecret(db, {
-      workspaceId: input.workspaceId,
-      kind: 'linkedin.email',
-      plaintext: email,
-      // The masked form, computed once here. This is the ONLY plaintext-derived
-      // value either kind stores in the clear, and it is deliberately the half
-      // that identifies the account without helping anyone into it.
-      label: maskedEmail,
-      actorUserId: input.actorUserId ?? null
-    });
-    await putWorkspaceSecret(db, {
-      workspaceId: input.workspaceId,
-      kind: 'linkedin.password',
-      plaintext: password,
-      // No label. There is nothing about a password that may be written down.
-      label: null,
-      actorUserId: input.actorUserId ?? null
-    });
+  return mutateCredentialPair(db, input.workspaceId, seatKey, async (tx) => {
+    if (seatKey === OWNER_SEAT_KEY) {
+      // The owner keeps the legacy workspace_secrets home. Both writes and their
+      // audit events commit or roll back together on the same database handle.
+      await putWorkspaceSecret(tx, {
+        workspaceId: input.workspaceId,
+        kind: 'linkedin.email',
+        plaintext: email,
+        label: maskedEmail,
+        actorUserId: input.actorUserId ?? null
+      });
+      await putWorkspaceSecret(tx, {
+        workspaceId: input.workspaceId,
+        kind: 'linkedin.password',
+        plaintext: password,
+        label: null,
+        actorUserId: input.actorUserId ?? null
+      });
+    } else {
+      await putSeatSecret(tx, {
+        workspaceId: input.workspaceId,
+        seatKey,
+        kind: 'linkedin.email',
+        plaintext: email,
+        label: maskedEmail,
+        actorUserId: input.actorUserId ?? null,
+        env
+      });
+      await putSeatSecret(tx, {
+        workspaceId: input.workspaceId,
+        seatKey,
+        kind: 'linkedin.password',
+        plaintext: password,
+        label: null,
+        actorUserId: input.actorUserId ?? null,
+        env
+      });
+    }
     return { hasCredentials: true, maskedEmail };
-  }
-
-  await putSeatSecret(db, {
-    workspaceId: input.workspaceId,
-    seatKey,
-    kind: 'linkedin.email',
-    plaintext: email,
-    label: maskedEmail,
-    actorUserId: input.actorUserId ?? null,
-    env
   });
-  await putSeatSecret(db, {
-    workspaceId: input.workspaceId,
-    seatKey,
-    kind: 'linkedin.password',
-    plaintext: password,
-    label: null,
-    actorUserId: input.actorUserId ?? null,
-    env
-  });
-
-  return { hasCredentials: true, maskedEmail };
 }
 
 /**
@@ -451,22 +494,25 @@ export async function describeLinkedInCredentials(
   workspaceId: string,
   seatKey: string = OWNER_SEAT_KEY
 ): Promise<LinkedInCredentialSummary> {
-  const [email, password] = await Promise.all(
-    seatKey === OWNER_SEAT_KEY
-      ? [
-          describeWorkspaceSecret(db, workspaceId, 'linkedin.email'),
-          describeWorkspaceSecret(db, workspaceId, 'linkedin.password')
-        ]
-      : [
-          describeSeatSecret(db, workspaceId, seatKey, 'linkedin.email'),
-          describeSeatSecret(db, workspaceId, seatKey, 'linkedin.password')
-        ]
-  );
-  // BOTH halves, or neither. One without the other cannot sign anything in, and
-  // reporting `hasCredentials: true` for it would leave an operator pressing a
-  // Sign in button that can never work.
-  if (!email || !password) return { hasCredentials: false, maskedEmail: email?.label ?? null };
-  return { hasCredentials: true, maskedEmail: email.label };
+  assertSeatKey(seatKey);
+  return db.transaction(async (tx) => {
+    // Status must not combine two snapshots from opposite sides of a rotation.
+    // The metadata read still decrypts nothing, even with the consistent view.
+    await tx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    const [email, password] = await Promise.all(
+      seatKey === OWNER_SEAT_KEY
+        ? [
+            describeWorkspaceSecret(tx, workspaceId, 'linkedin.email'),
+            describeWorkspaceSecret(tx, workspaceId, 'linkedin.password')
+          ]
+        : [
+            describeSeatSecret(tx, workspaceId, seatKey, 'linkedin.email'),
+            describeSeatSecret(tx, workspaceId, seatKey, 'linkedin.password')
+          ]
+    );
+    if (!email || !password) return { hasCredentials: false, maskedEmail: email?.label ?? null };
+    return { hasCredentials: true, maskedEmail: email.label };
+  });
 }
 
 /** Wipe both halves. True when anything was there to wipe. */
@@ -476,18 +522,40 @@ export async function deleteLinkedInCredentials(
   actorUserId?: string | null,
   seatKey: string = OWNER_SEAT_KEY
 ): Promise<boolean> {
-  // Sequential, not Promise.all: both writes append an audit row, and the pair
-  // reads better in order than interleaved.
-  if (seatKey === OWNER_SEAT_KEY) {
-    const email = await deleteWorkspaceSecret(db, workspaceId, 'linkedin.email', actorUserId ?? null);
-    const password = await deleteWorkspaceSecret(db, workspaceId, 'linkedin.password', actorUserId ?? null);
+  assertSeatKey(seatKey);
+  return mutateCredentialPair(db, workspaceId, seatKey, async (tx) => {
+    if (seatKey === OWNER_SEAT_KEY) {
+      const email = await deleteWorkspaceSecret(
+        tx,
+        workspaceId,
+        'linkedin.email',
+        actorUserId ?? null
+      );
+      const password = await deleteWorkspaceSecret(
+        tx,
+        workspaceId,
+        'linkedin.password',
+        actorUserId ?? null
+      );
+      return email || password;
+    }
+    const email = await deleteSeatSecret(
+      tx,
+      workspaceId,
+      seatKey,
+      'linkedin.email',
+      actorUserId ?? null
+    );
+    const password = await deleteSeatSecret(
+      tx,
+      workspaceId,
+      seatKey,
+      'linkedin.password',
+      actorUserId ?? null
+    );
     return email || password;
-  }
-  const email = await deleteSeatSecret(db, workspaceId, seatKey, 'linkedin.email', actorUserId ?? null);
-  const password = await deleteSeatSecret(db, workspaceId, seatKey, 'linkedin.password', actorUserId ?? null);
-  return email || password;
+  });
 }
-
 /**
  * INTERNAL. The only function that opens a stored LinkedIn sign-in.
  *
@@ -520,21 +588,26 @@ export async function readLinkedInCredentials(
   // `seatKey` comes last so that every existing 2- and 3-argument call site --
   // and the tests that pass a hosted `env` as the third argument -- keeps
   // resolving the owner seat exactly as it did.
-  if (seatKey === OWNER_SEAT_KEY) {
-    // `env` is threaded through rather than left to `process.env`: the caller
-    // may be a test or a worker with its own environment, and a read path that
-    // quietly used a different key than the write path is the kind of drift
-    // this module exists to make impossible.
-    const email = await readWorkspaceSecretPlaintext(db, workspaceId, 'linkedin.email', env);
+  assertSeatKey(seatKey);
+  // One REPEATABLE READ snapshot for both halves. Separate SELECTs under the
+  // default READ COMMITTED isolation could observe an email before a rotation
+  // and its new password after the rotation commits.
+  return db.transaction(async (tx) => {
+    await tx.exec('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY');
+    if (seatKey === OWNER_SEAT_KEY) {
+      const email = await readWorkspaceSecretPlaintext(tx, workspaceId, 'linkedin.email', env);
+      if (!email) return null;
+      const password = await readWorkspaceSecretPlaintext(
+        tx,
+        workspaceId,
+        'linkedin.password',
+        env
+      );
+      return password ? { email, password } : null;
+    }
+    const email = await readSeatSecret(tx, workspaceId, seatKey, 'linkedin.email', env);
     if (!email) return null;
-    const password = await readWorkspaceSecretPlaintext(db, workspaceId, 'linkedin.password', env);
-    if (!password) return null;
-    return { email, password };
-  }
-
-  const email = await readSeatSecret(db, workspaceId, seatKey, 'linkedin.email', env);
-  if (!email) return null;
-  const password = await readSeatSecret(db, workspaceId, seatKey, 'linkedin.password', env);
-  if (!password) return null;
-  return { email, password };
+    const password = await readSeatSecret(tx, workspaceId, seatKey, 'linkedin.password', env);
+    return password ? { email, password } : null;
+  });
 }

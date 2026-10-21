@@ -42,6 +42,7 @@ import { errorMessage, reloadOutreach, useOutreachRefresh } from './LinkedInSafe
 import { relativeTime } from './LinkedInScreen';
 import { DELAY_CHOICES, plannedForFrom, queueWaitCopy, type ScheduleMode } from './LinkedInTiming';
 import { useWorkspaceMembers } from './TeamScreen';
+import { mergeInboxSearchPage } from './inboxSearchPages';
 import { ConfidenceTag } from './LinkedInViz';
 import { Select } from './ui/primitives';
 import { plural } from './ui/plural';
@@ -92,15 +93,11 @@ const EMPTY_FILTERS: InboxFilters = { unread: false, hasReply: false, campaignId
 /**
  * HOW MUCH OF THE INBOX ONE READ ASKS FOR, and how much it can ever get.
  *
- * `/api/linkedin/inbox/threads` takes a `limit` it clamps to 500 and offers no
- * offset and no total, so this is not paging in the usual sense: each press
- * re-reads the same newest-first slice a page deeper, and the last press is the
- * one the server's own ceiling stops. Two things follow, and both are said on
- * screen rather than hidden. A full page means older conversations exist and
- * were not asked for -- never "200 of N", because the route returns rows and no
- * count, and a total nobody measured is a total this screen will not print. And
- * at 500 the honest sentence is that one read reaches no further, with the
- * filters named as the way to bring older conversations into range.
+ * Unfiltered reads retain the existing simple progressive 100..500 window.
+ * Search requests use bounded, real 100-row pages with an offset and match
+ * against all stored threads, not only the currently loaded window.
+ * Neither route invents a total count; a full page means "more may exist".
+ * The server always enforces workspace and sender scope before search.
  */
 const THREAD_PAGE = 100;
 const THREAD_MAX = 500;
@@ -392,8 +389,21 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
   /** True when that read came back full, so a task's conversation may be past the ceiling. */
   const [taskThreadsTruncated, setTaskThreadsTruncated] = useState(false);
   const [filters, setFilters] = useState<InboxFilters>(EMPTY_FILTERS);
-  /** Narrows the same in-memory list the filters do -- name, snippet, or a task's draft. Never triggers a read of its own. */
+  /** Server-side search scans all stored threads; task drafts filter locally. */
   const [search, setSearch] = useState('');
+  const [serverSearch, setServerSearch] = useState('');
+  const [searchPage, setSearchPage] = useState(0);
+  const [searchHasMore, setSearchHasMore] = useState(false);
+  useEffect(() => {
+    setSearchPage(0);
+  }, [activeSeatKey, filters.unread, filters.hasReply, filters.campaignId]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setSearchPage(0);
+      setServerSearch(search.trim());
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [search]);
   /** How deep the conversation list is currently reading. Raised a page at a time, never past `THREAD_MAX`. */
   const [threadLimit, setThreadLimit] = useState(THREAD_PAGE);
   const [openUrn, setOpenUrn] = useState<string | null>(null);
@@ -457,10 +467,17 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
         ...(filters.hasReply ? { hasReply: true } : {}),
         ...(filters.campaignId ? { campaignId: filters.campaignId } : {}),
         seatKey: activeSeatKey,
-        limit: threadLimit
+        ...(serverSearch ? { search: serverSearch, offset: searchPage * THREAD_PAGE } : {}),
+        limit: serverSearch ? THREAD_PAGE : threadLimit
       });
       if (listToken.current !== token) return;
-      setThreads(next);
+      if (serverSearch) {
+        setSearchHasMore(next.length === THREAD_PAGE);
+        setThreads((current) => mergeInboxSearchPage(current, next, searchPage));
+      } else {
+        setSearchHasMore(false);
+        setThreads(next);
+      }
       setError('');
     } catch (err) {
       if (listToken.current === token) {
@@ -474,7 +491,15 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
     } finally {
       if (listToken.current === token) setLoading(false);
     }
-  }, [filters.unread, filters.hasReply, filters.campaignId, activeSeatKey, threadLimit]);
+  }, [
+    filters.unread,
+    filters.hasReply,
+    filters.campaignId,
+    activeSeatKey,
+    threadLimit,
+    serverSearch,
+    searchPage
+  ]);
 
   const loadTasks = useCallback(async () => {
     try {
@@ -1059,8 +1084,8 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
    * ONE LIST, NOT TWO. A native inbox is a single rail sorted by recency; a
    * task's "recency" is when the campaign asked for it (`createdAt`), a
    * conversation's is its last message. Search narrows this same in-memory
-   * list and never triggers a read of its own -- it says nothing about what
-   * the server returned. Nothing here changes what counts as unread or
+   * list. For threads, server-side search runs against every stored thread
+   * before paging; the local filter also narrows task draft text. Nothing here changes what counts as unread or
    * has-a-reply: those stay properties of `threads` alone (the filters
    * above), so a task can never satisfy either one.
    */
@@ -1079,7 +1104,7 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
       });
     }
     for (const thread of threads) {
-      if (!matches([thread.name, thread.snippet])) continue;
+      if (!matches([thread.name, thread.profileUrl, thread.snippet])) continue;
       rows.push({
         kind: 'thread',
         key: `thread-${thread.threadUrn}`,
@@ -1211,10 +1236,11 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
             <input
               type="search"
               className="li-search-input"
-              placeholder="Search messages"
+              maxLength={120}
+              placeholder="Search all conversations"
               value={search}
               onChange={(event) => setSearch(event.target.value)}
-              aria-label="Search conversations and messages to write"
+              aria-label="Search all stored conversations and manual drafts"
             />
           </div>
 
@@ -1226,7 +1252,7 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
               <h4 aria-level={3}>{filtered ? 'Nothing matches' : 'Nothing has been synced yet'}</h4>
               <p>
                 {filtered
-                  ? 'The filters and search above narrow what the last sync stored; they never fetch anything new.'
+                  ? 'Search covers every stored conversation, including older threads. Refresh the inbox to sync new LinkedIn messages.'
                   : 'Sync the inbox to walk the conversation rail. Trevra stores what LinkedIn rendered — it invents no message and no timestamp.'}
               </p>
               {/* Clearing drops the narrowing, not the account: the account is a
@@ -1335,7 +1361,23 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
             measured and this screen will not print one. Keyed to `threads`,
             not `inboxRows`: this is about the server's own paging, and
             neither search nor folding tasks in changes what was asked for. */}
-          {threads.length >= threadLimit && (
+          {serverSearch && searchHasMore && (
+            <div className="panel-footer">
+              <span>
+                {threads.length} matching conversations loaded from the full stored inbox.
+              </span>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={loading}
+                onClick={() => setSearchPage((current) => current + 1)}
+              >
+                {loading ? <LoaderCircle className="spin" size={14} /> : <Inbox size={14} />}
+                Load more matches
+              </button>
+            </div>
+          )}
+          {!serverSearch && threads.length >= threadLimit && (
             <div className="panel-footer">
               <span>
                 {threadLimit < THREAD_MAX ? (
@@ -1345,9 +1387,8 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                   </>
                 ) : (
                   <>
-                    The {THREAD_MAX} most recently active conversations are shown, which is as far
-                    as one read of this list reaches. Narrow it by campaign above to bring older
-                    ones into range.
+                    The {THREAD_MAX} most recently active conversations are shown. Search by name,
+                    LinkedIn URL or snippet to find any older stored conversation.
                   </>
                 )}
               </span>

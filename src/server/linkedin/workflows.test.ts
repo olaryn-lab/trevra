@@ -6,6 +6,7 @@ import {
   chooseMessageVariant,
   delayMilliseconds,
   diagnoseWorkflow,
+  missingRequiredWorkflowVariables,
   parseWorkflowSteps,
   renderWorkflowTemplate,
   stepUsesBookingLink,
@@ -218,6 +219,159 @@ describe('LinkedIn manager workflows', () => {
   // them could reach a message. A merge field for data the operator already
   // supplied is not a feature request, it is the data being connected to the
   // one place it was collected for.
+
+  it('keeps the endorsed skill count through workflow validation and rejects oversized requests', () => {
+    const raw = {
+      id: 'skills',
+      action: 'endorse_skills',
+      delayBefore: { amount: 0, unit: 'days' },
+      config: { maxSkills: 6 }
+    };
+    const parsed = workflowStepsSchema.parse([raw]);
+    expect(parsed[0]).toMatchObject({ action: 'endorse_skills', config: { maxSkills: 6 } });
+    expect(
+      workflowStepsSchema.safeParse([
+        {
+          ...raw,
+          config: { maxSkills: 11 }
+        }
+      ]).success
+    ).toBe(false);
+    expect(
+      workflowStepsSchema.safeParse([
+        {
+          ...raw,
+          config: { maxSkills: 0 }
+        }
+      ]).success
+    ).toBe(false);
+  });
+
+  it('supports explicit fallback personalization and reports only unprotected missing values', () => {
+    const lead = { firstName: ' ', lastName: '', company: 'Acme' };
+    expect(renderWorkflowTemplate('Hi {{first_name|there}} from {{company}}', lead)).toBe(
+      'Hi there from Acme'
+    );
+    expect(renderWorkflowTemplate('Role: {{custom.role|a founder}}', lead)).toBe('Role: a founder');
+    expect(unsupportedVariables('{{first_name|there}} {{custom.role|someone}}')).toEqual([]);
+    expect(unsupportedVariables('{{unknown_field|there}}')).toEqual(['unknown_field']);
+    const step = workflowStepsSchema.parse([
+      {
+        id: 'manual',
+        action: 'manual_message',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: { suggestedTemplate: 'Hi {{first_name|there}}, call {{phone}}.' }
+      }
+    ])[0];
+    expect(missingRequiredWorkflowVariables(step, lead)).toEqual(['phone']);
+    expect(missingRequiredWorkflowVariables(step, { ...lead, phone: '+41 555' })).toEqual([]);
+  });
+
+  it('rejects malformed merge placeholders and empty fallbacks before a workflow can send', () => {
+    const malformed = [
+      '{{phone|}}',
+      '{{phone|    }}',
+      '{{first_name |there}}',
+      '{{ custom.role |Founder }}',
+      '{{first_name',
+      '}}',
+      '{{{first_name}}}'
+    ];
+    for (const token of malformed) {
+      expect(unsupportedVariables(`Hi ${token}`), token).not.toEqual([]);
+      expect(() =>
+        workflowStepsSchema.parse([
+          {
+            id: 'invite',
+            action: 'connection_request',
+            delayBefore: { amount: 0, unit: 'hours' },
+            config: { message: `Hi ${token}` }
+          }
+        ])
+      ).toThrow();
+    }
+    expect(unsupportedVariables('Hi {{first_name|there}} and {{custom.role|Founder}}')).toEqual([]);
+  });
+
+  it('holds legacy malformed templates and blank fallbacks even without save-time validation', () => {
+    const lead = { firstName: 'Maya', lastName: 'Smith', company: 'Acme', phone: null };
+    const step = workflowStepsSchema.parse([
+      {
+        id: 'manual',
+        action: 'manual_message',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: { suggestedTemplate: 'Call {{phone}}' }
+      }
+    ])[0];
+    if (step.action !== 'manual_message') throw new Error('unexpected workflow step');
+    const emptyFallback = {
+      ...step,
+      config: { suggestedTemplate: 'Call {{phone|   }}' }
+    };
+    expect(missingRequiredWorkflowVariables(emptyFallback, lead)).toEqual(
+      expect.arrayContaining(['phone', 'phone|empty fallback'])
+    );
+    const malformed = { ...step, config: { suggestedTemplate: 'Hi {{first_name |friend}}' } };
+    expect(missingRequiredWorkflowVariables(malformed, lead)).toContain('first_name |friend');
+  });
+
+  it('checks only the selected A/B variant and shared subject for required variables', () => {
+    const lead = { firstName: 'Maya', lastName: 'Smith', company: 'Acme', phone: null };
+    const step = workflowStepsSchema.parse([
+      {
+        id: 'invite',
+        action: 'connection_request',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: {
+          variants: [
+            { id: 'safe', body: 'Hi {{firstName}}', weight: 50 },
+            { id: 'phone', body: 'Call {{phone}}', weight: 50 }
+          ]
+        }
+      }
+    ])[0];
+    expect(missingRequiredWorkflowVariables(step, lead)).toEqual(['phone']);
+    expect(missingRequiredWorkflowVariables(step, lead, 'safe')).toEqual([]);
+    expect(missingRequiredWorkflowVariables(step, lead, 'phone')).toEqual(['phone']);
+
+    const email = workflowStepsSchema.parse([
+      {
+        id: 'email',
+        action: 'email',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: {
+          subject: 'Regarding {{country}}',
+          threaded: false,
+          tracking: 'off',
+          variants: [
+            { id: 'safe', body: 'Hi {{first_name}}', weight: 50 },
+            { id: 'phone', body: 'Call {{phone}}', weight: 50 }
+          ]
+        }
+      }
+    ])[0];
+    expect(missingRequiredWorkflowVariables(email, lead, 'safe')).toEqual(['country']);
+    expect(missingRequiredWorkflowVariables(email, lead, 'phone')).toEqual(['country', 'phone']);
+  });
+
+  it('enforces booking links in the selected variant, not unrelated A/B arms', () => {
+    const step = workflowStepsSchema.parse([
+      {
+        id: 'invite',
+        action: 'connection_request',
+        delayBefore: { amount: 0, unit: 'hours' },
+        config: {
+          variants: [
+            { id: 'safe', body: 'Hi {{first_name}}', weight: 50 },
+            { id: 'book', body: 'Book {{booking_link}}', weight: 50 }
+          ]
+        }
+      }
+    ])[0];
+    expect(stepUsesBookingLink(step)).toBe(true);
+    expect(stepUsesBookingLink(step, 'safe')).toBe(false);
+    expect(stepUsesBookingLink(step, 'book')).toBe(true);
+  });
 
   it('renders arbitrary imported custom fields and accepts them at validation time', () => {
     expect(unsupportedVariables('Hi {{custom.job_title}} at {{custom.icp_tier}}')).toEqual([]);
@@ -585,6 +739,8 @@ describe('booking link merge field', () => {
       }
     ]);
     expect(workflowUsesBookingLink(steps)).toBe(true);
-    expect(steps.filter(stepUsesBookingLink).map((step) => step.id)).toEqual(['ask']);
+    expect(steps.filter((step) => stepUsesBookingLink(step)).map((step) => step.id)).toEqual([
+      'ask'
+    ]);
   });
 });

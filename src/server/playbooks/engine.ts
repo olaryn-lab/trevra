@@ -617,7 +617,10 @@ async function runActionStep(
       workspaceId: run.workspaceId,
       actionType: step.actionType,
       payload,
-      payloadHash
+      payloadHash,
+      actorType: run.actorType,
+      actorId: run.actorId,
+      playbookId: run.playbookId
     });
     const finishedAt = new Date().toISOString();
     await db.transaction(async (tx) => {

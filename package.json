@@ -20,6 +20,8 @@
     "test:unit": "vitest run",
     "test:watch": "vitest",
     "check": "npm test && npm run build",
+    "release:certify": "tsx scripts/check-parity-release.ts",
+    "release:check": "npm run check && npm run release:certify",
     "check:nango": "cd nango-integrations && npm ci && NANGO_CLI_UPGRADE_MODE=ignore npx --no-install nango compile --no-interactive",
     "selfhost:init": "bash scripts/selfhost-init.sh",
     "selfhost:deploy": "bash scripts/selfhost-deploy.sh",
@@ -42,7 +44,8 @@
     "sandbox:start": "node dist-server/sandbox-gateway/index.js",
     "start:worker": "NODE_ENV=production node dist-server/worker/index.js",
     "module": "tsx src/cli/trevra-module.ts",
-    "sbom:build": "npm sbom --sbom-format cyclonedx > /tmp/trevra-sbom.cdx.json && mv /tmp/trevra-sbom.cdx.json public/catalog/trevra.sbom.cdx.json || echo 'sbom:build failed (npm sbom validation flake) -- keeping previous public/catalog/trevra.sbom.cdx.json'"
+    "sbom:build": "tsx scripts/build-sbom.ts",
+    "launch:acceptance": "node scripts/launch-mvp-acceptance.mjs"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^3.0.20",

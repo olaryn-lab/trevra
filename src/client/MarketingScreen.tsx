@@ -100,7 +100,7 @@ export function MarketingScreen({
                 </a>
               ))}
               <a href={sourceHref} target="_blank" rel="noreferrer">
-                Source on GitHub
+                Repository on GitHub
               </a>
             </nav>
           </details>
@@ -141,6 +141,9 @@ export function MarketingScreen({
         </div>
 
         <figure className="hero-evidence">
+          <figcaption>
+            Illustrative example · sample signals and payload, not live customer data.
+          </figcaption>
           <div className="evidence-card">
             <div className="evidence-head">
               <span>Customer Research</span>
@@ -242,6 +245,7 @@ export function MarketingScreen({
         </ol>
 
         <figure className="workspace-preview">
+          <figcaption>Illustrative workspace preview · not an actual customer result.</figcaption>
           <aside className="workspace-rail" aria-label="Illustrative Trevra workspace navigation">
             <div className="workspace-wordmark">
               <span>
@@ -376,7 +380,7 @@ export function MarketingScreen({
             <Server size={20} aria-hidden="true" />
             <span>
               <strong>Prefer your own infrastructure?</strong>
-              <small>Trevra is open source and PostgreSQL-only.</small>
+              <small>Trevra runs on PostgreSQL. See the self-hosting guide for requirements.</small>
             </span>
           </div>
           <a
@@ -437,7 +441,7 @@ export function MarketingScreen({
           <a href="#deploy">Deploy</a>
         </div>
         <div>
-          <strong>Open source</strong>
+          <strong>Resources</strong>
           <a href={sourceHref} target="_blank" rel="noreferrer">
             GitHub
           </a>
@@ -452,7 +456,7 @@ export function MarketingScreen({
             Talk to the founder
           </a>
         </div>
-        <p className="footer-note">© {new Date().getFullYear()} Trevra. Built in the open.</p>
+        <p className="footer-note">© {new Date().getFullYear()} Trevra. Research first.</p>
       </footer>
     </main>
   );

@@ -2,6 +2,8 @@
 
 ## Product
 
+**Active product implementation:** Dripify-complete parity and beyond. Before changing outreach, lead sourcing, inbox, billing, integrations or policy, read `docs/planning/2026-10-20-dripify-parity-execution-plan.md` and use its stable TRV task IDs. Verify changes against its release gates and update each task status plus its test/commit evidence; `DRIPIFY_PARITY.md` is a historical audit, not a completion certificate.
+
 Trevra is the evidence-backed ledger and control plane for agent-operated go-to-market, aimed at founders. Preserve the core boundary: models interpret commercial content, deterministic software controls money, permissions, state transitions, approvals, and external execution.
 
 ## Architecture
@@ -38,7 +40,7 @@ Trevra is the evidence-backed ledger and control plane for agent-operated go-to-
 - **Screens are addressed by PATH, never by hash.** `/outreach/inbox`, not `#/outreach/inbox`. `src/client/ui/route.ts` is the only router; it reads `location.pathname` and moves with `history.pushState`.
 - **`#` means one thing: scroll to an element on the page you are already on.** The marketing page in `index.html` owns those anchors (`#hosted`, `#approval`, `#deploy`). No screen may read or write `location.hash`.
 - In-app links are plain `<a href="/outreach/inbox">`. A document-level interceptor in `ui/route.ts` catches them; there is no `<Link>` component and none is needed.
-- Adding a route means adding it in three places that must agree: `SECTIONS`/`SUB_ROUTES`/`SHELL_PATHS` in `src/client/ui/route.ts`, and `APP_PATH_HEADS` in `src/server/index.ts` so a reload of that URL serves the app instead of a 404.
+- Adding an app route means keeping `src/client/ui/route.ts`'s `isAppPath` match and `src/server/index.ts`'s `APP_PATH_PATTERNS` reload fallback in agreement; the former `SHELL_PATHS`/`APP_PATH_HEADS` identifiers no longer exist.
 - `src/client/ui/route.test.ts` fails the suite on any `#/` route literal or `location.hash` use in `src/client`. If it fires, the fix is the code, not the test.
 
 ## Required checks

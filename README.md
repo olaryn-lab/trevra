@@ -1,6 +1,8 @@
 # Trevra
 
-Trevra is the open-source ledger and control plane for agent-operated go-to-market. Founders and agents use it to find and qualify accounts/people, capture inbound demand, operate outreach, manage conversations and opportunity state, and run evidence-backed GTM playbooks. Trevra records what happened and executes consequential GTM actions only through explicit policy and approval boundaries.
+Trevra is a ledger and control plane for agent-operated go-to-market. Founders and agents use it to find and qualify accounts/people, capture inbound demand, operate outreach, manage conversations and opportunity state, and run evidence-backed GTM playbooks. Trevra records what happened and executes consequential GTM actions only through explicit policy and approval boundaries.
+
+No open-source license has been published for this repository. Do not assume that source availability grants reuse, redistribution, or deployment rights; licensing must be approved separately.
 
 Trevra is deliberately **not** a project-management, contract, accounting, invoicing, payment, generic backend, generic event-bus, or arbitrary webhook automation product.
 
@@ -33,7 +35,7 @@ Trevra is **PostgreSQL-only**. There is no SQLite dependency, fallback, database
 
 ### Integration boundary
 
-Providers either **observe GTM state** or **execute a named GTM action**. The current prepared execution registry is deliberately closed to `email.send`, `community.reply`, and `crm.log-activity`.
+Providers either **observe GTM state** or **execute a named GTM action**. The current prepared execution registry is deliberately closed to `email.send`, `community.reply`, `crm.log-activity`, and `buffer.create-draft`.
 
 There is no customer Stripe payment webhook, accounting-provider execution, generic `/api/events` ingestion endpoint, generic remote-action adapter, or arbitrary webhook step in campaign workflows. Website lead capture is designed as a GTM-specific source contract, not as general application telemetry. See [`docs/integration-contracts.md`](docs/integration-contracts.md).
 
@@ -124,7 +126,7 @@ Open:
 
 ### Local sign-in
 
-FOSS/local Trevra signs users in directly with its built-in Better Auth email/password flow. No Authward service, Authward database, Mailpit instance, or external identity credentials are required. Self-hosted production uses the same boundary.
+Local development Trevra signs users in directly with its built-in Better Auth email/password flow. No Authward service, Authward database, Mailpit instance, or external identity credentials are required. Self-hosted production uses the same boundary, subject to separately approved deployment rights.
 
 Managed hosted Trevra is different by design: `TREVRA_DEPLOYMENT_MODE=hosted` disables Trevra password auth and requires Authward as the upstream identity authority. Social providers and passwordless login are configured on Authward, not in Trevra. Gmail and Calendar delegated permissions remain separate Nango connections.
 

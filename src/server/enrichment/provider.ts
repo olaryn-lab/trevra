@@ -52,12 +52,28 @@ export class EnrichmentProviderError extends Error {
   }
 }
 
+export interface PersonEmailFinderResult {
+  email: string | null;
+  /** A confidence between 0 and 1, not an assertion that an address is deliverable. */
+  confidence: number | null;
+  /** Hunter's actual verifier decision; finding a public email is not proof of deliverability. */
+  verificationStatus: 'valid' | 'accept_all' | 'unknown' | null;
+  /** Billable Hunter search credits actually returned by the API. */
+  credits: number;
+}
 export interface ContactEnrichmentProvider {
   readonly id: EnrichmentProviderId;
   /** Free call that proves the key works. Throws EnrichmentProviderError. */
   checkKey(): Promise<void>;
   domainSearch(domain: string, options: { limit: number }): Promise<DomainSearchResult>;
   verifyEmail(email: string): Promise<EmailVerificationResult>;
+  /** Optional: named-person lookup (not every provider supports this endpoint). */
+  findEmail?(input: {
+    firstName: string;
+    lastName: string;
+    company: string;
+    profileUrl: string | null;
+  }): Promise<PersonEmailFinderResult>;
 }
 
 /**

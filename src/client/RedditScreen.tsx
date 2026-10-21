@@ -19,6 +19,7 @@ import {
 } from './api';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
+import { RedditCommentPanel } from './RedditCommentPanel';
 
 /**
  * The Reddit account: connect with credentials, confirm the session, or
@@ -342,6 +343,7 @@ export function RedditAccountPanel({ setToast }: { setToast: (message: string) =
           </p>
         )}
       </section>
+      <RedditCommentPanel setToast={setToast} />
     </div>
   );
 }

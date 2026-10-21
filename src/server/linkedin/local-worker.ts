@@ -44,6 +44,7 @@ import {
   type LinkedInThreadSummary
 } from './driver-inbox.js';
 import { evaluateLinkedInSafety, type LinkedInSafetyVerdict } from './guard.js';
+import { linkedinActionPolicyGate } from './action-policy.js';
 import {
   pruneSeatEvents,
   recordSeatEvent,
@@ -645,6 +646,8 @@ export interface LocalBatchDeps {
   page: LinkedInPage;
   /** Defaults to `evaluateLinkedInSafety`. Injected so a test can count calls. */
   evaluate: (action: DueLinkedInAction, now: Date) => Promise<LinkedInSafetyVerdict>;
+  /** Production policy gate; optional for fake-store tests without a database. */
+  authorizeAction?: (action: DueLinkedInAction) => Promise<{ allowed: boolean; reason: string }>;
   now?: () => Date;
   /** Defaults to a real timer. */
   sleep?: (ms: number) => Promise<void>;
@@ -1363,6 +1366,28 @@ export async function runLinkedInLocalBatch(
       );
       result.branchSkipped += 1;
       continue;
+    }
+
+    // Re-read workspace policy and exact owner approval at the final pre-send
+    // boundary. A denied/unapproved action is deferred without browser effects.
+    if (deps.authorizeAction) {
+      let auth: { allowed: boolean; reason: string };
+      try {
+        auth = await deps.authorizeAction(action);
+      } catch (cause) {
+        await store.releaseClaim(action.id, null);
+        result.blocked += 1;
+        result.halted = true;
+        result.haltReason = `Workspace policy could not be evaluated: ${cause instanceof Error ? cause.message : String(cause)}`;
+        break;
+      }
+      if (!auth.allowed) {
+        await store.releaseClaim(action.id, null);
+        deferred.push(action.id);
+        result.blocked += 1;
+        log(`LinkedIn local worker held action ${action.id}: ${auth.reason}`);
+        continue;
+      }
     }
 
     // One seed per (batch, action), the same string the inter-action gap is
@@ -5377,6 +5402,17 @@ export async function runDueLinkedInActions(
         // input schema so an approved playbook payload cannot name a row to
         // excuse itself, and this caller has a row id that is its own by
         // construction -- it just claimed it.
+        authorizeAction: (action) =>
+          linkedinActionPolicyGate(db, workspaceId, action.id, {
+            kind: action.kind,
+            seatKey: action.seatKey,
+            targetRef: action.targetRef,
+            body: action.body,
+            subject: action.subject,
+            threadUrn: action.threadUrn,
+            attachment: action.attachment,
+            channelMetadata: action.channelMetadata
+          }),
         evaluate: (action, at) =>
           evaluateLinkedInSafety(
             db,
