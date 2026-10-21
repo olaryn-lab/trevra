@@ -30,3 +30,7 @@
 Run `npm run check` for local implementation qualification and `npm run release:certify` for explicit production blockers. `npm run release:check` runs both. **Do not bypass or rename a failed strict release check to report readiness.** Confirm each real-world provider/terms/privacy item with signed operational evidence rather than merely changing a registry cell to `VERIFIED`.
 
 **Preserved worktree:** `/home/pankaj/Projects/Trevra-worktrees/dripify-parity-20261020`. Existing unrelated dirty catalog JSON files and untracked `node_modules` are outside this work's commits. No push, PR, master merge, deployment, live provider write, or application server start/restart was authorized or attempted.
+
+## 2026-10-21 continuation — outbound webhooks
+
+The earlier 3,978-test count above is historical. Latest development qualification on the `feat/dripify-parity-20261020` worktree is **271/271 files and 3,999/3,999 tests**, TypeScript and production builds passed. A tenant-scoped, signed, minimally projected outbound lifecycle-event outbox is implemented with owner-only subscription management, PostgreSQL retries, dispatch lease fencing, and independent worker scheduling. **TRV-052 is IN PROGRESS, not VERIFIED**: production activation requires destination-host approval, DNS/egress controls, live receiver testing, privacy review, failure recovery and monitoring. The strict release gate remains NO-GO until all previously recorded blockers are independently resolved. No live delivery, deployment, production migration, push or PR was performed.
