@@ -167,23 +167,47 @@ export function authwardClientAuthentication(clientSecret: string) {
 
 const authwardUpstreamProviders = new Set(['google', 'github', 'microsoft', 'apple']);
 const AUTHWARD_LOGOUT_EVENT = 'http://schemas.openid.net/event/backchannel-logout';
-let authwardLogoutJwks: ReturnType<typeof createRemoteJWKSet> | undefined;
+let authwardLogoutJwks: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
 
-function authwardLogoutJwksResolver() {
-  if (!authwardIssuer) throw new Error('Authward is not configured');
-  if (!authwardLogoutJwks) {
-    authwardLogoutJwks = createRemoteJWKSet(
-      new URL(`${authwardIssuer}/api/auth/.well-known/jwks.json`),
-      {
-        [customFetch]: async (url, options) => {
-          const headers = new Headers(options.headers);
-          headers.set('accept', 'application/json');
-          headers.set('user-agent', 'Trevra-Auth/1.0');
-          return fetch(url, { ...options, headers });
-        }
-      }
-    );
+/** Never guess a legacy or isolated-realm JWKS path; use the issuer's OIDC discovery. */
+export function trustedAuthwardLogoutJwksUri(
+  issuer: string,
+  metadata: { issuer?: unknown; jwks_uri?: unknown }
+): URL {
+  if (metadata.issuer !== issuer || typeof metadata.jwks_uri !== 'string') {
+    throw new Error('Authward logout JWKS discovery is invalid');
   }
+  const jwks = new URL(metadata.jwks_uri);
+  if (jwks.protocol !== 'https:' || jwks.origin !== new URL(issuer).origin) {
+    throw new Error('Authward logout JWKS origin is not trusted');
+  }
+  return jwks;
+}
+
+async function authwardLogoutJwksResolver() {
+  if (!authwardIssuer) throw new Error('Authward is not configured');
+  authwardLogoutJwks ??= (async () => {
+    const response = await fetch(`${authwardIssuer}/.well-known/openid-configuration`, {
+      headers: { accept: 'application/json' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(5_000)
+    });
+    if (!response.ok) throw new Error('Authward logout discovery failed');
+    const metadata = (await response.json()) as { issuer?: unknown; jwks_uri?: unknown };
+    const jwks = trustedAuthwardLogoutJwksUri(authwardIssuer, metadata);
+    return createRemoteJWKSet(jwks, {
+      [customFetch]: async (url, options) => {
+        const headers = new Headers(options.headers);
+        headers.set('accept', 'application/json');
+        headers.set('user-agent', 'Trevra-Auth/1.0');
+        return fetch(url, { ...options, headers, redirect: 'manual' });
+      }
+    });
+  })().catch((error) => {
+    // A transient discovery failure must not poison all subsequent logouts.
+    authwardLogoutJwks = undefined;
+    throw error;
+  });
   return authwardLogoutJwks;
 }
 
@@ -191,14 +215,34 @@ export async function verifyAuthwardLogoutToken(
   logoutToken: string
 ): Promise<{ sub: string; sid: string; issuedAt: number }> {
   if (!authwardIssuer || !authwardClientId) throw new Error('Authward is not configured');
+  return verifyAuthwardLogoutTokenWithKey(
+    logoutToken,
+    await authwardLogoutJwksResolver(),
+    authwardIssuer,
+    authwardClientId
+  );
+}
+
+/** Separates local Ed25519 verification fixtures from the real IdP JWKS lookup. */
+export async function verifyAuthwardLogoutTokenWithKey(
+  logoutToken: string,
+  verificationKey: Parameters<typeof jwtVerify>[1] | CryptoKey,
+  issuer: string,
+  clientId: string,
+  nowSeconds = Math.floor(Date.now() / 1000)
+): Promise<{ sub: string; sid: string; issuedAt: number }> {
   if (!logoutToken || logoutToken.length > 64 * 1024)
     throw new Error('Invalid Authward logout token');
-  const { payload, protectedHeader } = await jwtVerify(logoutToken, authwardLogoutJwksResolver(), {
-    issuer: authwardIssuer,
-    audience: authwardClientId,
+  const options = {
+    issuer,
+    audience: clientId,
     algorithms: ['EdDSA'],
     typ: 'logout+jwt'
-  });
+  };
+  const { payload, protectedHeader } =
+    typeof verificationKey === 'function'
+      ? await jwtVerify(logoutToken, verificationKey, options)
+      : await jwtVerify(logoutToken, verificationKey, options);
   if (
     typeof payload.sub !== 'string' ||
     !payload.sub ||
@@ -210,8 +254,8 @@ export async function verifyAuthwardLogoutToken(
     !Number.isInteger(payload.iat) ||
     // Reject stale/replayed or future-dated central logout notifications.
     // This route intentionally fails closed if the IdP's clock is badly skewed.
-    payload.iat < Math.floor(Date.now() / 1000) - 300 ||
-    payload.iat > Math.floor(Date.now() / 1000) + 60 ||
+    payload.iat < nowSeconds - 300 ||
+    payload.iat > nowSeconds + 60 ||
     !payload.events ||
     typeof payload.events !== 'object' ||
     !(AUTHWARD_LOGOUT_EVENT in payload.events) ||

@@ -14,6 +14,7 @@ vi.mock('./email.js', () => ({
 import request from 'supertest';
 import type { Express } from 'express';
 import { randomBytes } from 'node:crypto';
+import { SignJWT, generateKeyPair } from 'jose';
 import { DEMO_WORKSPACE_ID, id, openDatabase, type Db } from './db.js';
 import { createApp } from './app.js';
 import {
@@ -22,6 +23,8 @@ import {
   authwardClientAuthentication,
   backfillWorkspaceOrganizations,
   invalidateAuthwardSubjectSessions,
+  verifyAuthwardLogoutTokenWithKey,
+  trustedAuthwardLogoutJwksUri,
   closeAuthDatabase,
   migrateAuthDatabase
 } from './auth-service.js';
@@ -71,6 +74,69 @@ describe('Authward confidential client authentication', () => {
     ]);
     expect(query.mock.calls[1][0]).toContain('"createdAt" <= to_timestamp($2)');
     expect(query.mock.calls[2][0]).toContain('"updatedAt" <= to_timestamp($2)');
+  });
+});
+
+describe('Authward logout JWKS discovery trust boundary', () => {
+  it('accepts only same-issuer HTTPS JWKS advertisements', () => {
+    const issuer = 'https://auth.olaryn.com/api/realms/trevra/auth';
+    const jwks = `${issuer}/.well-known/jwks.json`;
+    expect(trustedAuthwardLogoutJwksUri(issuer, { issuer, jwks_uri: jwks }).href).toBe(jwks);
+    for (const metadata of [
+      { issuer: 'https://unexpected.invalid', jwks_uri: jwks },
+      { issuer, jwks_uri: 'https://attacker.invalid/keys' },
+      { issuer, jwks_uri: 'http://auth.olaryn.com/keys' },
+      { issuer, jwks_uri: '' },
+      { issuer, jwks_uri: undefined }
+    ]) {
+      expect(() => trustedAuthwardLogoutJwksUri(issuer, metadata)).toThrow();
+    }
+  });
+});
+
+describe('signed Authward global logout verification (local Ed25519)', () => {
+  it('accepts one correctly signed logout token and rejects tampering and invalid claims', async () => {
+    const { publicKey, privateKey } = await generateKeyPair('EdDSA');
+    const { privateKey: wrongKey } = await generateKeyPair('EdDSA');
+    const issuer = 'https://auth.local.example.test';
+    const clientId = 'trevra-test-client';
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const event = 'http://schemas.openid.net/event/backchannel-logout';
+    const payload = { sub: 'auth-sub', sid: 'auth-session', events: { [event]: {} } };
+    const sign = async (
+      claims: Record<string, unknown> = {},
+      options: {
+        key?: typeof privateKey;
+        issuer?: string;
+        audience?: string;
+        issuedAt?: number;
+      } = {}
+    ) =>
+      new SignJWT({ ...payload, ...claims })
+        .setProtectedHeader({ alg: 'EdDSA', typ: 'logout+jwt' })
+        .setIssuer(options.issuer ?? issuer)
+        .setAudience(options.audience ?? clientId)
+        .setIssuedAt(options.issuedAt ?? nowSeconds)
+        .setJti('test-only-jti')
+        .sign(options.key ?? privateKey);
+    const verify = (token: string) =>
+      verifyAuthwardLogoutTokenWithKey(token, publicKey, issuer, clientId, nowSeconds);
+    expect(await verify(await sign())).toEqual({
+      sub: 'auth-sub',
+      sid: 'auth-session',
+      issuedAt: nowSeconds
+    });
+    for (const token of [
+      await sign({}, { key: wrongKey }),
+      await sign({}, { issuer: 'https://attacker.invalid' }),
+      await sign({}, { audience: 'other-app' }),
+      await sign({ events: {} }),
+      await sign({ nonce: 'forbidden' }),
+      await sign({}, { issuedAt: nowSeconds - 301 }),
+      await sign({}, { issuedAt: nowSeconds + 61 })
+    ]) {
+      await expect(verify(token)).rejects.toThrow();
+    }
   });
 });
 
