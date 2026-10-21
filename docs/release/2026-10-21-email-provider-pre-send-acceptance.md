@@ -16,9 +16,9 @@
 - PostgreSQL-backed Gmail race: opt-out commits while the prior-thread lookup is waiting; after lookup resumes, **zero** Nango send calls, delivery `failed`.
 - PostgreSQL-backed Microsoft race: opt-out commits after draft API was invoked and before it returns; the Graph draft is the only provider call, **zero** `/send` calls, delivery `failed`.
 - PostgreSQL-backed Zoho race: opt-out commits while reading the account identity; **zero** Nango send calls, delivery `failed`.
-- PostgreSQL-backed noncampaign-email regressions: imported LinkedIn lead marked `do_not_contact` without a canonical suppression and separately a matching Never Contact profile without a canonical suppression each prevent a connected Gmail send. No provider calls are made.
+- PostgreSQL-backed noncampaign-email regressions: imported LinkedIn lead marked `do_not_contact` without a canonical suppression, a changed canonical Person email with a DNC lead at the original email, and separately a matching Never Contact profile without a canonical suppression prevent connected Gmail sends. No provider calls are made.
 - Positive provider-simulation tests and campaign/approval/branching regressions remain necessary: do not only run the three negative tests. Run `npx tsx scripts/test-with-postgres.ts src/server/integration-service.test.ts src/server/email/zoho-send.test.ts src/server/linkedin/campaign-channels.test.ts src/server/email/outreach-playbook.test.ts`, plus `npm run typecheck` and `npm run check`.
-- Full `npm run check`: **exit 0** on 269/269 test files and 3,982/3,982 tests, TypeScript, Vite and server build. The standard build still swallows its known npm SBOM error; this is **not** release certification.
+- Full `npm run check`: **exit 0** on 269/269 test files and 3,985/3,985 tests after the follow-up Person-identity regression and additive migration, TypeScript, Vite and server build. The standard build still swallows its known npm SBOM error; this is **not** release certification.
 - The strict `npm run release:certify` remains fail-closed with **56** known release blockers at this revision. An additional `npm sbom --sbom-format cyclonedx --omit=dev` still reports `ESBOMPROBLEMS`; the existing package tree is not a verified fresh SBOM. Do not edit a tracked SBOM to make certification green.
 
 ## Authorized staging acceptance procedure (operator-controlled)

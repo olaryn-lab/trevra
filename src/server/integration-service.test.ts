@@ -427,6 +427,40 @@ describe('connected mailbox threading', () => {
     ).toEqual({ status: 'failed' });
   });
 
+  it('blocks a noncampaign send to a Person whose canonical email changed but whose imported lead is DNC', async () => {
+    const { database, workspaceId, connectionId } = await mailbox('gmail');
+    await seedLinkedInRecipient(database, workspaceId);
+    await database
+      .prepare(
+        `UPDATE contacts SET email='alias@example.test', email_normalized='alias@example.test'
+       WHERE workspace_id=? AND id=(SELECT person_id FROM linkedin_lead_contacts WHERE workspace_id=? AND email=?)`
+      )
+      .run(workspaceId, workspaceId, 'lead@example.test');
+    await database
+      .prepare(
+        'UPDATE linkedin_lead_contacts SET do_not_contact=TRUE WHERE workspace_id=? AND email=?'
+      )
+      .run(workspaceId, 'lead@example.test');
+    expect(
+      await findSuppression(database, workspaceId, {
+        channel: 'email',
+        email: 'alias@example.test'
+      })
+    ).toBeNull();
+    await expect(
+      executeConnectedAction(database, workspaceId, {
+        type: 'email_draft',
+        connection_id: connectionId,
+        recipient: 'alias@example.test',
+        subject: 'Alternate address',
+        body: 'Must not send',
+        structured_payload_json: '{}',
+        payload_hash: 'same-person-new-address-dnc'
+      })
+    ).rejects.toThrow(/do-not-contact/);
+    expect(nangoMock.post).not.toHaveBeenCalled();
+  });
+
   it('blocks noncampaign email for a linked Never Contact profile without a suppression row', async () => {
     const { database, workspaceId, connectionId } = await mailbox('gmail');
     await seedLinkedInRecipient(database, workspaceId);

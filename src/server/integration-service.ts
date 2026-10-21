@@ -1155,9 +1155,18 @@ export async function executeConnectedAction(
       const emailLeads = await tx
         .prepare(
           `SELECT do_not_contact,profile_url FROM linkedin_lead_contacts
-           WHERE workspace_id=? AND LOWER(BTRIM(email))=LOWER(?)`
+           WHERE workspace_id=?
+             AND (LOWER(BTRIM(email))=LOWER(?)
+               OR person_id IN (
+                 SELECT id FROM contacts WHERE workspace_id=? AND email_normalized=LOWER(?)
+               ))`
         )
-        .all<{ do_not_contact: boolean; profile_url: string | null }>(workspaceId, recipient);
+        .all<{ do_not_contact: boolean; profile_url: string | null }>(
+          workspaceId,
+          recipient,
+          workspaceId,
+          recipient
+        );
       if (emailLeads.some((lead) => lead.do_not_contact))
         throw Object.assign(new Error('Email recipient is marked do-not-contact; nothing sent.'), {
           status: 409
