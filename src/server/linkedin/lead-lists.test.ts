@@ -381,6 +381,69 @@ describe('pasted LinkedIn profile URLs', () => {
   });
 });
 
+describe('profile URL import limit reporting', () => {
+  it('reports unique overflow as rejected rather than fabricated duplicates', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'URL overflow' }, NOW);
+    const unique = Array.from(
+      { length: 10_001 },
+      (_, index) => `https://unrelated.test/in/profile-${index}`
+    );
+    const outcome = await importLeadProfileUrls(
+      db,
+      { workspaceId: WORKSPACE_ID, listId: list.id, urls: [...unique, unique[0]!] },
+      NOW
+    );
+    expect(outcome).toMatchObject({ inserted: 0, duplicates: 1, reused: 0 });
+    expect(outcome.rejected).toHaveLength(10_001);
+    expect(outcome.rejected.find((item) => item.value === unique[10_000])).toMatchObject({
+      value: unique[10_000],
+      reason: expect.stringContaining('10,000 unique items')
+    });
+    expect(await contactCount()).toBe(0);
+  });
+});
+
+describe('concurrent CSV import identity and membership', () => {
+  it('deduplicates overlapping simultaneous uploads without losing memberships', async () => {
+    const target = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'Concurrent CSV' },
+      NOW
+    );
+    const rows = Array.from(
+      { length: 20 },
+      (_, index) =>
+        `First${index},Last${index},Acme,person${index}@example.test,https://linkedin.com/in/person${index}-concurrent`
+    );
+    const csv = ['First Name,Last Name,Company,Email,LinkedIn URL', ...rows].join('\n');
+    const attempts = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        importLeadCsv(db, { workspaceId: WORKSPACE_ID, listId: target.id, csv }, NOW)
+      )
+    );
+    expect(attempts.reduce((sum, result) => sum + result.inserted, 0)).toBe(20);
+    expect(attempts.reduce((sum, result) => sum + result.duplicates, 0)).toBe(60);
+    expect(attempts.every((result) => result.reused === 0 && result.rejected.length === 0)).toBe(
+      true
+    );
+    expect(await contactCount()).toBe(20);
+    expect(await countLeadContacts(db, WORKSPACE_ID, target.id)).toBe(20);
+    const identities = await db
+      .prepare(
+        `SELECT COUNT(DISTINCT person_id)::int AS total
+         FROM linkedin_lead_contacts WHERE workspace_id=? AND person_id IS NOT NULL`
+      )
+      .get<{ total: number }>(WORKSPACE_ID);
+    expect(identities?.total).toBe(20);
+    const replay = await importLeadCsv(
+      db,
+      { workspaceId: WORKSPACE_ID, listId: target.id, csv },
+      NOW
+    );
+    expect(replay).toMatchObject({ inserted: 0, duplicates: 20, reused: 0 });
+  });
+});
+
 describe('materialising a harvest into a campaign-usable list', () => {
   it('creates the list, scrubs and splits every name, and counts what it could not use', async () => {
     const sourceId = await source();

@@ -713,16 +713,19 @@ export async function importLeadProfileUrls(
     input.seatKey ?? OWNER_SEAT_KEY
   );
   if (!list) throw new Error('Lead list not found.');
-  const unique = [...new Set(input.urls.map((value) => value.trim()).filter(Boolean))].slice(
-    0,
-    10_000
-  );
+  const nonempty = input.urls.map((value) => value.trim()).filter(Boolean);
+  const distinct = [...new Set(nonempty)];
+  const unique = distinct.slice(0, 10_000);
   let inserted = 0;
-  let duplicates = Math.max(
-    0,
-    input.urls.map((value) => value.trim()).filter(Boolean).length - unique.length
-  );
+  // Only repeated inputs are duplicates. A valid unique item above the per-
+  // request ceiling has not been processed and must be called out as rejected,
+  // never silently counted as a duplicate imported elsewhere.
+  let duplicates = nonempty.length - distinct.length;
   let reused = 0;
+  const overflow = distinct.slice(10_000).map((value) => ({
+    value,
+    reason: 'Profile URL import accepts at most 10,000 unique items per request; split the upload.'
+  }));
   const rejected: Array<{ value: string; reason: string }> = [];
   const timestamp = now.toISOString();
   await db.transaction(async (tx) => {
@@ -757,6 +760,7 @@ export async function importLeadProfileUrls(
       }
     }
   });
+  rejected.push(...overflow);
   return { inserted, duplicates, reused, rejected };
 }
 
