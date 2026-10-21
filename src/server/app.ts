@@ -18,6 +18,14 @@ import type { Db } from './db.js';
 import { DEMO_USER_ID, DEMO_WORKSPACE_ID, id, resetDemoData } from './db.js';
 import { listConnections } from './serializers.js';
 import {
+  OUTBOUND_WEBHOOK_EVENTS,
+  OutboundWebhookInputError,
+  createOutboundWebhookSubscription,
+  deactivateOutboundWebhookSubscription,
+  listOutboundWebhookSubscriptions,
+  listOutboundWebhookDeliveries
+} from './outbound-webhooks.js';
+import {
   applyUnsubscribeToken,
   findUnsubscribeDelivery,
   renderUnsubscribePage
@@ -1363,6 +1371,93 @@ export function createApp(db: Db) {
   // workspace spending its own minute; nothing below it can spend anyone
   // else's.
   app.use('/api', workspaceLimiter);
+
+  // Merchant outbound event notifications. Mutations are owner-only; event
+  // type allowlist and destination host allowlist are also server-enforced.
+  // Signing secret is returned ONLY at initial creation, never on GET.
+  app.get(
+    '/api/outbound-webhooks',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+          subscriptions: await listOutboundWebhookSubscriptions(db, req.auth!.workspaceId)
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.post(
+    '/api/outbound-webhooks',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            url: z.string().trim().url().max(1500),
+            eventTypes: z
+              .array(z.enum(OUTBOUND_WEBHOOK_EVENTS))
+              .min(1)
+              .max(OUTBOUND_WEBHOOK_EVENTS.length)
+          })
+          .strict()
+          .parse(req.body ?? {});
+        const result = await createOutboundWebhookSubscription(db, {
+          workspaceId: req.auth!.workspaceId,
+          url: input.url,
+          eventTypes: input.eventTypes,
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(201).json(result);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.get(
+    '/api/outbound-webhooks/:id/deliveries',
+    ownerOnly('inspect outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const limit = z.coerce.number().int().min(1).max(100).default(50).parse(req.query.limit);
+        const deliveries = await listOutboundWebhookDeliveries(
+          db,
+          req.auth!.workspaceId,
+          subscriptionId,
+          limit
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        if (!deliveries) return res.status(404).json({ error: 'Subscription not found' });
+        res.json({ deliveries });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.delete(
+    '/api/outbound-webhooks/:id',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const changed = await deactivateOutboundWebhookSubscription(
+          db,
+          req.auth!.workspaceId,
+          subscriptionId
+        );
+        res.setHeader('Cache-Control', 'no-store');
+        res
+          .status(changed ? 200 : 404)
+          .json(changed ? { deactivated: true } : { error: 'Subscription not found or inactive' });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
 
   app.get('/api/billing', async (req: AuthedRequest, res, next) => {
     try {
@@ -8994,7 +9089,8 @@ export function createApp(db: Db) {
       error instanceof LeadCaptureError ||
       error instanceof ProviderWebhookError ||
       error instanceof GitHubRepoError ||
-      error instanceof ComplianceError
+      error instanceof ComplianceError ||
+      error instanceof OutboundWebhookInputError
     )
       return res.status(error.status).json({ error: error.message });
     if (error instanceof z.ZodError)

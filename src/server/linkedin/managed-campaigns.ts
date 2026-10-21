@@ -1,4 +1,5 @@
 import { id, type Db } from '../db.js';
+import { appendDomainEvent } from '../control-plane/events.js';
 import { COUNTED_MESSAGE_KINDS, recordAction } from './actions.js';
 import { EMAIL_REPLY_EVENT_KIND } from './email-event-kind.js';
 import { safeCsvCell } from '../csv.js';
@@ -3387,22 +3388,46 @@ export async function recordManagedCampaignAudit(
   },
   now: Date = new Date()
 ): Promise<void> {
-  await db
-    .prepare(
-      `INSERT INTO audit_events (id,workspace_id,actor_type,actor_id,event_type,entity_type,entity_id,metadata_json,created_at)
+  await db.transactionOrInline(async (tx) => {
+    await tx
+      .prepare(
+        `INSERT INTO audit_events (id,workspace_id,actor_type,actor_id,event_type,entity_type,entity_id,metadata_json,created_at)
        VALUES (?,?,?,?,?,?,?,?,?::timestamptz)`
-    )
-    .run(
-      id('audit'),
-      input.workspaceId,
-      'user',
-      input.actorId,
-      input.eventType,
-      input.entityType,
-      input.entityId,
-      JSON.stringify(input.metadata ?? {}),
-      now.toISOString()
-    );
+      )
+      .run(
+        id('audit'),
+        input.workspaceId,
+        'user',
+        input.actorId,
+        input.eventType,
+        input.entityType,
+        input.entityId,
+        JSON.stringify(input.metadata ?? {}),
+        now.toISOString()
+      );
+    // Legacy campaign controls historically emitted only audit_events, not
+    // domain_events. Mirror precisely the public lifecycle subset so merchant
+    // subscriptions receive real start/pause/stop notifications. Omit arbitrary
+    // audit metadata; those fields are not reviewed for external disclosure.
+    if (
+      input.entityType === 'linkedin_campaign' &&
+      [
+        'linkedin_campaign.started',
+        'linkedin_campaign.stopped',
+        'linkedin_campaign.paused'
+      ].includes(input.eventType)
+    ) {
+      await appendDomainEvent(tx, {
+        workspaceId: input.workspaceId,
+        streamType: 'linkedin_campaign',
+        streamId: input.entityId,
+        eventType: input.eventType,
+        actorType: 'user',
+        actorId: input.actorId,
+        occurredAt: now
+      });
+    }
+  });
 }
 
 async function memberExecutionContext(

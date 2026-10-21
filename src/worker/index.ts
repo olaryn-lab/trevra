@@ -4,6 +4,7 @@ import { openDatabase } from '../server/db.js';
 import { runAllAutomationCycles } from '../server/automation-service.js';
 import { runReadyPlaybooks } from '../server/playbooks/engine.js';
 import { runDueAgentSchedules } from '../server/agent/schedule.js';
+import { dispatchOutboundWebhookDeliveries } from '../server/outbound-webhooks.js';
 import { reapStaleAgentRuns } from '../server/agent/runs.js';
 import { orchestrationMode } from '../server/orchestration/client.js';
 import { validateEnvironment } from '../server/config.js';
@@ -296,6 +297,25 @@ const companionPresenceTimer = setInterval(
   COMPANION_PRESENCE_SCAN_MS
 );
 companionPresenceTimer.unref();
+// HTTPS webhooks run independently: an unresponsive customer endpoint must
+// not hold the automation sweep. Without an operator hostname allowlist this
+// pass returns immediately without reserving or sending any external work.
+let outboundWebhookRunning = false;
+async function outboundWebhookCycle(): Promise<void> {
+  if (outboundWebhookRunning || draining) return;
+  outboundWebhookRunning = true;
+  try {
+    await dispatchOutboundWebhookDeliveries(db, { limit: 10 });
+  } catch (error) {
+    console.error('Worker outbound webhook cycle failed', error);
+  } finally {
+    outboundWebhookRunning = false;
+  }
+}
+void outboundWebhookCycle();
+const outboundWebhookTimer = setInterval(() => void outboundWebhookCycle(), 60_000);
+outboundWebhookTimer.unref();
+
 // Sending-domain DNS re-checks get their OWN loop and in-flight flag, like the
 // LinkedIn loop above: a sweep walks SPF/DKIM/DMARC for up to 25 domains
 // against real resolvers, and inside `cycle()`'s Promise.all a slow resolver
