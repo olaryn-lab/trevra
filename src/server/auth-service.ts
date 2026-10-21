@@ -63,12 +63,14 @@ export const authwardAuthEnabled = Boolean(
 );
 
 export interface AuthwardCapabilities {
+  passkey: boolean;
   magicLink: boolean;
   emailPassword: boolean;
   socialProviders: string[];
 }
 
 const fallbackAuthwardCapabilities: AuthwardCapabilities = {
+  passkey: false,
   magicLink: authwardAuthEnabled,
   emailPassword: false,
   socialProviders: []
@@ -76,11 +78,16 @@ const fallbackAuthwardCapabilities: AuthwardCapabilities = {
 
 export async function getAuthwardCapabilities(): Promise<AuthwardCapabilities> {
   if (!authwardAuthEnabled || !authwardIssuer || !authwardClientId) {
-    return { magicLink: false, emailPassword: false, socialProviders: [] };
+    return { passkey: false, magicLink: false, emailPassword: false, socialProviders: [] };
   }
   if (authority.isolated) {
     // The hosted authorization UI owns passkeys, social and email challenges.
-    return { magicLink: false, emailPassword: false, socialProviders: ['authward'] };
+    return {
+      passkey: false,
+      magicLink: false,
+      emailPassword: false,
+      socialProviders: ['authward']
+    };
   }
   try {
     const response = await fetch(
@@ -93,6 +100,7 @@ export async function getAuthwardCapabilities(): Promise<AuthwardCapabilities> {
     if (!response.ok) return fallbackAuthwardCapabilities;
     const body = (await response.json()) as Partial<AuthwardCapabilities>;
     return {
+      passkey: body.passkey === true,
       magicLink: body.magicLink === true,
       emailPassword: body.emailPassword === true,
       socialProviders: Array.isArray(body.socialProviders)
@@ -166,6 +174,34 @@ export function authwardClientAuthentication(clientSecret: string) {
 }
 
 const authwardUpstreamProviders = new Set(['google', 'github', 'microsoft', 'apple']);
+
+/**
+ * Keep the hosted passkey choice inside Better Auth's state/PKCE transaction.
+ * The UI can request this only when the verified legacy provider advertises
+ * passkey. Isolated realm mode always delegates method selection to Authward.
+ */
+export function authwardAuthorizationParams(
+  data: Record<string, unknown> | null | undefined,
+  isolated = false
+): Record<string, string> {
+  const resource = { resource: 'https://api.usetrevra.com' };
+  if (isolated) return resource;
+  const upstreamProvider = data?.upstreamProvider;
+  const authMethod = data?.authMethod;
+  const loginHint = data?.loginHint;
+  const returnTo = data?.returnTo;
+  return {
+    ...resource,
+    ...(typeof upstreamProvider === 'string' && authwardUpstreamProviders.has(upstreamProvider)
+      ? { upstream_provider: upstreamProvider }
+      : {}),
+    ...(authMethod === 'magic_link' && typeof loginHint === 'string' && typeof returnTo === 'string'
+      ? { auth_method: 'magic_link', login_hint: loginHint, return_to: returnTo }
+      : {}),
+    ...(authMethod === 'passkey' ? { auth_method: 'passkey', prompt: 'login' } : {})
+  };
+}
+
 const AUTHWARD_LOGOUT_EVENT = 'http://schemas.openid.net/event/backchannel-logout';
 let authwardLogoutJwks: Promise<ReturnType<typeof createRemoteJWKSet>> | undefined;
 
@@ -326,26 +362,11 @@ const authwardProvider = genericOAuth({
               : {}),
             disableSignUp: authority.isolated,
             pkce: true,
-            authorizationUrlParams: (ctx) => {
-              if (authority.isolated) return { resource: 'https://api.usetrevra.com' };
-              const data = ctx.body.additionalData;
-              const upstreamProvider = data?.upstreamProvider;
-              const authMethod = data?.authMethod;
-              const loginHint = data?.loginHint;
-              const returnTo = data?.returnTo;
-              return {
-                resource: 'https://api.usetrevra.com',
-                ...(typeof upstreamProvider === 'string' &&
-                authwardUpstreamProviders.has(upstreamProvider)
-                  ? { upstream_provider: upstreamProvider }
-                  : {}),
-                ...(authMethod === 'magic_link' &&
-                typeof loginHint === 'string' &&
-                typeof returnTo === 'string'
-                  ? { auth_method: 'magic_link', login_hint: loginHint, return_to: returnTo }
-                  : {})
-              };
-            },
+            authorizationUrlParams: (ctx) =>
+              authwardAuthorizationParams(
+                ctx.body.additionalData as Record<string, unknown> | undefined,
+                authority.isolated
+              ),
             tokenUrlParams: { resource: 'https://api.usetrevra.com' },
             getToken: (data) =>
               exchangeAuthwardCode(authwardIssuer, authwardClientId, authwardClientSecret, data),

@@ -20,6 +20,7 @@ import { createApp } from './app.js';
 import {
   assertOwnerChangeAllowed,
   auth as betterAuth,
+  authwardAuthorizationParams,
   authwardClientAuthentication,
   backfillWorkspaceOrganizations,
   invalidateAuthwardSubjectSessions,
@@ -39,6 +40,22 @@ import {
  * the credential route's gate as they actually behave wired together --
  * exactly the seam a mocked auth layer would paper over.
  */
+
+describe('Authward hosted passkey OIDC parameters', () => {
+  it('preserves state/PKCE initiation and rejects method injection in isolated realm mode', () => {
+    expect(authwardAuthorizationParams({ authMethod: 'passkey' })).toEqual({
+      resource: 'https://api.usetrevra.com',
+      auth_method: 'passkey',
+      prompt: 'login'
+    });
+    expect(authwardAuthorizationParams({ authMethod: 'passkey' }, true)).toEqual({
+      resource: 'https://api.usetrevra.com'
+    });
+    expect(
+      authwardAuthorizationParams({ authMethod: 'unknown', upstreamProvider: 'injected' })
+    ).toEqual({ resource: 'https://api.usetrevra.com' });
+  });
+});
 
 describe('Authward confidential client authentication', () => {
   it('requires a server-side secret and always uses HTTP Basic', () => {

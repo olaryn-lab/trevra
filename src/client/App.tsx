@@ -664,12 +664,12 @@ function SetupView({
  * buttons pass their upstream provider; the `interaction_expired` restart
  * passes none.
  */
-function startAuthwardSignIn(upstreamProvider?: string) {
+function startAuthwardSignIn(upstreamProvider?: string, authMethod?: 'passkey') {
   return authClient.signIn.oauth2({
     providerId: 'authward',
     callbackURL: `${window.location.origin}/loop`,
     errorCallbackURL: `${window.location.origin}/login`,
-    ...(upstreamProvider ? { additionalData: { upstreamProvider } } : {})
+    ...(upstreamProvider || authMethod ? { additionalData: { upstreamProvider, authMethod } } : {})
   });
 }
 
@@ -688,6 +688,7 @@ function AuthScreen({
   const [socialBusy, setSocialBusy] = useState<string | null>(null);
   const [authError, setAuthError] = useState('');
   const [authwardEnabled, setAuthwardEnabled] = useState(false);
+  const [passkeyEnabled, setPasskeyEnabled] = useState(false);
   const [socialProviders, setSocialProviders] = useState<string[]>([]);
   const [magicLinkEnabled, setMagicLinkEnabled] = useState(false);
   const [showEmail, setShowEmail] = useState(false);
@@ -698,6 +699,7 @@ function AuthScreen({
     void getPublicConfig()
       .then((config) => {
         setAuthwardEnabled(config.authwardAuthEnabled);
+        setPasskeyEnabled(config.passkeyAuthEnabled === true);
         setSocialProviders(config.socialAuthProviders);
         setMagicLinkEnabled(config.magicLinkAuthEnabled);
         setEmailPasswordEnabled(config.emailPasswordAuthEnabled);
@@ -759,6 +761,22 @@ function AuthScreen({
       }, showExpired);
     }
   }, []);
+
+  const signInWithPasskey = async () => {
+    if (!passkeyEnabled) return;
+    setSocialBusy('passkey');
+    setAuthError('');
+    try {
+      const result = await startAuthwardSignIn(undefined, 'passkey');
+      if (result?.error) {
+        setAuthError('Passkey sign-in could not be completed. Try another sign-in method.');
+        setSocialBusy(null);
+      }
+    } catch {
+      setAuthError('Passkey sign-in could not be completed. Try another sign-in method.');
+      setSocialBusy(null);
+    }
+  };
 
   const signInWithSocialProvider = async (provider: string) => {
     setSocialBusy(provider);
@@ -889,6 +907,21 @@ function AuthScreen({
               </p>
             </div>
             <div className="ol-auth-methods">
+              {passkeyEnabled && !magicLinkSentTo && (
+                <button
+                  type="button"
+                  className="google-auth-button ol-auth-action ol-auth-primary"
+                  disabled={busy || socialBusy !== null}
+                  onClick={() => void signInWithPasskey()}
+                >
+                  {socialBusy === 'passkey' ? (
+                    <LoaderCircle className="spin" size={17} />
+                  ) : (
+                    <KeyRound size={17} />
+                  )}
+                  <span className="ol-auth-method-label">Continue with passkey</span>
+                </button>
+              )}
               {socialProviders.length > 0 &&
                 !magicLinkSentTo &&
                 socialProviders.map((provider, index) => {

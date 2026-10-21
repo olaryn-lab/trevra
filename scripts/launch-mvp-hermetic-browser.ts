@@ -564,6 +564,55 @@ async function main() {
       forged.status() === 401 && (forged.headers()['ratelimit-policy'] ?? '').startsWith('300;')
     );
     await fresh.close();
+
+    // The optional passkey UI is hosted-IdP-controlled. A real local app must
+    // NOT advertise it; a synthetic public capability may show it, and a click
+    // must start Better Auth's usual OAuth flow with an explicit method hint.
+    const passkeyContext = await browser.newContext();
+    const passkeyPage = await passkeyContext.newPage();
+    await passkeyPage.goto(origin + '/login', { waitUntil: 'domcontentloaded' });
+    await passkeyPage
+      .getByRole('button', { name: 'Create an account' })
+      .waitFor({ timeout: 25000 });
+    check(
+      'L1 passkey hidden unless Authward advertises capability',
+      (await passkeyPage.getByRole('button', { name: 'Continue with passkey' }).count()) === 0
+    );
+    await passkeyPage.route('**/api/public-config', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          authwardAuthEnabled: true,
+          passkeyAuthEnabled: true,
+          socialAuthProviders: [],
+          magicLinkAuthEnabled: false,
+          emailPasswordAuthEnabled: false
+        })
+      });
+    });
+    let passkeyOAuthBody: Record<string, unknown> | null = null;
+    await passkeyPage.route('**/api/auth/sign-in/oauth2', async (route) => {
+      passkeyOAuthBody = route.request().postDataJSON() as Record<string, unknown>;
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { message: 'Synthetic provider double rejected' } })
+      });
+    });
+    await passkeyPage.reload({ waitUntil: 'domcontentloaded' });
+    const passkeyButton = passkeyPage.getByRole('button', { name: 'Continue with passkey' });
+    await passkeyButton.waitFor({ timeout: 25000 });
+    check('L1 passkey action appears only when provider capability is attested', true);
+    await passkeyButton.click();
+    await passkeyPage
+      .getByText('Passkey sign-in could not be completed.', { exact: false })
+      .waitFor({ timeout: 12000 });
+    const method = (passkeyOAuthBody as { additionalData?: { authMethod?: string } } | null)
+      ?.additionalData?.authMethod;
+    check('L1 passkey click starts existing OAuth with passkey method hint', method === 'passkey');
+    await passkeyContext.close();
+
     check('L1 UI has no uncaught page exception', errors.length === 0, errors.join('; '));
   } finally {
     const evidence = process.env.LAUNCH_ACCEPTANCE_REPORT_DIR;
