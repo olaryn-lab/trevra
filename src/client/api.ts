@@ -2505,26 +2505,26 @@ export async function importLinkedInManagerLeadCsv(
   return response.json();
 }
 
-/**
- * A page of one lead list, and HOW MANY PEOPLE ARE ACTUALLY ON IT.
- *
- * `total` is counted server-side, not `contacts.length`: the route returns at
- * most one page, so the two differ exactly when the screen most needs to say
- * so. Announcing a truncation from the page length alone is how the UI came to
- * claim a first-1,000 that nobody had counted.
- */
+/** Bounded lead-list page with the authoritative total and next-page status. */
 export async function getLinkedInManagerLeadContacts(
   listId: string,
-  seatKey?: string
+  seatKey?: string,
+  page: { offset?: number; limit?: number } = {}
 ): Promise<{
   list: LinkedInLeadList;
   contacts: LinkedInLeadContact[];
   total: number;
-  /** The server's page bound. `contacts.length` is short of `total` exactly when this is reached. */
   pageLimit: number;
+  offset: number;
+  hasMore: boolean;
 }> {
+  const params = new URLSearchParams();
+  if (seatKey) params.set('seatKey', seatKey);
+  if (page.offset !== undefined) params.set('offset', String(page.offset));
+  if (page.limit !== undefined) params.set('limit', String(page.limit));
+  const query = params.toString();
   return request(
-    `/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}/contacts${seatKey ? `?seatKey=${encodeURIComponent(seatKey)}` : ''}`
+    `/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}/contacts${query ? `?${query}` : ''}`
   );
 }
 

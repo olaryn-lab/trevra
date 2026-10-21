@@ -248,16 +248,12 @@ export function LinkedInManagerLeadConfig({
   /* -- the list half ----------------------------------------------------- */
   const [openListId, setOpenListId] = useState('');
   const [contacts, setContacts] = useState<LinkedInLeadContact[]>([]);
-  /**
-   * How many people are in the open list, counted by the server.
-   *
-   * NOT `contacts.length`, which is the size of one page. The read clamps at
-   * 5000 whatever it is asked for, so the page length answers "how many came
-   * back" and never "how many there are" -- which is how this screen came to
-   * announce "the first 1,000 are shown" about a list nobody had measured,
-   * true for no list at all: a 1,500-lead list showed every one of them under
-   * that notice, and a 6,000-lead list lost 1,000 people in silence.
-   */
+  /** The next server offset, distinct from the number currently matching a local filter. */
+  const [nextContactOffset, setNextContactOffset] = useState(0);
+  const [contactsMoreLoading, setContactsMoreLoading] = useState(false);
+  /** A late response from a previous list must not overwrite or append to a new one. */
+  const contactReadVersion = useRef(0);
+  /** Server-side list total, not just the contacts in the first response. */
   const [contactTotal, setContactTotal] = useState(0);
   const [contactsLoading, setContactsLoading] = useState(false);
   const [filter, setFilter] = useState('');
@@ -290,10 +286,13 @@ export function LinkedInManagerLeadConfig({
 
   const openList = useCallback(
     async (listId: string) => {
+      const readVersion = ++contactReadVersion.current;
       setOpenListId(listId);
       setRenamingList(false);
       setContacts([]);
       setContactTotal(0);
+      setNextContactOffset(0);
+      setContactsMoreLoading(false);
       setDraft(null);
       setArmed('');
       setFilter('');
@@ -303,18 +302,46 @@ export function LinkedInManagerLeadConfig({
       setContactsLoading(true);
       try {
         const result = await getLinkedInManagerLeadContacts(listId, activeSeatKey);
+        if (contactReadVersion.current !== readVersion) return;
         setContacts(result.contacts);
         setContactTotal(result.total);
+        setNextContactOffset(result.offset + result.contacts.length);
         setListError('');
       } catch (err) {
-        setListError(errorMessage(err, 'Unable to read the leads in that list.'));
+        if (contactReadVersion.current === readVersion)
+          setListError(errorMessage(err, 'Unable to read the leads in that list.'));
       } finally {
-        setContactsLoading(false);
+        if (contactReadVersion.current === readVersion) setContactsLoading(false);
       }
     },
     [activeSeatKey]
   );
 
+  const loadMoreContacts = async () => {
+    if (!openListId || contactsLoading || contactsMoreLoading || nextContactOffset >= contactTotal)
+      return;
+    const version = contactReadVersion.current;
+    const listId = openListId;
+    setContactsMoreLoading(true);
+    try {
+      const page = await getLinkedInManagerLeadContacts(listId, activeSeatKey, {
+        offset: nextContactOffset
+      });
+      if (contactReadVersion.current !== version) return;
+      setContacts((current) => {
+        const known = new Set(current.map((contact) => contact.id));
+        return [...current, ...page.contacts.filter((contact) => !known.has(contact.id))];
+      });
+      setContactTotal(page.total);
+      setNextContactOffset(page.hasMore ? page.offset + page.contacts.length : page.total);
+      setListError('');
+    } catch (err) {
+      if (contactReadVersion.current === version)
+        setListError(errorMessage(err, 'Could not load the next page of leads.'));
+    } finally {
+      if (contactReadVersion.current === version) setContactsMoreLoading(false);
+    }
+  };
   useEffect(() => {
     // COMPACT MODE READS NOTHING ON MOUNT. The bug this shape exists to avoid:
     // opening some unrelated existing list's contacts here is exactly what
@@ -664,9 +691,10 @@ export function LinkedInManagerLeadConfig({
   const removeContact = async (contact: LinkedInLeadContact) => {
     setRowBusy(contact.id);
     try {
-      await deleteLinkedInManagerLeadContact(contact.id);
       setContacts((current) => current.filter((entry) => entry.id !== contact.id));
       setContactTotal((current) => Math.max(0, current - 1));
+      // Removing an already-loaded row shifts every later OFFSET by one.
+      setNextContactOffset((current) => Math.max(0, current - 1));
       setArmed('');
       setListError('');
       setToast(
@@ -1268,16 +1296,14 @@ export function LinkedInManagerLeadConfig({
                 </p>
               ) : (
                 <>
-                  {/* The truncation notice is the server's count against the page
-                    it actually returned, so it appears exactly when a page was
-                    short and says by how much. Contacts come back oldest first,
-                    which is what makes "the first" the right word for them. */}
+                  {/* The server total makes unloaded contacts explicit, including
+                    identity-review results that have not been read yet. */}
                   <p className="li-hint">
                     {pluralGrouped(filtered.length, 'lead')}
-                    {term ? ` of ${pluralGrouped(contacts.length, 'lead')} read` : ''} in “
+                    {term ? ` of ${pluralGrouped(contacts.length, 'lead')} loaded` : ''} in “
                     {openMeta?.name ?? 'this list'}”.
                     {contactTotal > contacts.length &&
-                      ` The first ${contacts.length.toLocaleString()} of ${pluralGrouped(contactTotal, 'lead')} are shown — one read of a list returns no more than that, and Find someone searches the ones it returned.`}
+                      ` ${contacts.length.toLocaleString()} of ${pluralGrouped(contactTotal, 'lead')} loaded. Search and identity review cover loaded contacts; load the next page to continue.`}
                   </p>
                   {identityReviewCount > 0 && (
                     <p className="li-hint" role="status">
@@ -1558,6 +1584,20 @@ export function LinkedInManagerLeadConfig({
                         onClick={() => setVisible(visible + PAGE)}
                       >
                         Show {Math.min(PAGE, filtered.length - shown.length)} more
+                      </button>
+                    </div>
+                  )}
+                  {nextContactOffset < contactTotal && (
+                    <div className="mgr-actions">
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        disabled={contactsMoreLoading}
+                        onClick={() => void loadMoreContacts()}
+                      >
+                        {contactsMoreLoading
+                          ? 'Loading next page…'
+                          : `Load next page (${pluralGrouped(contactTotal - nextContactOffset, 'lead')} remain)`}
                       </button>
                     </div>
                   )}

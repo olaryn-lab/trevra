@@ -122,6 +122,32 @@ afterEach(async () => {
 });
 
 describe('account-scoped lead lists', () => {
+  it('reads later bounded pages in stable membership order, including after the old first-page ceiling', async () => {
+    const list = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'Paged contacts' },
+      NOW
+    );
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nA,One,Acme,https://linkedin.com/in/paged-one/\nB,Two,Acme,https://linkedin.com/in/paged-two/\nC,Three,Acme,https://linkedin.com/in/paged-three/'
+      },
+      NOW
+    );
+    const full = await listLeadContacts(db, WORKSPACE_ID, list.id);
+    const first = await listLeadContacts(db, WORKSPACE_ID, list.id, 2, 0);
+    const next = await listLeadContacts(db, WORKSPACE_ID, list.id, 2, 2);
+    expect(full).toHaveLength(3);
+    expect([...first, ...next].map((contact) => contact.id)).toEqual(
+      full.map((contact) => contact.id)
+    );
+    expect(await listLeadContacts(db, WORKSPACE_ID, list.id, 2, 3)).toEqual([]);
+    expect(await listLeadContacts(db, 'foreign_workspace', list.id, 2, 2)).toEqual([]);
+    expect(await countLeadContacts(db, WORKSPACE_ID, list.id)).toBe(3);
+  });
   it('allows the same list name on two LinkedIn accounts and only lists the selected account', async () => {
     await upsertSeat(db, WORKSPACE_ID, { label: 'Second', timezone: 'UTC' }, NOW, 'second');
     const owner = await createLeadList(

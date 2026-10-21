@@ -204,6 +204,49 @@ describe('LinkedIn manager HTTP surface', () => {
     await as(tokenB).get(`/api/linkedin/manager/lead-lists/${listA.id}/contacts`).expect(404);
   });
 
+  it('pages lead review past the first response with strict bounds and tenant isolation', async () => {
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Page review' })
+        .expect(201)
+    ).body.list;
+    await importLeadCsv(
+      db,
+      {
+        workspaceId: A,
+        listId: list.id,
+        csv: 'First Name,Last Name,Company,LinkedIn URL\nMaya,One,Acme,https://linkedin.com/in/api-paged-one/\nMaya,Two,Acme,https://linkedin.com/in/api-paged-two/\nMaya,Three,Acme,https://linkedin.com/in/api-paged-three/'
+      },
+      NOW
+    );
+    const url = `/api/linkedin/manager/lead-lists/${list.id}/contacts`;
+    const first = (await as(tokenA).get(`${url}?limit=2`).expect(200)).body;
+    const second = (await as(tokenA).get(`${url}?limit=2&offset=2`).expect(200)).body;
+    expect(first).toMatchObject({ total: 3, pageLimit: 2, offset: 0, hasMore: true });
+    expect(second).toMatchObject({ total: 3, pageLimit: 2, offset: 2, hasMore: false });
+    expect(
+      [...first.contacts, ...second.contacts].map((entry: { id: string }) => entry.id)
+    ).toHaveLength(3);
+    expect(
+      new Set([...first.contacts, ...second.contacts].map((entry: { id: string }) => entry.id)).size
+    ).toBe(3);
+    await as(tokenB).get(`${url}?limit=1&offset=2`).expect(404);
+    for (const params of [
+      'limit=0',
+      'limit=-1',
+      'limit=5001',
+      'offset=-1',
+      'offset=NaN',
+      'offset=99999999999999999',
+      'limit=1&limit=2'
+    ]) {
+      await as(tokenA).get(`${url}?${params}`).expect(400);
+    }
+    const past = (await as(tokenA).get(`${url}?offset=999&limit=2`).expect(200)).body;
+    expect(past).toMatchObject({ contacts: [], total: 3, hasMore: false });
+  });
+
   it('previews and automatches CSV without persisting a contact', async () => {
     const csv = Buffer.from(
       'First Name,Last Name,Company,Email\nDr. Maya,Smith,Acme,maya@acme.test\n'

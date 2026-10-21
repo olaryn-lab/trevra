@@ -6224,21 +6224,7 @@ export function createApp(db: Db) {
     })
   );
 
-  /**
-   * One lead list and a page of the people on it.
-   *
-   * THE TOTAL IS COUNTED, NOT INFERRED FROM THE PAGE. `listLeadContacts` clamps
-   * to `LEAD_CONTACT_READ_LIMIT` whatever it is handed, so a longer list came
-   * back silently short and the only number the screen had was the length of
-   * what it received -- which is how it came to announce "the first 1,000 are
-   * shown" about a list nobody had measured.
-   *
-   * THE CEILING AND THE COUNT BOTH COME FROM `lead-lists.ts`. A literal here
-   * would be a third copy of a number the reader already clamps to and the UI
-   * already prints a sentence about, and an inline `COUNT(*)` would be this
-   * file's own opinion of which table a list's people are in -- which the
-   * membership schema has already changed once.
-   */
+  /** Return any bounded page, not just the oldest 5,000 people in a list. */
   app.get(
     '/api/linkedin/manager/lead-lists/:id/contacts',
     linkedinRoute(async (req, res) => {
@@ -6247,13 +6233,35 @@ export function createApp(db: Db) {
       const { seatKey } = linkedinSeatSelectorSchema.parse(req.query);
       const list = await getLeadList(db, workspaceId, listId, seatKey);
       if (!list) throw new LinkedInApiError('Lead list not found', 404);
+      const pageNumber = (value: unknown, label: string, defaultValue: number, max: number) => {
+        if (value === undefined) return defaultValue;
+        if (typeof value !== 'string' || !/^\d+$/.test(value))
+          throw new LinkedInApiError(`${label} must be a nonnegative integer`, 400);
+        const parsed = Number(value);
+        if (!Number.isSafeInteger(parsed) || parsed > max)
+          throw new LinkedInApiError(`${label} is outside the supported range`, 400);
+        return parsed;
+      };
+      const limit = pageNumber(
+        req.query.limit,
+        'limit',
+        LEAD_CONTACT_READ_LIMIT,
+        LEAD_CONTACT_READ_LIMIT
+      );
+      if (limit === 0) throw new LinkedInApiError('limit must be at least 1', 400);
+      const offset = pageNumber(req.query.offset, 'offset', 0, 2_000_000_000);
       const [contacts, total] = await Promise.all([
-        listLeadContacts(db, workspaceId, listId, LEAD_CONTACT_READ_LIMIT),
+        listLeadContacts(db, workspaceId, listId, limit, offset),
         countLeadContacts(db, workspaceId, listId)
       ]);
-      // The page bound, so the screen can say "the first N of M" without holding
-      // its own copy of N.
-      res.json({ list, contacts, total, pageLimit: LEAD_CONTACT_READ_LIMIT });
+      res.json({
+        list,
+        contacts,
+        total,
+        pageLimit: limit,
+        offset,
+        hasMore: offset + contacts.length < total
+      });
     })
   );
 

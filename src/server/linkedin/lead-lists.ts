@@ -354,7 +354,8 @@ export async function listLeadContacts(
   db: Db,
   workspaceId: string,
   listId: string,
-  limit = LEAD_CONTACT_READ_LIMIT
+  limit = LEAD_CONTACT_READ_LIMIT,
+  offset = 0
 ): Promise<LinkedInLeadContact[]> {
   return (
     await db
@@ -363,10 +364,15 @@ export async function listLeadContacts(
     SELECT ${MEMBER_CONTACT_SELECT}
     FROM linkedin_lead_list_members m
     JOIN linkedin_lead_contacts c ON c.id=m.contact_id AND c.workspace_id=m.workspace_id
-    WHERE m.workspace_id=? AND m.list_id=? ORDER BY m.created_at,c.id LIMIT ?
+    WHERE m.workspace_id=? AND m.list_id=? ORDER BY m.created_at,c.id LIMIT ? OFFSET ?
   `
       )
-      .all<ContactRow>(workspaceId, listId, Math.max(1, Math.min(limit, LEAD_CONTACT_READ_LIMIT)))
+      .all<ContactRow>(
+        workspaceId,
+        listId,
+        Math.max(1, Math.min(limit, LEAD_CONTACT_READ_LIMIT)),
+        Math.max(0, Math.trunc(offset))
+      )
   ).map(toContact);
 }
 
