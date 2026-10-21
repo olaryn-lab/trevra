@@ -408,6 +408,12 @@ p {
   outline: 2px solid var(--t-focus);
   outline-offset: 2px;
 }
+/* Form inputs and select triggers use their existing 1px border for focus. */
+:is(input, textarea, select):not([type='checkbox']):not([type='radio']):focus-visible,
+.ui-select-trigger:focus-visible {
+  outline: none;
+  border-color: var(--t-focus);
+}
 /* A scrollable <pre> is a real focus stop in Chromium, and every one of these
    sits on --t-night, which is dark in BOTH themes. The default ring measures
    2.73:1 there in light -- the same class of miss as the input that was left
@@ -484,7 +490,7 @@ p {
 }
 .ui-control:focus {
   border-color: var(--t-focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--t-focus) 14%, transparent);
+  box-shadow: none;
 }
 .ui-control:disabled {
   background-color: var(--t-surface-2);
@@ -520,7 +526,7 @@ p {
 .ui-select-shell[data-open] .ui-select-trigger {
   border-color: var(--t-focus);
   background: var(--t-surface);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--t-focus) 14%, transparent);
+  box-shadow: none;
 }
 .ui-select-shell[data-open] .ui-select-chevron {
   color: var(--green);
@@ -1141,7 +1147,7 @@ details[open] > .ui-disclosure-summary::after {
     [type='file']
   ):not([type='color']):not([type='hidden']):focus {
   border-color: var(--t-focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--t-focus) 14%, transparent);
+  box-shadow: none;
 }
 .ui-standard select:not([multiple]) {
   appearance: none;
@@ -12044,7 +12050,7 @@ button:disabled {
 }
 .li-polished :is(input, textarea, select):not([type='checkbox']):not([type='radio']):focus {
   border-color: var(--t-focus);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--t-focus) 14%, transparent);
+  box-shadow: none;
 }
 .li-polished :is(input, textarea, select):disabled {
   background-color: var(--t-surface-2);
