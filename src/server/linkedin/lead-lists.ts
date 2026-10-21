@@ -580,6 +580,23 @@ async function linkCanonicalPerson(
  * now; the one-campaign claim is unaffected, because it is keyed on the
  * contact id and there is still exactly one of those per person.
  */
+/**
+ * Overlapping multi-row imports must visit identities in the same order.
+ * PostgreSQL otherwise detects a deadlock when two different lists insert
+ * the same contacts in opposite CSV/harvest order: each transaction holds the
+ * earlier contact while waiting for the other's later contact. Stable sorting
+ * retains source precedence for duplicate identity keys and never mutates the
+ * original parse/rejection rows. This is not a substitute for database unique
+ * constraints or a retry policy for other kinds of concurrent writes.
+ */
+function orderedLeadWrites(leads: readonly NormalizedLeadInput[]): NormalizedLeadInput[] {
+  return [...leads].sort((left, right) => {
+    const a = `${left.dedupeKey}\u0000${left.profileUrl ?? ''}`;
+    const b = `${right.dedupeKey}\u0000${right.profileUrl ?? ''}`;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
+}
+
 async function insertLead(
   db: Db,
   workspaceId: string,
@@ -805,26 +822,37 @@ export async function importLeadProfileUrls(
   }));
   const rejected: Array<{ value: string; reason: string }> = [];
   const timestamp = now.toISOString();
+  const valid: Array<{ raw: string; lead: NormalizedLeadInput }> = [];
+  for (const raw of unique) {
+    const profileUrl = canonicalProfileUrl(raw);
+    if (!profileUrl) {
+      rejected.push({ value: raw, reason: 'Not a valid LinkedIn /in/ profile URL.' });
+      continue;
+    }
+    const lead: NormalizedLeadInput = {
+      firstName: '',
+      lastName: '',
+      company: '',
+      email: null,
+      phone: null,
+      country: null,
+      profileUrl,
+      dedupeKey: '',
+      customFields: {},
+      original: { profileUrl, source: 'pasted_profile_url' }
+    };
+    lead.dedupeKey = leadDedupeKey(lead);
+    valid.push({ raw, lead });
+  }
+  // Paste imports participate in the same deterministic contact lock order as
+  // CSV and harvest imports, regardless of operator-provided URL order.
+  valid.sort((left, right) => {
+    const a = left.lead.dedupeKey;
+    const b = right.lead.dedupeKey;
+    return a < b ? -1 : a > b ? 1 : 0;
+  });
   await db.transaction(async (tx) => {
-    for (const raw of unique) {
-      const profileUrl = canonicalProfileUrl(raw);
-      if (!profileUrl) {
-        rejected.push({ value: raw, reason: 'Not a valid LinkedIn /in/ profile URL.' });
-        continue;
-      }
-      const lead: NormalizedLeadInput = {
-        firstName: '',
-        lastName: '',
-        company: '',
-        email: null,
-        phone: null,
-        country: null,
-        profileUrl,
-        dedupeKey: '',
-        customFields: {},
-        original: { profileUrl, source: 'pasted_profile_url' }
-      };
-      lead.dedupeKey = leadDedupeKey(lead);
+    for (const { raw, lead } of valid) {
       const outcome = await insertLead(tx, input.workspaceId, input.listId, lead, timestamp);
       if (!outcome.contactId) {
         rejected.push({ value: raw, reason: 'Could not store this profile.' });
@@ -866,8 +894,11 @@ export async function importLeadCsv(
   let inserted = 0;
   let duplicates = 0;
   let reused = 0;
+  // Deterministic identity order prevents two concurrently imported, reversed
+  // CSVs from holding one another's existing contact/Person locks in a cycle.
+  const accepted = orderedLeadWrites(parsed.accepted);
   await db.transaction(async (tx) => {
-    for (const lead of parsed.accepted) {
+    for (const lead of accepted) {
       const outcome = await insertLead(tx, input.workspaceId, input.listId, lead, timestamp);
       if (outcome.inserted) inserted += 1;
       else {
@@ -987,16 +1018,16 @@ export async function importLeadSourceContacts(
   let reused = 0;
   let skipped = 0;
 
+  // Apply the same identity order as CSV imports, including when the source
+  // returns a different order of the same profiles. Count invalid harvest rows
+  // before sorting; sorting is only for the database write lock order.
+  const normalizedLeads = harvested.map((lead) => normalizeScrapedLead(lead));
+  skipped = normalizedLeads.filter((lead) => !lead).length;
+  const ordered = orderedLeadWrites(
+    normalizedLeads.filter((lead): lead is NormalizedLeadInput => !!lead)
+  );
   await db.transaction(async (tx) => {
-    for (const lead of harvested) {
-      const normalized = normalizeScrapedLead(lead);
-      if (!normalized) {
-        // A row with no readable name or no addressable profile. Counted rather
-        // than silently dropped: 80 harvested and 61 imported is a number an
-        // operator will ask about.
-        skipped += 1;
-        continue;
-      }
+    for (const normalized of ordered) {
       const outcome = await insertLead(tx, input.workspaceId, list.id, normalized, timestamp);
       if (outcome.inserted) inserted += 1;
       else {

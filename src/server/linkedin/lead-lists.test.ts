@@ -529,6 +529,70 @@ describe('profile URL import limit reporting', () => {
 });
 
 describe('concurrent CSV import identity and membership', () => {
+  it('deduplicates reversed overlapping CSV uploads across lists without deadlocking', async () => {
+    const first = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Batch A' }, NOW);
+    const second = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Batch B' }, NOW);
+    const rows = Array.from(
+      { length: 24 },
+      (_, index) =>
+        `First${index},Last${index},Acme,reverse${index}@example.test,https://linkedin.com/in/reverse${index}-overlap`
+    );
+    const header = 'First Name,Last Name,Company,Email,LinkedIn URL';
+    const csvA = [header, ...rows].join('\n');
+    const csvB = [header, ...[...rows].reverse()].join('\n');
+    const results = await Promise.all([
+      importLeadCsv(db, { workspaceId: WORKSPACE_ID, listId: first.id, csv: csvA }, NOW),
+      importLeadCsv(db, { workspaceId: WORKSPACE_ID, listId: second.id, csv: csvB }, NOW)
+    ]);
+    expect(results.reduce((sum, result) => sum + result.inserted, 0)).toBe(24);
+    expect(results.reduce((sum, result) => sum + result.reused, 0)).toBe(24);
+    expect(await contactCount()).toBe(24);
+    expect(await countLeadContacts(db, WORKSPACE_ID, first.id)).toBe(24);
+    expect(await countLeadContacts(db, WORKSPACE_ID, second.id)).toBe(24);
+  });
+
+  it('shares deterministic lock order between concurrent CSV and pasted-profile imports', async () => {
+    const csvList = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'CSV Profiles' },
+      NOW
+    );
+    const pastedList = await createLeadList(
+      db,
+      { workspaceId: WORKSPACE_ID, name: 'Pasted Profiles' },
+      NOW
+    );
+    const urls = Array.from(
+      { length: 24 },
+      (_, index) => `https://linkedin.com/in/mixed-${index}-overlap`
+    );
+    const csv = [
+      'First Name,Last Name,Company,Email,LinkedIn URL',
+      ...urls.map(
+        (url, index) => `First${index},Last${index},Acme,mixed${index}@example.test,${url}`
+      )
+    ].join('\n');
+    const [fromCsv, fromPaste] = await Promise.all([
+      importLeadCsv(db, { workspaceId: WORKSPACE_ID, listId: csvList.id, csv }, NOW),
+      importLeadProfileUrls(
+        db,
+        {
+          workspaceId: WORKSPACE_ID,
+          listId: pastedList.id,
+          urls: [...urls].reverse()
+        },
+        NOW
+      )
+    ]);
+    expect(fromCsv.inserted + fromPaste.inserted).toBe(24);
+    expect(fromCsv.reused + fromPaste.reused).toBe(24);
+    expect(await contactCount()).toBe(24);
+    expect(await countLeadContacts(db, WORKSPACE_ID, csvList.id)).toBe(24);
+    expect(await countLeadContacts(db, WORKSPACE_ID, pastedList.id)).toBe(24);
+    expect(fromCsv.rejected).toEqual([]);
+    expect(fromPaste.rejected).toEqual([]);
+  });
+
   it('deduplicates overlapping simultaneous uploads without losing memberships', async () => {
     const target = await createLeadList(
       db,
