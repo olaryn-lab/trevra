@@ -187,12 +187,18 @@ ssh "ubuntu@${DB_IP}" "sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/data/back
 echo "backup: ${BACKUP}"
 
 echo "==> app instance"
-scp -q "${HERE}/compose.micro-app.yml" "ubuntu@${APP_IP}:${APP_DIR}/"
+scp -q "${HERE}/compose.micro-app.yml" "${HERE}/pull-ghcr-image.sh" "ubuntu@${APP_IP}:${APP_DIR}/"
 if [ "${TREVRA_SKIP_PULL:-false}" = "true" ]; then
-  echo "==> using preloaded ghcr.io/leanchain/trevra:${TAG}"
-  ssh "ubuntu@${APP_IP}" "docker image inspect 'ghcr.io/leanchain/trevra:${TAG}' >/dev/null"
+  echo "==> using preloaded ghcr.io/olaryn-lab/trevra:${TAG}"
+  ssh "ubuntu@${APP_IP}" "docker image inspect 'ghcr.io/olaryn-lab/trevra:${TAG}' >/dev/null"
 else
-  ssh "ubuntu@${APP_IP}" "cd ${APP_DIR} && TREVRA_IMAGE_TAG='${TAG}' docker compose --env-file .env.oracle -f compose.micro-app.yml pull"
+  if [ -n "${GHCR_PULL_TOKEN:-}" ]; then
+    # Use a short-lived packages:read token on stdin, not in Oracle's env file.
+    printf '%s\n' "$GHCR_PULL_TOKEN" | ssh "ubuntu@${APP_IP}" \
+      bash "${APP_DIR}/pull-ghcr-image.sh" "${APP_DIR}" "${TAG}" "${GHCR_PULL_USER:-github-actions}"
+  else
+    ssh "ubuntu@${APP_IP}" "cd ${APP_DIR} && TREVRA_IMAGE_TAG='${TAG}' docker compose --env-file .env.oracle -f compose.micro-app.yml pull"
+  fi
 fi
 
 echo "==> release migrations and hosted data hardening"

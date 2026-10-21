@@ -6,7 +6,7 @@
 name: trevra
 
 x-trevra-common: &trevra-common
-  image: ghcr.io/leanchain/trevra:${TREVRA_IMAGE_TAG:-main}
+  image: ghcr.io/olaryn-lab/trevra:${TREVRA_IMAGE_TAG:-main}
   env_file:
     - .env.oracle
   environment:

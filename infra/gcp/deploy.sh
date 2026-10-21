@@ -9,6 +9,17 @@ set -euo pipefail
 : "${AUTHWARD_ISSUER:=https://auth.olaryn.com}"
 : "${AUTHWARD_CLIENT_ID:=trevra-web}"
 : "${AUTHWARD_CLIENT_SECRET:?Set AUTHWARD_CLIENT_SECRET from the Authward trevra-web server-web client}"
+: "${AUTHWARD_ISOLATED_ENABLED:=false}"
+: "${AUTHWARD_ACCOUNT_MIGRATION_ENABLED:=false}"
+: "${AUTHWARD_ISOLATED_HOSTED_LOGIN_READY:=false}"
+: "${AUTHWARD_ISOLATED_RESOURCE_SCOPES:=trevra:access}"
+: "${AUTHWARD_ISOLATED_CLIENT_SECRET_NAME:=}"
+if [[ "$AUTHWARD_ISOLATED_ENABLED" == true || "$AUTHWARD_ACCOUNT_MIGRATION_ENABLED" == true ]]; then
+  [[ -n "$AUTHWARD_ISOLATED_CLIENT_SECRET_NAME" && "$AUTHWARD_ISOLATED_HOSTED_LOGIN_READY" == true ]] || {
+    echo "Isolated Authward requires a separately registered Secret Manager credential and verified hosted login" >&2
+    exit 1
+  }
+fi
 : "${BILLING_BASE_URL:=https://billing.olaryn.com}"
 : "${BILLING_CLIENT_ID:=trevra-billing}"
 : "${BILLING_CLIENT_SECRET:=}"
@@ -46,6 +57,11 @@ export TF_VAR_better_auth_url="${BETTER_AUTH_URL}"
 export TF_VAR_authward_issuer="${AUTHWARD_ISSUER}"
 export TF_VAR_authward_client_id="${AUTHWARD_CLIENT_ID}"
 export TF_VAR_authward_client_secret="${AUTHWARD_CLIENT_SECRET}"
+export TF_VAR_authward_isolated_enabled="$AUTHWARD_ISOLATED_ENABLED"
+export TF_VAR_authward_account_migration_enabled="$AUTHWARD_ACCOUNT_MIGRATION_ENABLED"
+export TF_VAR_authward_isolated_hosted_login_ready="$AUTHWARD_ISOLATED_HOSTED_LOGIN_READY"
+export TF_VAR_authward_isolated_resource_scopes="$AUTHWARD_ISOLATED_RESOURCE_SCOPES"
+export TF_VAR_authward_isolated_client_secret_name="$AUTHWARD_ISOLATED_CLIENT_SECRET_NAME"
 export TF_VAR_billing_base_url="${BILLING_BASE_URL}"
 export TF_VAR_billing_client_id="${BILLING_CLIENT_ID}"
 export TF_VAR_billing_client_secret="${BILLING_CLIENT_SECRET}"

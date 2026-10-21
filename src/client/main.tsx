@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { App } from './App';
 import { MarketingApp } from './MarketingApp';
 import './styles.css';
+import './login-contract-v2.css';
 
 const Root = import.meta.env.MODE === 'marketing' ? MarketingApp : App;
 

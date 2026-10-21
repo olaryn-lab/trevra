@@ -1,3 +1,4 @@
+import { mountAccountMigration } from './auth-service.js';
 import express, {
   type NextFunction,
   type Request,
@@ -1011,6 +1012,17 @@ export function createApp(db: Db) {
     res.json({ auth: identity });
   });
 
+  mountAccountMigration(app, db, authLimiter);
+  // Explicit migration is the only supported provider linking boundary.
+  app.all(
+    [
+      '/api/auth/oauth2/link',
+      '/api/auth/link-social',
+      '/api/auth/link-account',
+      '/api/auth/unlink-account'
+    ],
+    (_req, res) => res.sendStatus(403)
+  );
   app.all('/api/auth/*splat', toNodeHandler(betterAuth));
 
   // Public GTM capture must see the exact JSON bytes that the website signed.

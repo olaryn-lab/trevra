@@ -1,3 +1,4 @@
+import { AccountMigration } from './AccountMigration';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -74,6 +75,7 @@ import {
 } from './api';
 import { authClient, useIsWorkspaceOwner, useWorkspaceRole } from './auth-client';
 import { loginAuthError } from './auth-errors';
+import { INTERACTION_EXPIRED_MESSAGE, resolveAuthError, sessionStorageOrNull } from './auth-error';
 import { ActiveLinkedInAccountName } from './LinkedInActiveAccount';
 import { reloadOutreach } from './LinkedInSafety';
 import { LinkedInAccounts } from './LinkedInAccounts';
@@ -146,6 +148,26 @@ function GoogleMark() {
         fill="#EA4335"
         d="M9 3.58c1.321 0 2.507.454 3.441 1.346l2.581-2.581C13.463.892 11.426 0 9 0A9 9 0 0 0 .956 4.962l3.007 2.333C4.672 5.165 6.656 3.58 9 3.58Z"
       />
+    </svg>
+  );
+}
+
+/** Provider glyphs match the shared Olaryn sign-in contract. */
+function MicrosoftMark() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 18 18" width="20" height="20">
+      <path d="M0 0h8.5v8.5H0z" fill="#F25022" />
+      <path d="M9.5 0H18v8.5H9.5z" fill="#7FBA00" />
+      <path d="M0 9.5h8.5V18H0z" fill="#00A4EF" />
+      <path d="M9.5 9.5H18V18H9.5z" fill="#FFB900" />
+    </svg>
+  );
+}
+
+function GithubMark() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="currentColor">
+      <path d="M12 .7a11.3 11.3 0 0 0-3.57 22.02c.56.1.77-.24.77-.54v-2.1c-3.13.68-3.79-1.33-3.79-1.33-.51-1.3-1.25-1.65-1.25-1.65-1.02-.7.08-.68.08-.68 1.13.08 1.72 1.16 1.72 1.16 1 1.72 2.63 1.22 3.27.93.1-.73.39-1.22.71-1.5-2.5-.28-5.13-1.25-5.13-5.58 0-1.23.44-2.24 1.16-3.03-.12-.28-.5-1.43.11-2.98 0 0 .95-.3 3.1 1.16A10.78 10.78 0 0 1 12 6.2c.96 0 1.93.13 2.83.38 2.15-1.46 3.09-1.16 3.09-1.16.62 1.55.23 2.7.11 2.98.72.79 1.16 1.8 1.16 3.03 0 4.34-2.64 5.29-5.15 5.57.4.35.76 1.04.76 2.1v3.08c0 .3.2.65.78.54A11.3 11.3 0 0 0 12 .7Z" />
     </svg>
   );
 }
@@ -596,6 +618,7 @@ function SetupView({
         <BillingSettings />
       ) : onWorkspace ? (
         <PageGrid columns={2} className="workspace-reference-grid">
+          <AccountMigration />
           <ConnectionsView
             data={data}
             reload={reload}
@@ -633,6 +656,23 @@ function SetupView({
     </div>
   );
 }
+
+/**
+ * The one way the sign-in screen begins an Authward authorization: Better
+ * Auth's generic OAuth start (fresh state + PKCE), which sends the browser to
+ * Authward and back through `/api/auth/oauth2/callback/authward`. The social
+ * buttons pass their upstream provider; the `interaction_expired` restart
+ * passes none.
+ */
+function startAuthwardSignIn(upstreamProvider?: string) {
+  return authClient.signIn.oauth2({
+    providerId: 'authward',
+    callbackURL: `${window.location.origin}/loop`,
+    errorCallbackURL: `${window.location.origin}/login`,
+    ...(upstreamProvider ? { additionalData: { upstreamProvider } } : {})
+  });
+}
+
 function AuthScreen({
   onAuthenticated,
   onBack
@@ -650,6 +690,7 @@ function AuthScreen({
   const [authwardEnabled, setAuthwardEnabled] = useState(false);
   const [socialProviders, setSocialProviders] = useState<string[]>([]);
   const [magicLinkEnabled, setMagicLinkEnabled] = useState(false);
+  const [showEmail, setShowEmail] = useState(false);
   const [magicLinkSentTo, setMagicLinkSentTo] = useState<string | null>(null);
   const [emailPasswordEnabled, setEmailPasswordEnabled] = useState(false);
 
@@ -677,11 +718,23 @@ function AuthScreen({
       params.delete('auth_email');
       cleanAuthQuery = true;
     }
-    const signInError = loginAuthError(params);
-    if (signInError) setAuthError(signInError);
-    if (params.has('error') || params.has('auth_error') || params.has('error_description')) {
+    // Preserve friendly errors for ordinary OAuth/magic-link failures, while
+    // allowing one bounded retry for Authward's expired signed interaction.
+    if (params.has('error')) {
+      const message = loginAuthError(params);
+      if (message) setAuthError(message);
       params.delete('error');
+      cleanAuthQuery = true;
+    }
+    let restartSignIn = false;
+    if (params.has('auth_error')) {
+      const outcome = resolveAuthError(params.get('auth_error') ?? '', sessionStorageOrNull());
+      if (outcome.kind === 'restart') restartSignIn = true;
+      else setAuthError(outcome.message);
       params.delete('auth_error');
+      cleanAuthQuery = true;
+    }
+    if (params.has('error_description')) {
       params.delete('error_description');
       cleanAuthQuery = true;
     }
@@ -693,6 +746,18 @@ function AuthScreen({
         `${window.location.pathname}${query ? `?${query}` : ''}`
       );
     }
+    if (restartSignIn) {
+      // The authorization request behind a late sign-in link expired at
+      // Authward: start a fresh one (see auth-error.ts for the loop guard).
+      setBusy(true);
+      const showExpired = () => {
+        setAuthError(INTERACTION_EXPIRED_MESSAGE);
+        setBusy(false);
+      };
+      void startAuthwardSignIn().then((result) => {
+        if (result?.error) showExpired();
+      }, showExpired);
+    }
   }, []);
 
   const signInWithSocialProvider = async (provider: string) => {
@@ -700,12 +765,7 @@ function AuthScreen({
     setAuthError('');
     if (provider === 'google') trackEvent('google_auth_started');
     try {
-      const result = await authClient.signIn.oauth2({
-        providerId: 'authward',
-        callbackURL: `${window.location.origin}/loop`,
-        errorCallbackURL: `${window.location.origin}/login`,
-        additionalData: { upstreamProvider: provider }
-      });
+      const result = await startAuthwardSignIn(provider);
       if (result?.error) {
         setAuthError('Sign-in is temporarily unavailable. Please try again later.');
         setSocialBusy(null);
@@ -765,7 +825,10 @@ function AuthScreen({
 
   return (
     <main className="marketing-runtime">
-      <div className="auth-shell">
+      <div className="auth-shell auth-shell-centered">
+        <div className="auth-login-theme ol-auth-theme">
+          <ThemeToggle />
+        </div>
         <section className="auth-story">
           <a
             className="brand auth-brand"
@@ -799,128 +862,152 @@ function AuthScreen({
             </span>
           </div>
         </section>
-        <section className="auth-panel" id="get-started">
-          <div className="auth-card">
-            <span className="auth-icon">
-              <ShieldCheck />
-            </span>
-            <h2>
-              {magicLinkSentTo
-                ? 'Check your email'
-                : magicLinkEnabled
-                  ? 'Sign in to Trevra'
-                  : mode === 'signin'
-                    ? 'Sign in to Trevra'
-                    : 'Create your workspace'}
-            </h2>
-            <p>
-              {magicLinkSentTo
-                ? 'A secure sign-in link is on its way.'
-                : magicLinkEnabled
-                  ? 'Enter your email and we’ll send you a secure sign-in link.'
-                  : mode === 'signin'
-                    ? 'Continue to your workspace.'
-                    : 'Create a Trevra workspace.'}
-            </p>
-            {socialProviders.length > 0 &&
-              !magicLinkSentTo &&
-              socialProviders.map((provider) => {
-                const label =
-                  provider === 'google'
-                    ? 'Google'
-                    : provider === 'github'
-                      ? 'GitHub'
-                      : provider === 'microsoft'
-                        ? 'Microsoft'
-                        : provider === 'apple'
-                          ? 'Apple'
-                          : provider.charAt(0).toUpperCase() + provider.slice(1);
-                return (
-                  <button
-                    key={provider}
-                    className="google-auth-button"
-                    disabled={busy || socialBusy !== null}
-                    onClick={() => void signInWithSocialProvider(provider)}
-                  >
-                    {socialBusy === provider ? (
-                      <LoaderCircle className="spin" size={17} />
-                    ) : provider === 'google' ? (
-                      <GoogleMark />
-                    ) : (
-                      <ShieldCheck size={17} />
-                    )}
-                    Continue with {label}
-                  </button>
-                );
-              })}
-            {socialProviders.length > 0 &&
-              !magicLinkSentTo &&
-              (magicLinkEnabled || emailPasswordEnabled) && (
-                <div className="auth-divider">
-                  <span>or</span>
-                </div>
-              )}
-            {magicLinkEnabled &&
-              (magicLinkSentTo ? (
-                <div className="auth-email-sent" role="status" aria-live="polite">
-                  <span className="auth-email-sent-icon" aria-hidden="true">
-                    <Check size={20} />
-                  </span>
-                  <div>
-                    <p>
-                      We sent a secure sign-in link to <strong>{magicLinkSentTo}</strong>.
-                    </p>
-                    <p className="auth-consent">
-                      The link expires in 15 minutes and can be used once.
-                    </p>
-                  </div>
-                  <button
-                    className="primary-button auth-submit"
-                    disabled={busy || socialBusy !== null}
-                    onClick={() => void sendMagicLink()}
-                  >
-                    {busy ? <LoaderCircle className="spin" size={16} /> : <Mail size={16} />}
-                    Resend link
-                  </button>
-                  <button
-                    className="auth-text-button"
-                    disabled={busy || socialBusy !== null}
-                    onClick={() => {
-                      setMagicLinkSentTo(null);
-                      window.sessionStorage.removeItem('trevra.pendingAuthEmail');
-                    }}
-                  >
-                    Use a different email
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <label>
-                    Email
-                    <input
-                      type="email"
-                      autoComplete="email"
-                      value={email}
-                      onChange={(event) => {
-                        setEmail(event.target.value);
+        <section className="auth-panel ol-auth-page" id="get-started">
+          <div className="auth-card ol-auth-card">
+            <div className="auth-signin-brand ol-auth-brand">
+              <BrandMark />
+              <span>Trevra</span>
+            </div>
+            <div className="ol-auth-intro">
+              <h2 className="ol-auth-title">
+                {magicLinkSentTo
+                  ? 'Check your email'
+                  : magicLinkEnabled
+                    ? 'Welcome to Trevra'
+                    : mode === 'signin'
+                      ? 'Welcome to Trevra'
+                      : 'Create your workspace'}
+              </h2>
+              <p className="ol-auth-subtitle">
+                {magicLinkSentTo
+                  ? 'A secure sign-in link is on its way.'
+                  : magicLinkEnabled
+                    ? 'Sign in to your workspace.'
+                    : mode === 'signin'
+                      ? 'Sign in to your workspace.'
+                      : 'Create a Trevra workspace.'}
+              </p>
+            </div>
+            <div className="ol-auth-methods">
+              {socialProviders.length > 0 &&
+                !magicLinkSentTo &&
+                socialProviders.map((provider, index) => {
+                  const label =
+                    provider === 'google'
+                      ? 'Google'
+                      : provider === 'github'
+                        ? 'GitHub'
+                        : provider === 'microsoft'
+                          ? 'Microsoft'
+                          : provider === 'apple'
+                            ? 'Apple'
+                            : provider.charAt(0).toUpperCase() + provider.slice(1);
+                  return (
+                    <button
+                      key={provider}
+                      className={
+                        'google-auth-button ol-auth-action ' +
+                        (index === 0 ? 'ol-auth-primary' : '')
+                      }
+                      disabled={busy || socialBusy !== null}
+                      onClick={() => void signInWithSocialProvider(provider)}
+                    >
+                      {socialBusy === provider ? (
+                        <LoaderCircle className="spin" size={17} />
+                      ) : provider === 'google' ? (
+                        <GoogleMark />
+                      ) : provider === 'microsoft' ? (
+                        <MicrosoftMark />
+                      ) : provider === 'github' ? (
+                        <GithubMark />
+                      ) : (
+                        <ShieldCheck size={17} />
+                      )}
+                      <span className="ol-auth-method-label">Continue with {label}</span>
+                    </button>
+                  );
+                })}
+              {magicLinkEnabled &&
+                (magicLinkSentTo ? (
+                  <div className="auth-email-sent" role="status" aria-live="polite">
+                    <span className="auth-email-sent-icon" aria-hidden="true">
+                      <Check size={20} />
+                    </span>
+                    <div>
+                      <p>
+                        We sent a secure sign-in link to <strong>{magicLinkSentTo}</strong>.
+                      </p>
+                      <p className="auth-consent">
+                        The link expires in 15 minutes and can be used once.
+                      </p>
+                    </div>
+                    <button
+                      className="primary-button auth-submit"
+                      disabled={busy || socialBusy !== null}
+                      onClick={() => void sendMagicLink()}
+                    >
+                      {busy ? <LoaderCircle className="spin" size={16} /> : <Mail size={16} />}
+                      Resend link
+                    </button>
+                    <button
+                      className="auth-text-button"
+                      disabled={busy || socialBusy !== null}
+                      onClick={() => {
                         setMagicLinkSentTo(null);
+                        window.sessionStorage.removeItem('trevra.pendingAuthEmail');
                       }}
-                      placeholder="you@company.com"
-                      onKeyDown={(event) => {
-                        if (event.key === 'Enter' && email.trim()) void sendMagicLink();
-                      }}
-                    />
-                  </label>
-                  <button
-                    className="primary-button auth-submit"
-                    disabled={busy || socialBusy !== null || !email.trim()}
-                    onClick={() => void sendMagicLink()}
-                  >
-                    {busy ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
-                    Continue with email
-                  </button>
-                </>
-              ))}
+                    >
+                      Use a different email
+                    </button>
+                  </div>
+                ) : (
+                  <div className="auth-expandable-email ol-auth-expand">
+                    <button
+                      type="button"
+                      className="google-auth-button ol-auth-action"
+                      aria-expanded={showEmail}
+                      aria-controls="trevra-email-form"
+                      onClick={() => setShowEmail((value) => !value)}
+                      disabled={busy || socialBusy !== null}
+                    >
+                      <Mail size={17} />
+                      <span className="ol-auth-method-label">Continue with email</span>
+                    </button>
+                    {showEmail && (
+                      <div id="trevra-email-form" className="auth-email-fields ol-auth-email-body">
+                        <label>
+                          Email address
+                          <input
+                            type="email"
+                            autoComplete="email"
+                            value={email}
+                            onChange={(event) => {
+                              setEmail(event.target.value);
+                              setMagicLinkSentTo(null);
+                            }}
+                            placeholder="you@company.com"
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter' && email.trim()) void sendMagicLink();
+                            }}
+                          />
+                        </label>
+                        <button
+                          className="primary-button auth-submit ol-auth-submit"
+                          disabled={busy || socialBusy !== null || !email.trim()}
+                          onClick={() => void sendMagicLink()}
+                        >
+                          {busy ? (
+                            <LoaderCircle className="spin" size={16} />
+                          ) : (
+                            <ShieldCheck size={16} />
+                          )}
+                          Email me a sign-in link
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+            </div>
             {emailPasswordEnabled && (
               <>
                 {mode === 'signup' && (
@@ -997,18 +1084,14 @@ function AuthScreen({
                 {mode === 'signin' ? 'Create an account' : 'Sign in instead'}
               </button>
             )}
-            <button className="auth-switch" onClick={onBack}>
-              ← Back to site
-            </button>
-            <p className="auth-consent">
-              By continuing, you agree to the <a href="/terms">Terms</a> and{' '}
-              <a href="/privacy">Privacy Notice</a>.
-            </p>
-            <div className="auth-legal-links">
-              <a href="/privacy">Privacy</a>
-              <a href="/terms">Terms</a>
-              <a href="/security">Security</a>
-              <a href="/how-it-works">How it works</a>
+            <div className="ol-auth-footer">
+              <button className="auth-switch" onClick={onBack}>
+                ← Back to site
+              </button>
+              <p className="auth-consent">
+                By continuing, you agree to the <a href="/terms">Terms</a> and{' '}
+                <a href="/privacy">Privacy Notice</a>.
+              </p>
             </div>
           </div>
         </section>

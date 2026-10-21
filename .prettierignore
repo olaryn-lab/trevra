@@ -5,3 +5,6 @@ package-lock.json
 *.min.js
 nango-integrations/build
 nango-integrations/.nango
+
+# Versioned, byte-identical shared Olaryn design layer; format at the source.
+src/client/login-contract-v2.css
