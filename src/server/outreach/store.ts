@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { id, type Db } from '../db.js';
 import { appendDomainEvent } from '../control-plane/events.js';
+import { COMMUNITY_POST_VERIFICATION } from '../../shared/community-post.js';
+export { COMMUNITY_POST_VERIFICATION } from '../../shared/community-post.js';
 import type { OutreachThread } from './types.js';
 
 /**
@@ -264,9 +266,6 @@ export class CommunityPostResolutionError extends Error {
     super(message);
   }
 }
-
-export const COMMUNITY_POST_VERIFICATION =
-  'I checked the original thread and authorize releasing the claim for retry if no reply exists.' as const;
 
 export async function listUnresolvedCommunityPosts(
   db: Db,

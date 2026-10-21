@@ -183,6 +183,32 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+export type { UnresolvedCommunityPost } from '../shared/community-post';
+
+export async function getUnresolvedCommunityPosts() {
+  const result = await request<{
+    posts: import('../shared/community-post').UnresolvedCommunityPost[];
+  }>('/api/outreach/posts/unresolved');
+  return result.posts;
+}
+
+export async function resolveUncertainCommunityPost(
+  postId: string,
+  input: {
+    outcome: 'posted' | 'not_posted';
+    verificationUrl: string;
+    confirmation: string;
+  }
+): Promise<{ id: string; status: 'posted' | 'failed'; verificationUrl: string }> {
+  const response = await request<{
+    post: { id: string; status: 'posted' | 'failed'; verificationUrl: string };
+  }>(`/api/outreach/posts/${encodeURIComponent(postId)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify(input)
+  });
+  return response.post;
+}
+
 export type BillingSnapshot =
   | { enabled: false }
   | {
