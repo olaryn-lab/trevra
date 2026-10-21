@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { id, type Db } from '../db.js';
+import { appendDomainEvent } from '../control-plane/events.js';
 import type { OutreachThread } from './types.js';
 
 /**
@@ -252,6 +253,154 @@ export async function existingPost(
   `
     )
     .get<ExistingPost>(workspaceId, payloadHash);
+}
+
+/** An owner may settle only an aged, explicitly investigated unknown write. */
+export class CommunityPostResolutionError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number
+  ) {
+    super(message);
+  }
+}
+
+export const COMMUNITY_POST_VERIFICATION =
+  'I checked the original thread and authorize releasing the claim for retry if no reply exists.' as const;
+
+export async function listUnresolvedCommunityPosts(
+  db: Db,
+  workspaceId: string,
+  now: Date = new Date(),
+  limit = 50
+): Promise<
+  Array<{
+    id: string;
+    platform: string;
+    threadUrl: string;
+    createdAt: string;
+    lastError: string | null;
+    readyForReview: boolean;
+  }>
+> {
+  const rows = await db
+    .prepare(
+      `SELECT id,platform,thread_url,error,
+          TO_CHAR(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS created_at,
+          (created_at <= (?::timestamptz - INTERVAL '2 minutes')) AS ready
+       FROM outreach_posts WHERE workspace_id=? AND status='pending'
+       ORDER BY created_at,id LIMIT ?`
+    )
+    .all<{
+      id: string;
+      platform: string;
+      thread_url: string;
+      error: string | null;
+      created_at: string;
+      ready: boolean;
+    }>(now.toISOString(), workspaceId, Math.max(1, Math.min(limit, 200)));
+  return rows.map((row) => ({
+    id: row.id,
+    platform: row.platform,
+    threadUrl: row.thread_url,
+    createdAt: row.created_at,
+    lastError: row.error,
+    readyForReview: row.ready
+  }));
+}
+
+/**
+ * Never infer absence from a timeout. An owner must visit the original thread
+ * and explicitly attest to the outcome before a claim is released. The
+ * two-minute floor prevents a human racing an in-flight (15s timeout) POST.
+ * No automatic retry is dispatched by this operation.
+ */
+export async function resolveCommunityUnknownPost(
+  db: Db,
+  input: {
+    workspaceId: string;
+    postId: string;
+    actorUserId: string;
+    outcome: 'posted' | 'not_posted';
+    verificationUrl: string;
+    confirmation: string;
+  },
+  now: Date = new Date()
+): Promise<{ id: string; status: 'posted' | 'failed'; verificationUrl: string } | null> {
+  if (input.confirmation !== COMMUNITY_POST_VERIFICATION)
+    throw new CommunityPostResolutionError('Confirm you inspected the original thread.', 400);
+  if (!input.actorUserId.trim())
+    throw new CommunityPostResolutionError('Owner identity required.', 400);
+  let verified: URL;
+  try {
+    verified = new URL(input.verificationUrl);
+    if (verified.protocol !== 'https:') throw new Error('HTTPS required');
+  } catch {
+    throw new CommunityPostResolutionError('Verification URL must be an HTTPS link.', 400);
+  }
+  return db.transaction(async (tx) => {
+    const row = await tx
+      .prepare(
+        `SELECT id,status,thread_url,
+                (created_at <= (?::timestamptz - INTERVAL '2 minutes')) AS ready
+         FROM outreach_posts WHERE workspace_id=? AND id=? FOR UPDATE`
+      )
+      .get<{ id: string; status: string; thread_url: string; ready: boolean }>(
+        now.toISOString(),
+        input.workspaceId,
+        input.postId
+      );
+    if (!row) return null;
+    if (row.status !== 'pending')
+      throw new CommunityPostResolutionError('This post is no longer awaiting resolution.', 409);
+    if (!row.ready)
+      throw new CommunityPostResolutionError(
+        'This provider write may still be in flight; review it after two minutes.',
+        409
+      );
+    let target: URL;
+    try {
+      target = new URL(row.thread_url);
+    } catch {
+      throw new CommunityPostResolutionError(
+        'Stored thread URL is invalid; investigate manually.',
+        409
+      );
+    }
+    const hostname = (value: string) => value.toLowerCase().replace(/^www\./, '');
+    if (hostname(verified.hostname) !== hostname(target.hostname))
+      throw new CommunityPostResolutionError(
+        'Verification must link to the same platform host as the original thread.',
+        400
+      );
+    const status = input.outcome === 'posted' ? 'posted' : 'failed';
+    await tx
+      .prepare(
+        `UPDATE outreach_posts SET status=?,provider=?,external_ref=?,error=?
+         WHERE workspace_id=? AND id=? AND status='pending'`
+      )
+      .run(
+        status,
+        input.outcome === 'posted' ? 'operator-confirmed' : null,
+        input.outcome === 'posted' ? verified.toString() : null,
+        input.outcome === 'posted'
+          ? null
+          : 'Owner verified no reply at the original thread and authorized release for retry under the original exact-payload approval.',
+        input.workspaceId,
+        input.postId
+      );
+    await appendDomainEvent(tx, {
+      workspaceId: input.workspaceId,
+      streamType: 'outreach_post',
+      streamId: row.id,
+      eventType: 'community_reply.unknown_resolved',
+      actorType: 'user',
+      actorId: input.actorUserId,
+      payload: { outcome: input.outcome, verificationUrl: verified.toString() },
+      occurredAt: now
+    });
+    return { id: row.id, status, verificationUrl: verified.toString() };
+  });
 }
 
 /** Resolve a claimed (`pending`) row once the platform's answer is known. */

@@ -77,6 +77,12 @@ import {
   SkillApiError
 } from './skill-api.js';
 import { loadThreadFeed } from './outreach/feed.js';
+import {
+  COMMUNITY_POST_VERIFICATION,
+  CommunityPostResolutionError,
+  listUnresolvedCommunityPosts,
+  resolveCommunityUnknownPost
+} from './outreach/store.js';
 import { getScout } from './outreach/registry.js';
 import {
   createWatch,
@@ -3472,6 +3478,53 @@ export function createApp(db: Db) {
       next(error);
     }
   });
+
+  // Unknown community-provider writes are held, not blindly retried. Only an
+  // owner who inspected the original public thread can settle their outcome.
+  app.get(
+    '/api/outreach/posts/unresolved',
+    ownerOnly('review unresolved community replies'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({
+          posts: await listUnresolvedCommunityPosts(db, req.auth!.workspaceId, new Date())
+        });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  app.post(
+    '/api/outreach/posts/:id/resolve',
+    ownerOnly('resolve an uncertain community reply'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            outcome: z.enum(['posted', 'not_posted']),
+            verificationUrl: z.string().trim().url().max(2048),
+            confirmation: z.literal(COMMUNITY_POST_VERIFICATION)
+          })
+          .strict()
+          .parse(req.body ?? {});
+        const post = await resolveCommunityUnknownPost(db, {
+          workspaceId: req.auth!.workspaceId,
+          postId: String(req.params.id),
+          actorUserId: req.auth!.userId,
+          ...input
+        });
+        if (!post) return res.status(404).json({ error: 'Unresolved community post not found.' });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json({ post });
+      } catch (error) {
+        if (error instanceof CommunityPostResolutionError)
+          return res.status(error.status).json({ error: error.message });
+        next(error);
+      }
+    }
+  );
 
   app.get('/api/content/opportunities', async (req: AuthedRequest, res, next) => {
     try {
