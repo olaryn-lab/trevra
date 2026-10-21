@@ -20,7 +20,7 @@ vi.mock('@nangohq/node', () => ({
 import { openDatabase, type Db } from '../db.js';
 import { putWorkspaceSecret } from '../secrets/store.js';
 import { queueEnrichmentRun } from '../enrichment/runs.js';
-import { createSuppression, findSuppression } from '../suppressions.js';
+import { createSuppression, findSuppression, liftSuppression } from '../suppressions.js';
 import { executeConnectedAction } from '../integration-service.js';
 import { addExclusions } from './exclusions.js';
 import {
@@ -2472,9 +2472,15 @@ describe('campaign channel executor', () => {
       );
     expect(await eventCount()).toBe(0);
 
+    // Legacy/malformed sent actions without a verified recipient cannot be tracked.
     await db
       .prepare('UPDATE linkedin_campaign_channel_actions SET payload_json=?::jsonb WHERE id=?')
       .run(JSON.stringify({ tracking: 'opens' }), 'licha_track');
+    expect(await recordCampaignEmailTrackingOpen(db, 'opaque-open-token', NOW)).toBe(false);
+    expect(await eventCount()).toBe(0);
+    await db
+      .prepare('UPDATE linkedin_campaign_channel_actions SET payload_json=?::jsonb WHERE id=?')
+      .run(JSON.stringify({ recipient: 'maya@example.com', tracking: 'opens' }), 'licha_track');
     expect(await recordCampaignEmailTrackingOpen(db, 'opaque-open-token', NOW)).toBe(true);
     expect(
       await recordCampaignEmailTrackingClick(db, 'opaque-open-token', 'opaque-link-token', NOW)
@@ -2482,7 +2488,10 @@ describe('campaign channel executor', () => {
     expect(await eventCount()).toBe(1); // opens-only cannot record clicks.
     await db
       .prepare('UPDATE linkedin_campaign_channel_actions SET payload_json=?::jsonb WHERE id=?')
-      .run(JSON.stringify({ tracking: 'opens_clicks' }), 'licha_track');
+      .run(
+        JSON.stringify({ recipient: 'maya@example.com', tracking: 'opens_clicks' }),
+        'licha_track'
+      );
     expect(
       await recordCampaignEmailTrackingClick(db, 'opaque-open-token', 'opaque-link-token', NOW)
     ).toBe('https://example.com/demo');
@@ -2536,7 +2545,7 @@ describe('campaign channel executor', () => {
         member.contactId,
         'email-private-step',
         NOW.toISOString(),
-        JSON.stringify({ tracking: 'opens_clicks' }),
+        JSON.stringify({ recipient: 'maya@example.com', tracking: 'opens_clicks' }),
         'private-tracking-key',
         NOW.toISOString(),
         token,
@@ -2607,13 +2616,18 @@ describe('campaign channel executor', () => {
         'UPDATE linkedin_lead_contacts SET do_not_contact=FALSE WHERE workspace_id=? AND id=?'
       )
       .run(WORKSPACE, member.contactId);
-    await createSuppression(
+    // The lead was edited AFTER the old email was sent. Only the persisted
+    // recipient identifies the mailbox whose tracking URL still exists.
+    await db
+      .prepare('UPDATE linkedin_lead_contacts SET email=? WHERE workspace_id=? AND id=?')
+      .run('new@example.net', WORKSPACE, member.contactId);
+    const oldRecipientSuppression = await createSuppression(
       db,
       {
         workspaceId: WORKSPACE,
         channel: 'email',
         email: 'maya@example.com',
-        reason: 'Recipient unsubscribed',
+        reason: 'Original recipient unsubscribed',
         source: 'test_opt_out'
       },
       NOW
@@ -2631,6 +2645,49 @@ describe('campaign channel executor', () => {
         'external:email_opened'
       ]
     ).not.toBe(true);
+
+    await liftSuppression(
+      db,
+      { workspaceId: WORKSPACE, suppressionId: oldRecipientSuppression.id, actorType: 'system' },
+      NOW
+    );
+    // A later opt-out on the contact's edited address must also prevent
+    // telemetry from tokens attached to the same lead/Person.
+    const editedRecipientSuppression = await createSuppression(
+      db,
+      {
+        workspaceId: WORKSPACE,
+        channel: 'email',
+        email: 'new@example.net',
+        reason: 'Edited address requested opt-out',
+        source: 'test_opt_out'
+      },
+      NOW
+    );
+    expect(await recordCampaignEmailTrackingOpen(db, token, NOW)).toBe(false);
+    expect(await recordCampaignEmailTrackingClick(db, token, linkToken, NOW)).toBe(
+      'https://example.com/recipient-resource'
+    );
+    expect(await eventCount()).toBe(0);
+    await liftSuppression(
+      db,
+      { workspaceId: WORKSPACE, suppressionId: editedRecipientSuppression.id, actorType: 'system' },
+      NOW
+    );
+
+    // Never Contact is a cross-channel stop, and the campaign send boundary
+    // already considers it. Previously the telemetry boundary silently did not.
+    await addExclusions(
+      db,
+      WORKSPACE,
+      [{ targetRef: 'https://linkedin.com/in/maya-private-tracking', reason: 'Never contact' }],
+      NOW
+    );
+    expect(await recordCampaignEmailTrackingOpen(db, token, NOW)).toBe(false);
+    expect(await recordCampaignEmailTrackingClick(db, token, linkToken, NOW)).toBe(
+      'https://example.com/recipient-resource'
+    );
+    expect(await eventCount()).toBe(0);
   });
 
   it('polls past temporary delivery failures so a later reply still stops queued work', async () => {

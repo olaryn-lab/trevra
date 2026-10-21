@@ -29,6 +29,7 @@ import {
   renderCampaignTrackedContent
 } from './campaign-email-html.js';
 import { assertNotSuppressed, findSuppression, SuppressionError } from '../suppressions.js';
+import { normalizeContactEmail } from '../lead-capture/people.js';
 export type CampaignChannelKind = 'email' | 'find_email';
 export type CampaignChannelStatus =
   'planned' | 'claimed' | 'sent' | 'failed' | 'unknown' | 'skipped';
@@ -1366,6 +1367,7 @@ interface EmailTrackingTarget {
   payload_json: unknown;
   email: string | null;
   person_id: string | null;
+  profile_url: string | null;
   do_not_contact: boolean;
 }
 
@@ -1374,14 +1376,43 @@ async function mayRecordEmailTracking(
   row: EmailTrackingTarget,
   kind: 'opened' | 'clicked'
 ): Promise<boolean> {
-  const tracking = objectOf(row.payload_json).tracking;
+  const payload = objectOf(row.payload_json);
+  const tracking = payload.tracking;
   if (tracking !== 'opens_clicks' && !(kind === 'opened' && tracking === 'opens')) return false;
   if (row.do_not_contact) return false;
-  return !(await findSuppression(db, row.workspace_id, {
-    channel: 'email',
-    personId: row.person_id,
-    email: row.email
-  }));
+
+  // The original recipient owns this token. Contact enrichment/editing can
+  // change c.email after delivery; consulting only the live lead lets a later
+  // unsubscribe for the *sent-to* address be missed. Legacy actions that lack
+  // a persisted recipient cannot prove whom the token was sent to: fail closed.
+  const sentTo = normalizeContactEmail(
+    typeof payload.recipient === 'string' ? payload.recipient : null
+  );
+  if (!sentTo) return false;
+  if (
+    row.profile_url &&
+    (await filterExcluded(db, row.workspace_id, [row.profile_url])).excluded.length
+  )
+    return false;
+  if (
+    await findSuppression(db, row.workspace_id, {
+      channel: 'email',
+      personId: row.person_id,
+      email: sentTo
+    })
+  )
+    return false;
+  // Also respect a canonical Person or current-address opt-out after an edit.
+  const currentEmail = normalizeContactEmail(row.email);
+  return (
+    !currentEmail ||
+    currentEmail === sentTo ||
+    !(await findSuppression(db, row.workspace_id, {
+      channel: 'email',
+      personId: row.person_id,
+      email: currentEmail
+    }))
+  );
 }
 
 /** Public pixel: an invalid/disallowed event writes nothing, and reveals nothing. */
@@ -1392,7 +1423,7 @@ export async function recordCampaignEmailTrackingOpen(
 ): Promise<boolean> {
   const row = await db
     .prepare(
-      `SELECT a.workspace_id,a.id,a.payload_json,c.email,c.person_id,c.do_not_contact
+      `SELECT a.workspace_id,a.id,a.payload_json,c.email,c.person_id,c.profile_url,c.do_not_contact
        FROM linkedin_campaign_channel_actions a
        JOIN linkedin_lead_contacts c ON c.id=a.contact_id AND c.workspace_id=a.workspace_id
        WHERE a.tracking_token=? AND a.kind='email' AND a.status='sent'`
@@ -1422,7 +1453,7 @@ export async function recordCampaignEmailTrackingClick(
 ): Promise<string | null> {
   const row = await db
     .prepare(
-      `SELECT a.workspace_id,a.id,a.payload_json,c.email,c.person_id,c.do_not_contact,l.target_url
+      `SELECT a.workspace_id,a.id,a.payload_json,c.email,c.person_id,c.profile_url,c.do_not_contact,l.target_url
        FROM linkedin_campaign_channel_actions a
        JOIN linkedin_campaign_email_tracking_links l
          ON l.workspace_id=a.workspace_id AND l.channel_action_id=a.id
