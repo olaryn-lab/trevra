@@ -1233,13 +1233,13 @@ details[open] > .ui-disclosure-summary::after {
 
 .app-shell {
   display: grid;
-  grid-template-columns: 228px 1fr;
+  grid-template-columns: 228px minmax(0, 1fr);
   min-height: 100vh;
 }
 .sidebar {
-  background: var(--t-surface-3);
-  border-right: 1px solid var(--line);
-  padding: 26px 18px 18px;
+  background: var(--t-bg);
+  border-right: 1px solid var(--t-line);
+  padding: 16px 12px;
   display: flex;
   flex-direction: column;
   position: sticky;
@@ -1294,7 +1294,7 @@ details[open] > .ui-disclosure-summary::after {
 }
 .sidebar nav {
   display: grid;
-  gap: 5px;
+  gap: 2px;
 }
 .nav-item {
   width: 100%;
@@ -1314,19 +1314,23 @@ details[open] > .ui-disclosure-summary::after {
 }
 .nav-item.active {
   background: var(--t-surface);
-  color: var(--green);
+  color: var(--t-green-600);
+  font-weight: var(--t-w-strong);
   box-shadow: var(--t-shadow-sm);
 }
 .main {
   width: 100%;
   min-width: 0;
-  padding: 31px 44px 60px;
+  padding: 0 32px 60px;
 }
 .topbar {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 28px;
+  min-height: 64px;
+  margin-bottom: 24px;
+  padding-block: 10px;
+  border-bottom: 1px solid var(--t-line);
 }
 .topbar-title {
   min-width: 0;
@@ -3448,7 +3452,7 @@ button:disabled {
   }
   /* Room for the tab bar, plus whatever the device reserves below it. */
   .main {
-    padding: 22px 20px calc(74px + env(safe-area-inset-bottom, 0px));
+    padding: 0 16px calc(74px + env(safe-area-inset-bottom, 0px));
   }
   .metrics-grid,
   .metrics-grid-four,
@@ -3471,6 +3475,7 @@ button:disabled {
     flex-direction: column;
     gap: 14px;
     margin-bottom: 20px;
+    padding-block: 18px;
   }
   .topbar h1 {
     font-size: var(--t-text-xl);

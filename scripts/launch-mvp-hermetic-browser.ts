@@ -196,6 +196,54 @@ async function main() {
     await page.goto(origin + '/outreach', { waitUntil: 'domcontentloaded' });
     await page.getByRole('button', { name: /New campaign/i }).waitFor({ timeout: 25000 });
     check('L5 authenticated campaigns screen renders and permits navigation', true);
+    // UI-shell layout verification at desktop and mobile. Never infer visual
+    // parity from static CSS alone: sample real computed styles in Chromium.
+    const desktopShell = await page.evaluate(() => {
+      const shell = document.querySelector('.app-shell');
+      const aside = document.querySelector('.sidebar');
+      const main = document.querySelector('.main');
+      const topbar = document.querySelector('.topbar');
+      return {
+        tracks: shell ? getComputedStyle(shell).gridTemplateColumns : '',
+        asideWidth: aside?.getBoundingClientRect().width ?? 0,
+        mainPadding: main ? getComputedStyle(main).paddingLeft : '',
+        topbarHeight: topbar?.getBoundingClientRect().height ?? 0,
+        navGap: aside?.querySelector('nav') ? getComputedStyle(aside.querySelector('nav')!).gap : ''
+      };
+    });
+    check(
+      'UI desktop shell keeps compact sidebar and zero-min-width content track',
+      Math.abs(desktopShell.asideWidth - 228) <= 1 &&
+        desktopShell.mainPadding === '32px' &&
+        desktopShell.navGap === '2px' &&
+        desktopShell.topbarHeight >= 64
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    const mobileShell = await page.evaluate(() => {
+      const shell = document.querySelector('.app-shell');
+      const aside = document.querySelector('.sidebar');
+      const main = document.querySelector('.main');
+      const tabs = document.querySelector('.mobile-tabbar');
+      const topbar = document.querySelector('.topbar');
+      return {
+        tracks: shell ? getComputedStyle(shell).gridTemplateColumns : '',
+        sidebar: aside ? getComputedStyle(aside).display : '',
+        mainPadding: main ? getComputedStyle(main).paddingLeft : '',
+        bottomPadding: main ? parseFloat(getComputedStyle(main).paddingBottom) : 0,
+        tabs: tabs ? getComputedStyle(tabs).display : '',
+        headerPadding: topbar ? getComputedStyle(topbar).paddingTop : ''
+      };
+    });
+    check(
+      'UI mobile shell keeps content, navigation and safe-area spacing',
+      mobileShell.sidebar === 'none' &&
+        mobileShell.tabs === 'grid' &&
+        mobileShell.mainPadding === '16px' &&
+        mobileShell.bottomPadding >= 74 &&
+        mobileShell.headerPadding === '18px'
+    );
+    await page.setViewportSize({ width: 1280, height: 720 });
+
     await page.getByRole('button', { name: /New campaign/i }).click();
     await page.getByRole('heading', { name: 'One thing is missing' }).waitFor({ timeout: 25000 });
     check('L5 missing LinkedIn sender blocks new campaign with actionable explanation', true);
