@@ -21,6 +21,8 @@ export const INTERACTION_RESTART_STORAGE_KEY = 'trevra.authwardInteractionRestar
 export const INTERACTION_RESTART_WINDOW_MS = 2 * 60 * 1000;
 
 export const INTERACTION_EXPIRED_MESSAGE = 'Your sign-in link expired. Sign in again to continue.';
+export const OAUTH_SESSION_RECOVERY_MESSAGE =
+  'We could not restore your sign-in session. Sign in again in this browser.';
 export const GOOGLE_NOT_CONFIGURED_MESSAGE =
   'Google sign-in is temporarily unavailable. Try another method.';
 export const PROVIDER_UNAVAILABLE_MESSAGE =
@@ -34,6 +36,7 @@ export type AuthErrorOutcome = { kind: 'restart' } | { kind: 'message'; message:
 export function authErrorMessage(code: string): string {
   if (code === 'google_not_configured') return GOOGLE_NOT_CONFIGURED_MESSAGE;
   if (code === 'interaction_expired') return INTERACTION_EXPIRED_MESSAGE;
+  if (code === 'oauth_code_verification_failed') return OAUTH_SESSION_RECOVERY_MESSAGE;
   if (code === 'invalid_client')
     return 'Sign-in is temporarily unavailable. Please try again later.';
   if (code === 'invalid_grant') return 'This sign-in link has expired. Request a new one.';
@@ -68,7 +71,10 @@ export function resolveAuthError(
   storage: RestartMarkerStorage | null,
   now: number = Date.now()
 ): AuthErrorOutcome {
-  if (code === 'interaction_expired' && claimInteractionRestart(storage, now)) {
+  if (
+    (code === 'interaction_expired' || code === 'oauth_code_verification_failed') &&
+    claimInteractionRestart(storage, now)
+  ) {
     return { kind: 'restart' };
   }
   return { kind: 'message', message: authErrorMessage(code) };

@@ -19,7 +19,7 @@ describe('Trevra login callback errors', () => {
 
   it('handles Better Auth callback failures and old magic-link errors without raw codes', () => {
     expect(loginAuthError(new URLSearchParams('error=oauth_code_verification_failed'))).toMatch(
-      /temporarily unavailable/
+      /in this browser/
     );
     expect(loginAuthError(new URLSearchParams('error=INVALID_TOKEN'))).toMatch(/Request a new one/);
     expect(loginAuthError(new URLSearchParams('error=state_mismatch'))).toBe(

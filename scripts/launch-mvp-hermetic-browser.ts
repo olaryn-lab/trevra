@@ -585,7 +585,7 @@ async function main() {
         body: JSON.stringify({
           authwardAuthEnabled: true,
           passkeyAuthEnabled: true,
-          socialAuthProviders: [],
+          socialAuthProviders: ['google'],
           magicLinkAuthEnabled: false,
           emailPasswordAuthEnabled: false
         })
@@ -604,6 +604,13 @@ async function main() {
     const passkeyButton = passkeyPage.getByRole('button', { name: 'Continue with passkey' });
     await passkeyButton.waitFor({ timeout: 25000 });
     check('L1 passkey action appears only when provider capability is attested', true);
+    const googleButton = passkeyPage.getByRole('button', { name: 'Continue with Google' });
+    check(
+      'L1 passkey + Google do not both appear as primary actions',
+      (await passkeyPage.locator('.ol-auth-methods .ol-auth-primary').count()) === 1 &&
+        (await passkeyButton.getAttribute('class'))?.includes('ol-auth-primary') === true &&
+        (await googleButton.getAttribute('class'))?.includes('ol-auth-primary') === false
+    );
     await passkeyButton.click();
     await passkeyPage
       .getByText('Passkey sign-in could not be completed.', { exact: false })
@@ -612,6 +619,31 @@ async function main() {
       ?.additionalData?.authMethod;
     check('L1 passkey click starts existing OAuth with passkey method hint', method === 'passkey');
     await passkeyContext.close();
+
+    // Email links opened from a mail client may arrive in a new browser with
+    // no Trevra state/PKCE cookie. Re-establish that state once, never loop.
+    const recoveryContext = await browser.newContext();
+    const recoveryPage = await recoveryContext.newPage();
+    let oauthRecoveryStarts = 0;
+    await recoveryPage.route('**/api/auth/sign-in/oauth2', async (route) => {
+      oauthRecoveryStarts += 1;
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { message: 'Controlled recovery rejection' } })
+      });
+    });
+    await recoveryPage.goto(origin + '/login?error=oauth_code_verification_failed', {
+      waitUntil: 'domcontentloaded'
+    });
+    await recoveryPage
+      .getByText('We could not restore your sign-in session.', { exact: false })
+      .waitFor({ timeout: 12000 });
+    check(
+      'L1 cross-browser magic-link callback starts one fresh OAuth transaction',
+      oauthRecoveryStarts === 1 && !recoveryPage.url().includes('oauth_code_verification_failed')
+    );
+    await recoveryContext.close();
 
     check('L1 UI has no uncaught page exception', errors.length === 0, errors.join('; '));
   } finally {

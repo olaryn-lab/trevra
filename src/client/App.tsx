@@ -75,7 +75,12 @@ import {
 } from './api';
 import { authClient, useIsWorkspaceOwner, useWorkspaceRole } from './auth-client';
 import { loginAuthError } from './auth-errors';
-import { INTERACTION_EXPIRED_MESSAGE, resolveAuthError, sessionStorageOrNull } from './auth-error';
+import {
+  INTERACTION_EXPIRED_MESSAGE,
+  OAUTH_SESSION_RECOVERY_MESSAGE,
+  resolveAuthError,
+  sessionStorageOrNull
+} from './auth-error';
 import { ActiveLinkedInAccountName } from './LinkedInActiveAccount';
 import { reloadOutreach } from './LinkedInSafety';
 import { LinkedInAccounts } from './LinkedInAccounts';
@@ -722,13 +727,29 @@ function AuthScreen({
     }
     // Preserve friendly errors for ordinary OAuth/magic-link failures, while
     // allowing one bounded retry for Authward's expired signed interaction.
-    if (params.has('error')) {
+    const callbackError = params.get('error');
+    if (callbackError !== null) {
       const message = loginAuthError(params);
       if (message) setAuthError(message);
       params.delete('error');
       cleanAuthQuery = true;
     }
     let restartSignIn = false;
+    let restartFailureMessage = INTERACTION_EXPIRED_MESSAGE;
+    if (callbackError === 'oauth_code_verification_failed') {
+      // An emailed Authward link may open in another browser, which does not
+      // have the original Trevra OAuth state/PKCE cookie. After Authward
+      // establishes its session, a fresh Trevra OAuth request in *this* tab
+      // can complete normally. Never retry unboundedly.
+      const outcome = resolveAuthError('oauth_code_verification_failed', sessionStorageOrNull());
+      if (outcome.kind === 'restart') {
+        restartSignIn = true;
+        restartFailureMessage = OAUTH_SESSION_RECOVERY_MESSAGE;
+        setAuthError('');
+      } else {
+        setAuthError(outcome.message);
+      }
+    }
     if (params.has('auth_error')) {
       const outcome = resolveAuthError(params.get('auth_error') ?? '', sessionStorageOrNull());
       if (outcome.kind === 'restart') restartSignIn = true;
@@ -753,7 +774,7 @@ function AuthScreen({
       // Authward: start a fresh one (see auth-error.ts for the loop guard).
       setBusy(true);
       const showExpired = () => {
-        setAuthError(INTERACTION_EXPIRED_MESSAGE);
+        setAuthError(restartFailureMessage);
         setBusy(false);
       };
       void startAuthwardSignIn().then((result) => {
@@ -940,7 +961,7 @@ function AuthScreen({
                       key={provider}
                       className={
                         'google-auth-button ol-auth-action ' +
-                        (index === 0 ? 'ol-auth-primary' : '')
+                        (index === 0 && !passkeyEnabled ? 'ol-auth-primary' : '')
                       }
                       disabled={busy || socialBusy !== null}
                       onClick={() => void signInWithSocialProvider(provider)}
