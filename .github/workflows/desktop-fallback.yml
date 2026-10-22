@@ -1,0 +1,114 @@
+name: Desktop fallback QA
+
+# GitHub-hosted CI stays the default. The desktop is only dispatched after
+# a completed hosted run on this exact main SHA was refused for billing/quota.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  checks: read
+
+jobs:
+  fallback-quality:
+    if: github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Linux, X64, desktop-fallback-trevra]
+    timeout-minutes: 80
+    steps:
+      - name: Enforce hosted-runner exhaustion on exact commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="$GITHUB_API_URL/repos/$GITHUB_REPOSITORY"
+          auth=(-H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json")
+          runs=$(curl -fsS "${auth[@]}" "$api/actions/runs?head_sha=$GITHUB_SHA&per_page=40")
+          found=0
+          while read -r run; do
+            [[ -n "$run" ]] || continue
+            jobs=$(curl -fsS "${auth[@]}" "$api/actions/runs/$run/jobs?per_page=100")
+            while read -r id; do
+              [[ -n "$id" ]] || continue
+              ann=$(curl -fsS "${auth[@]}" "$api/check-runs/$id/annotations?per_page=100")
+              if jq -e '[.[] | .message | ascii_downcase | select(test("payments have failed|spending limit needs to be increased|billing.*limit"))] | length > 0' <<< "$ann" >/dev/null; then
+                found=1
+                break
+              fi
+            done < <(jq -r '.jobs[] | select(.conclusion=="failure") | .id' <<< "$jobs")
+            [[ "$found" == 0 ]] || break
+          done < <(jq -r '[.workflow_runs[] | select(.event=="push" or .event=="workflow_dispatch") | select(.conclusion=="failure") | select(.name!="Desktop fallback QA") | .id] | .[]' <<< "$runs")
+          if [[ "$found" != 1 ]]; then
+            echo "::error::No confirmed GitHub-hosted billing/quota refusal on $GITHUB_SHA. Desktop fallback is forbidden."
+            exit 1
+          fi
+          echo "Verified a GitHub-hosted quota/billing refusal. Running isolated fallback QA."
+      - name: Checkout trusted main revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.23.2
+      - name: Run project-specific source-level checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$GITHUB_REPOSITORY" in
+            olaryn-lab/auth)
+              npm ci --no-fund
+              npm run typecheck
+              npm test
+              npm run build
+              npm audit --omit=dev --audit-level=high
+              npm --silent run security:sbom > /tmp/authward-fallback.cdx.json
+              node -e 'const x=require("/tmp/authward-fallback.cdx.json");if(!x.bomFormat || !Array.isArray(x.components))process.exit(1)'
+              ;;
+            olaryn-lab/trevra)
+              npm ci --no-fund
+              npm run typecheck
+              npm run test:unit
+              npm run build
+              ;;
+            olaryn-lab/billing)
+              uv python install 3.13.15
+              uv sync --frozen
+              uv run ruff check src tests migrations scripts
+              uv run ruff format --check src tests migrations scripts
+              uv run bandit -q -r src
+              uv run python -m compileall -q src migrations
+              ;;
+            olaryn-lab/design-system)
+              bun install --frozen-lockfile
+              bun run check
+              bun run typecheck
+              ;;
+            leanchain/e-commerce)
+              bun install --frozen-lockfile
+              cd backend
+              uv sync --all-extras
+              cd ..
+              make static
+              ;;
+            lemoncrow-lab/lemoncrow-dev)
+              uv sync --locked
+              uv run --locked python -m scripts.release_gate --validate
+              uv run --locked python scripts/render_support_matrix.py --check
+              ;;
+            lemoncrow-lab/landing)
+              npm ci --no-fund
+              npm run typecheck
+              npm test
+              npm run build
+              ;;
+            *)
+              echo "::error::No approved quality recipe for $GITHUB_REPOSITORY; refusing a green no-op."
+              exit 2
+              ;;
+          esac
+      - name: Report qualification scope
+        run: |
+          echo "Desktop fallback QA passed for $GITHUB_REPOSITORY @ $GITHUB_SHA."
+          echo "This does NOT replace Docker-image vulnerability scans, real database/integration tests, or protected production release gates."
