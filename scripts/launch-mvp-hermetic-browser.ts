@@ -639,6 +639,39 @@ async function main() {
     );
     await recoveryContext.close();
 
+    // The *verified* Authward email link may open in a new Android Chrome
+    // tab/WebView that never held the original Trevra OAuth state/PKCE cookie.
+    // Trevra must create exactly one NEW browser-owned OAuth transaction.
+    const emailContext = await browser.newContext();
+    const emailPage = await emailContext.newPage();
+    let freshOAuthStarts = 0;
+    await emailPage.route('**/api/auth/sign-in/oauth2', async (route) => {
+      freshOAuthStarts += 1;
+      await route.fulfill({
+        status: 400,
+        contentType: 'application/json',
+        body: JSON.stringify({ error: { message: 'Synthetic OAuth failure' } })
+      });
+    });
+    await emailPage.goto(origin + '/login?authward_session_ready=1', {
+      waitUntil: 'domcontentloaded'
+    });
+    await emailPage
+      .getByText('Email verification succeeded, but sign-in could not finish.', { exact: false })
+      .waitFor({ timeout: 12000 });
+    check(
+      'L1 verified email link initiates one new OAuth session in receiving browser',
+      freshOAuthStarts === 1 && !emailPage.url().includes('authward_session_ready')
+    );
+    await emailPage.goto(origin + '/login?authward_session_ready=1', {
+      waitUntil: 'domcontentloaded'
+    });
+    await emailPage
+      .getByText('Email sign-in could not finish automatically.', { exact: false })
+      .waitFor({ timeout: 12000 });
+    check('L1 repeated verified-email URL cannot create redirect loop', freshOAuthStarts === 1);
+    await emailContext.close();
+
     check('L1 UI has no uncaught page exception', errors.length === 0, errors.join('; '));
   } finally {
     const evidence = process.env.LAUNCH_ACCEPTANCE_REPORT_DIR;

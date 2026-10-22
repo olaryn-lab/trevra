@@ -18,6 +18,7 @@
  */
 
 export const INTERACTION_RESTART_STORAGE_KEY = 'trevra.authwardInteractionRestartAt';
+export const EMAIL_CONTINUATION_STORAGE_KEY = 'trevra.authwardEmailContinuationAt';
 export const INTERACTION_RESTART_WINDOW_MS = 2 * 60 * 1000;
 
 export const INTERACTION_EXPIRED_MESSAGE = 'Your sign-in link expired. Sign in again to continue.';
@@ -60,6 +61,25 @@ export function claimInteractionRestart(
     // abs(): a marker left by a clock that later moved backwards still counts as recent.
     if (last > 0 && Math.abs(now - last) < INTERACTION_RESTART_WINDOW_MS) return false;
     storage.setItem(INTERACTION_RESTART_STORAGE_KEY, String(now));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** An Authward-verified email callback may cause ONE new browser-owned OAuth
+ * handshake. A new tab or WebView then creates its own state/PKCE cookie.
+ * The continuation hint is never a credential or proof of authentication.
+ */
+export function claimEmailContinuation(
+  storage: RestartMarkerStorage | null,
+  now: number = Date.now()
+): boolean {
+  if (!storage) return false;
+  try {
+    const last = Number(storage.getItem(EMAIL_CONTINUATION_STORAGE_KEY));
+    if (last > 0 && Math.abs(now - last) < INTERACTION_RESTART_WINDOW_MS) return false;
+    storage.setItem(EMAIL_CONTINUATION_STORAGE_KEY, String(now));
     return true;
   } catch {
     return false;

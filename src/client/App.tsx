@@ -80,6 +80,7 @@ import { loginAuthError } from './auth-errors';
 import {
   INTERACTION_EXPIRED_MESSAGE,
   OAUTH_SESSION_RECOVERY_MESSAGE,
+  claimEmailContinuation,
   resolveAuthError,
   sessionStorageOrNull
 } from './auth-error';
@@ -739,6 +740,22 @@ function AuthScreen({
     }
     let restartSignIn = false;
     let restartFailureMessage = INTERACTION_EXPIRED_MESSAGE;
+    if (params.get('authward_session_ready') === '1') {
+      // The user's email link has established an Authward session in the
+      // browser that opened it. This is only a navigation hint: our next
+      // OAuth transaction still verifies state, PKCE, issuer and subject.
+      // Do not reuse the original (potentially cross-browser) authorization.
+      if (callbackError === null && claimEmailContinuation(sessionStorageOrNull())) {
+        restartSignIn = true;
+        restartFailureMessage =
+          'Email verification succeeded, but sign-in could not finish. Try again here.';
+        setAuthError('');
+      } else if (callbackError === null) {
+        setAuthError('Email sign-in could not finish automatically. Choose a sign-in method.');
+      }
+      params.delete('authward_session_ready');
+      cleanAuthQuery = true;
+    }
     if (callbackError === 'oauth_code_verification_failed') {
       // An emailed Authward link may open in another browser, which does not
       // have the original Trevra OAuth state/PKCE cookie. After Authward

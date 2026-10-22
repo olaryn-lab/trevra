@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   INTERACTION_EXPIRED_MESSAGE,
   OAUTH_SESSION_RECOVERY_MESSAGE,
+  claimEmailContinuation,
   INTERACTION_RESTART_STORAGE_KEY,
   INTERACTION_RESTART_WINDOW_MS,
   resolveAuthError,
@@ -75,6 +76,14 @@ describe('auth_error on the sign-in screen', () => {
         message: INTERACTION_EXPIRED_MESSAGE
       });
     }
+  });
+
+  it('permits one browser-owned OAuth restart after verified email link and never loops', () => {
+    const { storage } = memoryStorage();
+    expect(claimEmailContinuation(storage, t0)).toBe(true);
+    expect(claimEmailContinuation(storage, t0 + 1_000)).toBe(false);
+    expect(claimEmailContinuation(storage, t0 + INTERACTION_RESTART_WINDOW_MS + 1)).toBe(true);
+    expect(claimEmailContinuation(null, t0)).toBe(false);
   });
 
   it('recovers an emailed OAuth callback opened without the original PKCE cookie once per tab', () => {
