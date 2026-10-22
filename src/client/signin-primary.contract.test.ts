@@ -9,4 +9,8 @@ describe('hosted Trevra login action hierarchy', () => {
     expect(src).toContain('className="google-auth-button ol-auth-action ol-auth-primary"');
     expect(src).toContain("(index === 0 && !passkeyEnabled ? 'ol-auth-primary' : '')");
   });
+  it('calls native Trevra passkey rather than the legacy redirected OAuth method', () => {
+    expect(src).toContain('await nativeTrevraSignIn()');
+    expect(src).not.toContain("startAuthwardSignIn(undefined, 'passkey')");
+  });
 });

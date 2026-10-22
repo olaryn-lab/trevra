@@ -591,14 +591,10 @@ async function main() {
         })
       });
     });
-    let passkeyOAuthBody: Record<string, unknown> | null = null;
+    let passkeyOAuthStarts = 0;
     await passkeyPage.route('**/api/auth/sign-in/oauth2', async (route) => {
-      passkeyOAuthBody = route.request().postDataJSON() as Record<string, unknown>;
-      await route.fulfill({
-        status: 400,
-        contentType: 'application/json',
-        body: JSON.stringify({ error: { message: 'Synthetic provider double rejected' } })
-      });
+      passkeyOAuthStarts += 1;
+      await route.fulfill({ status: 400, contentType: 'application/json', body: '{}' });
     });
     await passkeyPage.reload({ waitUntil: 'domcontentloaded' });
     const passkeyButton = passkeyPage.getByRole('button', { name: 'Continue with passkey' });
@@ -615,9 +611,7 @@ async function main() {
     await passkeyPage
       .getByText('Passkey sign-in could not be completed.', { exact: false })
       .waitFor({ timeout: 12000 });
-    const method = (passkeyOAuthBody as { additionalData?: { authMethod?: string } } | null)
-      ?.additionalData?.authMethod;
-    check('L1 passkey click starts existing OAuth with passkey method hint', method === 'passkey');
+    check('L1 native passkey never redirects through Authward OAuth', passkeyOAuthStarts === 0);
     await passkeyContext.close();
 
     // Email links opened from a mail client may arrive in a new browser with

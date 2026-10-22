@@ -1,4 +1,6 @@
 import { AccountMigration } from './AccountMigration';
+import { NativeTrevraPasskeySettings } from './NativeTrevraPasskeySettings';
+import { nativeTrevraSignIn } from './native-product-passkey';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -624,6 +626,7 @@ function SetupView({
       ) : onWorkspace ? (
         <PageGrid columns={2} className="workspace-reference-grid">
           <AccountMigration />
+          <NativeTrevraPasskeySettings />
           <ConnectionsView
             data={data}
             reload={reload}
@@ -788,11 +791,8 @@ function AuthScreen({
     setSocialBusy('passkey');
     setAuthError('');
     try {
-      const result = await startAuthwardSignIn(undefined, 'passkey');
-      if (result?.error) {
-        setAuthError('Passkey sign-in could not be completed. Try another sign-in method.');
-        setSocialBusy(null);
-      }
+      await nativeTrevraSignIn();
+      await onAuthenticated();
     } catch {
       setAuthError('Passkey sign-in could not be completed. Try another sign-in method.');
       setSocialBusy(null);

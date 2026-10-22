@@ -4,6 +4,10 @@ import type { Express, RequestHandler } from 'express';
 import { authwardAuthority, isolatedSubject } from './authward-config.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import pg from 'pg';
+import {
+  nativeTrevraPasskeyPlugin,
+  proxyTrevraPasskeyEnrollment
+} from './native-product-passkey.js';
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { APIError, betterAuth } from 'better-auth';
 import { fromNodeHeaders } from 'better-auth/node';
@@ -387,6 +391,10 @@ authPool.on('error', (error) =>
   console.error('Unexpected Better Auth PostgreSQL pool error', error)
 );
 
+export function enrollTrevraPasskey(userId: string, phase: 'options' | 'verify', data: unknown) {
+  return proxyTrevraPasskeyEnrollment(authPool, userId, phase, data);
+}
+
 /* ===========================================================================
  * Team workspace access (docs/superpowers/specs/2026-08-13-team-workspace-
  * access-design.md). `workspaces` stays Trevra's own table -- ~15 business
@@ -575,6 +583,7 @@ export const auth = betterAuth({
   },
   plugins: [
     authwardProvider,
+    nativeTrevraPasskeyPlugin(authPool),
     // Default roles only (owner / admin / member), no custom access-control
     // statements and no teams -- spec Non-goals. This workspace uses exactly
     // two of the three: 'owner' (the credential-management carve-out) and
