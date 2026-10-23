@@ -1,4 +1,6 @@
 import { AccountMigration } from './AccountMigration';
+import { NativeTrevraPasskeySettings } from './NativeTrevraPasskeySettings';
+import { nativeTrevraSignIn } from './native-product-passkey';
 import { Fragment, useEffect, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import {
@@ -75,7 +77,13 @@ import {
 } from './api';
 import { authClient, useIsWorkspaceOwner, useWorkspaceRole } from './auth-client';
 import { loginAuthError } from './auth-errors';
-import { INTERACTION_EXPIRED_MESSAGE, resolveAuthError, sessionStorageOrNull } from './auth-error';
+import {
+  INTERACTION_EXPIRED_MESSAGE,
+  OAUTH_SESSION_RECOVERY_MESSAGE,
+  claimEmailContinuation,
+  resolveAuthError,
+  sessionStorageOrNull
+} from './auth-error';
 import { ActiveLinkedInAccountName } from './LinkedInActiveAccount';
 import { reloadOutreach } from './LinkedInSafety';
 import { LinkedInAccounts } from './LinkedInAccounts';
@@ -619,6 +627,7 @@ function SetupView({
       ) : onWorkspace ? (
         <PageGrid columns={2} className="workspace-reference-grid">
           <AccountMigration />
+          <NativeTrevraPasskeySettings />
           <ConnectionsView
             data={data}
             reload={reload}
@@ -722,13 +731,45 @@ function AuthScreen({
     }
     // Preserve friendly errors for ordinary OAuth/magic-link failures, while
     // allowing one bounded retry for Authward's expired signed interaction.
-    if (params.has('error')) {
+    const callbackError = params.get('error');
+    if (callbackError !== null) {
       const message = loginAuthError(params);
       if (message) setAuthError(message);
       params.delete('error');
       cleanAuthQuery = true;
     }
     let restartSignIn = false;
+    let restartFailureMessage = INTERACTION_EXPIRED_MESSAGE;
+    if (params.get('authward_session_ready') === '1') {
+      // The user's email link has established an Authward session in the
+      // browser that opened it. This is only a navigation hint: our next
+      // OAuth transaction still verifies state, PKCE, issuer and subject.
+      // Do not reuse the original (potentially cross-browser) authorization.
+      if (callbackError === null && claimEmailContinuation(sessionStorageOrNull())) {
+        restartSignIn = true;
+        restartFailureMessage =
+          'Email verification succeeded, but sign-in could not finish. Try again here.';
+        setAuthError('');
+      } else if (callbackError === null) {
+        setAuthError('Email sign-in could not finish automatically. Choose a sign-in method.');
+      }
+      params.delete('authward_session_ready');
+      cleanAuthQuery = true;
+    }
+    if (callbackError === 'oauth_code_verification_failed') {
+      // An emailed Authward link may open in another browser, which does not
+      // have the original Trevra OAuth state/PKCE cookie. After Authward
+      // establishes its session, a fresh Trevra OAuth request in *this* tab
+      // can complete normally. Never retry unboundedly.
+      const outcome = resolveAuthError('oauth_code_verification_failed', sessionStorageOrNull());
+      if (outcome.kind === 'restart') {
+        restartSignIn = true;
+        restartFailureMessage = OAUTH_SESSION_RECOVERY_MESSAGE;
+        setAuthError('');
+      } else {
+        setAuthError(outcome.message);
+      }
+    }
     if (params.has('auth_error')) {
       const outcome = resolveAuthError(params.get('auth_error') ?? '', sessionStorageOrNull());
       if (outcome.kind === 'restart') restartSignIn = true;
@@ -753,7 +794,7 @@ function AuthScreen({
       // Authward: start a fresh one (see auth-error.ts for the loop guard).
       setBusy(true);
       const showExpired = () => {
-        setAuthError(INTERACTION_EXPIRED_MESSAGE);
+        setAuthError(restartFailureMessage);
         setBusy(false);
       };
       void startAuthwardSignIn().then((result) => {
@@ -767,11 +808,8 @@ function AuthScreen({
     setSocialBusy('passkey');
     setAuthError('');
     try {
-      const result = await startAuthwardSignIn(undefined, 'passkey');
-      if (result?.error) {
-        setAuthError('Passkey sign-in could not be completed. Try another sign-in method.');
-        setSocialBusy(null);
-      }
+      await nativeTrevraSignIn();
+      await onAuthenticated();
     } catch {
       setAuthError('Passkey sign-in could not be completed. Try another sign-in method.');
       setSocialBusy(null);
@@ -940,7 +978,7 @@ function AuthScreen({
                       key={provider}
                       className={
                         'google-auth-button ol-auth-action ' +
-                        (index === 0 ? 'ol-auth-primary' : '')
+                        (index === 0 && !passkeyEnabled ? 'ol-auth-primary' : '')
                       }
                       disabled={busy || socialBusy !== null}
                       onClick={() => void signInWithSocialProvider(provider)}

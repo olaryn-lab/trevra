@@ -10,7 +10,10 @@ export function loginAuthError(params: URLSearchParams): string | null {
   if (code === 'INVALID_TOKEN') {
     return 'That sign-in link is invalid, expired, or has already been used. Request a new one.';
   }
-  if (code === 'invalid_client' || code === 'oauth_code_verification_failed') {
+  if (code === 'oauth_code_verification_failed') {
+    return 'We could not restore your sign-in session. Sign in again in this browser.';
+  }
+  if (code === 'invalid_client') {
     return 'Sign-in is temporarily unavailable. Please try again later.';
   }
   return 'We could not complete your sign-in. Please try again.';

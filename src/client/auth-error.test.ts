@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   INTERACTION_EXPIRED_MESSAGE,
+  OAUTH_SESSION_RECOVERY_MESSAGE,
+  claimEmailContinuation,
   INTERACTION_RESTART_STORAGE_KEY,
   INTERACTION_RESTART_WINDOW_MS,
   resolveAuthError,
@@ -74,6 +76,36 @@ describe('auth_error on the sign-in screen', () => {
         message: INTERACTION_EXPIRED_MESSAGE
       });
     }
+  });
+
+  it('permits one browser-owned OAuth restart after verified email link and never loops', () => {
+    const { storage } = memoryStorage();
+    expect(claimEmailContinuation(storage, t0)).toBe(true);
+    expect(claimEmailContinuation(storage, t0 + 1_000)).toBe(false);
+    expect(claimEmailContinuation(storage, t0 + INTERACTION_RESTART_WINDOW_MS + 1)).toBe(true);
+    expect(claimEmailContinuation(null, t0)).toBe(false);
+  });
+
+  it('recovers an emailed OAuth callback opened without the original PKCE cookie once per tab', () => {
+    const { storage, values } = memoryStorage();
+    expect(resolveAuthError('oauth_code_verification_failed', storage, t0)).toEqual({
+      kind: 'restart'
+    });
+    expect(resolveAuthError('oauth_code_verification_failed', storage, t0 + 1_000)).toEqual({
+      kind: 'message',
+      message: OAUTH_SESSION_RECOVERY_MESSAGE
+    });
+    expect(resolveAuthError('interaction_expired', storage, t0 + 2_000)).toEqual({
+      kind: 'message',
+      message: INTERACTION_EXPIRED_MESSAGE
+    });
+    expect(values.size).toBe(1);
+    // Without reliable session storage a redirect loop must never start.
+    expect(resolveAuthError('oauth_code_verification_failed', null, t0)).toEqual({
+      kind: 'message',
+      message: OAUTH_SESSION_RECOVERY_MESSAGE
+    });
+    expect(resolveAuthError('invalid_client', memoryStorage().storage, t0).kind).toBe('message');
   });
 
   it('keeps provider messages and falls back to a generic message for anything else', () => {

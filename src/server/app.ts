@@ -1,4 +1,5 @@
 import { mountAccountMigration } from './auth-service.js';
+import { nativeTrevraEnabled, NATIVE_TREVRA_ORIGIN } from './native-product-passkey.js';
 import express, {
   type NextFunction,
   type Request,
@@ -48,6 +49,7 @@ import {
   configureAuthProvisioning,
   dispatchAuthwardMagicLink,
   emailPasswordAuthEnabled,
+  enrollTrevraPasskey,
   getAuthwardCapabilities,
   handleAuthwardBackchannelLogout,
   resolveBetterAuthIdentity
@@ -696,6 +698,10 @@ export function createApp(db: Db) {
         process.env.NODE_ENV === 'production'
           ? {
               directives: {
+                connectSrc: [
+                  "'self'",
+                  ...(nativeTrevraEnabled() ? ['https://auth.olaryn.com'] : [])
+                ],
                 scriptSrc: [
                   "'self'",
                   (_req, res) => `'nonce-${String((res as unknown as Response).locals.cspNonce)}'`
@@ -944,7 +950,7 @@ export function createApp(db: Db) {
     const authwardCapabilities = await getAuthwardCapabilities();
     res.json({
       authwardAuthEnabled,
-      passkeyAuthEnabled: authwardCapabilities.passkey,
+      passkeyAuthEnabled: nativeTrevraEnabled(),
       socialAuthProviders: authwardCapabilities.socialProviders,
       // Compatibility field for older clients.
       googleAuthEnabled: authwardCapabilities.socialProviders.includes('google'),
@@ -1091,6 +1097,30 @@ export function createApp(db: Db) {
       '/api/auth/unlink-account'
     ],
     (_req, res) => res.sendStatus(403)
+  );
+  // Authward verifies the product-RP credential; enrollment never sends the
+  // authenticated user's stored ID token to browser JavaScript.
+  app.use('/api/auth/native-passkey', authLimiter);
+  app.post(
+    '/api/auth/native-passkey/enroll/:phase',
+    express.json({ limit: '24kb' }),
+    async (req, res) => {
+      if (!nativeTrevraEnabled()) return res.sendStatus(404);
+      if (req.headers.origin !== NATIVE_TREVRA_ORIGIN) return res.sendStatus(403);
+      const phase = req.params.phase;
+      if (phase !== 'options' && phase !== 'verify') return res.sendStatus(404);
+      const identity = await readSession(db, req);
+      if (!identity) return res.sendStatus(401);
+      try {
+        const output = await enrollTrevraPasskey(identity.userId, phase, req.body);
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(output);
+      } catch (error) {
+        res.status(400).json({
+          error: error instanceof Error ? error.message : 'Passkey enrollment unavailable'
+        });
+      }
+    }
   );
   app.all('/api/auth/*splat', toNodeHandler(betterAuth));
 

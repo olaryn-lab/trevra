@@ -138,3 +138,15 @@ Nango's PostgreSQL data and encryption key must be backed up together. A databas
 ## Cloud Run Compose reference
 
 `compose.gcp.yml` demonstrates the requested Cloud Run multi-container shape with a Cloud SQL Auth Proxy sidecar. Cloud Run Compose support is useful for previews and simple deployments, but the Terraform resources are the maintained production configuration because they express Cloud SQL HA, backups, IAM, Secret Manager, deletion protection, and remote state explicitly.
+
+## Native Trevra passkeys (opt-in)
+
+`TREVRA_NATIVE_PASSKEY_ENABLED=true` enables Trevra-domain WebAuthn only in
+hosted production with the legacy `trevra-web` Authward authority and canonical
+`APP_ORIGIN=https://app.usetrevra.com`. The default is disabled. First deploy
+Authward's `product-rp-passkeys.ts` Trevra origin and prove its exact CORS
+allowlist; then ship and enable the Trevra feature flag. Existing Authward RP
+passkeys do not work on the Trevra RP and are not migrated. The Trevra
+Setup → Workspace page contains new enrollment after a recent social/email
+sign-in. See `docs/release/2026-10-22-trevra-native-passkey-handover.md` for
+security checks and the supervised acceptance sequence.
