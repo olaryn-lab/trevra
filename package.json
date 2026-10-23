@@ -103,7 +103,7 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vite": "^8.1.5",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.12"
   },
   "optionalDependencies": {
     "playwright": "^1.62.1"
