@@ -43,6 +43,12 @@ import { relativeTime } from './LinkedInScreen';
 import { DELAY_CHOICES, plannedForFrom, queueWaitCopy, type ScheduleMode } from './LinkedInTiming';
 import { useWorkspaceMembers } from './TeamScreen';
 import { mergeInboxSearchPage } from './inboxSearchPages';
+import {
+  INBOX_MESSAGE_PAGE,
+  inboxMessageLimitForThread,
+  newestInboxMessages,
+  nextInboxMessageLimit
+} from './inboxMessageWindow';
 import { ConfidenceTag } from './LinkedInViz';
 import { Select } from './ui/primitives';
 import { plural } from './ui/plural';
@@ -409,6 +415,14 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
   const [openUrn, setOpenUrn] = useState<string | null>(null);
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
   const [conversation, setConversation] = useState<LinkedInConversation | null>(null);
+  /**
+   * The visible message window belongs to the selected thread. Changing
+   * conversations resets to 50 without relying on effects or stale fetches;
+   * syncing the same thread keeps the operator's place in its history.
+   */
+  const [messageWindow, setMessageWindow] = useState<{ threadId: string; limit: number } | null>(
+    null
+  );
   /** Every `reply` this workspace queued, so the composer can say where each one got to. */
   const [replies, setReplies] = useState<LinkedInActionView[]>([]);
   /** True when that read came back full: an older queued message to somebody may be missing from the strip. */
@@ -695,8 +709,15 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
     }
   };
 
+  /** A deliberate selection resets the visible history; background sync does not. */
+  const selectThread = (threadUrn: string) => {
+    setMessageWindow(null);
+    void openThread(threadUrn);
+  };
+
   /** A task is something to write, not something that arrived. Opening one loads its draft. */
   const selectTask = (task: ManualTaskView) => {
+    setMessageWindow(null);
     setOpenTaskId(task.id);
     setOpenUrn(null);
     setConversation(null);
@@ -1080,6 +1101,11 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
   const filtered =
     filters.unread || filters.hasReply || Boolean(filters.campaignId) || Boolean(search.trim());
   const messages = conversation?.messages ?? [];
+  const shownMessageLimit = inboxMessageLimitForThread(
+    messageWindow,
+    conversation?.thread.id ?? null
+  );
+  const visibleMessages = newestInboxMessages(messages, shownMessageLimit);
   /**
    * ONE LIST, NOT TWO. A native inbox is a single rail sorted by recency; a
    * task's "recency" is when the campaign asked for it (`createdAt`), a
@@ -1312,7 +1338,7 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                     <button
                       type="button"
                       className={`li-thread ${openUrn === row.thread.threadUrn ? 'is-open' : ''}`}
-                      onClick={() => void openThread(row.thread.threadUrn)}
+                      onClick={() => selectThread(row.thread.threadUrn)}
                     >
                       <LiAvatar
                         name={row.thread.name}
@@ -1454,7 +1480,7 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                   <button
                     className="secondary-button"
                     type="button"
-                    onClick={() => void openThread(taskThread.threadUrn)}
+                    onClick={() => selectThread(taskThread.threadUrn)}
                   >
                     <MessageSquare size={14} /> Open the conversation
                   </button>
@@ -1697,36 +1723,63 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                   shows.
                 </p>
               ) : (
-                <ol className="li-msgs">
-                  {groupMessages(messages).map((item) => {
-                    if (item.kind === 'divider') {
+                <>
+                  {visibleMessages.length < messages.length && (
+                    <div className="panel-footer" role="group" aria-label="Older stored messages">
+                      <span>
+                        Showing the newest {visibleMessages.length} of {messages.length} stored
+                        messages. Earlier messages have not been deleted.
+                      </span>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() =>
+                          setMessageWindow({
+                            threadId: conversation.thread.id,
+                            limit: nextInboxMessageLimit(shownMessageLimit, messages.length)
+                          })
+                        }
+                      >
+                        <Inbox size={14} /> Load{' '}
+                        {Math.min(INBOX_MESSAGE_PAGE, messages.length - visibleMessages.length)}{' '}
+                        older messages
+                      </button>
+                    </div>
+                  )}
+                  <ol className="li-msgs">
+                    {groupMessages(visibleMessages).map((item) => {
+                      if (item.kind === 'divider') {
+                        return (
+                          <li key={item.key} className="li-day-divider" role="presentation">
+                            <span>{item.label}</span>
+                          </li>
+                        );
+                      }
+                      const last = item.items[item.items.length - 1];
+                      const queuedBy = last.actionId ? nameFor(last.queuedByUserId) : null;
                       return (
-                        <li key={item.key} className="li-day-divider" role="presentation">
-                          <span>{item.label}</span>
+                        <li
+                          key={item.key}
+                          className={`li-msg-group li-msg-group-${item.direction}`}
+                        >
+                          <span className="li-msg-who">
+                            {item.direction === 'in' ? 'Them' : 'You'}
+                          </span>
+                          {item.items.map((message) => (
+                            <p key={message.id} className="li-msg-bubble">
+                              {message.body}
+                            </p>
+                          ))}
+                          <span className="li-msg-time">
+                            {messageTime(last.sentAt) ?? 'No timestamp was rendered'}
+                            {last.actionId &&
+                              ` · sent through Trevra${queuedBy ? ` by ${queuedBy}` : ''}`}
+                          </span>
                         </li>
                       );
-                    }
-                    const last = item.items[item.items.length - 1];
-                    const queuedBy = last.actionId ? nameFor(last.queuedByUserId) : null;
-                    return (
-                      <li key={item.key} className={`li-msg-group li-msg-group-${item.direction}`}>
-                        <span className="li-msg-who">
-                          {item.direction === 'in' ? 'Them' : 'You'}
-                        </span>
-                        {item.items.map((message) => (
-                          <p key={message.id} className="li-msg-bubble">
-                            {message.body}
-                          </p>
-                        ))}
-                        <span className="li-msg-time">
-                          {messageTime(last.sentAt) ?? 'No timestamp was rendered'}
-                          {last.actionId &&
-                            ` · sent through Trevra${queuedBy ? ` by ${queuedBy}` : ''}`}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ol>
+                    })}
+                  </ol>
+                </>
               )}
 
               <div className="li-composer">
