@@ -289,7 +289,7 @@ export function renderUnsubscribePage(state: UnsubscribePageState, token?: strin
     'h1{font-size:1.375rem;line-height:1.3;margin:0 0 .5rem}',
     'p{margin:0 0 1.25rem}',
     'button{min-height:44px;padding:0 1.25rem;font:inherit;border-radius:6px;border:1px solid ButtonBorder;background:ButtonFace;color:ButtonText;cursor:pointer}',
-    'button:focus-visible{outline:2px solid Highlight;outline-offset:2px}',
+    'button:focus-visible{outline: 1px solid Highlight;outline-offset: 0px}',
     '</style></head>',
     `<body><main><h1>${title}</h1><p>${escapeHtml(copy.body)}</p>${form}</main></body></html>`
   ].join('\n');
