@@ -1,3 +1,5 @@
+> **Historical baseline (6 October 2026):** file references and claims below have not been revalidated against the latest Trevra `main`.
+
 # Trevra current state: capability baseline for LemonCrow and Beseam GTM
 
 Scope and method: main branch at `a2bcb0b` ("feat(gtm): prepare capture and watch plans, populate Today work/results", 2026-10-06). The repo has 454 commits since 2026-07-23 (`git rev-list --count HEAD`; `git log`). All paths are relative to `/home/pankaj/Projects/Trevra`, and every citation is a repo file (path:line).
