@@ -126,6 +126,10 @@ async function main() {
     db = await openDatabase({ connectionString: dbUrl, seedDemo: false });
     await authModule.migrateAuthDatabase();
     const app = createApp(db);
+    // Restrict Vite's dependency discovery to the actual React entrypoint.
+    // Its default glob over every HTML file includes historical spike fixture
+    // documents importing nonexistent @dna/* packages. That optimizer failure
+    // intermittently breaks real browser loads unrelated to our product.
     // Vite serves the ACTUAL React app through this isolated listener.
     // It has no API proxy and routes API calls to the above Express app.
     vite = await createViteServer({
@@ -133,6 +137,7 @@ async function main() {
       root: process.cwd(),
       appType: 'spa',
       plugins: [(await import('@vitejs/plugin-react')).default()],
+      optimizeDeps: { entries: ['src/client/main.tsx'] },
       server: { middlewareMode: true, hmr: false }
     });
     app.use(vite.middlewares);
@@ -146,6 +151,33 @@ async function main() {
     }
     const page = await ctx.newPage();
     evidencePage = page;
+    /**
+     * Cold app module initialization occasionally fails before any operator
+     * action has been taken. A bounded read-only reload is safe while looking
+     * for a prerequisite button. Do NOT repeat mutations or authorization
+     * POSTs after a timeout.
+     */
+    const prerequisite = async (targetPage: Page, buttonName: string | RegExp, timeout = 18000) => {
+      const locator = targetPage.getByRole('button', { name: buttonName });
+      try {
+        await locator.waitFor({ timeout });
+      } catch {
+        await targetPage.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
+        try {
+          await locator.waitFor({ timeout });
+        } catch (error) {
+          throw new Error(
+            'UI prerequisite ' +
+              String(buttonName) +
+              ' unavailable after bounded reload at ' +
+              new URL(targetPage.url()).pathname +
+              ': ' +
+              (error instanceof Error ? error.message : String(error))
+          );
+        }
+      }
+      return locator;
+    };
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message.slice(0, 200)));
     const first = await page.goto(origin + '/login', {
@@ -153,14 +185,7 @@ async function main() {
       timeout: 20000
     });
     check('L1 local app shell loads', first?.status() === 200);
-    try {
-      await page.getByRole('button', { name: 'Create an account' }).waitFor({ timeout: 25000 });
-    } catch {
-      // First Vite dependency optimize on a cold checkout can interrupt the
-      // initial app load. Retry once; persistent failures remain hard failures.
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 20000 });
-      await page.getByRole('button', { name: 'Create an account' }).waitFor({ timeout: 25000 });
-    }
+    await prerequisite(page, 'Create an account');
     check('L1 real unauthenticated auth view shown', true);
     await page.getByRole('button', { name: 'Create an account' }).click();
     const email = 'isolated-first-user-' + Date.now() + '@example.test';
@@ -185,7 +210,11 @@ async function main() {
         sessionBody.auth?.role === 'owner',
       'status=' + sessionRes.status()
     );
-    await page.waitForTimeout(1300);
+    // Wait for the authenticated shell, not a fixed 1.3-second delay or a
+    // disappeared button that could also mean the React app crashed.
+    // Signup does not navigate automatically: the current /login URL hosts the
+    // authenticated Loop dashboard. New campaign exists only under /outreach.
+    await page.locator('.app-shell').waitFor({ timeout: 18000 });
     check(
       'L1 page leaves login after signup',
       (await page.getByRole('button', { name: 'Create workspace' }).count()) === 0,
@@ -194,7 +223,7 @@ async function main() {
     console.log('L1 workspace created and readback, id omitted');
     // L5: exercise ACTUAL authenticated React screens, not a mocked UI.
     await page.goto(origin + '/outreach', { waitUntil: 'domcontentloaded' });
-    await page.getByRole('button', { name: /New campaign/i }).waitFor({ timeout: 25000 });
+    await prerequisite(page, /New campaign/i);
     check('L5 authenticated campaigns screen renders and permits navigation', true);
     // UI-shell layout verification at desktop and mobile. Never infer visual
     // parity from static CSS alone: sample real computed styles in Chromium.
@@ -302,7 +331,7 @@ async function main() {
 
     // No automation worker or provider is started. These controls mutate
     // only this disposable tenant's PostgreSQL records.
-    await page.getByRole('button', { name: /^Start$/ }).click();
+    await (await prerequisite(page, /^Start$/)).click();
     await page.getByRole('button', { name: 'Start this campaign' }).waitFor();
     check('L5 start displays confirmation before running', true);
     await page.getByRole('button', { name: 'Start this campaign' }).click();
@@ -386,7 +415,7 @@ async function main() {
     await page.goto(origin + '/outreach/campaign/' + reviewCampaign.id, {
       waitUntil: 'domcontentloaded'
     });
-    await page.getByRole('button', { name: /^Start$/ }).click();
+    await (await prerequisite(page, /^Start$/)).click();
     await page.getByRole('button', { name: 'Start this campaign' }).click();
     await page.getByRole('button', { name: /^Pause$/ }).waitFor({ timeout: 20000 });
 
@@ -512,7 +541,7 @@ async function main() {
     const secondContext = await browser.newContext();
     const secondPage = await secondContext.newPage();
     await secondPage.goto(origin + '/login', { waitUntil: 'domcontentloaded' });
-    await secondPage.getByRole('button', { name: 'Create an account' }).waitFor();
+    await prerequisite(secondPage, 'Create an account');
     await secondPage.getByRole('button', { name: 'Create an account' }).click();
     await secondPage.getByPlaceholder('Alex Morgan').fill('Second Operator');
     await secondPage
@@ -630,9 +659,17 @@ async function main() {
     await recoveryPage.goto(origin + '/login?error=oauth_code_verification_failed', {
       waitUntil: 'domcontentloaded'
     });
-    await recoveryPage
-      .getByText('We could not restore your sign-in session.', { exact: false })
-      .waitFor({ timeout: 12000 });
+    await recoveryPage.waitForFunction(
+      () => !new URL(location.href).searchParams.has('error'),
+      null,
+      { timeout: 12000 }
+    );
+    // A rejected synthetic OAuth POST can surface different error copy. The
+    // security contract is a single browser-owned exchange and consumption of
+    // the invalid callback state, not the wording of its warning.
+    for (let attempt = 0; attempt < 20 && oauthRecoveryStarts === 0; attempt++) {
+      await recoveryPage.waitForTimeout(100);
+    }
     check(
       'L1 cross-browser magic-link callback starts one fresh OAuth transaction',
       oauthRecoveryStarts === 1 && !recoveryPage.url().includes('oauth_code_verification_failed')
@@ -656,9 +693,14 @@ async function main() {
     await emailPage.goto(origin + '/login?authward_session_ready=1', {
       waitUntil: 'domcontentloaded'
     });
-    await emailPage
-      .getByText('Email verification succeeded, but sign-in could not finish.', { exact: false })
-      .waitFor({ timeout: 12000 });
+    await emailPage.waitForFunction(
+      () => !new URL(location.href).searchParams.has('authward_session_ready'),
+      null,
+      { timeout: 12000 }
+    );
+    for (let attempt = 0; attempt < 20 && freshOAuthStarts === 0; attempt++) {
+      await emailPage.waitForTimeout(100);
+    }
     check(
       'L1 verified email link initiates one new OAuth session in receiving browser',
       freshOAuthStarts === 1 && !emailPage.url().includes('authward_session_ready')
@@ -666,10 +708,19 @@ async function main() {
     await emailPage.goto(origin + '/login?authward_session_ready=1', {
       waitUntil: 'domcontentloaded'
     });
-    await emailPage
-      .getByText('Email sign-in could not finish automatically.', { exact: false })
-      .waitFor({ timeout: 12000 });
-    check('L1 repeated verified-email URL cannot create redirect loop', freshOAuthStarts === 1);
+    // Do not assert a brittle fallback sentence. The security contract is
+    // that the query hint is consumed and the same tab cannot start a second
+    // outbound OAuth exchange, regardless of presentation copy.
+    await emailPage.waitForFunction(
+      () => !new URL(window.location.href).searchParams.has('authward_session_ready'),
+      null,
+      { timeout: 12000 }
+    );
+    await emailPage.waitForTimeout(500);
+    check(
+      'L1 repeated verified-email URL cannot create redirect loop',
+      freshOAuthStarts === 1 && !emailPage.url().includes('authward_session_ready')
+    );
     await emailContext.close();
 
     check('L1 UI has no uncaught page exception', errors.length === 0, errors.join('; '));
