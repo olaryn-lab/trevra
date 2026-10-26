@@ -100,7 +100,7 @@ const server = app.listen(runtime.port, () =>
     );
   else if (mode.hosted && runtime.linkedinLocalWorker.companionBrowser)
     console.log(
-      'LinkedIn companion execution is enabled: a workspace is served only while its paired computer and a signed-in Trevra tab are both present. LinkedIn traffic leaves from that computer.'
+      'LinkedIn companion execution is enabled: a workspace is served only while its paired computer is connected. LinkedIn traffic leaves from that computer; a Trevra tab does not need to stay open.'
     );
   else if (mode.hosted)
     console.log(
@@ -273,8 +273,8 @@ linkedinTimer.unref();
 // must not inherit a deployment's five-minute automation cadence, otherwise a
 // five-minute disconnect grace can become almost ten minutes before the first
 // email attempt. Scan independently once a minute; the DB marker makes repeated
-// scans idempotent and notifyDisconnectedCompanionDevices isolates failures per
-// workspace.
+// scans idempotent across replicas via durable notification claims;
+// notifyDisconnectedCompanionDevices isolates delivery failures per device.
 const COMPANION_PRESENCE_SCAN_MS = 60_000;
 let companionPresenceRunning = false;
 async function companionPresenceCycle(): Promise<void> {

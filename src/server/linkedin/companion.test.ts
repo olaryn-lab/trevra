@@ -435,6 +435,8 @@ describe('LinkedIn companion disconnect/reconnect notifications', () => {
 
     const returned = new Date(scanAt.getTime() + 60_000);
     await authenticateCompanionToken(db, paired.token, returned);
+    // Delivery is performed by the worker scan, not during socket auth.
+    await notifyDisconnectedCompanionDevices(db, returned);
     expect(notificationMock.notifyCompanionDeviceReconnected).toHaveBeenCalledTimes(1);
     expect(notificationMock.notifyCompanionDeviceReconnected).toHaveBeenCalledWith(
       db,
@@ -443,6 +445,116 @@ describe('LinkedIn companion disconnect/reconnect notifications', () => {
         deviceLabel: paired.label
       })
     );
+    expect(await disconnectNotifiedAt(paired.deviceId)).toBeNull();
+  });
+
+  it('claims a disconnect before email so overlapping worker scans do not deliver twice', async () => {
+    const paired = await pairedDevice();
+    await setLastSeen(paired.deviceId, NOW);
+    const scanAt = new Date(NOW.getTime() + COMPANION_DEVICE_DISCONNECT_GRACE_MS + 1);
+    let begin!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      begin = resolve;
+    });
+    const held = new Promise<boolean>((resolve) => {
+      release = () => resolve(true);
+    });
+    notificationMock.notifyCompanionDeviceDisconnected.mockImplementationOnce(async () => {
+      begin();
+      return held;
+    });
+
+    const first = notifyDisconnectedCompanionDevices(db, scanAt);
+    await started;
+    await notifyDisconnectedCompanionDevices(db, scanAt);
+    expect(notificationMock.notifyCompanionDeviceDisconnected).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    expect(await disconnectNotifiedAt(paired.deviceId)).not.toBeNull();
+  });
+
+  it('sends the matching reconnect notice if the computer returns during the disconnect email', async () => {
+    const paired = await pairedDevice();
+    await setLastSeen(paired.deviceId, NOW);
+    const scanAt = new Date(NOW.getTime() + COMPANION_DEVICE_DISCONNECT_GRACE_MS + 1);
+    let begin!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      begin = resolve;
+    });
+    const held = new Promise<boolean>((resolve) => {
+      release = () => resolve(true);
+    });
+    notificationMock.notifyCompanionDeviceDisconnected.mockImplementationOnce(async () => {
+      begin();
+      return held;
+    });
+
+    const scan = notifyDisconnectedCompanionDevices(db, scanAt);
+    await started;
+    await authenticateCompanionToken(db, paired.token, new Date(scanAt.getTime() + 1000));
+    expect(notificationMock.notifyCompanionDeviceReconnected).not.toHaveBeenCalled();
+    release();
+    await scan;
+    expect(notificationMock.notifyCompanionDeviceReconnected).toHaveBeenCalledTimes(1);
+    expect(await disconnectNotifiedAt(paired.deviceId)).toBeNull();
+  });
+
+  it('retries a failed disconnect email on a later scan without retaining an in-flight claim', async () => {
+    const paired = await pairedDevice();
+    await setLastSeen(paired.deviceId, NOW);
+    const scanAt = new Date(NOW.getTime() + COMPANION_DEVICE_DISCONNECT_GRACE_MS + 1);
+    notificationMock.notifyCompanionDeviceDisconnected.mockResolvedValueOnce(false);
+    await notifyDisconnectedCompanionDevices(db, scanAt);
+    await notifyDisconnectedCompanionDevices(db, new Date(scanAt.getTime() + 60_000));
+    expect(notificationMock.notifyCompanionDeviceDisconnected).toHaveBeenCalledTimes(2);
+    expect(await disconnectNotifiedAt(paired.deviceId)).not.toBeNull();
+  });
+
+  it('reclaims abandoned disconnect notifications but not fresh in-flight claims', async () => {
+    const paired = await pairedDevice();
+    await setLastSeen(paired.deviceId, NOW);
+    const scanAt = new Date(NOW.getTime() + COMPANION_DEVICE_DISCONNECT_GRACE_MS + 1);
+    await db
+      .prepare('UPDATE linkedin_companion_devices SET disconnect_claimed_at=? WHERE id=?')
+      .run(new Date(scanAt.getTime() - 60_000).toISOString(), paired.deviceId);
+    await notifyDisconnectedCompanionDevices(db, scanAt);
+    expect(notificationMock.notifyCompanionDeviceDisconnected).not.toHaveBeenCalled();
+
+    await db
+      .prepare('UPDATE linkedin_companion_devices SET disconnect_claimed_at=? WHERE id=?')
+      .run(new Date(scanAt.getTime() - 11 * 60_000).toISOString(), paired.deviceId);
+    await notifyDisconnectedCompanionDevices(db, scanAt);
+    expect(notificationMock.notifyCompanionDeviceDisconnected).toHaveBeenCalledTimes(1);
+    expect(await disconnectNotifiedAt(paired.deviceId)).not.toBeNull();
+  });
+
+  it('does not alert a recovered computer whose heartbeat moved after discovery', async () => {
+    const paired = await pairedDevice();
+    await setLastSeen(paired.deviceId, NOW);
+    const scanAt = new Date(NOW.getTime() + COMPANION_DEVICE_DISCONNECT_GRACE_MS + 1);
+    // A simulated other process has just confirmed the device is alive.
+    await setLastSeen(paired.deviceId, new Date(scanAt.getTime() - 1000));
+    await notifyDisconnectedCompanionDevices(db, scanAt);
+    expect(notificationMock.notifyCompanionDeviceDisconnected).not.toHaveBeenCalled();
+  });
+
+  it('retries a failed reconnect notice from the worker without delaying companion authentication', async () => {
+    const paired = await pairedDevice();
+    await setLastSeen(paired.deviceId, NOW);
+    const scanAt = new Date(NOW.getTime() + COMPANION_DEVICE_DISCONNECT_GRACE_MS + 1);
+    await notifyDisconnectedCompanionDevices(db, scanAt);
+    const returned = new Date(scanAt.getTime() + 1000);
+    notificationMock.notifyCompanionDeviceReconnected.mockResolvedValueOnce(false);
+
+    await authenticateCompanionToken(db, paired.token, returned);
+    expect(notificationMock.notifyCompanionDeviceReconnected).not.toHaveBeenCalled();
+    await notifyDisconnectedCompanionDevices(db, returned);
+    expect(await disconnectNotifiedAt(paired.deviceId)).not.toBeNull();
+
+    await notifyDisconnectedCompanionDevices(db, new Date(returned.getTime() + 60_000));
+    expect(notificationMock.notifyCompanionDeviceReconnected).toHaveBeenCalledTimes(2);
     expect(await disconnectNotifiedAt(paired.deviceId)).toBeNull();
   });
 

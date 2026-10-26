@@ -185,10 +185,11 @@ async function main() {
         sessionBody.auth?.role === 'owner',
       'status=' + sessionRes.status()
     );
-    await page.waitForTimeout(1300);
+    await page.waitForURL('**/loop', { timeout: 15000 });
     check(
       'L1 page leaves login after signup',
-      (await page.getByRole('button', { name: 'Create workspace' }).count()) === 0,
+      new URL(page.url()).pathname === '/loop' &&
+        (await page.getByRole('link', { name: 'Outreach' }).count()) > 0,
       'url=' + page.url()
     );
     console.log('L1 workspace created and readback, id omitted');

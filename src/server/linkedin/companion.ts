@@ -193,7 +193,6 @@ interface CompanionTokenIdentity {
   deviceId: string;
   workspaceId: string;
   label: string;
-  wasDisconnected: boolean;
 }
 
 async function companionTokenIdentity(
@@ -205,21 +204,18 @@ async function companionTokenIdentity(
   const row = await db
     .prepare(
       `
-    SELECT id, workspace_id, label, disconnect_notified_at IS NOT NULL AS was_disconnected
+    SELECT id, workspace_id, label
     FROM linkedin_companion_devices
     WHERE token_hash=? AND revoked_at IS NULL
   `
     )
-    .get<{ id: string; workspace_id: string; label: string; was_disconnected: boolean }>(
-      sha256(token)
-    );
+    .get<{ id: string; workspace_id: string; label: string }>(sha256(token));
   if (!row) return null;
   await touchCompanionDevice(db, row.id, now);
   return {
     deviceId: row.id,
     workspaceId: row.workspace_id,
-    label: row.label,
-    wasDisconnected: row.was_disconnected
+    label: row.label
   };
 }
 
@@ -244,71 +240,53 @@ export async function authenticateCompanionToken(
 ): Promise<{ deviceId: string; workspaceId: string; label: string } | null> {
   const identity = await companionTokenIdentity(db, token, now);
   if (!identity) return null;
-  const row = {
-    id: identity.deviceId,
-    workspace_id: identity.workspaceId,
-    label: identity.label,
-    was_disconnected: identity.wasDisconnected
-  };
   await db
     .prepare(
       `UPDATE linkedin_companion_recoveries
        SET status='closed',closed_at=?,last_seen_at=?
        WHERE workspace_id=? AND device_id=? AND status<>'closed'`
     )
-    .run(iso(now), iso(now), row.workspace_id, row.id);
-  // This runs exactly once per FRESH control connection (companion start, a
-  // restart, or either half of `trevra linkedin reconnect`) -- never on a
-  // routine keepalive ping, which touches `last_seen_at` directly in
-  // companion-relay.ts without going through this function. A new connection
-  // is always worth a catch-up, whether or not the gap since the last one
-  // crossed the 90s "online" threshold: signing in during `trevra linkedin
-  // reconnect` and closing the window typically takes well under 90s, and
-  // that quick round trip is exactly the moment a fresh look matters most --
-  // waiting on a stale time-gap check here is why the reconnect alert used to
-  // sit there until the next already-scheduled visit noticed on its own.
-  await markWorkspaceAvailabilityReturn(db, row.workspace_id, now);
-  // Only a device that ACTUALLY got a disconnect email earlier gets a matching
-  // reconnect email. Claim the send by clearing first (so two simultaneous new
-  // control sockets cannot double-send), but restore the marker if delivery is
-  // unavailable or fails so a later fresh connection can retry instead of
-  // recording a reconnect notification that never existed.
-  if (row.was_disconnected) {
-    const cleared = await db
-      .prepare(
-        `
-      UPDATE linkedin_companion_devices SET disconnect_notified_at=NULL WHERE id=? AND disconnect_notified_at IS NOT NULL
-    `
-      )
-      .run(row.id);
-    if (cleared.changes > 0) {
-      try {
-        const delivered = await notifyCompanionDeviceReconnected(db, {
-          workspaceId: row.workspace_id,
-          deviceLabel: row.label
-        });
-        if (!delivered) {
-          await db
-            .prepare(
-              'UPDATE linkedin_companion_devices SET disconnect_notified_at=? WHERE id=? AND disconnect_notified_at IS NULL'
-            )
-            .run(iso(now), row.id);
-        }
-      } catch (notificationError) {
-        await db
-          .prepare(
-            'UPDATE linkedin_companion_devices SET disconnect_notified_at=? WHERE id=? AND disconnect_notified_at IS NULL'
-          )
-          .run(iso(now), row.id)
-          .catch(() => undefined);
-        console.error(
-          'Failed to deliver Trevra companion reconnect notification',
-          notificationError
-        );
-      }
-    }
+    .run(iso(now), iso(now), identity.workspaceId, identity.deviceId);
+  await markWorkspaceAvailabilityReturn(db, identity.workspaceId, now);
+  // Do not await SMTP on the WebSocket authentication path. A slow mail server
+  // used to prevent the companion from reconnecting at all. The independent
+  // minute-cadence worker scan sends any matching reconnect notification.
+  return { deviceId: identity.deviceId, workspaceId: identity.workspaceId, label: identity.label };
+}
+
+/** Atomic database claim fences overlapping worker scans delivering recovery mail. */
+async function sendCompanionReconnectIfPending(
+  db: Db,
+  deviceId: string,
+  workspaceId: string,
+  label: string,
+  now: Date
+): Promise<void> {
+  const cleared = await db
+    .prepare(
+      `UPDATE linkedin_companion_devices
+       SET disconnect_notified_at=NULL
+       WHERE id=? AND revoked_at IS NULL AND disconnect_notified_at IS NOT NULL`
+    )
+    .run(deviceId);
+  if (cleared.changes === 0) return;
+  try {
+    const delivered = await notifyCompanionDeviceReconnected(db, {
+      workspaceId,
+      deviceLabel: label
+    });
+    if (delivered) return;
+  } catch (error) {
+    console.error('Failed to deliver Trevra companion reconnect notification', error);
   }
-  return { deviceId: row.id, workspaceId: row.workspace_id, label: row.label };
+  await db
+    .prepare(
+      `UPDATE linkedin_companion_devices
+       SET disconnect_notified_at=?
+       WHERE id=? AND revoked_at IS NULL AND disconnect_notified_at IS NULL`
+    )
+    .run(iso(now), deviceId)
+    .catch((error) => console.error('Failed to restore companion reconnect alert', error));
 }
 export async function touchCompanionDevice(
   db: Db,
@@ -330,57 +308,93 @@ export async function companionDeviceIsActive(db: Db, deviceId: string): Promise
 }
 
 /**
- * A periodic scan, not a request handler: never let a caller's tick die
- * because one workspace's SMTP hiccuped. Devices are processed independently,
- * each guarded by its own try/catch, and the `disconnect_notified_at IS NULL`
- * clause on the follow-up UPDATE makes a concurrent double-run of this scan a
- * no-op instead of a duplicate email.
+ * Scan for stale companions. Claim atomically BEFORE SMTP so concurrent worker
+ * replicas cannot both send the same outage notification. A claim expires after
+ * ten minutes to recover worker crashes; SMTP delivery is at-least-once.
  */
 export async function notifyDisconnectedCompanionDevices(
   db: Db,
   now: Date = new Date()
 ): Promise<void> {
   const staleBefore = iso(new Date(now.getTime() - COMPANION_DEVICE_DISCONNECT_GRACE_MS));
+  const claimExpiredBefore = iso(new Date(now.getTime() - 10 * 60_000));
   const devices = await db
     .prepare(
-      `
-    SELECT id, workspace_id, label,
-           to_char(last_seen_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_seen_at
-    FROM linkedin_companion_devices
-    WHERE revoked_at IS NULL
-      AND last_seen_at IS NOT NULL
-      AND last_seen_at < ?
-      AND disconnect_notified_at IS NULL
-  `
+      `SELECT id, workspace_id, label,
+              to_char(last_seen_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS last_seen_at
+       FROM linkedin_companion_devices
+       WHERE revoked_at IS NULL AND last_seen_at IS NOT NULL AND last_seen_at < ?
+         AND disconnect_notified_at IS NULL
+         AND (disconnect_claimed_at IS NULL OR disconnect_claimed_at < ?)`
     )
-    .all<{ id: string; workspace_id: string; label: string; last_seen_at: string }>(staleBefore);
+    .all<{ id: string; workspace_id: string; label: string; last_seen_at: string }>(
+      staleBefore,
+      claimExpiredBefore
+    );
 
   await Promise.all(
     devices.map(async (device) => {
+      const claimedAt = iso(now);
       try {
+        const claim = await db
+          .prepare(
+            `UPDATE linkedin_companion_devices
+             SET disconnect_claimed_at=?
+             WHERE id=? AND revoked_at IS NULL
+               AND last_seen_at IS NOT NULL AND last_seen_at < ?
+               AND disconnect_notified_at IS NULL
+               AND (disconnect_claimed_at IS NULL OR disconnect_claimed_at < ?)
+             RETURNING id`
+          )
+          .get<{ id: string }>(claimedAt, device.id, staleBefore, claimExpiredBefore);
+        if (!claim) return;
         const delivered = await notifyCompanionDeviceDisconnected(db, {
           workspaceId: device.workspace_id,
           deviceLabel: device.label,
           lastSeenAt: device.last_seen_at
         });
-        // `disconnect_notified_at` means exactly what its name says. Before
-        // this guard, SMTP being absent (or no owner recipient being resolved)
-        // returned successfully and we permanently marked an email as sent.
-        if (!delivered) return;
-        await db
-          .prepare(
-            `
-        UPDATE linkedin_companion_devices SET disconnect_notified_at=? WHERE id=? AND disconnect_notified_at IS NULL
-      `
-          )
-          .run(iso(now), device.id);
+        if (delivered) {
+          await db
+            .prepare(
+              `UPDATE linkedin_companion_devices
+               SET disconnect_notified_at=?, disconnect_claimed_at=NULL
+               WHERE id=? AND disconnect_claimed_at=? AND revoked_at IS NULL`
+            )
+            .run(claimedAt, device.id, claimedAt);
+        }
       } catch (error) {
         console.error(
           'Failed to notify workspace of a disconnected LinkedIn companion device',
           error
         );
+      } finally {
+        await db
+          .prepare(
+            `UPDATE linkedin_companion_devices
+             SET disconnect_claimed_at=NULL
+             WHERE id=? AND disconnect_claimed_at=? AND disconnect_notified_at IS NULL`
+          )
+          .run(device.id, claimedAt)
+          .catch((error) => console.error('Failed to release companion notification claim', error));
       }
     })
+  );
+
+  // Reconnection can happen DURING the SMTP request, before the disconnect
+  // marker is committed. A subsequent scan also retries transient email failure
+  // even when the companion has stayed connected without opening a new socket.
+  const recovered = await db
+    .prepare(
+      `SELECT id,workspace_id,label
+       FROM linkedin_companion_devices
+       WHERE revoked_at IS NULL AND disconnect_notified_at IS NOT NULL
+         AND last_seen_at >= ?`
+    )
+    .all<{ id: string; workspace_id: string; label: string }>(staleBefore);
+  await Promise.all(
+    recovered.map((device) =>
+      sendCompanionReconnectIfPending(db, device.id, device.workspace_id, device.label, now)
+    )
   );
 }
 
