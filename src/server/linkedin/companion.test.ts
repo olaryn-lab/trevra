@@ -36,6 +36,21 @@ const ENV = {
 
 let db: Db;
 
+/**
+ * The production notification scanner covers every workspace. Other Vitest
+ * files share the disposable PostgreSQL instance and can legitimately leave
+ * unrelated attention events there. Assert this fixture's workspace delivery,
+ * never the total global scan's mock call count.
+ */
+function workspaceNotificationCalls(mock: {
+  mock: { calls: readonly (readonly unknown[])[] };
+}): number {
+  return mock.mock.calls.filter((args) => {
+    const input = args[1] as { workspaceId?: string } | undefined;
+    return input?.workspaceId === WORKSPACE_ID;
+  }).length;
+}
+
 beforeEach(async () => {
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   await db
@@ -305,10 +320,10 @@ describe('LinkedIn companion pairing and presence', () => {
     ]);
 
     await notifyCompanionSeatAttentionEmails(db, NOW);
-    expect(notificationMock.notifyLinkedInSeatNeedsAttention).toHaveBeenCalledTimes(1);
+    expect(workspaceNotificationCalls(notificationMock.notifyLinkedInSeatNeedsAttention)).toBe(1);
     // A second scan sees the delivery marker and does not spam the same alert.
     await notifyCompanionSeatAttentionEmails(db, new Date(NOW.getTime() + 500));
-    expect(notificationMock.notifyLinkedInSeatNeedsAttention).toHaveBeenCalledTimes(1);
+    expect(workspaceNotificationCalls(notificationMock.notifyLinkedInSeatNeedsAttention)).toBe(1);
 
     await recordSeatEvent(
       db,
@@ -324,9 +339,9 @@ describe('LinkedIn companion pairing and presence', () => {
       (await listCompanionStatus(db, WORKSPACE_ID, new Date(NOW.getTime() + 1000))).attention
     ).toEqual([]);
     await notifyCompanionSeatAttentionEmails(db, new Date(NOW.getTime() + 1000));
-    expect(notificationMock.notifyLinkedInSeatRecovered).toHaveBeenCalledTimes(1);
+    expect(workspaceNotificationCalls(notificationMock.notifyLinkedInSeatRecovered)).toBe(1);
     await notifyCompanionSeatAttentionEmails(db, new Date(NOW.getTime() + 1500));
-    expect(notificationMock.notifyLinkedInSeatRecovered).toHaveBeenCalledTimes(1);
+    expect(workspaceNotificationCalls(notificationMock.notifyLinkedInSeatRecovered)).toBe(1);
   });
 
   it('revocation invalidates the device token and immediately removes readiness', async () => {
