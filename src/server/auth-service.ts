@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { migrationAuthority, mountAuthwardLink } from './authward-link.js';
 import type { Express, RequestHandler } from 'express';
-import { authwardAuthority, isolatedSubject } from './authward-config.js';
+import { authwardAuthority } from './authward-config.js';
 import type { IncomingHttpHeaders } from 'node:http';
 import pg from 'pg';
 import {
@@ -126,16 +126,15 @@ export async function beginAuthwardMagicLink(
     throw new Error('Authward is available only for hosted Trevra');
   }
   if (authority.isolated) throw new Error('Use Authward hosted login for isolated magic links');
-  return auth.api.signInWithOAuth2({
+  return auth.api.signInSocial({
     body: {
-      providerId: 'authward',
+      provider: 'authward',
       callbackURL: baseURL + '/loop',
       errorCallbackURL: baseURL + '/login',
-      additionalData: {
-        authMethod: 'magic_link',
-        loginHint: email,
-        returnTo: baseURL + '/login'
-      }
+      additionalParams: authwardAuthorizationParams(
+        { authMethod: 'magic_link', loginHint: email, returnTo: baseURL + '/login' },
+        authority.isolated
+      )
     },
     headers: fromNodeHeaders(headers),
     asResponse: true
@@ -354,26 +353,20 @@ const authwardProvider = genericOAuth({
             clientId: authwardClientId,
             ...authwardClientAuthentication(authwardClientSecret),
             discoveryUrl: `${authwardIssuer}/.well-known/openid-configuration`,
-            issuer: authwardIssuer,
-            requireIssuerValidation: true,
+            // OIDC discovery supplies the issuer/JWKS. Keep the provider's
+            // verified 'sub' as its immutable account ID, preserving existing
+            // Authward-linked accounts through the Generic OAuth 1.7 rewrite.
+            requireIdTokenVerification: true,
             scopes: authority.scopes,
-            ...(authority.isolated
-              ? {
-                  mapProfileToUser: (profile: Record<string, unknown>) => ({
-                    id: isolatedSubject(authwardIssuer, profile)
-                  })
-                }
-              : {}),
             disableSignUp: authority.isolated,
             pkce: true,
-            authorizationUrlParams: (ctx) =>
-              authwardAuthorizationParams(
-                ctx.body.additionalData as Record<string, unknown> | undefined,
-                authority.isolated
-              ),
+            authorizationUrlParams: authwardAuthorizationParams(null, authority.isolated),
             tokenUrlParams: { resource: 'https://api.usetrevra.com' },
             getToken: (data) =>
               exchangeAuthwardCode(authwardIssuer, authwardClientId, authwardClientSecret, data),
+            // Preserve the redirect URI already registered with Authward.
+            // Express forwards it to the new handler without exchanging code
+            // or changing the token request's OAuth redirect_uri.
             redirectURI: `${baseURL}/api/auth/oauth2/callback/authward`
           }
         ]
@@ -406,7 +399,7 @@ export function enrollTrevraPasskey(userId: string, phase: 'options' | 'verify',
  *
  * WHETHER AN ORGANIZATION'S ID CAN BE PINNED TO A CALLER-CHOSEN VALUE was the
  * spec's flagged open question, and it is answered here, not assumed:
- * verified against the installed better-auth (1.6.25) by reading
+ * originally verified against better-auth 1.6.25 by reading
  * `organization/routes/crud-org.mjs` and proving it against a real Postgres
  * container before writing any of this file. Two facts make it possible:
  *

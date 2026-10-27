@@ -1,9 +1,5 @@
 import { createAuthClient } from 'better-auth/react';
-import {
-  genericOAuthClient,
-  magicLinkClient,
-  organizationClient
-} from 'better-auth/client/plugins';
+import { magicLinkClient, organizationClient } from 'better-auth/client/plugins';
 
 /**
  * The `organization` plugin (docs/superpowers/specs/2026-08-13-team-
@@ -22,7 +18,8 @@ import {
  */
 export const authClient = createAuthClient({
   baseURL: window.location.origin,
-  plugins: [genericOAuthClient(), magicLinkClient(), organizationClient()]
+  // Better Auth 1.7 treats Generic OAuth as a regular social provider.
+  plugins: [magicLinkClient(), organizationClient()]
 });
 
 /**

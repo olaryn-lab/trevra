@@ -679,16 +679,24 @@ function SetupView({
 /**
  * The one way the sign-in screen begins an Authward authorization: Better
  * Auth's generic OAuth start (fresh state + PKCE), which sends the browser to
- * Authward and back through `/api/auth/oauth2/callback/authward`. The social
- * buttons pass their upstream provider; the `interaction_expired` restart
- * passes none.
+ * Authward and back through the registered legacy callback URL, forwarded
+ * internally to Better Auth 1.7's /callback/authward handler. The social
+ * buttons pass only allowed upstream providers. OAuth state/PKCE and
+ * redirect_uri are owned by Better Auth, never supplied through params.
  */
 function startAuthwardSignIn(upstreamProvider?: string, authMethod?: 'passkey') {
-  return authClient.signIn.oauth2({
-    providerId: 'authward',
+  const allowed = ['google', 'github', 'microsoft', 'apple'];
+  return authClient.signIn.social({
+    provider: 'authward',
     callbackURL: `${window.location.origin}/loop`,
     errorCallbackURL: `${window.location.origin}/login`,
-    ...(upstreamProvider || authMethod ? { additionalData: { upstreamProvider, authMethod } } : {})
+    additionalParams: {
+      resource: 'https://api.usetrevra.com',
+      ...(upstreamProvider && allowed.includes(upstreamProvider)
+        ? { upstream_provider: upstreamProvider }
+        : {}),
+      ...(authMethod === 'passkey' ? { auth_method: 'passkey', prompt: 'login' } : {})
+    }
   });
 }
 

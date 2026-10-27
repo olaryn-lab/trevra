@@ -690,7 +690,7 @@ async function main() {
       });
     });
     let passkeyOAuthStarts = 0;
-    await passkeyPage.route('**/api/auth/sign-in/oauth2', async (route) => {
+    await passkeyPage.route('**/api/auth/sign-in/social', async (route) => {
       passkeyOAuthStarts += 1;
       await route.fulfill({ status: 400, contentType: 'application/json', body: '{}' });
     });
@@ -720,7 +720,7 @@ async function main() {
       errors.push('recovery: ' + error.message.slice(0, 200))
     );
     let oauthRecoveryStarts = 0;
-    await recoveryPage.route('**/api/auth/sign-in/oauth2', async (route) => {
+    await recoveryPage.route('**/api/auth/sign-in/social', async (route) => {
       oauthRecoveryStarts += 1;
       await route.fulfill({
         status: 400,
@@ -758,7 +758,7 @@ async function main() {
     const emailPage = await emailContext.newPage();
     emailPage.on('pageerror', (error) => errors.push('email: ' + error.message.slice(0, 200)));
     let freshOAuthStarts = 0;
-    await emailPage.route('**/api/auth/sign-in/oauth2', async (route) => {
+    await emailPage.route('**/api/auth/sign-in/social', async (route) => {
       freshOAuthStarts += 1;
       await route.fulfill({
         status: 400,

@@ -1122,6 +1122,31 @@ export function createApp(db: Db) {
       }
     }
   );
+  // Better Auth 1.7 moved Generic OAuth callbacks to /callback/:provider.
+  // Keep the old Authward-registered URI stable during the migration. This
+  // same-origin HTTP redirect preserves code/state, and the token exchange
+  // still uses the configured (old) redirect_uri. No new login confirmation
+  // screen, no untrusted redirect target.
+  app.get('/api/auth/oauth2/callback/authward', (req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
+    const error = typeof req.query.error === 'string' ? req.query.error : null;
+    if (error) {
+      const allowed = new Set(['access_denied', 'invalid_grant', 'interaction_expired']);
+      res.redirect(
+        302,
+        '/login?error=' + encodeURIComponent(allowed.has(error) ? error : 'oauth_failed')
+      );
+      return;
+    }
+    const code = typeof req.query.code === 'string' ? req.query.code : '';
+    const state = typeof req.query.state === 'string' ? req.query.state : '';
+    if (!code || !state) return res.sendStatus(400);
+    const url = new URL('/api/auth/callback/authward', 'http://localhost');
+    url.searchParams.set('code', code);
+    url.searchParams.set('state', state);
+    if (typeof req.query.iss === 'string') url.searchParams.set('iss', req.query.iss);
+    res.redirect(307, url.pathname + url.search);
+  });
   app.all('/api/auth/*splat', toNodeHandler(betterAuth));
 
   // Public GTM capture must see the exact JSON bytes that the website signed.
