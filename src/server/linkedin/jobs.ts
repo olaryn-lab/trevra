@@ -236,6 +236,12 @@ export interface InboxSyncResult {
   inbound: number;
   /** One per conversation whose reply landed on a ledger row, in the ingest's own words. */
   linkage: string[];
+  /**
+   * Profiles with an actually opened and persisted conversation transcript
+   * during THIS scan. A rail listing alone does not prove we read their reply.
+   * Used only by recipient-specific managed follow-up preflight.
+   */
+  verifiedProfiles: string[];
   /** What could not be read. Never a reason to fail the run. */
   degraded: string[];
 }
@@ -282,6 +288,7 @@ export async function syncLinkedInInbox(
     messages: 0,
     inbound: 0,
     linkage: [],
+    verifiedProfiles: [],
     degraded: []
   };
 
@@ -328,7 +335,7 @@ export async function syncLinkedInInbox(
   };
 
   for (const thread of synced.threads) {
-    const transcript = await readThreadFromLinkedIn(session.page, thread.threadUrn, {
+    const transcript = await inbox.readThread(session.page, thread.threadUrn, {
       ...(options.maxMessages === undefined ? {} : { maxMessages: options.maxMessages }),
       ...(options.sinceDays === undefined ? {} : { sinceDays: options.sinceDays }),
       seed: `${seed}:${thread.threadUrn}`,
@@ -358,6 +365,7 @@ export async function syncLinkedInInbox(
     );
     result.messages += stored.inserted;
     result.inbound += stored.inbound;
+    if (thread.profileUrl) result.verifiedProfiles.push(thread.profileUrl);
     if (stored.inbound > 0) result.linkage.push(stored.linkage);
   }
 

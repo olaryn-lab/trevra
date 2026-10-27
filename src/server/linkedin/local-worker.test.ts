@@ -79,7 +79,7 @@ describe('managed follow-up live reply refresh', () => {
     const { driver, calls } = fakeDriver();
     const preflight = createLinkedInReplyPreflight(async () => {
       replied = true; // As syncLinkedInInbox ingests an actual inbound reply.
-      return { blocked: null, degraded: [] };
+      return { blocked: null, degraded: [], recipientVerified: true, priorOutboundEvidence: true };
     });
     const result = await runLinkedInLocalBatch(harness.store, {
       driver,
@@ -102,7 +102,9 @@ describe('managed follow-up live reply refresh', () => {
     const { driver, calls } = fakeDriver();
     const preflight = createLinkedInReplyPreflight(async () => ({
       blocked: 'LinkedIn login challenge',
-      degraded: []
+      degraded: [],
+      recipientVerified: false,
+      priorOutboundEvidence: true
     }));
     const result = await runLinkedInLocalBatch(harness.store, {
       driver,

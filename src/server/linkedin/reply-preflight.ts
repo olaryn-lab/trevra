@@ -2,7 +2,7 @@ import type { DueLinkedInAction } from './local-worker.js';
 
 type FollowUp = Pick<
   DueLinkedInAction,
-  'kind' | 'campaignId' | 'manual' | 'replyToInbound' | 'targetRef'
+  'id' | 'kind' | 'campaignId' | 'manual' | 'replyToInbound' | 'targetRef'
 >;
 
 /** Only autonomous managed follow-ups need a fresh inbox read. */
@@ -24,8 +24,17 @@ export function needsLinkedInReplyPreflight(action: FollowUp): boolean {
  * failed read as fresh; the next sitting can retry under normal pacing.
  * The fresh-read cache lives only for this sitting, never across processes.
  */
+export interface ReplyPreflightEvidence {
+  blocked: string | null;
+  degraded: readonly string[];
+  /** This particular person's transcript was opened and ingested. */
+  recipientVerified: boolean;
+  /** A previous outbound message might have received a reply. */
+  priorOutboundEvidence: boolean;
+}
+
 export function createLinkedInReplyPreflight(
-  readInbox: (action: FollowUp) => Promise<{ blocked: string | null; degraded: readonly string[] }>,
+  readInbox: (action: FollowUp) => Promise<ReplyPreflightEvidence>,
   options: { now?: () => Date; maxAgeMs?: number } = {}
 ): (action: FollowUp) => Promise<void> {
   const now = options.now ?? (() => new Date());
@@ -42,7 +51,7 @@ export function createLinkedInReplyPreflight(
       instant - lastVerifiedAt < maxAgeMs
     )
       return;
-    let result: { blocked: string | null; degraded: readonly string[] };
+    let result: ReplyPreflightEvidence;
     try {
       result = await readInbox(action);
     } catch {
@@ -62,6 +71,18 @@ export function createLinkedInReplyPreflight(
       throw new Error(
         'A LinkedIn conversation could not be verified; automated follow-ups remain queued.'
       );
-    verifiedByTarget.set(key, now().getTime());
+    // A bounded inbox scan is not proof that a specific prospect's messages
+    // were read. After any previous outgoing message, require an actually
+    // opened conversation; otherwise a hidden/older reply could trigger an
+    // automated follow-up. First approved messages (no prior outbound message)
+    // can proceed without a pre-existing LinkedIn conversation.
+    if (!result.recipientVerified && result.priorOutboundEvidence)
+      throw new Error(
+        'The recipient conversation was not verified; automated follow-ups remain queued.'
+      );
+    // An approved FIRST message without a thread is permitted once, but
+    // must not grant 15 minutes of cached reply-freshness. That first send
+    // changes the situation: the very next action may now have a reply.
+    if (result.recipientVerified) verifiedByTarget.set(key, now().getTime());
   };
 }
