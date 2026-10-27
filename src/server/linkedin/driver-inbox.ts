@@ -258,6 +258,29 @@ async function present(page: LinkedInPage, selector: string): Promise<boolean> {
   return (await countOf(page, selector)) > 0;
 }
 
+/**
+ * LinkedIn's client-rendered thread often reaches DOMContentLoaded before it
+ * inserts any message rows. A snapshot count then yields false selector drift.
+ * Playwright's locator supports waitFor; the minimal test doubles need not.
+ *
+ * Wait for actual messages, not the empty list shell. If nothing appears,
+ * preserve the existing fail-closed verdict rather than guessing a transcript.
+ */
+async function awaitMessageRows(page: LinkedInPage): Promise<void> {
+  const selector = `${INBOX_SELECTORS.messageList} > li`;
+  if (await present(page, selector)) return;
+  const first = page.locator(selector).first() as {
+    waitFor?: (options: { state: 'attached'; timeout: number }) => Promise<void>;
+  };
+  if (typeof first.waitFor === 'function') {
+    try {
+      await first.waitFor({ state: 'attached', timeout: 8_000 });
+    } catch {
+      // The ordinary count + wall checks below distinguish empty from drift.
+    }
+  }
+}
+
 /** The first match's collapsed text. Null for absent, empty, or unreadable. */
 async function textOf(page: LinkedInPage, selector: string): Promise<string | null> {
   try {
@@ -902,6 +925,9 @@ export async function readThread(
   const opened = await openUrl(page, walk, url);
   if (opened) return opened;
 
+  await awaitMessageRows(page);
+  const afterLoadWall = await detectWall(page);
+  if (afterLoadWall) return fail(afterLoadWall, wallDetail(afterLoadWall, url));
   const total = await countOf(page, `${INBOX_SELECTORS.messageList} > li`);
   if (total === 0) {
     if (await present(page, INBOX_SELECTORS.messageList))
