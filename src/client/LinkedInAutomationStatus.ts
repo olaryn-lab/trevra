@@ -1,4 +1,6 @@
-import type { ManagedCampaign } from '../server/linkedin/managed-campaigns';
+import type { ManagedCampaign, CampaignQueueSummary } from '../server/linkedin/managed-campaigns';
+import type { LinkedInCampaignExecution } from '../server/linkedin/execution-state';
+import { campaignExecutionBlocker } from './LinkedInExecutionBlocker';
 import type { LinkedInSeat } from '../server/linkedin/seats';
 import type { LinkedInCompanionStatus, LinkedInSeatResponse, LinkedInWorkerStatus } from './api';
 
@@ -16,8 +18,11 @@ export function linkedInAutomationStatus(input: {
   worker: LinkedInWorkerStatus | null;
   companion: LinkedInCompanionStatus | null;
   campaigns: readonly ManagedCampaign[] | null;
+  operations?: Readonly<
+    Record<string, { queues: CampaignQueueSummary; execution?: LinkedInCampaignExecution } | null>
+  >;
 }): LinkedInAutomationSummary {
-  const { accounts, details, worker, companion, campaigns } = input;
+  const { accounts, details, worker, companion, campaigns, operations } = input;
   if (accounts === null || !worker || campaigns === null || (worker.companionBrowser && !companion))
     return {
       kind: 'checking',
@@ -81,18 +86,77 @@ export function linkedInAutomationStatus(input: {
     (campaign) =>
       activeKeys.has(campaign.seatKey) || campaign.senderKeys.some((key) => activeKeys.has(key))
   );
-  const running = related.filter((campaign) => campaign.status === 'running').length;
+  const runningCampaigns = related.filter((campaign) => campaign.status === 'running');
+  const running = runningCampaigns.length;
   const paused = related.filter((campaign) => campaign.status === 'paused').length;
-  if (running > 0)
+  if (running > 0) {
+    // Campaign status alone does NOT say anything about deliverable work. Get
+    // the actual claimable/parked rows and the existing execution blocker.
+    // Never silently call an unknown state Working.
+    if (!operations || runningCampaigns.some((campaign) => operations[campaign.id] === undefined))
+      return {
+        kind: 'checking',
+        title: 'Checking campaigns',
+        description: 'Confirming which approved LinkedIn actions can run.',
+        nextStep: null
+      };
+    if (runningCampaigns.some((campaign) => operations[campaign.id] === null))
+      return {
+        kind: 'attention',
+        title: 'Needs attention',
+        description: 'Trevra could not check whether this campaign can send.',
+        nextStep: 'Refresh the page. If this continues, inspect campaign execution details.'
+      };
+
+    const blockers = runningCampaigns.map((campaign) => {
+      const report = operations[campaign.id]!;
+      return {
+        report,
+        blocker: campaignExecutionBlocker({
+          senderKeys: campaign.senderKeys,
+          queues: report.queues,
+          execution: report.execution ?? null,
+          workerStatus: worker,
+          companionStatus: companion,
+          now: Date.now()
+        })
+      };
+    });
+    const attention = blockers.find((item) => item.blocker?.severity === 'attention');
+    if (attention)
+      return {
+        kind: 'attention',
+        title: 'Needs attention',
+        description: attention.blocker!.title,
+        nextStep: attention.blocker!.detail
+      };
+    const waiting = blockers.find((item) => item.blocker?.severity === 'waiting');
+    if (waiting)
+      return {
+        kind: 'waiting',
+        title: 'Waiting',
+        description: waiting.blocker!.title,
+        nextStep: waiting.blocker!.detail
+      };
+    const executing = blockers.reduce((total, item) => total + item.report.queues.executing, 0);
+    const ready = blockers.reduce((total, item) => total + item.report.queues.queuedReady, 0);
+    if (ready + executing === 0)
+      return {
+        kind: 'waiting',
+        title: 'Waiting for the next action',
+        description: 'Campaigns are running, but no approved LinkedIn action is due yet.',
+        nextStep: 'Trevra will continue when the next scheduled action becomes eligible.'
+      };
     return {
       kind: 'working',
       title: 'Working',
       description:
         String(running) +
         (running === 1 ? ' campaign is' : ' campaigns are') +
-        ' running. Trevra sends only when the next action is approved and eligible.',
+        ' running, with approved actions eligible for execution.',
       nextStep: null
     };
+  }
   return {
     kind: 'waiting',
     title: 'Waiting for a campaign',
