@@ -7,6 +7,7 @@ import {
   linkedInSchedulerStatus
 } from './linkedin-runtime.js';
 import { createLinkedInStartupCoordinator } from './linkedin-startup.js';
+import { notifyStalledLinkedInCampaigns } from '../server/linkedin/stall-monitor.js';
 import { runAllAutomationCycles } from '../server/automation-service.js';
 import { runReadyPlaybooks } from '../server/playbooks/engine.js';
 import { runDueAgentSchedules } from '../server/agent/schedule.js';
@@ -54,6 +55,13 @@ const runtime = validateEnvironment();
 const linkedinShard = workerShard();
 const linkedinWorkerId = workerIdentity();
 const linkedinWorkerStartedAt = new Date();
+let linkedinStallLastResult: {
+  checkedAt: string | null;
+  detected: number;
+  notified: number;
+  failed: number;
+  lastError: string | null;
+} = { checkedAt: null, detected: 0, notified: 0, failed: 0, lastError: null };
 // The worker runs approved outreach sends (playbooks, Temporal) without
 // createApp, so it registers the real footer provider itself; without it every
 // approved outreach email is refused at send time.
@@ -95,7 +103,8 @@ app.get('/health', async (_req, res) => {
         ...linkedin,
         cycles,
         scheduler,
-        browserLane: linkedInBrowserLane.snapshot()
+        browserLane: linkedInBrowserLane.snapshot(),
+        stallMonitor: linkedinStallLastResult
       }
     });
   } catch {
@@ -347,6 +356,38 @@ const companionPresenceTimer = setInterval(
   COMPANION_PRESENCE_SCAN_MS
 );
 companionPresenceTimer.unref();
+// A healthy scheduler can still leave approved customer outreach overdue.
+// Check a bounded set of running campaigns separately and notify the owner
+// only when the same existing safety gate was open continuously for two hours.
+// Durable PostgreSQL claims deduplicate alert delivery across worker replicas.
+// No browser interaction or LinkedIn send is initiated by this monitor.
+const LINKEDIN_STALL_SCAN_MS = 5 * 60_000;
+let linkedinStallRunning = false;
+async function linkedinStallCycle(): Promise<void> {
+  if (linkedinStallRunning || draining || !runtime.linkedinLocalWorker.enabled) return;
+  linkedinStallRunning = true;
+  try {
+    const result = await notifyStalledLinkedInCampaigns(db, { limit: 30 });
+    linkedinStallLastResult = {
+      ...result,
+      checkedAt: new Date().toISOString(),
+      lastError: null
+    };
+  } catch (error) {
+    linkedinStallLastResult = {
+      ...linkedinStallLastResult,
+      checkedAt: new Date().toISOString(),
+      lastError: 'Campaign stall scan failed; see worker logs.'
+    };
+    console.error('Worker LinkedIn stalled campaign scan failed', error);
+  } finally {
+    linkedinStallRunning = false;
+  }
+}
+void linkedinStallCycle();
+const linkedinStallTimer = setInterval(() => void linkedinStallCycle(), LINKEDIN_STALL_SCAN_MS);
+linkedinStallTimer.unref();
+
 // HTTPS webhooks run independently: an unresponsive customer endpoint must
 // not hold the automation sweep. Without an operator hostname allowlist this
 // pass returns immediately without reserving or sending any external work.
@@ -420,6 +461,7 @@ async function shutdown(signal: string) {
   clearInterval(linkedinPlanningTimer);
   clearInterval(linkedinOutboundTimer);
   clearInterval(companionPresenceTimer);
+  clearInterval(linkedinStallTimer);
   clearInterval(emailDeliverabilityTimer);
   clearInterval(enrichmentTimer);
   const deadline = Date.now() + DRAIN_TIMEOUT_MS;
