@@ -15,5 +15,5 @@ if (configuredVersion && !RELEASE_VERSION.test(configuredVersion)) {
 export const COMPANION_RELEASE_VERSION = configuredVersion || DEFAULT_COMPANION_RELEASE_VERSION;
 
 export function companionReleasePackage(version: string = COMPANION_RELEASE_VERSION): string {
-  return `https://github.com/leanchain/trevra/releases/download/companion-v${version}/trevra-${version}.tgz`;
+  return `https://github.com/olaryn-lab/trevra/releases/download/companion-v${version}/trevra-${version}.tgz`;
 }

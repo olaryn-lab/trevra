@@ -20,7 +20,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/leanchain/trevra.git"
+    "url": "git+https://github.com/olaryn-lab/trevra.git"
   },
   "homepage": "https://app.usetrevra.com",
   "publishConfig": {
