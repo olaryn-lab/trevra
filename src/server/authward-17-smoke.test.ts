@@ -19,8 +19,8 @@ describe('Better Auth 1.7 hosted Authward authorization start', () => {
     vi.stubEnv('APP_ORIGIN', 'http://localhost:43173');
 
     const requests: string[] = [];
-    const { privateKey, publicKey } = await generateKeyPair('RS256');
-    const jwk = { ...(await exportJWK(publicKey)), kid: 'test-only-key', use: 'sig', alg: 'RS256' };
+    const { privateKey, publicKey } = await generateKeyPair('EdDSA');
+    const jwk = { ...(await exportJWK(publicKey)), kid: 'test-only-key', use: 'sig', alg: 'EdDSA' };
     let nonce = '';
     vi.stubGlobal(
       'fetch',
@@ -36,7 +36,7 @@ describe('Better Auth 1.7 hosted Authward authorization start', () => {
               userinfo_endpoint: issuer + '/userinfo',
               jwks_uri: issuer + '/jwks',
               response_types_supported: ['code'],
-              id_token_signing_alg_values_supported: ['RS256']
+              id_token_signing_alg_values_supported: ['EdDSA']
             }),
             { status: 200, headers: { 'content-type': 'application/json' } }
           );
@@ -57,7 +57,7 @@ describe('Better Auth 1.7 hosted Authward authorization start', () => {
             email_verified: true,
             name: 'Smoke OIDC User'
           })
-            .setProtectedHeader({ alg: 'RS256', kid: 'test-only-key' })
+            .setProtectedHeader({ alg: 'EdDSA', kid: 'test-only-key' })
             .setIssuer(issuer)
             .setIssuedAt()
             .setExpirationTime('10m')
