@@ -731,7 +731,6 @@ function BandOverrideField({
 }) {
   const on = draft.safetyBandOverride;
   const bands = safety?.bands ?? null;
-  const ramp = safety?.campaignWarmupFractions ?? null;
 
   return (
     <>
@@ -783,11 +782,8 @@ function BandOverrideField({
               ? `This account has finished its ${safety.seat.warmupWeeks}-week warm-up. `
               : `Account warm-up: week ${safety.seat.warmupWeek} of ${safety.seat.warmupWeeks}, ${Math.round(safety.seat.warmupMultiplier * 100)}% active-outreach multiplier. `
             : 'The account warm-up applies. '}
-        Campaign ramp still applies:{' '}
-        {ramp && ramp.length > 0
-          ? ramp.map((fraction) => `${Math.round(fraction * 100)}%`).join(' → ')
-          : 'applies'}
-        .
+        New campaigns share this account’s existing daily limit. No separate campaign warm-up
+        applies.
       </p>
     </>
   );
