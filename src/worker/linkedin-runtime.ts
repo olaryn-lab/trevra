@@ -38,6 +38,58 @@ export function createExclusiveLane() {
 
 export type LinkedInCycleName = 'planning' | 'outbound' | 'maintenance';
 
+export type LinkedInCycleSnapshot = Record<
+  LinkedInCycleName,
+  {
+    running: boolean;
+    lastStartedAt: string | null;
+    lastCompletedAt: string | null;
+    lastFailedAt: string | null;
+    lastError: string | null;
+  }
+>;
+
+/**
+ * A healthy Node process is not necessarily a healthy LinkedIn scheduler.
+ * Report stale or failed loops separately without turning the whole worker's
+ * readiness endpoint into 503 (it also serves other product subsystems).
+ *
+ * Long browser batches are valid; staleness is judged on a cycle that is NOT
+ * currently running. Planning is the exception: a >10 minute database-only
+ * plan is itself an incident.
+ */
+export function linkedInSchedulerStatus(
+  cycles: LinkedInCycleSnapshot,
+  options: {
+    now: Date;
+    startedAt: Date;
+    intervalMs: number;
+    enabled: boolean;
+    discoveryHealthy: boolean;
+  }
+): { healthy: boolean; state: 'disabled' | 'starting' | 'healthy' | 'degraded'; issues: string[] } {
+  if (!options.enabled) return { healthy: true, state: 'disabled', issues: [] };
+  const issues: string[] = [];
+  if (!options.discoveryHealthy) issues.push('Action queue discovery failed.');
+  const graceMs = Math.max(3 * options.intervalMs, 10 * 60_000);
+  const nowMs = options.now.getTime();
+  for (const name of ['planning', 'outbound', 'maintenance'] as const) {
+    const cycle = cycles[name];
+    if (cycle.lastError) issues.push(name + ' failed; see worker logs.');
+    const startedMs = cycle.lastStartedAt
+      ? Date.parse(cycle.lastStartedAt)
+      : options.startedAt.getTime();
+    if (nowMs - startedMs > graceMs && !cycle.running)
+      issues.push(name + ' has not started recently.');
+    if (name === 'planning' && cycle.running && nowMs - startedMs > graceMs)
+      issues.push('planning has been running unusually long.');
+  }
+  if (issues.length) return { healthy: false, state: 'degraded', issues };
+  if (Object.values(cycles).some((cycle) => !cycle.lastStartedAt))
+    return { healthy: true, state: 'starting', issues: [] };
+  return { healthy: true, state: 'healthy', issues: [] };
+}
+
 export function createLinkedInCycleHealth() {
   const cycles: Record<
     LinkedInCycleName,

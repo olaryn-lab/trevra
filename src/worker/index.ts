@@ -1,7 +1,12 @@
 import 'dotenv/config';
 import express from 'express';
 import { openDatabase } from '../server/db.js';
-import { createExclusiveLane, createLinkedInCycleHealth } from './linkedin-runtime.js';
+import {
+  createExclusiveLane,
+  createLinkedInCycleHealth,
+  linkedInSchedulerStatus
+} from './linkedin-runtime.js';
+import { createLinkedInStartupCoordinator } from './linkedin-startup.js';
 import { runAllAutomationCycles } from '../server/automation-service.js';
 import { runReadyPlaybooks } from '../server/playbooks/engine.js';
 import { runDueAgentSchedules } from '../server/agent/schedule.js';
@@ -48,6 +53,7 @@ const runtime = validateEnvironment();
 // operator is watching.
 const linkedinShard = workerShard();
 const linkedinWorkerId = workerIdentity();
+const linkedinWorkerStartedAt = new Date();
 // The worker runs approved outreach sends (playbooks, Temporal) without
 // createApp, so it registers the real footer provider itself; without it every
 // approved outreach email is refused at send time.
@@ -69,6 +75,14 @@ app.get('/health', async (_req, res) => {
   // schedules and projections, and restarting it would fix nothing -- but it is
   // now a fact a monitor can alert on.
   const linkedin = linkedInWorkerHealth();
+  const cycles = linkedinCycleHealth.snapshot();
+  const scheduler = linkedInSchedulerStatus(cycles, {
+    now: new Date(),
+    startedAt: linkedinWorkerStartedAt,
+    intervalMs: runtime.automationIntervalMs,
+    enabled: runtime.linkedinLocalWorker.enabled,
+    discoveryHealthy: linkedin.discoveryHealthy
+  });
   try {
     await db.prepare('SELECT 1 AS ok').get();
     res.json({
@@ -79,7 +93,8 @@ app.get('/health', async (_req, res) => {
       linkedinShard: `${linkedinShard.index + 1}/${linkedinShard.total}`,
       linkedin: {
         ...linkedin,
-        cycles: linkedinCycleHealth.snapshot(),
+        cycles,
+        scheduler,
         browserLane: linkedInBrowserLane.snapshot()
       }
     });
@@ -276,11 +291,20 @@ async function linkedinMaintenanceCycle(): Promise<void> {
 await cycle();
 const timer = setInterval(() => void cycle(), runtime.automationIntervalMs);
 timer.unref();
-// Maintenance starts first to observe replies before outbound work. Planning
-// is database-only and does not wait on a browser or an action cooldown.
-void linkedinMaintenanceCycle();
-void linkedinPlanningCycle();
-void linkedinOutboundCycle();
+// A call started first is not a completed call: the old startup queued the
+// outbound browser lane behind session detection but *ahead* of the inbox,
+// potentially sending a follow-up before a newly received reply was recorded.
+// Complete the first maintenance visit before starting outbound. Planning
+// proceeds independently, and every subsequent cycle keeps its own timer.
+const linkedinStartup = createLinkedInStartupCoordinator();
+void linkedinStartup
+  .start({
+    maintenance: linkedinMaintenanceCycle,
+    planning: linkedinPlanningCycle,
+    outbound: linkedinOutboundCycle,
+    onPlanningError: (error) => console.error('LinkedIn startup planning failed', error)
+  })
+  .catch((error) => console.error('LinkedIn initial maintenance failed', error));
 const linkedinMaintenanceTimer = setInterval(
   () => void linkedinMaintenanceCycle(),
   runtime.automationIntervalMs
@@ -291,10 +315,9 @@ const linkedinPlanningTimer = setInterval(
   runtime.automationIntervalMs
 );
 linkedinPlanningTimer.unref();
-const linkedinOutboundTimer = setInterval(
-  () => void linkedinOutboundCycle(),
-  runtime.automationIntervalMs
-);
+const linkedinOutboundTimer = setInterval(() => {
+  if (linkedinStartup.outboundMayRun()) void linkedinOutboundCycle();
+}, runtime.automationIntervalMs);
 linkedinOutboundTimer.unref();
 // Presence alerting is operational monitoring, not business automation. It
 // must not inherit a deployment's five-minute automation cadence, otherwise a
