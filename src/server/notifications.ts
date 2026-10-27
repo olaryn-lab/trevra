@@ -25,16 +25,27 @@ function appBaseUrl(): string {
 
 async function workspaceOwners(db: Db, workspaceId: string): Promise<OwnerRecipient[]> {
   if (!smtpConfigured()) return [];
-  const owners = await db
-    .prepare(
-      `
+  // Better Auth owns these tables and applies its migrations separately
+  // from our application migrations. Fresh local/self-hosted databases may
+  // therefore have legitimate legacy owners but NO Better Auth tables yet.
+  // Attempting this join unconditionally raised 42P01 and made the promised
+  // legacy fallback unreachable, so alerts always failed instead of retrying
+  // to the address we already know. Never mask other database errors.
+  let owners: OwnerRecipient[] = [];
+  try {
+    owners = await db
+      .prepare(
+        `
     SELECT u.email,u.name
     FROM member m JOIN "user" u ON u.id=m."userId"
     WHERE m."organizationId"=? AND m.role='owner'
     ORDER BY m."createdAt" ASC
   `
-    )
-    .all<{ email: string; name: string }>(workspaceId);
+      )
+      .all<OwnerRecipient>(workspaceId);
+  } catch (error) {
+    if ((error as { code?: string })?.code !== '42P01') throw error;
+  }
   if (owners.length > 0) return owners;
 
   // Legacy/self-hosted fallback. Hosted team workspaces should have Better Auth
