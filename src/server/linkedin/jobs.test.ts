@@ -534,6 +534,76 @@ describe('the account a sync is allowed to read', () => {
     expect(result.blocked).toContain('never confirmed');
   });
 
+  it('reports recipient coverage only for transcripts actually read and persisted', async () => {
+    await upsertSeat(
+      db,
+      WORKSPACE_ID,
+      { label: 'Owner', timezone: 'UTC', profileUrl: 'https://www.linkedin.com/in/connected/' },
+      NOW
+    );
+    const { driver } = identityDriver();
+    const profileUrl = 'https://www.linkedin.com/in/stranger/';
+    const thread = {
+      threadUrn: '2-stranger==',
+      profileUrl,
+      name: 'Stranger',
+      lastMessageAt: NOW.toISOString(),
+      snippet: 'Most recent message',
+      unread: false
+    };
+    const listing = async () => ({ ok: true as const, threads: [thread], degraded: [] });
+    const read = async () => ({
+      ok: true as const,
+      threadUrn: thread.threadUrn,
+      messages: [],
+      degraded: []
+    });
+    const result = await syncLinkedInInbox(
+      db,
+      { enabled: true },
+      {
+        workspaceId: WORKSPACE_ID,
+        now: NOW,
+        page,
+        driver,
+        inboxDriver: {
+          listConversations: listing,
+          readThread: read,
+          sendReply: async () => {
+            throw Error('no send');
+          }
+        }
+      }
+    );
+    expect(result.blocked).toBeNull();
+    expect(result.threads).toBe(1);
+    expect(result.verifiedProfiles).toEqual([profileUrl]);
+    const unreadable = await syncLinkedInInbox(
+      db,
+      { enabled: true },
+      {
+        workspaceId: WORKSPACE_ID,
+        now: NOW,
+        page,
+        driver,
+        inboxDriver: {
+          listConversations: listing,
+          readThread: async () => ({
+            ok: false as const,
+            failureKind: 'selector_drift' as const,
+            detail: 'mock unreadable transcript'
+          }),
+          sendReply: async () => {
+            throw Error('no send');
+          }
+        }
+      }
+    );
+    expect(unreadable.threads).toBe(1);
+    expect(unreadable.verifiedProfiles).toEqual([]);
+    expect(unreadable.degraded.join(' ')).toContain('could not be read');
+  });
+
   it('walks the rail when the signed-in account IS the seat', async () => {
     await upsertSeat(
       db,

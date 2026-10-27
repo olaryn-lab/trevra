@@ -3,6 +3,7 @@ import { createLinkedInReplyPreflight, needsLinkedInReplyPreflight } from './rep
 import type { DueLinkedInAction } from './local-worker';
 
 const followup = {
+  id: 'action-1',
   kind: 'dm',
   campaignId: 'campaign-1',
   targetRef: 'https://www.linkedin.com/in/test-prospect/',
@@ -10,7 +11,7 @@ const followup = {
   replyToInbound: false
 } as const satisfies Pick<
   DueLinkedInAction,
-  'kind' | 'campaignId' | 'targetRef' | 'manual' | 'replyToInbound'
+  'id' | 'kind' | 'campaignId' | 'targetRef' | 'manual' | 'replyToInbound'
 >;
 
 describe('managed follow-up reply preflight', () => {
@@ -28,7 +29,12 @@ describe('managed follow-up reply preflight', () => {
 
   it('checks at most once per 15 minutes within a sitting, then refreshes', async () => {
     let clock = 10_000;
-    const readInbox = vi.fn(async () => ({ blocked: null, degraded: [] }));
+    const readInbox = vi.fn(async () => ({
+      blocked: null,
+      degraded: [],
+      recipientVerified: true,
+      priorOutboundEvidence: true
+    }));
     const verify = createLinkedInReplyPreflight(readInbox, { now: () => new Date(clock) });
     await verify(followup);
     await verify(followup);
@@ -44,12 +50,24 @@ describe('managed follow-up reply preflight', () => {
   it('does not cache blocked or unreadable inbox evidence as a successful read', async () => {
     const readInbox = vi
       .fn()
-      .mockResolvedValueOnce({ blocked: 'account mismatch', degraded: [] })
+      .mockResolvedValueOnce({
+        blocked: 'account mismatch',
+        degraded: [],
+        recipientVerified: false,
+        priorOutboundEvidence: true
+      })
       .mockResolvedValueOnce({
         blocked: null,
-        degraded: ['Conversation thread42 could not be read (selector_drift): unavailable']
+        degraded: ['Conversation thread42 could not be read (selector_drift): unavailable'],
+        recipientVerified: false,
+        priorOutboundEvidence: true
       })
-      .mockResolvedValueOnce({ blocked: null, degraded: [] });
+      .mockResolvedValueOnce({
+        blocked: null,
+        degraded: [],
+        recipientVerified: true,
+        priorOutboundEvidence: true
+      });
     const verify = createLinkedInReplyPreflight(readInbox);
     await expect(verify(followup)).rejects.toThrow('blocked');
     await expect(verify(followup)).rejects.toThrow('could not be verified');
@@ -60,7 +78,66 @@ describe('managed follow-up reply preflight', () => {
   it('ignores transcript metadata-linkage warnings rather than blocking all sending', async () => {
     const verify = createLinkedInReplyPreflight(async () => ({
       blocked: null,
-      degraded: ['Profile URL missing for conversation']
+      degraded: ['Profile URL missing for conversation'],
+      recipientVerified: true,
+      priorOutboundEvidence: true
+    }));
+    await expect(verify(followup)).resolves.toBeUndefined();
+  });
+
+  it('refuses an older unlinked recipient conversation that the bounded scan did not cover', async () => {
+    const read = vi.fn(async () => ({
+      blocked: null,
+      degraded: [],
+      recipientVerified: false,
+      priorOutboundEvidence: true
+    }));
+    const verify = createLinkedInReplyPreflight(read);
+    await expect(verify(followup)).rejects.toThrow('recipient conversation was not verified');
+    await expect(verify(followup)).rejects.toThrow('remain queued');
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('permits an approved first message when no previous outgoing message exists', async () => {
+    const read = vi.fn(async () => ({
+      blocked: null,
+      degraded: [],
+      recipientVerified: false,
+      priorOutboundEvidence: false
+    }));
+    const verify = createLinkedInReplyPreflight(read);
+    await expect(verify(followup)).resolves.toBeUndefined();
+    await expect(verify(followup)).resolves.toBeUndefined();
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('rechecks after the first send instead of caching its lack of conversation', async () => {
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce({
+        blocked: null,
+        degraded: [],
+        recipientVerified: false,
+        priorOutboundEvidence: false
+      })
+      .mockResolvedValueOnce({
+        blocked: null,
+        degraded: [],
+        recipientVerified: false,
+        priorOutboundEvidence: true
+      });
+    const verify = createLinkedInReplyPreflight(read);
+    await expect(verify(followup)).resolves.toBeUndefined();
+    await expect(verify(followup)).rejects.toThrow('recipient conversation was not verified');
+    expect(read).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts an actually opened recipient transcript after previous outreach', async () => {
+    const verify = createLinkedInReplyPreflight(async () => ({
+      blocked: null,
+      degraded: [],
+      recipientVerified: true,
+      priorOutboundEvidence: true
     }));
     await expect(verify(followup)).resolves.toBeUndefined();
   });

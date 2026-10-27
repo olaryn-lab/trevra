@@ -47,6 +47,7 @@ import {
 import { evaluateLinkedInSafety, type LinkedInSafetyVerdict } from './guard.js';
 import { linkedinActionPolicyGate } from './action-policy.js';
 import { createLinkedInReplyPreflight } from './reply-preflight.js';
+import { targetRefCandidates } from './inbox.js';
 import {
   pruneSeatEvents,
   recordSeatEvent,
@@ -5446,6 +5447,27 @@ export async function runDueLinkedInActions(
       const verifyReplies = createLinkedInReplyPreflight(async (action) => {
         const { syncLinkedInInbox, syncLinkedInThread } = await import('./jobs.js');
         const canonical = profileUrlFor(action.targetRef);
+        const candidates = canonical ? targetRefCandidates(canonical) : [];
+        // Only a previous outbound message (or a may-have-sent one) can have
+        // generated a follow-up reply. Pending invites alone do not turn the
+        // first approved DM into an impossible-to-verify blocked action.
+        const previous = candidates.length
+          ? await db
+              .prepare(
+                `SELECT id FROM linkedin_actions
+               WHERE workspace_id=? AND seat_key=? AND id<>?
+                 AND LOWER(target_ref)=ANY(?::text[])
+                 AND kind IN ('dm','reply','inmail','group_message','event_message')
+                 AND (
+                   status IN ('sent','accepted','replied','exported')
+                   OR settlement_hold_at IS NOT NULL
+                   OR (status='held' AND failure_kind='unknown')
+                 )
+               LIMIT 1`
+              )
+              .get<{ id: string }>(workspaceId, seatKey, action.id, candidates)
+          : null;
+        const priorOutboundEvidence = Boolean(previous);
         const known = canonical
           ? await db
               .prepare(
@@ -5460,18 +5482,33 @@ export async function runDueLinkedInActions(
         // this covers an older conversation even when other threads are busy.
         // Unknown conversations fall back to a bounded recent-inbox walk.
         const context = { workspaceId, seatKey, page: handle.page, driver, log: say };
-        if (known?.thread_urn)
-          return syncLinkedInThread(db, config, known.thread_urn, {
+        if (known?.thread_urn) {
+          const read = await syncLinkedInThread(db, config, known.thread_urn, {
             ...context,
             maxMessages: 30,
             sinceDays: 30
           });
-        return syncLinkedInInbox(db, config, {
+          return {
+            ...read,
+            recipientVerified: !read.blocked,
+            priorOutboundEvidence
+          };
+        }
+        const read = await syncLinkedInInbox(db, config, {
           ...context,
           maxThreads: 12,
           maxMessages: 20,
           sinceDays: 14
         });
+        return {
+          ...read,
+          // URLs vary by www/, trailing slash and query parameters. Compare
+          // only validated LinkedIn profile identities, never a display name.
+          recipientVerified: read.verifiedProfiles.some((url) =>
+            targetRefCandidates(url).some((spelling) => candidates.includes(spelling))
+          ),
+          priorOutboundEvidence
+        };
       });
       const result = await runLinkedInLocalBatch(store, {
         driver,
