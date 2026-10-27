@@ -25,6 +25,7 @@ import {
   detectLinkedInSeat,
   getLinkedInLimits,
   getLinkedInManagedCampaigns,
+  getLinkedInCampaignOperations,
   getLinkedInCompanionStatus,
   getLinkedInManagerSeats,
   getLinkedInSeat,
@@ -194,6 +195,10 @@ export function LinkedInAccounts({
   const [worker, setWorker] = useState<LinkedInWorkerStatus | null>(null);
   const [companionStatus, setCompanionStatus] = useState<LinkedInCompanionStatus | null>(null);
   const [campaigns, setCampaigns] = useState<ManagedCampaign[] | null>(null);
+  const [campaignOperations, setCampaignOperations] = useState<Record<
+    string,
+    Awaited<ReturnType<typeof getLinkedInCampaignOperations>> | null
+  > | null>(null);
   const [loading, setLoading] = useState(true);
   const [failure, setFailure] = useState('');
   const [adding, setAdding] = useState(startAdding);
@@ -219,6 +224,26 @@ export function LinkedInAccounts({
       setWorker(workerStatus);
       setCompanionStatus(companion);
       setCampaigns(activeCampaigns);
+      setCampaignOperations(null);
+      // Each running campaign already has an authoritative blocker report.
+      // Read it here rather than inventing a second 'why idle' rules engine.
+      // An unreadable report must never masquerade as Working.
+      if (activeCampaigns) {
+        const runningCampaigns = activeCampaigns.filter(
+          (campaign) => campaign.status === 'running'
+        );
+        void Promise.all(
+          runningCampaigns.map(async (campaign) => {
+            try {
+              return [campaign.id, await getLinkedInCampaignOperations(campaign.id)] as const;
+            } catch {
+              return [campaign.id, null] as const;
+            }
+          })
+        ).then((rows) => {
+          if (sequence === loadSequence.current) setCampaignOperations(Object.fromEntries(rows));
+        });
+      }
       // lc-debt: one GET /api/linkedin/seat per account -- fine at the handful
       // of accounts a person manages, wrong at fifty; upgrade path is a manager
       // route returning sign-in state and today's counts for every account at
@@ -319,7 +344,8 @@ export function LinkedInAccounts({
     details,
     worker,
     companion: companionStatus,
-    campaigns
+    campaigns,
+    operations: campaignOperations ?? undefined
   });
   const needsConnectionHelp = overview.kind === 'attention' || overview.kind === 'setup';
   const empty = accounts !== null && accounts.length === 0;
