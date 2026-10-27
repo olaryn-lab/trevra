@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   approveLinkedInActionReview,
   getLinkedInActionReviews,
@@ -14,16 +14,35 @@ export function LinkedInActionApprovals() {
   const [rows, setRows] = useState<LinkedInActionReview[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const latestRead = useRef(0);
   const load = useCallback(async () => {
+    const requestId = ++latestRead.current;
     try {
-      setRows(await getLinkedInActionReviews());
+      const next = await getLinkedInActionReviews();
+      if (requestId !== latestRead.current) return;
+      setRows(next);
       setError('');
     } catch (cause) {
+      if (requestId !== latestRead.current) return;
       setError(cause instanceof Error ? cause.message : 'Could not load LinkedIn actions.');
     }
   }, []);
   useEffect(() => {
     void load();
+    // The hosted worker plans and holds actions independently of the React
+    // screen. Without a refresh, the owner may never see approvals that were
+    // queued after this screen mounted, leaving a campaign apparently stuck.
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void load();
+    };
+    const poll = window.setInterval(refreshWhenVisible, 30_000);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.clearInterval(poll);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+      // A slow response from an unmounted screen must never rewrite new state.
+      latestRead.current += 1;
+    };
   }, [load]);
   useOutreachRefresh(load);
   if (!rows.length && !error) return null;

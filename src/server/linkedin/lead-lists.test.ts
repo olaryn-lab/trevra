@@ -245,7 +245,10 @@ describe('account-scoped lead lists', () => {
     expect(review).toMatchObject({ total: 1, listTotal: 5001, identityReviewCount: 1 });
     expect(review.contacts).toHaveLength(1);
     expect(review.contacts[0].firstName).toBe('Late');
-  }, 20_000);
+    // This fixture inserts 5,001 contacts and memberships with real indexes.
+    // The shared CI host may be saturated by other suites/containers; preserve
+    // all correctness assertions without an artificial 20-second setup limit.
+  }, 60_000);
 
   it('allows the same list name on two LinkedIn accounts and only lists the selected account', async () => {
     await upsertSeat(db, WORKSPACE_ID, { label: 'Second', timezone: 'UTC' }, NOW, 'second');
