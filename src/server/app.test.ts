@@ -1120,7 +1120,7 @@ describe('Trevra API on PostgreSQL', () => {
    * number, never a literal: a test that restates 50 InMails a month passes
    * while the API reports something else.
    */
-  it('reports the operator ranges, the seat bands and the campaign ramp with the limits', async () => {
+  it('reports the operator ranges, seat bands and full campaign allowance with the limits', async () => {
     const agent = await agentWithSession();
     await agent
       .put('/api/linkedin/seat')
@@ -1153,11 +1153,9 @@ describe('Trevra API on PostgreSQL', () => {
       expect(before.body.bands[kind]).toEqual(LINKEDIN_LIMITS[kind][band]);
     }
 
-    // Days 1..5 at 20% a step, ending at the seat's full ceiling.
+    // Managed campaigns use the seat's account budget from day one.
     const ramp: number[] = before.body.campaignWarmupFractions;
-    expect(ramp).toHaveLength(5);
-    expect(ramp[0]).toBeCloseTo(0.2, 10);
-    expect(ramp.at(-1)).toBe(1);
+    expect(ramp).toEqual([1]);
     ramp.forEach((fraction, index) =>
       expect(fraction).toBeCloseTo(
         campaignWarmupFraction(RAMP_START, new Date(Date.parse(RAMP_START) + index * 86_400_000)),

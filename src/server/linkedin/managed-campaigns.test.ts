@@ -1007,8 +1007,9 @@ describe('campaign admission forecasting', () => {
       { workspaceId: WORKSPACE, leadListId: listId, workflowId },
       NOW
     );
-    // Warm-up band 10/day x 50% account ramp = 5/day; campaign day 1 at 20% = 1.
-    expect(warming.dayOneCapacity.invite).toBe(1);
+    // Fresh seats keep their 50% account warm-up (10 x 50% = 5/day),
+    // without a second 20% penalty for starting a campaign.
+    expect(warming.dayOneCapacity.invite).toBe(5);
 
     await upsertSeat(
       db,
@@ -1021,9 +1022,8 @@ describe('campaign admission forecasting', () => {
       { workspaceId: WORKSPACE, leadListId: listId, workflowId },
       NOW
     );
-    // Established/full-speed uses the 100/day queue envelope; campaign day 1
-    // still keeps its independent 20% ramp, so launch capacity is 20.
-    expect(established.dayOneCapacity.invite).toBe(20);
+    // Established seats use the full 100/day queue envelope from day one.
+    expect(established.dayOneCapacity.invite).toBe(100);
   });
 
   it('previews provider enrichment credits separately from emails already on the list', async () => {

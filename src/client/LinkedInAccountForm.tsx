@@ -615,7 +615,7 @@ export function ScheduleFields({
           </label>
           <p className="li-hint">
             {draft.warmupOverride
-              ? 'After saving, the account-level multiplier is 100% immediately. Campaign warm-up, daily limits, rolling limits, working hours and other safety checks still apply.'
+              ? 'After saving, the account-level multiplier is 100%. Daily and rolling limits, working hours, and the other safety checks still apply; there is no second campaign warm-up.'
               : safety
                 ? `Current account multiplier: ${Math.round(safety.seat.warmupMultiplier * 100)}% for active outreach.`
                 : 'Account warm-up is currently enabled.'}

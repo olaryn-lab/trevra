@@ -11517,11 +11517,11 @@ const LINKEDIN_WINDOW_HOURS = { day: 24, week: 24 * 7, month: 24 * 30 } as const
 /** The three kinds that share ONE operator setting. `guard.ts` counts them together. */
 const MESSAGE_POOL_KINDS = ['dm', 'reply', 'inmail', 'group_message', 'event_message'] as const;
 
-/** A ramp that never reaches full is a bug in the ramp; this only stops the walk. */
+/** Preserve the historical API shape; campaign allowance is full from day one. */
 const CAMPAIGN_RAMP_MAX_DAYS = 60;
 
 /**
- * The campaign-day ramp as fractions of the seat's ceiling, days 1..n.
+ * The campaign allowance as fractions of the seat's ceiling; normally [1].
  *
  * ASKED OF THE FUNCTION THAT APPLIES IT rather than declared here.
  * `campaignWarmupFraction` in managed-campaigns.ts is the one place the step
@@ -11740,7 +11740,7 @@ async function effectiveLinkedInLimits(
      */
     operatorRanges: LINKEDIN_OPERATOR_RANGES,
     /**
-     * The campaign-day ramp, days 1..n, as fractions of the seat's ceiling.
+     * Campaign allowance, full from day one; account warm-up is applied separately.
      *
      * COMPUTED FROM `campaignWarmupFraction` RATHER THAN LISTED, so the screen
      * showing the ramp and the runner applying it cannot disagree -- the
