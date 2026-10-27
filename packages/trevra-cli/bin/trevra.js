@@ -603,6 +603,29 @@ async function ensureBrowser(
     await sleep(100);
   }
   activity('browser_error', `seat=${seatKey} devtools endpoint unavailable`);
+  // DISPLAY can exist but point to an unusable X server after desktop logout.
+  // An unattended Linux Companion should retry exactly once using headless
+  // Chrome and the same private profile. Explicit visible recovery never does.
+  if (minimized && !headless && platform() === 'linux') {
+    if (child.exitCode === null) {
+      const stopped = new Promise((resolveStop) => {
+        const timeout = setTimeout(resolveStop, 1500);
+        child.once('exit', () => {
+          clearTimeout(timeout);
+          resolveStop();
+        });
+      });
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // Chrome may have exited just before the signal.
+      }
+      await stopped;
+    }
+    if (browsers.get(key) === handle) browsers.delete(key);
+    activity('browser_headless_fallback', `seat=${seatKey} reason=headed_start_failed`);
+    return ensureBrowser(workspaceId, seatKey, { headless: true });
+  }
   throw new Error(
     `Chrome opened no DevTools endpoint for ${seatKey}. Close the Trevra Chrome window and run the command again.`
   );
