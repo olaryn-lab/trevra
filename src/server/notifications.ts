@@ -254,7 +254,7 @@ export async function notifyLinkedInCampaignStalled(
       'Trevra detected approved LinkedIn work that has not progressed.',
       'Workspace: ' + name,
       'Campaign: ' + input.campaignName,
-      'Overdue approved actions: ' + input.approvedDue,
+      'Verified overdue actions (bounded sample): ' + input.approvedDue,
       'Oldest scheduled action: ' + input.oldestDue,
       '',
       'Open Trevra to review execution blockers and the connected computer.',
@@ -267,7 +267,7 @@ export async function notifyLinkedInCampaignStalled(
       text,
       html: `<p>Approved LinkedIn work in <strong>${clean(name)}</strong> is overdue.</p>
         <p>Campaign: ${clean(input.campaignName)}<br />
-        Approved actions: ${input.approvedDue}<br />
+        Verified overdue actions (bounded sample): ${input.approvedDue}<br />
         Oldest planned: ${clean(input.oldestDue)}</p>
         <p><a href="${clean(reviewUrl)}">Check campaign execution</a>.
         Do not retry uncertain LinkedIn actions without verifying the outcome.</p>`
