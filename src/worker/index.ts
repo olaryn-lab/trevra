@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import { openDatabase } from '../server/db.js';
+import { createExclusiveLane, createLinkedInCycleHealth } from './linkedin-runtime.js';
 import { runAllAutomationCycles } from '../server/automation-service.js';
 import { runReadyPlaybooks } from '../server/playbooks/engine.js';
 import { runDueAgentSchedules } from '../server/agent/schedule.js';
@@ -76,7 +77,11 @@ app.get('/health', async (_req, res) => {
       orchestrator: orchestrationMode(),
       worker: linkedinWorkerId,
       linkedinShard: `${linkedinShard.index + 1}/${linkedinShard.total}`,
-      linkedin
+      linkedin: {
+        ...linkedin,
+        cycles: linkedinCycleHealth.snapshot(),
+        browserLane: linkedInBrowserLane.snapshot()
+      }
     });
   } catch {
     res.status(503).json({ ok: false, service: 'trevra-worker', linkedin });
@@ -149,126 +154,148 @@ async function cycle(): Promise<void> {
     running = false;
   }
 }
-// The local LinkedIn worker gets its OWN loop and its own in-flight flag,
-// rather than another entry in the cycle above. One batch drives a real
-// browser at real paced gaps (30-120s between actions, plan 1.4), so a pass
-// can last tens of minutes -- and folding that into `cycle()` would hold the
-// automation sweep, the playbook engine and the schedule sweep behind it for
-// exactly that long. Gated on config: `enabled` is false on every hosted
-// instance by construction (plan 4.3) and on by default everywhere else.
-//
-// COSTS NOTHING WHERE IT CANNOT RUN. Both calls below check
-// `linkedInBrowserReadiness` before touching the database, so this worker in a
-// container -- no display, no browser binaries -- returns immediately and,
-// crucially, claims no detect request away from the operator's own
-// `npm run linkedin:worker` on the host (plan 4.9).
-//
-// EVERYTHING BELOW IS SHARDED, BOUNDED AND ROTATED, AND NONE OF THAT WAS TRUE.
-// The three loops in this function used to walk EVERY seat and EVERY workspace
-// on the deployment, serially, on every tick, in the same order in every
-// worker process. At a thousand workspaces that is thousands of round trips
-// before a browser opens, the same thousands repeated in every worker, and an
-// alphabetical head that gets served every minute in front of a tail that is
-// never reached at all. Sharding splits the fleet, the per-tick bounds keep one
-// tick finite, and the cursors are what stop the bound from meaning "the first
-// N forever".
+// Campaign planning (database only), outbound action execution, and inbox
+// maintenance use independent clocks. One long paced batch can no longer stop
+// campaign planning or freeze the maintenance scheduler.
 const SIDE_TASK_SEATS_PER_TICK = 50;
 const CAMPAIGN_WORKSPACES_PER_TICK = 50;
+const linkedInBrowserLane = createExclusiveLane();
+const linkedinCycleHealth = createLinkedInCycleHealth();
 let seatCursor: { workspaceId: string; seatKey: string } | null = null;
-let workspaceCursor: string | null = null;
-let linkedinRunning = false;
-async function linkedinCycle(): Promise<void> {
-  if (linkedinRunning || draining || !runtime.linkedinLocalWorker.enabled) return;
-  linkedinRunning = true;
-  // THE HOSTED RUNNER IS THIS LOOP, NOT A SECOND ONE, and that is the whole
-  // design: claiming, leasing, pacing, cooldown, the safety gate and the ledger
-  // are the same code on a hosted deployment as on a laptop, because a second
-  // implementation of any of them is a second place for them to be wrong. What
-  // hosted execution adds is WHERE the browser is (a remote provider, see
-  // `browser/provider.ts`) and WHO may be served (`allowSeat` below).
-  //
-  // Rebuilt every tick rather than once at boot: the filter memoises its
-  // answers for the length of a pass, so a workspace that withdraws its
-  // authorisation stops being served on the next tick rather than at the next
-  // restart. Null on every self-hosted deployment, where the loop is unchanged.
-  const allowSeat = hostedSeatFilter(db);
-  // One paired laptop may own many isolated LinkedIn profiles, but it should
-  // drive only one account at a time. Cloud/browser fleets keep the bounded
-  // headless concurrency; the local companion is serialized across seats.
-  const seatConcurrency = seatConcurrencyForConfig(runtime.linkedinLocalWorker, true);
-  // Neither call throws -- a missing optional playwright, a browser that will
-  // not open and a halted batch are all outcomes they report. This catch is
-  // for the case they are wrong about that.
+let planningWorkspaceCursor: string | null = null;
+let postingWorkspaceCursor: string | null = null;
+
+async function withLinkedInBrowser<T>(work: () => Promise<T>): Promise<T> {
+  return runtime.linkedinLocalWorker.companionBrowser ? linkedInBrowserLane.run(work) : work();
+}
+
+async function linkedinPlanningCycle(): Promise<void> {
+  if (draining || !runtime.linkedinLocalWorker.enabled) return;
   try {
-    await runPendingSeatDetectRequests(db, runtime.linkedinLocalWorker, {
-      shard: linkedinShard,
-      ...(allowSeat ? { allowSeat } : {})
+    await linkedinCycleHealth.run('planning', async () => {
+      // Hosted workspaces plan only while an authorised browser is available,
+      // so an offline Companion does not accumulate stale unattended work.
+      const allowSeat = hostedSeatFilter(db);
+      const workspaces = await linkedinWorkspaceIdsForShard(db, {
+        shard: linkedinShard,
+        limit: CAMPAIGN_WORKSPACES_PER_TICK,
+        after: planningWorkspaceCursor
+      });
+      planningWorkspaceCursor =
+        workspaces.length < CAMPAIGN_WORKSPACES_PER_TICK
+          ? null
+          : (workspaces[workspaces.length - 1] ?? null);
+      for (const workspaceId of workspaces) {
+        if (draining) break;
+        if (allowSeat && !(await allowSeat({ workspaceId }))) continue;
+        await runLinkedInCampaignTick(db, workspaceId);
+      }
     });
-    await runDueLinkedInActions(db, runtime.linkedinLocalWorker, {
-      shard: linkedinShard,
-      workerId: linkedinWorkerId,
-      concurrency: seatConcurrency,
-      ...(allowSeat ? { allowSeat } : {})
-    });
-    // THE SEND QUEUE FIRST. Then one tightly bounded autonomous state read:
-    // inbox sync, because replies are outcomes the campaign cannot otherwise
-    // learn. Pending-invite reconciliation, acceptance profile checks and lead
-    // sourcing remain explicit operator actions. `runLinkedInSideTasks` also
-    // drains a withdrawal only when a queued withdrawal row already exists.
-    //
-    // PER SEAT and bounded/rotated across the shard so one account cannot
-    // starve another tenant's worker pass.
-    const seats = await seatRefsForShard(db, {
-      shard: linkedinShard,
-      limit: SIDE_TASK_SEATS_PER_TICK,
-      after: seatCursor
-    });
-    seatCursor = seats.length < SIDE_TASK_SEATS_PER_TICK ? null : (seats[seats.length - 1] ?? null);
-    await runBounded(seats, seatConcurrency, async (seat) => {
-      if (allowSeat && !(await allowSeat(seat))) return;
-      await runLinkedInSideTasks(db, runtime.linkedinLocalWorker, {
-        workspaceId: seat.workspaceId,
-        seatKey: seat.seatKey
+  } catch (error) {
+    console.error('LinkedIn campaign planning cycle failed', error);
+  }
+}
+
+async function linkedinOutboundCycle(): Promise<void> {
+  if (draining || !runtime.linkedinLocalWorker.enabled) return;
+  try {
+    await linkedinCycleHealth.run('outbound', async () => {
+      const allowSeat = hostedSeatFilter(db);
+      await withLinkedInBrowser(async () => {
+        if (draining) return;
+        await runDueLinkedInActions(db, runtime.linkedinLocalWorker, {
+          shard: linkedinShard,
+          workerId: linkedinWorkerId,
+          concurrency: seatConcurrencyForConfig(runtime.linkedinLocalWorker, true),
+          ...(allowSeat ? { allowSeat } : {})
+        });
       });
     });
-    // Once per workspace, AFTER the side tasks -- see `runLinkedInCampaignTick`.
-    // Sharded on the workspace alone: a campaign tick is a per-workspace act,
-    // and hashing it per seat would have two workers advancing one tenant's
-    // campaigns at the same time.
-    const workspaces = await linkedinWorkspaceIdsForShard(db, {
-      shard: linkedinShard,
-      limit: CAMPAIGN_WORKSPACES_PER_TICK,
-      after: workspaceCursor
-    });
-    workspaceCursor =
-      workspaces.length < CAMPAIGN_WORKSPACES_PER_TICK
-        ? null
-        : (workspaces[workspaces.length - 1] ?? null);
-    for (const workspaceId of workspaces) {
-      // A campaign tick PLANS rows; it sends nothing. Gated all the same on a
-      // hosted deployment, because filling an unauthorised workspace's queue
-      // with work nothing may execute is a backlog with no reader.
-      if (allowSeat && !(await allowSeat({ workspaceId }))) continue;
-      await runLinkedInCampaignTick(db, workspaceId);
-      await runLinkedInPostTick(db, runtime.linkedinLocalWorker, { workspaceId });
-    }
   } catch (error) {
-    console.error('LinkedIn local worker cycle failed', error);
-  } finally {
-    linkedinRunning = false;
+    console.error('LinkedIn outbound execution cycle failed', error);
+  }
+}
+
+async function linkedinMaintenanceCycle(): Promise<void> {
+  if (draining || !runtime.linkedinLocalWorker.enabled) return;
+  try {
+    await linkedinCycleHealth.run('maintenance', async () => {
+      const allowSeat = hostedSeatFilter(db);
+      await withLinkedInBrowser(async () => {
+        if (draining) return;
+        await runPendingSeatDetectRequests(db, runtime.linkedinLocalWorker, {
+          shard: linkedinShard,
+          ...(allowSeat ? { allowSeat } : {})
+        });
+      });
+      const seats = await seatRefsForShard(db, {
+        shard: linkedinShard,
+        limit: SIDE_TASK_SEATS_PER_TICK,
+        after: seatCursor
+      });
+      seatCursor =
+        seats.length < SIDE_TASK_SEATS_PER_TICK ? null : (seats[seats.length - 1] ?? null);
+      await runBounded(
+        seats,
+        seatConcurrencyForConfig(runtime.linkedinLocalWorker, true),
+        async (seat) => {
+          if (draining || (allowSeat && !(await allowSeat(seat)))) return;
+          await withLinkedInBrowser(async () => {
+            if (draining) return;
+            await runLinkedInSideTasks(db, runtime.linkedinLocalWorker, {
+              workspaceId: seat.workspaceId,
+              seatKey: seat.seatKey
+            });
+          });
+        }
+      );
+      // Publishing can operate the browser and belongs in maintenance, not
+      // database-only planning. It retains the existing workspace rotation.
+      const workspaces = await linkedinWorkspaceIdsForShard(db, {
+        shard: linkedinShard,
+        limit: CAMPAIGN_WORKSPACES_PER_TICK,
+        after: postingWorkspaceCursor
+      });
+      postingWorkspaceCursor =
+        workspaces.length < CAMPAIGN_WORKSPACES_PER_TICK
+          ? null
+          : (workspaces[workspaces.length - 1] ?? null);
+      for (const workspaceId of workspaces) {
+        if (draining) break;
+        if (allowSeat && !(await allowSeat({ workspaceId }))) continue;
+        await withLinkedInBrowser(async () => {
+          if (!draining)
+            await runLinkedInPostTick(db, runtime.linkedinLocalWorker, { workspaceId });
+        });
+      }
+    });
+  } catch (error) {
+    console.error('LinkedIn inbox and maintenance cycle failed', error);
   }
 }
 await cycle();
 const timer = setInterval(() => void cycle(), runtime.automationIntervalMs);
 timer.unref();
-// Run the LinkedIn cycle once immediately after boot as well as on the cadence.
-// Do not await it: one browser batch can legitimately run for many minutes, and
-// worker startup/health plus the other timers must not wait behind real browser
-// pacing. `linkedinRunning` makes the interval tick a no-op while this pass is
-// still active, so this cannot create overlapping LinkedIn cycles.
-void linkedinCycle();
-const linkedinTimer = setInterval(() => void linkedinCycle(), runtime.automationIntervalMs);
-linkedinTimer.unref();
+// Maintenance starts first to observe replies before outbound work. Planning
+// is database-only and does not wait on a browser or an action cooldown.
+void linkedinMaintenanceCycle();
+void linkedinPlanningCycle();
+void linkedinOutboundCycle();
+const linkedinMaintenanceTimer = setInterval(
+  () => void linkedinMaintenanceCycle(),
+  runtime.automationIntervalMs
+);
+linkedinMaintenanceTimer.unref();
+const linkedinPlanningTimer = setInterval(
+  () => void linkedinPlanningCycle(),
+  runtime.automationIntervalMs
+);
+linkedinPlanningTimer.unref();
+const linkedinOutboundTimer = setInterval(
+  () => void linkedinOutboundCycle(),
+  runtime.automationIntervalMs
+);
+linkedinOutboundTimer.unref();
 // Presence alerting is operational monitoring, not business automation. It
 // must not inherit a deployment's five-minute automation cadence, otherwise a
 // five-minute disconnect grace can become almost ten minutes before the first
@@ -366,14 +393,16 @@ async function shutdown(signal: string) {
   draining = true;
   console.log(`${signal} received; draining worker`);
   clearInterval(timer);
-  clearInterval(linkedinTimer);
+  clearInterval(linkedinMaintenanceTimer);
+  clearInterval(linkedinPlanningTimer);
+  clearInterval(linkedinOutboundTimer);
   clearInterval(companionPresenceTimer);
   clearInterval(emailDeliverabilityTimer);
   clearInterval(enrichmentTimer);
   const deadline = Date.now() + DRAIN_TIMEOUT_MS;
   while (
     (running ||
-      linkedinRunning ||
+      Object.values(linkedinCycleHealth.snapshot()).some((state) => state.running) ||
       companionPresenceRunning ||
       emailDeliverabilityRunning ||
       enrichmentRunning) &&

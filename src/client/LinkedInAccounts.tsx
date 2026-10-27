@@ -24,6 +24,8 @@ import {
   deleteLinkedInSeat,
   detectLinkedInSeat,
   getLinkedInLimits,
+  getLinkedInManagedCampaigns,
+  getLinkedInCompanionStatus,
   getLinkedInManagerSeats,
   getLinkedInSeat,
   getLinkedInWithdrawalCandidates,
@@ -38,6 +40,7 @@ import {
   type LinkedInDetectedProfile,
   type LinkedInLimitsReport,
   type LinkedInSeat,
+  type LinkedInCompanionStatus,
   type LinkedInSeatResponse,
   type LinkedInWithdrawalCandidates,
   type LinkedInWorkerStatus,
@@ -58,6 +61,8 @@ import {
   usedToday
 } from './LinkedInAccountForm';
 import { CompanionPanel, Wall, WorkerNotice } from './LinkedInCompanion';
+import { linkedInAutomationStatus } from './LinkedInAutomationStatus';
+import type { ManagedCampaign } from '../server/linkedin/managed-campaigns';
 import { errorMessage, reloadOutreach, useOutreachRefresh } from './LinkedInSafety';
 import { relativeTime, sourceNote } from './LinkedInScreen';
 import { MAINTENANCE_TASK_LABELS, formatVisitWindow, queueWaitCopy } from './LinkedInTiming';
@@ -149,7 +154,7 @@ function stateSentence(
         ? `Stopped by you: ${account.pausedReason}. Nothing is scheduled or sent until you resume it.`
         : 'Stopped by you. Nothing is scheduled or sent until you resume it.';
     case 'cooling-down':
-      return 'Trevra has cut this account back after a run of declined invites. It picks up again on its own.';
+      return 'Trevra paused this account after a LinkedIn restriction. Check the account before resuming it.';
     case 'not-connected':
       return 'No sign-in stored, so Trevra cannot open LinkedIn as this account. Add it below.';
     case 'needs-signin':
@@ -159,7 +164,7 @@ function stateSentence(
         ? `Week ${detail.warmupWeek} of ${detail.warmupWeeks} — easing in on purpose. Uses only part of the limits below until the ramp finishes.`
         : 'Easing in: this account may use only part of the limits you set below until the ramp finishes.';
     default:
-      return 'Signed in and working to the limits below.';
+      return 'Signed in. Trevra handles approved campaigns during your working hours.';
   }
 }
 
@@ -187,6 +192,8 @@ export function LinkedInAccounts({
   const [details, setDetails] = useState<Record<string, LinkedInSeatResponse>>({});
   const [reports, setReports] = useState<Record<string, LinkedInLimitsReport>>({});
   const [worker, setWorker] = useState<LinkedInWorkerStatus | null>(null);
+  const [companionStatus, setCompanionStatus] = useState<LinkedInCompanionStatus | null>(null);
+  const [campaigns, setCampaigns] = useState<ManagedCampaign[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [failure, setFailure] = useState('');
   const [adding, setAdding] = useState(startAdding);
@@ -199,15 +206,19 @@ export function LinkedInAccounts({
     const sequence = ++loadSequence.current;
     setLoading(true);
     try {
-      const [list, workerStatus] = await Promise.all([
+      const [list, workerStatus, companion, activeCampaigns] = await Promise.all([
         getLinkedInManagerSeats(),
         // The worker read is evidence, not the subject. A failed one must not
         // take the account list down with it.
-        getLinkedInWorkerStatus().catch(() => null)
+        getLinkedInWorkerStatus().catch(() => null),
+        getLinkedInCompanionStatus().catch(() => null),
+        getLinkedInManagedCampaigns().catch(() => null)
       ]);
       if (sequence !== loadSequence.current) return;
       setAccounts(list);
       setWorker(workerStatus);
+      setCompanionStatus(companion);
+      setCampaigns(activeCampaigns);
       // lc-debt: one GET /api/linkedin/seat per account -- fine at the handful
       // of accounts a person manages, wrong at fifty; upgrade path is a manager
       // route returning sign-in state and today's counts for every account at
@@ -303,6 +314,14 @@ export function LinkedInAccounts({
   // settings while the selected seat key stayed the same.
   const safety = activeSeatKey ? (reports[activeSeatKey] ?? null) : null;
 
+  const overview = linkedInAutomationStatus({
+    accounts,
+    details,
+    worker,
+    companion: companionStatus,
+    campaigns
+  });
+  const needsConnectionHelp = overview.kind === 'attention' || overview.kind === 'setup';
   const empty = accounts !== null && accounts.length === 0;
   if (compact) {
     return (
@@ -370,12 +389,38 @@ export function LinkedInAccounts({
         </div>
       )}
 
-      <WorkerNotice worker={worker} />
-      {worker?.companionBrowser && (
-        <details className="mgr-inputs li-settings-companion">
-          <summary>Connected computer</summary>
+      <section className="page-panel li-account-status-overview" role="status" aria-live="polite">
+        <div className="section-heading">
+          <div>
+            <h3 aria-level={2}>{overview.title}</h3>
+            <p>{overview.description}</p>
+            {overview.nextStep && <p className="li-hint">{overview.nextStep}</p>}
+          </div>
+          <span className="li-acct-state">
+            {overview.kind === 'working'
+              ? 'Active'
+              : overview.kind === 'attention'
+                ? 'Action needed'
+                : overview.kind === 'checking'
+                  ? 'Checking'
+                  : overview.kind === 'setup'
+                    ? 'Setup'
+                    : overview.kind === 'paused'
+                      ? 'Paused'
+                      : 'Idle'}
+          </span>
+        </div>
+      </section>
+      {(worker?.companionBrowser || worker === null || !worker.ready) && (
+        <details
+          key={needsConnectionHelp ? 'attention' : 'healthy'}
+          className="mgr-inputs li-settings-companion"
+          open={needsConnectionHelp}
+        >
+          <summary>Connection &amp; troubleshooting</summary>
           <div className="mgr-inputs-body">
-            <CompanionPanel setToast={setToast} />
+            <WorkerNotice worker={worker} />
+            {worker?.companionBrowser && <CompanionPanel setToast={setToast} />}
           </div>
         </details>
       )}
