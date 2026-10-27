@@ -62,7 +62,10 @@ import {
   usedToday
 } from './LinkedInAccountForm';
 import { CompanionPanel, Wall, WorkerNotice } from './LinkedInCompanion';
-import { linkedInAutomationStatus } from './LinkedInAutomationStatus';
+import {
+  linkedInAutomationStatus,
+  type LinkedInAutomationSummary
+} from './LinkedInAutomationStatus';
 import type { ManagedCampaign } from '../server/linkedin/managed-campaigns';
 import { errorMessage, reloadOutreach, useOutreachRefresh } from './LinkedInSafety';
 import { relativeTime, sourceNote } from './LinkedInScreen';
@@ -94,6 +97,39 @@ import { useWorkspaceMembers } from './TeamScreen';
  * reads a profile back, and writes limits -- the same four things the single-
  * account setup screen always did, once per account instead of once.
  */
+
+/**
+ * One truthful summary shared by the actual Connections account drawer and
+ * the full account layout. The full-layout summary used to be dead UI: all
+ * production mounts of LinkedInAccounts were compact, so customers could
+ * never see the source-backed Working/Waiting/Needs-attention verdict.
+ */
+function AutomationOverviewPanel({ summary }: { summary: LinkedInAutomationSummary }) {
+  return (
+    <section className="page-panel li-account-status-overview" role="status" aria-live="polite">
+      <div className="section-heading">
+        <div>
+          <h3 aria-level={2}>{summary.title}</h3>
+          <p>{summary.description}</p>
+          {summary.nextStep && <p className="li-hint">{summary.nextStep}</p>}
+        </div>
+        <span className="li-acct-state">
+          {summary.kind === 'working'
+            ? 'Active'
+            : summary.kind === 'attention'
+              ? 'Action needed'
+              : summary.kind === 'checking'
+                ? 'Checking'
+                : summary.kind === 'setup'
+                  ? 'Setup'
+                  : summary.kind === 'paused'
+                    ? 'Paused'
+                    : 'Idle'}
+        </span>
+      </div>
+    </section>
+  );
+}
 
 /** `in/priya-sharma`, not the whole URL. The link still goes to the whole URL. */
 const profileLabel = (url: string) =>
@@ -356,6 +392,20 @@ export function LinkedInAccounts({
       >
         <TimezoneOptions />
         {failure && <div className="error-banner">{failure}</div>}
+        {!adding && <AutomationOverviewPanel summary={overview} />}
+        {!adding && (worker?.companionBrowser || worker === null || !worker.ready) && (
+          <details
+            key={needsConnectionHelp ? 'attention' : 'healthy'}
+            className="mgr-inputs li-settings-companion"
+            open={needsConnectionHelp}
+          >
+            <summary>Connection &amp; troubleshooting</summary>
+            <div className="mgr-inputs-body">
+              <WorkerNotice worker={worker} />
+              {worker?.companionBrowser && <CompanionPanel setToast={setToast} />}
+            </div>
+          </details>
+        )}
         {accounts === null ? (
           <p className="empty-copy">{loading ? 'Reading LinkedIn account…' : 'No data.'}</p>
         ) : adding ? (

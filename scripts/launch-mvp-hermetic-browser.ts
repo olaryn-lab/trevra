@@ -295,6 +295,69 @@ async function main() {
       new Date()
     );
 
+    // R6: the live Connections route opens a COMPACT account drawer. The
+    // source-backed automation summary used to render only in the unused full
+    // layout, so a real customer never saw why outreach was not progressing.
+    // Use the actual logged-in app and an unpaired provider-double seat.
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    const accountLink = page.getByRole('button', {
+      name: 'Isolated test sender (NOT paired)',
+      exact: true
+    });
+    await accountLink.waitFor({ timeout: 25000 });
+    await accountLink.click();
+    const accountDrawer = page.getByRole('dialog', {
+      name: 'Isolated test sender (NOT paired)'
+    });
+    await accountDrawer.waitFor({ timeout: 12000 });
+    const automationStatus = accountDrawer.locator('.li-account-status-overview');
+    await automationStatus.waitFor({ timeout: 20000 });
+    await page.waitForTimeout(750);
+    const overviewCopy = (await automationStatus.innerText()).trim();
+    check(
+      'R6 real compact LinkedIn drawer renders evidence-based automation status',
+      /Needs attention|Checking LinkedIn|Waiting|Paused|Connect LinkedIn|Working/.test(
+        overviewCopy
+      ),
+      overviewCopy.slice(0, 150)
+    );
+    check(
+      'R6 unpaired account is not falsely shown sending LinkedIn actions',
+      !/Working.*Active/.test(overviewCopy.replace(/\s+/g, ' ')),
+      overviewCopy.slice(0, 150)
+    );
+    await accountDrawer.getByText('Connection & troubleshooting').waitFor({
+      timeout: 15000
+    });
+    check('R6 compact LinkedIn drawer exposes recovery guidance', true);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForTimeout(300);
+    const drawerGeometry = await accountDrawer.evaluate((drawer) => {
+      const viewportWidth = document.documentElement.clientWidth;
+      const rect = drawer.getBoundingClientRect();
+      return {
+        viewportWidth,
+        left: rect.left,
+        right: rect.right,
+        statusVisible: Boolean(
+          drawer.querySelector('.li-account-status-overview')?.getBoundingClientRect().height
+        )
+      };
+    });
+    check(
+      'R6 mobile LinkedIn status drawer stays visible within viewport',
+      drawerGeometry.statusVisible &&
+        drawerGeometry.left >= -2 &&
+        drawerGeometry.right <= drawerGeometry.viewportWidth + 2,
+      JSON.stringify(drawerGeometry)
+    );
+    await page.setViewportSize({ width: 1280, height: 720 });
+    await accountDrawer.getByRole('button', { name: 'Close LinkedIn panel' }).click();
+    check(
+      'R6 account drawer closes without leaving a stale overlay',
+      (await page.getByRole('dialog', { name: 'Isolated test sender (NOT paired)' }).count()) === 0
+    );
+
     await page.goto(origin + '/outreach/new', { waitUntil: 'domcontentloaded' });
     await page.getByRole('heading', { name: 'Prepare outreach' }).waitFor({ timeout: 25000 });
     check('L5 provider-double seat exposes real CSV preparation UI', true);
