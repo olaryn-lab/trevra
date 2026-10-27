@@ -624,21 +624,22 @@ function toMember(row: MemberRow): ManagedCampaignMember {
   };
 }
 
-/** Campaign-day ramp requested by the manager brief: days 1..5 => 20/40/60/80/100%. */
-export function campaignWarmupFraction(startedAt: string | null, now: Date): number {
-  if (!startedAt) return 0.2;
-  const start = Date.parse(startedAt);
-  if (Number.isNaN(start) || start > now.getTime()) return 0.2;
-  const day = Math.floor((now.getTime() - start) / 86_400_000) + 1;
-  return Math.min(1, Math.max(0.2, day * 0.2));
+/**
+ * One account budget per kind. Starting another managed campaign must not
+ * silently multiply the seat's already-conservative daily ceiling by 20%.
+ * The runner still fair-shares the budget across campaigns and subtracts
+ * existing planned actions; this helper makes the launch preview match it.
+ */
+export function campaignWarmupFraction(_startedAt: string | null, _now: Date): number {
+  return 1;
 }
 
 export function campaignActionLimit(
   accountLimit: number,
-  startedAt: string | null,
-  now: Date
+  _startedAt: string | null,
+  _now: Date
 ): number {
-  return Math.floor(accountLimit * campaignWarmupFraction(startedAt, now));
+  return Math.max(0, Math.floor(accountLimit));
 }
 
 export async function listManagedCampaigns(

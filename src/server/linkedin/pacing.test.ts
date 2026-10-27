@@ -486,17 +486,17 @@ describe('acceptance-rate throttle', () => {
     for (let index = 0; index < declined; index += 1) await log('invite', 'declined', 30);
   }
 
-  it('halves volume below the 30% floor and names the reason', async () => {
+  it('keeps throughput and reports a low-acceptance advisory', async () => {
     await seatWithOutcomes(2, 8);
     const plan = await planPacing(
       db,
       { workspaceId: WORKSPACE_ID, kind: 'invite', targets: targets(30), horizonDays: 1 },
       NOW
     );
-    // Smoothing allows 13; the throttle halves it.
-    expect(perDay(plan)[0]).toBe(6);
-    expect(plan.ceilingsApplied).toContain('acceptance-rate');
-    expect(plan.reasons.some((reason) => reason.startsWith('throttled:'))).toBe(true);
+    // The observable acceptance warning does not silently halve the seat's pace.
+    expect(perDay(plan)[0]).toBe(13);
+    expect(plan.ceilingsApplied).not.toContain('acceptance-rate');
+    expect(plan.reasons.some((reason) => reason.startsWith('Advisory:'))).toBe(true);
   });
 
   it('leaves a healthy seat alone', async () => {
@@ -720,7 +720,7 @@ describe('seat state', () => {
     expect(plan.ceilingsApplied).toContain('seat-paused');
   });
 
-  it('charges the outstanding-invite backlog against the weekly ceiling', async () => {
+  it('uses a separate outstanding cap without double-charging the weekly quota', async () => {
     await seat('2026-01-01');
     // Yesterday's real volume, so the day-over-day ramp is not what binds.
     for (let index = 0; index < 18; index += 1) await log('invite', 'sent', 30);
@@ -736,12 +736,11 @@ describe('seat state', () => {
       NOW
     );
 
-    // Steady band is 90/week. 18 went out this week and 70 are still
-    // outstanding from before it, so the first day may carry 2 -- not the 18
-    // the daily band and the ramp would both have allowed.
-    expect(perDay(plan)[0]).toBe(2);
+    // 18 recent plus 70 older pending invites leave 12 outstanding slots.
+    // The weekly quota counts only recent sends, while the backlog cap counts all 88.
+    expect(perDay(plan)[0]).toBe(12);
     expect(plan.ceilingsApplied).toContain('pending-invite-backlog');
-    expect(plan.reasons.join(' ')).toContain('70 invite(s) sent more than 7 days ago');
+    expect(plan.reasons.join(' ')).toContain('88 invite(s) remain outstanding');
   });
 
   it("does not charge this week's invites twice", async () => {

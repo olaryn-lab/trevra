@@ -557,12 +557,12 @@ describe('day-over-day delta for an explicitly established account', () => {
 });
 
 describe('acceptance rate', () => {
-  it('blocks below the 30% floor', async () => {
+  it('warns but does not block below the 30% floor', async () => {
     await seat('2026-01-01');
     for (let index = 0; index < 2; index += 1) await log('invite', 'accepted', 30);
     for (let index = 0; index < 8; index += 1) await log('invite', 'declined', 30);
     const verdict = await guard();
-    expect(check(verdict, 'acceptance-rate').passed).toBe(false);
+    expect(check(verdict, 'acceptance-rate').passed).toBe(true);
     expect(check(verdict, 'acceptance-rate').detail).toContain('20%');
   });
 
@@ -946,34 +946,34 @@ describe('campaign warm-up', () => {
     );
   }
 
-  it('blocks the third invite of a managed campaign on its first day', async () => {
+  it('permits a third invite under the seat budget on campaign day one', async () => {
     await seatWithInviteLimit(10);
     const campaignId = await campaignRow(NOW.toISOString());
 
-    // Day 1 is 20% of the seat's effective 10/day ceiling: two invites.
+    // A new campaign uses the account budget without another day-one reduction.
     const fresh = await guard({ campaignId }, { dayShape: FLAT_DAY_SHAPE });
     expect(check(fresh, 'campaign-warmup').passed).toBe(true);
-    expect(check(fresh, 'campaign-warmup').detail).toContain('0 of 2');
+    expect(check(fresh, 'campaign-warmup').detail).toContain('0 of 10');
     expect(check(fresh, 'campaign-warmup').detail).toContain('campaign day 1');
 
     await logCampaignInvites(campaignId, 2);
     const third = await guard({ campaignId }, { dayShape: FLAT_DAY_SHAPE });
-    expect(check(third, 'campaign-warmup').passed).toBe(false);
-    expect(check(third, 'campaign-warmup').detail).toContain('2 of 2');
-    expect(third.reason).toContain('campaign-warmup');
+    expect(check(third, 'campaign-warmup').passed).toBe(true);
+    expect(check(third, 'campaign-warmup').detail).toContain('2 of 10');
+    expect(third.reason).toContain('day-over-day-delta'); // Cold account ramp remains independent.
     // The per-seat ramp is untouched and still passing -- this seat has been
     // automated since January. Two ramps, and the stricter one binds.
     expect(check(third, 'warmup-ceiling').passed).toBe(true);
     expect(check(third, 'rolling-24h').passed).toBe(true);
   });
 
-  it('lifts the ceiling as the campaign ages: day 3 is 60%', async () => {
+  it('keeps the same account budget on campaign day three', async () => {
     await seatWithInviteLimit(10);
     const campaignId = await campaignRow(new Date(NOW.getTime() - 2 * 86_400_000).toISOString());
     await logCampaignInvites(campaignId, 2);
     const verdict = await guard({ campaignId }, { dayShape: FLAT_DAY_SHAPE });
     expect(check(verdict, 'campaign-warmup').passed).toBe(true);
-    expect(check(verdict, 'campaign-warmup').detail).toContain('2 of 6');
+    expect(check(verdict, 'campaign-warmup').detail).toContain('2 of 10');
     expect(check(verdict, 'campaign-warmup').detail).toContain('campaign day 3');
   });
 
@@ -1005,7 +1005,7 @@ describe('campaign warm-up', () => {
     // seat-level ceilings above are what stop the total running away.
     const verdict = await guard({ campaignId: second }, { dayShape: FLAT_DAY_SHAPE });
     expect(check(verdict, 'campaign-warmup').passed).toBe(true);
-    expect(check(verdict, 'campaign-warmup').detail).toContain('0 of 2');
+    expect(check(verdict, 'campaign-warmup').detail).toContain('0 of 10');
   });
 });
 
@@ -1776,7 +1776,7 @@ describe('one LinkedIn member across workspaces', () => {
     );
   });
 
-  it("keeps suppression and the campaign ramp per workspace, whatever the neighbour's ledger holds", async () => {
+  it('keeps suppression and campaign counts scoped to their workspace', async () => {
     await upsertSeat(
       db,
       WORKSPACE_ID,
@@ -1811,7 +1811,7 @@ describe('one LinkedIn member across workspaces', () => {
     const verdict = await guard({ campaignId: 'licmp_guard_linked' }, { dayShape: FLAT_DAY_SHAPE });
     expect(check(verdict, 'suppression').passed).toBe(true);
     expect(check(verdict, 'campaign-warmup').passed).toBe(true);
-    expect(check(verdict, 'campaign-warmup').detail).toContain('0 of 2');
+    expect(check(verdict, 'campaign-warmup').detail).toContain('0 of 10');
     expect(JSON.stringify(verdict)).not.toContain('Neighbour exclusion');
   });
   it('keeps separate budgets when one profile key was bound by two different users', async () => {

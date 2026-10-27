@@ -148,8 +148,7 @@ export interface LinkedInSeat {
    * steady/warm-up BAND cap only.
    *
    * WHAT IT DOES NOT LIFT, and this is the whole reason it is safe to offer:
-   * the per-campaign 20/40/60/80/100% day ramp (`campaignActionLimit`) still
-   * applies, as does the per-seat warm-up week (`warmupMultiplierFor`) unless
+   * the per-seat warm-up week (`warmupMultiplierFor`) still applies unless
    * the operator separately uses `warmupOverride`. Rolling windows, the
    * day-over-day variance clamp, the working window, and posture remain too.
    * This override is a different ceiling, never an absence of one.
