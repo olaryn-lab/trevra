@@ -547,6 +547,13 @@ export interface LocalWorkerStore {
   /** Nothing was sent: put the action back in the queue, recording why. */
   releaseClaim(actionId: string, failureKind: LinkedInFailureKind | null): Promise<void>;
   /**
+   * Durable WAL boundary immediately BEFORE an external LinkedIn effect.
+   * A worker may die after the Send click but before recording the outcome;
+   * lease expiry must never silently replay that action. Only the exact
+   * holder of the claimed batch can mark it, and failure aborts sending.
+   */
+  beginExternalEffect(batchId: string, actionId: string, now: Date): Promise<void>;
+  /**
    * Does this seat hold an invite to this target that was never accepted?
    *
    * Asked for ONE question and it is a narrow one: a profile with no Message
@@ -1392,6 +1399,24 @@ export async function runLinkedInLocalBatch(
       }
     }
 
+    // Durably mark MAY-HAVE-SENT before crossing the external browser boundary.
+    // A process can disappear immediately after a click; without this marker
+    // the lease reaper would mistake it for a safe pre-click crash and retry
+    // the very same invite or message. Ambiguity means operator review,
+    // never silent duplicate outreach.
+    try {
+      await store.beginExternalEffect(batchId, action.id, at);
+    } catch (cause) {
+      result.blocked += 1;
+      result.halted = true;
+      result.haltReason =
+        'The LinkedIn action could not be durably protected before sending. No new browser action was attempted.';
+      log(
+        `LinkedIn local worker could not protect action ${action.id} before execution: ${cause instanceof Error ? cause.message : String(cause)}`
+      );
+      break;
+    }
+
     // One seed per (batch, action), the same string the inter-action gap is
     // drawn from, so the whole of a batch's timing -- between actions and
     // within one -- is reproducible from two ids in the ledger.
@@ -1593,9 +1618,13 @@ export async function runLinkedInLocalBatch(
        * different file. An operator sent to the wrong file is worse off than an
        * operator told nothing, so this names the browser session instead.
        */
-      await store.releaseClaim(action.id, failureKind);
+      // A disconnected relay cannot prove whether LinkedIn accepted a click
+      // just before the transport disappeared. Preserve the may-have-sent
+      // marker and require outcome reconciliation; automatic retries can
+      // create a duplicate notification or message.
+      await store.holdClaim(action.id, 'unknown');
       result.halted = true;
-      result.haltReason = `The browser session for this seat ended mid-batch, so this batch stopped and its remaining work stays due. Nothing was sent, and the selectors are not involved: check that the paired computer is still online and that its companion relay is connected.${detail}`;
+      result.haltReason = `The browser connection disappeared during an action. Trevra did not retry it because LinkedIn may already have received it; check the outcome before resuming. ${detail}`;
       break;
     }
 
@@ -2425,11 +2454,26 @@ export function postgresLocalWorkerStore(
         .prepare(
           `
         UPDATE linkedin_actions
-        SET claimed_at=NULL, claimed_by=NULL, lease_expires_at=NULL, batch_id=NULL, failure_kind=?
+        SET claimed_at=NULL, claimed_by=NULL, lease_expires_at=NULL, batch_id=NULL,
+            settlement_hold_at=NULL, failure_kind=?
         WHERE id=? AND workspace_id=?
       `
         )
         .run(failureKind, actionId, workspaceId);
+    },
+
+    async beginExternalEffect(batchId, actionId, now) {
+      const claimed = await db
+        .prepare(
+          `UPDATE linkedin_actions
+           SET settlement_hold_at=?
+           WHERE id=? AND workspace_id=? AND seat_key=?
+             AND batch_id=? AND claimed_by=? AND claimed_at IS NOT NULL
+             AND settlement_hold_at IS NULL AND status='planned'
+           RETURNING id`
+        )
+        .get<{ id: string }>(now.toISOString(), actionId, workspaceId, seatKey, batchId, workerId);
+      if (!claimed) throw new Error('The LinkedIn action is no longer owned by this worker.');
     },
 
     async settleSent(actionId, externalRef, now, metadata) {
@@ -2445,7 +2489,7 @@ export function postgresLocalWorkerStore(
         SET status='sent', recorded_at=?, external_ref=?, failure_kind=NULL,
             paid_credit_used=CASE WHEN ?::boolean THEN TRUE ELSE paid_credit_used END,
             channel_metadata_json=channel_metadata_json || ?::jsonb,
-            claimed_by=NULL, lease_expires_at=NULL
+            claimed_by=NULL, lease_expires_at=NULL, settlement_hold_at=NULL
         WHERE id=? AND workspace_id=?
       `
         )
@@ -2466,7 +2510,7 @@ export function postgresLocalWorkerStore(
           `UPDATE linkedin_actions
            SET status=?, recorded_at=COALESCE(recorded_at,?::timestamptz), failure_kind=NULL,
                channel_metadata_json=channel_metadata_json || ?::jsonb,
-               claimed_at=NULL,claimed_by=NULL,lease_expires_at=NULL
+               claimed_at=NULL,claimed_by=NULL,lease_expires_at=NULL,settlement_hold_at=NULL
            WHERE id=? AND workspace_id=? AND kind='invite'`
         )
         .run(
@@ -2506,7 +2550,7 @@ export function postgresLocalWorkerStore(
             `
           UPDATE linkedin_actions
           SET status='skipped', recorded_at=NULL, claimed_at=NULL, claimed_by=NULL,
-              lease_expires_at=NULL, batch_id=NULL, failure_kind=?
+              lease_expires_at=NULL, batch_id=NULL, settlement_hold_at=NULL, failure_kind=?
           WHERE id=? AND workspace_id=?
         `
           )
@@ -2534,7 +2578,7 @@ export function postgresLocalWorkerStore(
           `
         UPDATE linkedin_actions
         SET status='skipped', recorded_at=NULL, claimed_at=NULL, claimed_by=NULL,
-            lease_expires_at=NULL, failure_kind=NULL
+            lease_expires_at=NULL, settlement_hold_at=NULL, failure_kind=NULL
         WHERE id=? AND workspace_id=?
       `
         )
