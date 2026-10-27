@@ -28,6 +28,7 @@ import {
 import {
   SELECTORS,
   isSeatRead,
+  profileUrlFor,
   playwrightDegreeDriver,
   playwrightDriver,
   readOpenProfile,
@@ -45,6 +46,7 @@ import {
 } from './driver-inbox.js';
 import { evaluateLinkedInSafety, type LinkedInSafetyVerdict } from './guard.js';
 import { linkedinActionPolicyGate } from './action-policy.js';
+import { createLinkedInReplyPreflight } from './reply-preflight.js';
 import {
   pruneSeatEvents,
   recordSeatEvent,
@@ -5391,6 +5393,42 @@ export async function runDueLinkedInActions(
         workerId,
         leaseMs: actionLeaseMs
       });
+      // The normal inbox cadence is not tied to when a campaign follow-up is
+      // actually about to be sent. Read newly arrived replies BEFORE the next
+      // managed follow-up's safety gate, and let the runner's final campaign
+      // state check observe any ingested reply. First-contact invitations and
+      // explicit manual actions incur no additional inbox browsing. A failed
+      // read never becomes an assertion that the prospect has not answered.
+      const verifyReplies = createLinkedInReplyPreflight(async (action) => {
+        const { syncLinkedInInbox, syncLinkedInThread } = await import('./jobs.js');
+        const canonical = profileUrlFor(action.targetRef);
+        const known = canonical
+          ? await db
+              .prepare(
+                `SELECT thread_urn FROM linkedin_threads
+               WHERE workspace_id=? AND seat_key=? AND LOWER(profile_url)=LOWER(?)
+               ORDER BY last_message_at DESC NULLS LAST LIMIT 1`
+              )
+              .get<{ thread_urn: string }>(workspaceId, seatKey, canonical)
+          : null;
+        // Refresh this recipient's exact conversation when Trevra has a
+        // verified profile-to-thread link. Unlike a top-N inbox snapshot,
+        // this covers an older conversation even when other threads are busy.
+        // Unknown conversations fall back to a bounded recent-inbox walk.
+        const context = { workspaceId, seatKey, page: handle.page, driver, log: say };
+        if (known?.thread_urn)
+          return syncLinkedInThread(db, config, known.thread_urn, {
+            ...context,
+            maxMessages: 30,
+            sinceDays: 30
+          });
+        return syncLinkedInInbox(db, config, {
+          ...context,
+          maxThreads: 12,
+          maxMessages: 20,
+          sinceDays: 14
+        });
+      });
       const result = await runLinkedInLocalBatch(store, {
         driver,
         page: handle.page,
@@ -5413,8 +5451,9 @@ export async function runDueLinkedInActions(
             attachment: action.attachment,
             channelMetadata: action.channelMetadata
           }),
-        evaluate: (action, at) =>
-          evaluateLinkedInSafety(
+        evaluate: async (action, at) => {
+          await verifyReplies(action);
+          return evaluateLinkedInSafety(
             db,
             {
               workspaceId: action.workspaceId,
@@ -5473,7 +5512,8 @@ export async function runDueLinkedInActions(
             // The claimed row is the SUBJECT of the question, not an answer to
             // it. Excluded by primary key; every other row still counts.
             { excludeActionId: action.id }
-          ),
+          );
+        },
         now: () => new Date(),
         log: say
       });

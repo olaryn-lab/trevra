@@ -22,6 +22,7 @@ import {
   type LinkedInSafetyVerdict
 } from './guard.js';
 import { ACTION_GAP_SECONDS } from './limits.js';
+import { createLinkedInReplyPreflight } from './reply-preflight.js';
 import { dayShapeFor, FLAT_DAY_SHAPE } from './pacing.js';
 import { getSeat, upsertSeat, type SeatPosture } from './seats.js';
 import {
@@ -68,6 +69,57 @@ import {
   type LocalWorkerStore,
   type PlaywrightLike
 } from './local-worker.js';
+
+describe('managed follow-up live reply refresh', () => {
+  it('retires a queued follow-up when the pre-send inbox read discovers a reply', async () => {
+    let replied = false;
+    const harness = fakeStore([action({ id: 'followup-1', kind: 'dm', campaignId: 'managed-1' })], {
+      executionState: () => (replied ? 'retire' : 'execute')
+    });
+    const { driver, calls } = fakeDriver();
+    const preflight = createLinkedInReplyPreflight(async () => {
+      replied = true; // As syncLinkedInInbox ingests an actual inbound reply.
+      return { blocked: null, degraded: [] };
+    });
+    const result = await runLinkedInLocalBatch(harness.store, {
+      driver,
+      page,
+      sleep: noSleep,
+      log: () => {},
+      evaluate: async (entry) => {
+        await preflight(entry);
+        return verdict();
+      }
+    });
+    expect(result.branchSkipped).toBe(1);
+    expect(result.executed).toBe(0);
+    expect(harness.sent).toEqual([]);
+    expect(calls.filter((call) => call.method === 'sendDm')).toHaveLength(0);
+  });
+
+  it('keeps a follow-up queued when the live inbox check is blocked', async () => {
+    const harness = fakeStore([action({ id: 'followup-2', kind: 'dm', campaignId: 'managed-1' })]);
+    const { driver, calls } = fakeDriver();
+    const preflight = createLinkedInReplyPreflight(async () => ({
+      blocked: 'LinkedIn login challenge',
+      degraded: []
+    }));
+    const result = await runLinkedInLocalBatch(harness.store, {
+      driver,
+      page,
+      sleep: noSleep,
+      log: () => {},
+      evaluate: async (entry) => {
+        await preflight(entry);
+        return verdict();
+      }
+    });
+    expect(result.halted).toBe(true);
+    expect(harness.released).toContainEqual({ id: 'followup-2', failureKind: null });
+    expect(harness.sent).toEqual([]);
+    expect(calls.filter((call) => call.method === 'sendDm')).toHaveLength(0);
+  });
+});
 
 describe('seatConcurrencyForConfig', () => {
   it('serializes every LinkedIn account behind one paired companion', () => {
