@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Db } from '../db.js';
 import type { Skill, SkillContext } from '../skills/types.js';
 import {

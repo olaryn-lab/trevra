@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Skill } from '../skills/types.js';
 import { HIGH_VALUE_KEYWORDS, MEDIUM_KEYWORDS, MIN_RELEVANCE_SCORE, NEGATIVE_KEYWORDS } from './config.js';
 import type { OutreachThread } from './types.js';

@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Db } from '../db.js';
 import { executeConnectedAction } from '../integration-service.js';
 import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-address.js';

@@ -1,5 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { ingestCanonicalRecord } from '../integration-service.js';
 import { workspaceUserEmails } from '../meetings/ingest.js';
 import { ProviderWebhookError, type ProviderWebhookVerifier } from './types.js';

@@ -13,7 +13,7 @@ import multer from 'multer';
 import pino from 'pino';
 import { pinoHttp } from 'pino-http';
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { APIError } from 'better-auth';
 import { fromNodeHeaders, toNodeHandler } from 'better-auth/node';
 import type { Db } from './db.js';

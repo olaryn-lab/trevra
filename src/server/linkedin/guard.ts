@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { getChannel } from '../channels/registry.js';
 import type { Db } from '../db.js';
 import { filterExcluded } from './exclusions.js';

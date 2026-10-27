@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import {
   ACCOUNT_SIGNAL_KINDS,
   FIRST_PARTY_SIGNAL_KINDS,

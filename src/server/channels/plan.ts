@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Skill } from '../skills/types.js';
 import type { ChannelAdapter, ChannelDraft, ChannelPost, AutomationMode } from './types.js';
 import { getChannel, listEnabled } from './registry.js';

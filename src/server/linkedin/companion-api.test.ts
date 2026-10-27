@@ -71,7 +71,7 @@ describe('LinkedIn companion HTTP journey', () => {
     const created = await authed().post('/api/linkedin/companion/pair').send({}).expect(201);
     expect(created.body.code).toMatch(/^[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/);
     expect(created.body.command).toContain(
-      'npx --yes --package=https://github.com/leanchain/trevra/releases/download/companion-v0.2.2/trevra-0.2.2.tgz trevra linkedin install --pair'
+      'npx --yes --package=https://github.com/olaryn-lab/trevra/releases/download/companion-v0.2.2/trevra-0.2.2.tgz trevra linkedin install --pair'
     );
     expect(created.body.command).toContain(created.body.code);
 

@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 
 export const MEETING_STATUSES = ['scheduled', 'rescheduled', 'cancelled'] as const;
 export type MeetingStatus = (typeof MEETING_STATUSES)[number];

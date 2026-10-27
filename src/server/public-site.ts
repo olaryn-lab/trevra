@@ -1,7 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import express, { type Express, type Response } from 'express';
 import rateLimit from 'express-rate-limit';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Db } from './db.js';
 import { id } from './db.js';
 import { listPublicModulePopularity, listPublicRegistryModules } from './registry/service.js';

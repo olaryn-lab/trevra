@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { id, type Db } from '../db.js';
 import { browserProviderSettings } from '../browser/provider.js';
 import { companionBrowserConfigured } from './companion.js';

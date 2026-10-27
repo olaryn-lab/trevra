@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { id, type Db } from '../db.js';
 import { appendDomainEvent } from '../control-plane/events.js';
 import { RECIPIENT_SQL, recipientSchema } from '../email/recipient-sql.js';

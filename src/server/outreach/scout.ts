@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { FetchLike } from '../skills/guard.js';
 import { envCredentials, type CredentialAccessor, type ProviderAvailability } from '../research/types.js';
 import type { Skill, SkillContext, SkillEvidence } from '../skills/types.js';

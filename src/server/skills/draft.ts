@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Skill, SkillContext } from './types.js';
 import { SKILL_DRAFT_UNSUBSCRIBE_LINE } from '../email/compliance.js';
 import { critique, critiqueToInstructions, type Critique, type CriticOptions } from './voice.js';

@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Nango } from '@nangohq/node';
-import { z, ZodError } from 'zod';
+import { z, ZodError } from 'zod/v3';
 import { notifyIntegrationNeedsReauth } from './notifications.js';
 import type { AvailableIntegration } from '../shared/types.js';
 import { id, type Db } from './db.js';

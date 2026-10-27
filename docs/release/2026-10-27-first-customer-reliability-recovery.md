@@ -151,15 +151,37 @@ a disposable profile with those links still launched successfully. Display
 absence was independently reproduced, matching the actual Companion's
 configuration and exit code.
 
-**Deployment is intentionally blocked.** A new Companion release may
-immediately resume the 38 overdue production actions. The patch is prepared
-for a separate versioned Companion release but has not been installed over the
-active `0.2.11` service. Before activating it, explicitly hold production
-outreach, verify ownership/consent of the recipient set, use an authorized
-test account and recipient to prove a live connection and one deliberate
-send, then re-enable any intended campaigns in a controlled sequence.
-There is currently **no evidence of successful live send or reply completion
-after the fix**.
+**Follow-up completed, 27 October 2026:** A guarded production PostgreSQL
+transaction paused the one affected LinkedIn seat and both running campaigns,
+and moved **37 unclaimed planned actions** to `held`. One planned action with
+a **42-day-old claim** was deliberately preserved unchanged for outcome
+reconciliation. No campaign may resume automatically without an explicit
+operator decision. This hold is reversible.
+
+The Companion release `0.2.13` was published from the isolated branch, then
+installed from its versioned GitHub asset on the paired Linux computer. The
+prior `0.2.11` service package was copied to a separate rollback location;
+existing pairing and the Chrome profile were preserved. The restarted service
+connected to production and successfully opened, minimized and relayed a
+real Chrome DevTools session. A **read-only `Browser.getVersion` request from
+the real production worker through the real relay to the paired computer
+passed**. A post-probe production database check confirmed 37 held actions,
+two paused campaigns, the one preserved stale claim and **zero new action
+batches**. This proves browser transport, **not successful LinkedIn login,
+message delivery or correct recipient outcomes**.
+
+The app API is still on its previous production image; migration `148` remains
+undeployed. The isolated application branch also resolved all four npm audit
+advisories: dependency lockfile upgrades plus patched Zod 4.6.7 with the
+existing schemas imported through `zod/v3`. `npm audit` reported **0 issues**,
+TypeScript and production build passed, and the real-schema JSON conversion
+check succeeded. Browser acceptance passed 48/48; a stale expected release
+URL in one controlled-provider test was corrected and that focused integration
+passed 4/4. Deploy the server changes separately with the production hold
+preserved; do not treat this as authority to resume outreach.
+
+There is still **no evidence of a successful live LinkedIn send or reply
+completion after the fix**.
 
 The `oauth_code_verification_failed` anonymous public smoke scenario did not
 pass its friendly-error expectation, but that smoke intentionally blocks

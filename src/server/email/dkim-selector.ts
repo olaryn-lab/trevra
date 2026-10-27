@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Db } from '../db.js';
 import { normalizeSenderDomain } from './deliverability.js';
 

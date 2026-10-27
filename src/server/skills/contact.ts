@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { createSsrfFetch, validatePublicHost, type FetchLike } from './guard.js';
 import { extractLinks, extractMailtos, parseRobots, robotsAllows, sameOriginPath, socialProfile, type RobotsRules } from './html.js';
 import { normalizeDomain } from './ladder.js';

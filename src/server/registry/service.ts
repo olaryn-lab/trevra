@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Db } from '../db.js';
 import { id } from '../db.js';
 import type { InstalledCommunityModule } from '../sandbox/community-runtime.js';

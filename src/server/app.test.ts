@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import request from 'supertest';
 import { MockLanguageModelV4 } from 'ai/test';
 import type { LanguageModelV4, LanguageModelV4GenerateResult } from '@ai-sdk/provider';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { randomBytes } from 'node:crypto';
