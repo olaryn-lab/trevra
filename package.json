@@ -58,7 +58,7 @@
     "@temporalio/workflow": "^1.21.1",
     "ai": "^7.0.49",
     "ajv": "^8.20.0",
-    "better-auth": "^1.6.24",
+    "better-auth": "1.7.14",
     "cookie-parser": "^1.4.7",
     "csv-parse": "^7.0.1",
     "dotenv": "^17.4.2",

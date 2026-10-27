@@ -174,7 +174,37 @@ describe('Authward back-channel logout HTTP boundary', () => {
   });
 });
 
-describe('hosted OAuth callback failures', () => {
+describe('hosted OAuth callback compatibility across Better Auth 1.7', () => {
+  it('forwards the registered Authward callback to the new handler without changing OAuth values', async () => {
+    const app = createApp(await freshDb());
+    const response = await request(app).get(
+      '/api/auth/oauth2/callback/authward?code=opaque-code&state=opaque-state&iss=https%3A%2F%2Fauth.example.test'
+    );
+    expect(response.status).toBe(307);
+    expect(response.headers['cache-control']).toBe('no-store');
+    const redirect = new URL(response.headers.location, 'https://app.usetrevra.com');
+    expect(redirect.origin).toBe('https://app.usetrevra.com');
+    expect(redirect.pathname).toBe('/api/auth/callback/authward');
+    expect(redirect.searchParams.get('code')).toBe('opaque-code');
+    expect(redirect.searchParams.get('state')).toBe('opaque-state');
+    expect(redirect.searchParams.get('iss')).toBe('https://auth.example.test');
+  });
+
+  it('rejects missing code/state instead of inventing an OAuth state', async () => {
+    const app = createApp(await freshDb());
+    await request(app).get('/api/auth/oauth2/callback/authward?code=only-code').expect(400);
+    await request(app).get('/api/auth/oauth2/callback/authward?state=only-state').expect(400);
+  });
+
+  it('never reflects an arbitrary provider error into an unsafe redirect', async () => {
+    const app = createApp(await freshDb());
+    const response = await request(app).get(
+      '/api/auth/oauth2/callback/authward?error=https%3A%2F%2Fevil.invalid'
+    );
+    expect(response.status).toBe(302);
+    expect(response.headers.location).toBe('/login?error=oauth_failed');
+  });
+
   it.each(['access_denied', 'invalid_grant'])('redirects %s to the Trevra login', async (code) => {
     const app = createApp(await freshDb());
     const response = await request(app).get(`/api/auth/oauth2/callback/authward?error=${code}`);
