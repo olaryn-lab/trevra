@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import {
   INBOUND_ADDRESS_METADATA_KEY as SYNC_METADATA_KEY,
   INBOUND_EMAIL_MESSAGE_MODEL as SYNC_MODEL_NAME,

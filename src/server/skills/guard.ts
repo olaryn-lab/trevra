@@ -1,6 +1,6 @@
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Skill } from './types.js';
 
 /**

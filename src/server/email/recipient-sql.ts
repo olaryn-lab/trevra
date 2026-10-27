@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 
 /**
  * A lead-list member's address, for a query that joins linkedin_lead_contacts

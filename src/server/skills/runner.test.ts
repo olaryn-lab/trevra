@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { DEMO_WORKSPACE_ID, id, openDatabase, resetDemoData, type Db } from '../db.js';
 import { getSkill, listSkills, registerSkill, seedSkills } from './registry.js';
 import { redactForLedger, runSkill } from './runner.js';

@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Db } from '../db.js';
 import { getNango } from '../integration-service.js';
 import { emailDomainOf, type DnsResolver } from './deliverability.js';

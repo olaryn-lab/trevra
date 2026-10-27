@@ -106,7 +106,14 @@ import { Button, Field, Input, Select, SwitchField, Textarea } from './ui/primit
 import { BrandMark } from './ui/BrandMark';
 import { HelpPanel, JumpPalette, ShortcutSheet } from './ui/HelpPanel';
 import { useShortcuts } from './ui/keys';
-import { navigate, useRoute, type Route, type Section } from './ui/route';
+import {
+  isLoginPath,
+  navigate,
+  replaceNavigate,
+  useRoute,
+  type Route,
+  type Section
+} from './ui/route';
 import { SeatPauseButton, StopBar, useStopControls } from './ui/StopBar';
 import { LedgerView } from './views/LedgerView';
 import { LoopCostView, LoopView } from './views/LoopView';
@@ -297,6 +304,9 @@ export function App() {
       if (loadToken.current !== token) return;
       setData(next);
       setNeedsAuth(false);
+      // The authenticated shell must not remain at /login after signup or
+      // passkey/email sign-in. Deep links to app routes are preserved.
+      if (isLoginPath(window.location.pathname)) replaceNavigate('/loop');
     } catch (err) {
       if (loadToken.current !== token) return;
       if (err instanceof ApiError && err.status === 401) {

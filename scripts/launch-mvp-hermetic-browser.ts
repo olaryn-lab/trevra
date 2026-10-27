@@ -210,14 +210,14 @@ async function main() {
         sessionBody.auth?.role === 'owner',
       'status=' + sessionRes.status()
     );
-    // Wait for the authenticated shell, not a fixed 1.3-second delay or a
-    // disappeared button that could also mean the React app crashed.
-    // Signup does not navigate automatically: the current /login URL hosts the
-    // authenticated Loop dashboard. New campaign exists only under /outreach.
+    // Wait for actual authenticated navigation; a hidden signup button alone
+    // could also mean the React app failed or rendered in-place at /login.
+    await page.waitForURL('**/loop', { timeout: 18000 });
     await page.locator('.app-shell').waitFor({ timeout: 18000 });
     check(
       'L1 page leaves login after signup',
-      (await page.getByRole('button', { name: 'Create workspace' }).count()) === 0,
+      new URL(page.url()).pathname === '/loop' &&
+        (await page.getByRole('link', { name: 'Outreach' }).count()) > 0,
       'url=' + page.url()
     );
     console.log('L1 workspace created and readback, id omitted');
@@ -418,6 +418,10 @@ async function main() {
     await (await prerequisite(page, /^Start$/)).click();
     await page.getByRole('button', { name: 'Start this campaign' }).click();
     await page.getByRole('button', { name: /^Pause$/ }).waitFor({ timeout: 20000 });
+    // Keep the Outreach screen open while a background worker plans actions.
+    // The review queue must refresh without navigation or an unsafe replay.
+    await page.goto(origin + '/outreach', { waitUntil: 'domcontentloaded' });
+    await prerequisite(page, /New campaign/i);
 
     const now = new Date();
     const { runManagedCampaigns } = await import('../src/server/linkedin/runner.js');
@@ -487,7 +491,9 @@ async function main() {
       'L6 unapproved side effects are blocked',
       beforeApproval.executed === 0 && driverCalls === 0
     );
-    await page.goto(origin + '/outreach', { waitUntil: 'domcontentloaded' });
+    // The queue was initially empty when this page mounted; a simulated tab
+    // return must reveal the newly planned approval without reloading the page.
+    await page.evaluate(() => document.dispatchEvent(new Event('visibilitychange')));
     const approve = page.getByRole('button', { name: 'Approve this action' });
     await approve.first().waitFor({ timeout: 25000 });
     check('L5 exact-message approval is visible to the browser operator', true);
@@ -647,6 +653,9 @@ async function main() {
     // no Trevra state/PKCE cookie. Re-establish that state once, never loop.
     const recoveryContext = await browser.newContext();
     const recoveryPage = await recoveryContext.newPage();
+    recoveryPage.on('pageerror', (error) =>
+      errors.push('recovery: ' + error.message.slice(0, 200))
+    );
     let oauthRecoveryStarts = 0;
     await recoveryPage.route('**/api/auth/sign-in/oauth2', async (route) => {
       oauthRecoveryStarts += 1;
@@ -659,6 +668,9 @@ async function main() {
     await recoveryPage.goto(origin + '/login?error=oauth_code_verification_failed', {
       waitUntil: 'domcontentloaded'
     });
+    // A first cold page load can fail before React mounts. Only retry the
+    // read-only page prerequisite; never repeat an OAuth POST.
+    await prerequisite(recoveryPage, 'Create an account');
     await recoveryPage.waitForFunction(
       () => !new URL(location.href).searchParams.has('error'),
       null,
@@ -681,6 +693,7 @@ async function main() {
     // Trevra must create exactly one NEW browser-owned OAuth transaction.
     const emailContext = await browser.newContext();
     const emailPage = await emailContext.newPage();
+    emailPage.on('pageerror', (error) => errors.push('email: ' + error.message.slice(0, 200)));
     let freshOAuthStarts = 0;
     await emailPage.route('**/api/auth/sign-in/oauth2', async (route) => {
       freshOAuthStarts += 1;
@@ -693,6 +706,7 @@ async function main() {
     await emailPage.goto(origin + '/login?authward_session_ready=1', {
       waitUntil: 'domcontentloaded'
     });
+    await prerequisite(emailPage, 'Create an account');
     await emailPage.waitForFunction(
       () => !new URL(location.href).searchParams.has('authward_session_ready'),
       null,

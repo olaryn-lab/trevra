@@ -495,6 +495,17 @@ async function ensureBrowser(
   { headless = false, minimized = false, raise = false } = {}
 ) {
   const key = `${workspaceId}/${seatKey}`;
+  // systemd --user can start the background Companion before the graphical
+  // session exports DISPLAY. A minimized Chrome is still a headed Chrome, and
+  // on Linux it exits immediately without an X11 display (exit 1, no DevTools
+  // endpoint). Background relay requests may use headless Chrome instead;
+  // explicit onboarding/reconnect requests are intentionally still visible and
+  // never silently turned headless.
+  if (minimized && !headless && platform() === 'linux' && !process.env.DISPLAY?.trim()) {
+    headless = true;
+    minimized = false;
+    activity('browser_headless_fallback', `seat=${seatKey} reason=display_unavailable`);
+  }
   // A reused browser may have been left minimized by an earlier autonomous run,
   // or raised again by the last thing Trevra drove through it, so the window
   // state is re-asserted on every reuse rather than only when Chrome is spawned.

@@ -7,7 +7,7 @@ import { createAuthEndpoint } from 'better-auth/api';
 import { setSessionCookie } from 'better-auth/cookies';
 import type { Pool } from 'pg';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 
 export const NATIVE_TREVRA_ORIGIN = 'https://app.usetrevra.com';
 export const NATIVE_TREVRA_CLIENT = 'trevra-web';

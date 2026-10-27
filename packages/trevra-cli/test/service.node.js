@@ -205,7 +205,7 @@ test('auto-update accepts only newer plain semver releases from the official pac
   assert.equal(isNewerVersion('0.2.0', 'latest'), false);
   assert.equal(
     officialCompanionPackage('1.4.2'),
-    'https://github.com/leanchain/trevra/releases/download/companion-v1.4.2/trevra-1.4.2.tgz'
+    'https://github.com/olaryn-lab/trevra/releases/download/companion-v1.4.2/trevra-1.4.2.tgz'
   );
   assert.throws(() => officialCompanionPackage('../../evil'));
 });

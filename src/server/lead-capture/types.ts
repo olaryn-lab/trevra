@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { normalizeHeardAbout } from '../../shared/attribution.js';
 
 export const CAPTURE_SOURCE_KINDS = [

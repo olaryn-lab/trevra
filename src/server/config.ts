@@ -1,5 +1,5 @@
 import { authwardAuthority } from './authward-config.js';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { browserProviderSettings } from './browser/provider.js';
 import { configuredHttpObservationProviders } from './observations/providers/http.js';
 import {

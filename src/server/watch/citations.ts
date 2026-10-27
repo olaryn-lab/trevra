@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { normalizeAccountDomain } from '../accounts/store.js';
 import { id, type Db } from '../db.js';
 import { createCaptureSource, getWorkspaceCaptureSource } from '../lead-capture/sources.js';

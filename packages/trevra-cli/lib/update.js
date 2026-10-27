@@ -1,7 +1,9 @@
 const SEMVER = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 export function parseVersion(value) {
-  const match = String(value ?? '').trim().match(SEMVER);
+  const match = String(value ?? '')
+    .trim()
+    .match(SEMVER);
   if (!match) return null;
   return match.slice(1).map((part) => Number(part));
 }
@@ -19,5 +21,5 @@ export function isNewerVersion(current, candidate) {
 
 export function officialCompanionPackage(version) {
   if (!parseVersion(version)) throw new Error('Trevra offered an invalid companion version.');
-  return `https://github.com/leanchain/trevra/releases/download/companion-v${version}/trevra-${version}.tgz`;
+  return `https://github.com/olaryn-lab/trevra/releases/download/companion-v${version}/trevra-${version}.tgz`;
 }

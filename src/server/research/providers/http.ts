@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { validatePublicHost } from '../../skills/guard.js';
 import { normalizeDomain } from '../../skills/ladder.js';
 import type {

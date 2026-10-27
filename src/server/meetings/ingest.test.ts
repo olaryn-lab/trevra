@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { ZodError } from 'zod';
+import { ZodError } from 'zod/v3';
 import { openDatabase, type Db } from '../db.js';
 import { ingestCanonicalRecord } from '../integration-service.js';
 import { getToday } from '../today.js';

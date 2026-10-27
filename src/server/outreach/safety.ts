@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Db } from '../db.js';
 import { getChannel } from '../channels/registry.js';
 import { envCredentials, type CredentialAccessor } from '../research/types.js';

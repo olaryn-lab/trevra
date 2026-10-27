@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { getChannel } from '../channels/registry.js';
 import { critique, critiqueToInstructions, type Critique, type CriticOptions } from '../skills/voice.js';
 import type { Skill } from '../skills/types.js';

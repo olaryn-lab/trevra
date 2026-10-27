@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { critique, critiqueToInstructions, type Critique, type CriticOptions } from '../skills/voice.js';
 import type { Skill } from '../skills/types.js';
 import { ACTION_KIND_VALUES, type LinkedInActionKind } from './actions.js';

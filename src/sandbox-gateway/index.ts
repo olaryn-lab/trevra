@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import express, { type Express } from 'express';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import type { Db } from '../server/db.js';
 import { loadExecutableRelease } from '../server/registry/service.js';
 import { executeSandboxRelease } from '../server/sandbox/community-runtime.js';

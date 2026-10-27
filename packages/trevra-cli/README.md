@@ -17,7 +17,7 @@ trevra linkedin setup
 Then, in Trevra, open **Outreach → LinkedIn accounts → Connect this computer** and copy the generated command. It looks like:
 
 ```sh
-npx --yes --package=https://github.com/leanchain/trevra/releases/download/companion-v0.2.2/trevra-0.2.2.tgz trevra linkedin install --pair XXXX-XXXX-XXXX --url https://app.usetrevra.com
+npx --yes --package=https://github.com/olaryn-lab/trevra/releases/download/companion-v0.2.2/trevra-0.2.2.tgz trevra linkedin install --pair XXXX-XXXX-XXXX --url https://app.usetrevra.com
 ```
 
 The command pairs the computer, ensures the exact Trevra companion version exists in the private per-user directory, registers the OS background service if needed, opens the dedicated LinkedIn Chrome profile visibly once for first sign-in, and starts the service. When `setup` already installed that exact version, pairing does not reinstall it. After onboarding, normal service-driven LinkedIn work uses that same persistent profile in headless/background Chrome.

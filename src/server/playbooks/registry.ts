@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from 'zod/v3';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { Db } from '../db.js';
 import { OUTREACH_UNSUBSCRIBE_MODES } from '../email/unsubscribe-policy.js';
