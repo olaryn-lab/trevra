@@ -37,6 +37,7 @@ import {
   runLinkedInSideTasks
 } from '../server/linkedin/jobs.js';
 import { hostedExecutionMode, hostedSeatFilter } from '../server/linkedin/hosted-execution.js';
+import { scanStalledLinkedInCampaigns } from '../server/linkedin/campaign-stalls.js';
 import { runDueResearchSources } from '../server/research/service.js';
 import { runDueBrandWatches } from '../server/watch/service.js';
 import { runQueuedEnrichmentRuns } from '../server/enrichment/runs.js';
@@ -342,6 +343,25 @@ async function companionPresenceCycle(): Promise<void> {
   }
 }
 await companionPresenceCycle();
+// Business delivery monitoring is independent of browser pacing and campaign
+// planning. A live worker can be perfectly healthy while an eligible campaign
+// makes no progress. The monitor only observes and notifies; it never claims,
+// resumes or sends LinkedIn actions.
+let campaignStallScanRunning = false;
+async function campaignStallCycle(): Promise<void> {
+  if (campaignStallScanRunning || draining) return;
+  campaignStallScanRunning = true;
+  try {
+    await scanStalledLinkedInCampaigns(db);
+  } catch (error) {
+    console.error('Worker LinkedIn campaign stall scan failed', error);
+  } finally {
+    campaignStallScanRunning = false;
+  }
+}
+void campaignStallCycle();
+const campaignStallTimer = setInterval(() => void campaignStallCycle(), 5 * 60_000);
+campaignStallTimer.unref();
 const companionPresenceTimer = setInterval(
   () => void companionPresenceCycle(),
   COMPANION_PRESENCE_SCAN_MS
@@ -420,6 +440,7 @@ async function shutdown(signal: string) {
   clearInterval(linkedinPlanningTimer);
   clearInterval(linkedinOutboundTimer);
   clearInterval(companionPresenceTimer);
+  clearInterval(campaignStallTimer);
   clearInterval(emailDeliverabilityTimer);
   clearInterval(enrichmentTimer);
   const deadline = Date.now() + DRAIN_TIMEOUT_MS;

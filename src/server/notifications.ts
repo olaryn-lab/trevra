@@ -6,6 +6,7 @@ import {
   sendIntegrationNeedsReauthEmail,
   sendLinkedInSeatNeedsAttentionEmail,
   sendLinkedInSeatRecoveredEmail,
+  sendLinkedInCampaignStalledEmail,
   smtpConfigured
 } from './email.js';
 
@@ -221,6 +222,40 @@ export async function notifyLinkedInSeatRecovered(
       to: owner.email,
       workspaceName: name,
       seatLabel
+    })
+  );
+  return true;
+}
+
+export async function notifyLinkedInCampaignStalled(
+  db: Db,
+  input: {
+    workspaceId: string;
+    campaignId: string;
+    seatKey: string;
+    overdueCount: number;
+  }
+): Promise<boolean> {
+  if (!smtpConfigured()) return false;
+  const owners = await workspaceOwners(db, input.workspaceId);
+  if (owners.length === 0) return false;
+  const [name, campaign] = await Promise.all([
+    workspaceName(db, input.workspaceId),
+    db
+      .prepare(
+        "SELECT name FROM linkedin_campaigns WHERE workspace_id=? AND id=? AND status='running'"
+      )
+      .get<{ name: string }>(input.workspaceId, input.campaignId)
+  ]);
+  if (!campaign) return false;
+  const reviewUrl = `${appBaseUrl()}/outreach`;
+  await deliverOwners(owners, (owner) =>
+    sendLinkedInCampaignStalledEmail({
+      to: owner.email,
+      workspaceName: name,
+      campaignName: campaign.name,
+      overdueCount: input.overdueCount,
+      reviewUrl
     })
   );
   return true;

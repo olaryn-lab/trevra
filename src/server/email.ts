@@ -277,6 +277,32 @@ export async function sendLinkedInSeatNeedsAttentionEmail(input: {
   await sendTransactionalEmail({ to: input.to, subject, text, html });
 }
 
+export async function sendLinkedInCampaignStalledEmail(input: {
+  to: string;
+  workspaceName: string;
+  campaignName: string;
+  overdueCount: number;
+  reviewUrl: string;
+}): Promise<void> {
+  const subject = 'LinkedIn campaign needs attention in Trevra';
+  const text = [
+    `A LinkedIn campaign in ${input.workspaceName} may have stopped progressing.`,
+    '',
+    `Campaign: ${input.campaignName}`,
+    `Overdue approved actions: ${input.overdueCount}`,
+    'Trevra observed eligible, overdue work and an online Companion for at least 30 minutes, with no recent sending batch.',
+    'No actions were retried or sent as part of this alert.',
+    '',
+    `Review the campaign and its execution reason: ${input.reviewUrl}`
+  ].join('\n');
+  const html = `
+    <p>A LinkedIn campaign in <strong>${escapeHtml(input.workspaceName)}</strong> may have stopped progressing.</p>
+    <p><strong>${escapeHtml(input.campaignName)}</strong> — ${input.overdueCount} overdue approved actions.</p>
+    <p>Trevra observed eligible work with an online Companion for at least 30 minutes and no recent sending batch. No actions were retried by this alert.</p>
+    <p><a href="${escapeHtml(input.reviewUrl)}">Review the campaign</a></p>`;
+  await sendTransactionalEmail({ to: input.to, subject, text, html });
+}
+
 export async function sendLinkedInSeatRecoveredEmail(input: {
   to: string;
   workspaceName: string;
