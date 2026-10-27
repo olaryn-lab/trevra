@@ -53,7 +53,7 @@ const safety = {
     profile_view: { perDay: 15 },
     follow: { perDay: 12 }
   },
-  campaignWarmupFractions: [0.2, 0.4, 0.6, 0.8, 1]
+  campaignWarmupFractions: [1]
 } as unknown as LinkedInLimitsReport;
 
 describe('LinkedIn account warm-up controls', () => {
@@ -84,7 +84,7 @@ describe('LinkedIn account warm-up controls', () => {
     expect(html).toContain('Current account multiplier: 50% for active outreach');
   });
 
-  it('explains that skipping account warm-up does not remove the campaign ramp', () => {
+  it('explains that the account budget is shared without a second campaign ramp', () => {
     const html = renderToStaticMarkup(
       <ScheduleFields
         draft={draft(true)}
@@ -95,9 +95,9 @@ describe('LinkedIn account warm-up controls', () => {
         activatedAt="2026-08-20T09:00:00.000Z"
       />
     );
-    expect(html).toContain('account-level multiplier is 100% immediately');
-    expect(html).toContain('Campaign warm-up');
-    expect(html).toContain('20% → 40% → 60% → 80% → 100%');
+    expect(html).toContain('account-level multiplier is 100%');
+    expect(html).toContain('No separate campaign warm-up applies');
+    expect(html).not.toContain('20% → 40% → 60% → 80% → 100%');
   });
 });
 

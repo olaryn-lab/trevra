@@ -320,8 +320,8 @@ describe('managed campaign runner', () => {
     const tick = await runManagedCampaigns(db, WORKSPACE, NOW);
     const plannedInvites = (await actions()).filter((action) => action.kind === 'invite');
 
-    expect(tick.actionsPlanned).toBe(1);
-    expect(plannedInvites).toHaveLength(1);
+    expect(tick.actionsPlanned).toBe(2);
+    expect(plannedInvites).toHaveLength(2);
     expect(plannedInvites[0]?.status).toBe('planned');
   });
 
@@ -1173,10 +1173,11 @@ describe('managed campaign runner', () => {
       .prepare(
         `SELECT status,settlement_hold_at,failure_kind FROM linkedin_actions WHERE workspace_id=? AND id=?`
       )
-      .get<{ status: string; settlement_hold_at: string | null; failure_kind: string | null }>(
-        WORKSPACE,
-        planned.id
-      );
+      .get<{
+        status: string;
+        settlement_hold_at: string | null;
+        failure_kind: string | null;
+      }>(WORKSPACE, planned.id);
     expect(actionRow).toMatchObject({
       status: 'sent',
       settlement_hold_at: null,
@@ -1185,7 +1186,7 @@ describe('managed campaign runner', () => {
     expect((await members(campaignId))[0]?.step_index).toBe(1);
   });
 
-  it('caps day-one planning at the campaign ramp and releases the rest on day two', async () => {
+  it('plans all eligible day-one leads without a second campaign ramp', async () => {
     await upsertSeat(db, WORKSPACE, { dailyInviteLimit: 10 }, NOW);
     const listId = await seededList(
       'Ramp',
@@ -1216,26 +1217,26 @@ describe('managed campaign runner', () => {
     ).id;
     const campaignId = await runningCampaign(listId, workflowId, 'Ramp');
 
-    // Day 1 is 20% of 10.
-    expect((await runManagedCampaigns(db, WORKSPACE, NOW)).actionsPlanned).toBe(2);
-    expect((await actions()).filter((row) => row.kind === 'invite')).toHaveLength(2);
+    // The campaign can use the seat budget immediately; all five fit.
+    expect((await runManagedCampaigns(db, WORKSPACE, NOW)).actionsPlanned).toBe(5);
+    expect((await actions()).filter((row) => row.kind === 'invite')).toHaveLength(5);
     const waiting = (await members(campaignId)).filter((row) => row.status === 'pending');
-    expect(waiting).toHaveLength(3);
+    expect(waiting).toHaveLength(0);
     await settlePlanned(NOW, (row) => row.kind === 'invite');
 
     // Re-ticking the same day plans nothing more: the ramp is counted against
     // what this campaign already has in the next 24 hours.
     expect((await runManagedCampaigns(db, WORKSPACE, at(HOUR))).actionsPlanned).toBe(0);
-    expect(await actions()).toHaveLength(2);
+    expect(await actions()).toHaveLength(5);
 
-    // Day 2 is 40% -- minus the two day-one invites still inside the window.
-    expect((await runManagedCampaigns(db, WORKSPACE, at(DAY))).actionsPlanned).toBe(2);
-    expect(await actions()).toHaveLength(4);
+    // The campaign is not re-queued on day two.
+    expect((await runManagedCampaigns(db, WORKSPACE, at(DAY))).actionsPlanned).toBe(0);
+    expect(await actions()).toHaveLength(5);
     await settlePlanned(at(DAY), (row) => row.kind === 'invite');
-    expect(await campaignStatus(campaignId)).toBe('running');
+    expect(await campaignStatus(campaignId)).toBe('completed');
 
-    // Day 3 is 60%, and the last lead goes out.
-    expect((await runManagedCampaigns(db, WORKSPACE, at(2 * DAY))).actionsPlanned).toBe(1);
+    // Day three also remains idempotent.
+    expect((await runManagedCampaigns(db, WORKSPACE, at(2 * DAY))).actionsPlanned).toBe(0);
     expect(await actions()).toHaveLength(5);
     await settlePlanned(at(2 * DAY), (row) => row.kind === 'invite');
     await runManagedCampaigns(db, WORKSPACE, at(2 * DAY + HOUR));
@@ -1531,7 +1532,7 @@ describe('managed campaign runner', () => {
    * researched band, day one planned 6 invites and the gate passed 3 -- the
    * other three sat refused with nothing saying why.
    */
-  it('budgets the campaign ramp off the effective ceiling, not the raw operator limit', async () => {
+  it('uses the effective seat ceiling without an extra campaign multiplier', async () => {
     // The shipped default. The steady invite band is 18/day.
     await upsertSeat(db, WORKSPACE, { dailyInviteLimit: 30 }, NOW);
     const listId = await seededList(
@@ -1564,10 +1565,10 @@ describe('managed campaign runner', () => {
     await runningCampaign(listId, workflowId, 'Ceiling');
 
     // 20% of 18, not 20% of 30.
-    expect((await runManagedCampaigns(db, WORKSPACE, NOW)).actionsPlanned).toBe(3);
+    expect((await runManagedCampaigns(db, WORKSPACE, NOW)).actionsPlanned).toBe(8);
   });
 
-  it("lets the operator's own ceiling drive the ramp once the band override is on", async () => {
+  it('honors the operator ceiling without a new-campaign ramp', async () => {
     await upsertSeat(db, WORKSPACE, { dailyInviteLimit: 30, safetyBandOverride: true }, NOW);
     const listId = await seededList(
       'Override',
@@ -1599,7 +1600,7 @@ describe('managed campaign runner', () => {
     await runningCampaign(listId, workflowId, 'Override');
 
     // 20% of the operator's 30 now that they have opted out of the band.
-    expect((await runManagedCampaigns(db, WORKSPACE, NOW)).actionsPlanned).toBe(6);
+    expect((await runManagedCampaigns(db, WORKSPACE, NOW)).actionsPlanned).toBe(8);
   });
 
   /**

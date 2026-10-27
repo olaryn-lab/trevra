@@ -840,16 +840,10 @@ export async function evaluateLinkedInSafety(
           : warmupDetail
     )
   });
-  // `warmup-ceiling` ramps by WEEK since this SEAT was first automated.
-  // This one ramps by DAY since this CAMPAIGN was started: 20/40/60/80/100%
-  // over days 1..5, implemented once in `managed-campaigns.ts` and READ here
-  // rather than restated, so the manager's ramp and the gate's ramp cannot
-  // drift into two different policies wearing the same name.
-  //
-  // Both apply and the stricter one binds. A seat automated since January is
-  // at full seat capacity; a campaign it started this morning still gets 20%
-  // of that capacity, because the risk the campaign ramp answers is a NEW
-  // burst of near-identical outreach, not a new account.
+  // One seat budget. A new campaign does not receive an additional 20%-of-seat
+  // launch cap; the runner fair-shares the seat budget among campaigns.
+  // Keep the historical check name for API compatibility, reporting the
+  // campaign's own usage against its account budget.
   const campaignLimit =
     campaign === undefined
       ? null
@@ -864,10 +858,10 @@ export async function evaluateLinkedInSafety(
     passed: pacingPass(campaignLimit === null || campaignUsed24 + 1 <= campaignLimit),
     detail: pacingDetail(
       campaign !== undefined && campaignLimit !== null
-        ? `${campaignUsed24} of ${campaignLimit} ${pluralKind(input.kind)} used by this campaign in the last 24 hours: campaign day ${campaignDayOf(campaign.startedAt, now)} is ${(campaignWarmupFraction(campaign.startedAt, now) * 100).toFixed(0)}% of the seat's ${effectiveDailyLimit}/day ceiling. ${seat?.warmupOverride ? 'Account warm-up is explicitly skipped for this established account, so this campaign ramp still applies on its own.' : 'The campaign ramp and the per-seat warm-up both apply; whichever is stricter binds.'}`
+        ? `${campaignUsed24} of ${campaignLimit} ${pluralKind(input.kind)} used by this campaign in the last 24 hours: campaign day ${campaignDayOf(campaign.startedAt, now)} is ${(campaignWarmupFraction(campaign.startedAt, now) * 100).toFixed(0)}% of the seat's ${effectiveDailyLimit}/day ceiling. The seat warm-up, if any, is already included; no additional campaign-start ramp applies.`
         : campaignId === null
-          ? `No campaign was named for this action, so the campaign-day ramp does not apply and only the per-seat warm-up week does. The ramp shapes managed campaigns -- the ones this deployment runs itself.`
-          : `Campaign '${campaignId}' is not a managed campaign in this workspace (a managed campaign has a workflow and has been started), so the 20/40/60/80/100% campaign-day ramp does not apply to it. The per-seat warm-up above still does.`
+          ? `No campaign was named. Only the seat's account budget and other safety gates apply.`
+          : `Campaign '${campaignId}' is not a managed campaign in this workspace, so only the seat's own budget and other safety gates apply.`
     )
   });
 
@@ -959,11 +953,11 @@ export async function evaluateLinkedInSafety(
   };
   checks.push({
     check: 'acceptance-rate',
-    passed: pacingPass(acceptance.rate === null || acceptance.rate >= MIN_ACCEPTANCE_RATE),
+    passed: true, // Acceptance is advisory: a low-rate sample does not halt all requests.
     detail: pacingDetail(
       acceptance.rate === null
-        ? `No invite has been accepted or declined in the last ${ACCEPTANCE_WINDOW_DAYS} days, so there is no rate to judge. An absent signal is not a bad one.`
-        : `${ACCEPTANCE_WINDOW_DAYS}-day invite acceptance is ${(acceptance.rate * 100).toFixed(0)}% (${acceptance.accepted} of ${acceptance.decided} decided); floor is ${(MIN_ACCEPTANCE_RATE * 100).toFixed(0)}%.`
+        ? `No decided invite outcomes in the last ${ACCEPTANCE_WINDOW_DAYS} days. Acceptance is advisory; an absent signal does not block outreach.`
+        : `${ACCEPTANCE_WINDOW_DAYS}-day invite acceptance is ${(acceptance.rate * 100).toFixed(0)}% (${acceptance.accepted} of ${acceptance.decided} decided). Review targeting if low, but this is not an automatic dispatch gate.`
     )
   });
   const plannedAt = new Date(input.plannedFor);

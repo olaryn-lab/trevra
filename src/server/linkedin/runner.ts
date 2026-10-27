@@ -1308,9 +1308,8 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
     const budgetBySeat = new Map<string, Map<BudgetedKind, number>>();
     const paidInmailRemainingBySeat = new Map<string, number>();
     for (const sender of usableSenders) {
-      // Campaign warm-up is a SECOND, narrower ceiling inside the fair share.
-      // Count this campaign's already-planned rows so a rerun of the same tick
-      // cannot spend its share twice.
+      // A campaign shares the seat's one budget, without a day-one multiplier.
+      // Count already-planned rows so a repeated tick cannot plan them twice.
       const used = await db
         .prepare(
           `SELECT kind,COUNT(*)::int AS total FROM linkedin_actions

@@ -9,7 +9,6 @@ import {
   type SeatRef
 } from './actions.js';
 import {
-  ACCEPTANCE_THROTTLE_FACTOR,
   ACCEPTANCE_WINDOW_DAYS,
   ACTION_GAP_SECONDS,
   BUSINESS_HOURS,
@@ -869,43 +868,23 @@ export async function planPacing(
 
   // --- Step 4 (measured once, applied per day below). ---
   const acceptance = await acceptanceRate(db, seatRef, ACCEPTANCE_WINDOW_DAYS, now);
-  const throttled = acceptance.rate !== null && acceptance.rate < MIN_ACCEPTANCE_RATE;
-  if (throttled && acceptance.rate !== null) {
-    ceilingsApplied.push('acceptance-rate');
+  if (acceptance.rate !== null && acceptance.rate < MIN_ACCEPTANCE_RATE) {
     reasons.push(
-      `throttled: ${ACCEPTANCE_WINDOW_DAYS}-day invite acceptance is ${(acceptance.rate * 100).toFixed(0)}% (${acceptance.accepted} of ${acceptance.decided} decided), below the ${(MIN_ACCEPTANCE_RATE * 100).toFixed(0)}% floor. Volume is halved until it recovers.`
+      `Advisory: ${ACCEPTANCE_WINDOW_DAYS}-day invite acceptance is ${(acceptance.rate * 100).toFixed(0)}% (${acceptance.accepted} of ${acceptance.decided} decided). Review targeting, but do not automatically halve the configured volume.`
     );
   }
 
   /**
-   * The invisible half of the backlog, charged against the WEEKLY headroom.
+   * Outstanding invitations are an independent capacity budget, not weekly sends.
    *
-   * The weekly clamp asks "how much of this seat's 7-day invite capacity is
-   * already spent", and it answered from `recorded_at` alone -- which silently
-   * assumed every invite older than the window had been resolved. It has not:
-   * on LinkedIn's side an unanswered invite from March is still occupying
-   * capacity in June, which is precisely why plan 1.4 measures acceptance
-   * against invites OUTSTANDING rather than invites sent this week. Charging it
-   * is what makes withdrawal do something; before this an operator could clear
-   * two hundred stale invites and watch the planner emit the same schedule,
-   * because nothing it read had changed.
-   *
-   * OLDER THAN THE WINDOW, NOT THE WHOLE BACKLOG, and that bound is the whole
-   * correctness of it. `sumOfLast(timeline, 6)` below already charges every
-   * invite sent in the last seven days; adding the full outstanding count on
-   * top would charge this week's invites TWICE -- a seat that sent ten of its
-   * twenty weekly invites and is waiting on all ten would be clamped to zero
-   * rather than to ten. `now - 7 days` leaves exactly the part the rolling
-   * window cannot see, which is the part that was missing.
-   *
-   * A CONSTANT FOR THE WHOLE PLAN, not decremented per day: the backlog is what
-   * it is at planning time, and modelling it shrinking would be modelling
-   * acceptances that have not happened.
+   * The seven-day send limit counts actions sent during that window. An invite
+   * still pending after seven days is NOT a new weekly send; subtracting it
+   * from the weekly quota a second time can starve the queue indefinitely.
+   * Instead, check the total outstanding count once, and reserve capacity
+   * for this plan under MAX_OUTSTANDING_INVITES. Never assume any pending
+   * invite will be accepted during the plan.
    */
-  const outstandingInvites =
-    input.kind === 'invite'
-      ? await countPendingInvites(db, seatRef, { before: new Date(now.getTime() - 7 * 86_400_000) })
-      : 0;
+  const outstandingInvites = input.kind === 'invite' ? await countPendingInvites(db, seatRef) : 0;
 
   // Ledger history: the last element is the last 24 hours.
   const history = await dailyCountsForLastNDays(db, seatRef, input.kind, HISTORY_DAYS, now);
@@ -987,9 +966,7 @@ export async function planPacing(
     let allowed = Math.min(dayCeiling, deltaCeiling);
     if (!seat.warmupOverride && deltaCeiling < baseDaily) deltaClamped = true;
 
-    // --- Step 4: acceptance-rate throttle. Halves, never zeroes. ---
-    if (throttled)
-      allowed = Math.max(allowed > 0 ? 1 : 0, Math.floor(allowed * ACCEPTANCE_THROTTLE_FACTOR));
+    // Acceptance is reported for the operator, not a second rate limiter.
     //
     // The configured days decide WHICH days exist for this seat; the weekend
     // factor only shapes the volume of a weekend day nobody configured. So an
@@ -1008,18 +985,19 @@ export async function planPacing(
     // 3 InMails a day for a fortnight quietly clears a 50-a-month quota.
     if (band.perWeek !== undefined) {
       const spentThisWeek = sumOfLast(timeline, 6);
-      const capped = Math.min(
-        allowed,
-        Math.max(0, band.perWeek - spentThisWeek - outstandingInvites)
-      );
+      const capped = Math.min(allowed, Math.max(0, band.perWeek - spentThisWeek));
       if (capped < allowed) {
         weeklyClamped = true;
-        // Reported separately, because "you have sent too many this week" and
-        // "two hundred of yours are still unanswered" have different fixes and
-        // only one of them is "wait".
-        if (outstandingInvites > 0) backlogClamped = true;
+        // Only actions actually sent inside this seven-day window spend the weekly budget.
       }
       allowed = capped;
+    }
+    // Outstanding invites have a separate, transparent capacity limit; they
+    // must not be double-charged as sends against an unrelated weekly window.
+    if (input.kind === 'invite') {
+      const remaining = Math.max(0, MAX_OUTSTANDING_INVITES - outstandingInvites - assigned);
+      if (remaining < allowed) backlogClamped = true;
+      allowed = Math.min(allowed, remaining);
     }
     if (band.perMonth !== undefined) {
       const capped = Math.min(allowed, Math.max(0, band.perMonth - sumOfLast(timeline, 29)));
@@ -1119,7 +1097,7 @@ export async function planPacing(
   if (backlogClamped) {
     ceilingsApplied.push('pending-invite-backlog');
     reasons.push(
-      `${outstandingInvites} invite(s) sent more than 7 days ago are still awaiting an answer, and they are charged against the same weekly capacity as new ones -- on LinkedIn's side an unanswered invite keeps occupying a slot until it is accepted or withdrawn. Withdrawing them returns that capacity; the ceiling on the whole backlog is ${MAX_OUTSTANDING_INVITES}, REPORTED from plan 1.4.`
+      `${outstandingInvites} invite(s) remain outstanding; the separate outstanding-invite cap is ${MAX_OUTSTANDING_INVITES}. Older invites do not consume this week's new-send budget a second time.`
     );
   }
   if (monthlyClamped) {

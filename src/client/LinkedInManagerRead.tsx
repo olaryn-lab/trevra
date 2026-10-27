@@ -701,7 +701,7 @@ function campaignBlockers({
                 // A ramp that widens on its own schedule. Worth reading, not
                 // worth colouring the card amber.
                 severity: 'waiting' as const,
-                detail: `Campaign warm-up and account warm-up are separate. ${report?.seat.label ?? 'This LinkedIn account'} is in account warm-up week ${report?.seat.warmupWeek ?? 1} of ${report?.seat.warmupWeeks ?? 1}, which currently permits 0 ${CAPACITY_LABEL[kind].toLowerCase()}/day. This campaign cannot receive a slot until the account ramp permits this action. Any already queued action is still safety-checked before execution and will not send against a zero account ceiling.`
+                detail: `${report?.seat.label ?? 'This LinkedIn account'} is in account warm-up week ${report?.seat.warmupWeek ?? 1} of ${report?.seat.warmupWeeks ?? 1}, which currently permits 0 ${CAPACITY_LABEL[kind].toLowerCase()}/day. There is no separate campaign warm-up. Actions remain subject to the account ceiling and execution safety checks.`
               }
             : {
                 title: `${CAPACITY_LABEL[kind]} capacity fully allocated`,

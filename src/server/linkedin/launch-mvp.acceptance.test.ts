@@ -326,26 +326,44 @@ describe('first customer L3–L6 acceptance with provider doubles and isolated P
     await runManagedCampaigns(db, workspace, plusHours(now, 28));
     await runCampaignChannelActions(db, workspace, plusHours(now, 29));
     expect(provider.post).toHaveBeenCalledTimes(count);
+
+    // With no redundant campaign-day ramp the two-lead journey can complete
+    // before its lifecycle controls are exercised. Verify pause/resume/stop on
+    // a fresh, explicitly running campaign instead of trying to pause one
+    // which has already completed legitimately.
+    const controls = await campaign(
+      'Lifecycle controls',
+      'First Name,Last Name,Company,Email,LinkedIn URL\nControl,Person,Acme,control@example.com,https://linkedin.com/in/trevra-mvp-control/',
+      [inviteStep]
+    );
+    const controlId = controls.created.id as string;
     await client
-      .post('/api/linkedin/manager/campaigns/' + id + '/pause')
+      .post('/api/linkedin/manager/campaigns/' + controlId + '/start')
+      .send({})
+      .expect(200);
+    await client
+      .post('/api/linkedin/manager/campaigns/' + controlId + '/pause')
       .send({})
       .expect(200);
     expect(
-      (await client.get('/api/linkedin/manager/campaigns/' + id).expect(200)).body.campaign.status
+      (await client.get('/api/linkedin/manager/campaigns/' + controlId).expect(200)).body.campaign
+        .status
     ).toBe('paused');
     await client
-      .post('/api/linkedin/manager/campaigns/' + id + '/start')
-      .send({})
-      .expect(200); // Start is the existing resume API.
-    expect(
-      (await client.get('/api/linkedin/manager/campaigns/' + id).expect(200)).body.campaign.status
-    ).toBe('running');
-    await client
-      .post('/api/linkedin/manager/campaigns/' + id + '/stop')
+      .post('/api/linkedin/manager/campaigns/' + controlId + '/start')
       .send({})
       .expect(200);
     expect(
-      (await client.get('/api/linkedin/manager/campaigns/' + id).expect(200)).body.campaign.status
+      (await client.get('/api/linkedin/manager/campaigns/' + controlId).expect(200)).body.campaign
+        .status
+    ).toBe('running');
+    await client
+      .post('/api/linkedin/manager/campaigns/' + controlId + '/stop')
+      .send({})
+      .expect(200);
+    expect(
+      (await client.get('/api/linkedin/manager/campaigns/' + controlId).expect(200)).body.campaign
+        .status
     ).toBe('stopped');
   });
 

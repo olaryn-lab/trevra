@@ -242,18 +242,13 @@ describe('LinkedIn outreach manager persistence', () => {
     ]);
   });
 
-  it('uses the exact five-day 20/40/60/80/100 campaign ramp', () => {
+  it('uses the seat budget from day one without a redundant campaign ramp', () => {
     const start = '2026-08-01T09:00:00.000Z';
     const fractions = [0, 1, 2, 3, 4, 9].map((days) =>
       campaignWarmupFraction(start, new Date(Date.parse(start) + days * 86_400_000))
     );
-    expect(fractions[0]).toBeCloseTo(0.2);
-    expect(fractions[1]).toBeCloseTo(0.4);
-    expect(fractions[2]).toBeCloseTo(0.6);
-    expect(fractions[3]).toBeCloseTo(0.8);
-    expect(fractions[4]).toBe(1);
-    expect(fractions[5]).toBe(1);
-    expect(campaignActionLimit(30, start, new Date('2026-08-01T12:00:00Z'))).toBe(6);
-    expect(campaignActionLimit(25, start, new Date('2026-08-04T12:00:00Z'))).toBe(20);
+    expect(fractions).toEqual([1, 1, 1, 1, 1, 1]);
+    expect(campaignActionLimit(30, start, new Date('2026-08-01T12:00:00Z'))).toBe(30);
+    expect(campaignActionLimit(25, start, new Date('2026-08-04T12:00:00Z'))).toBe(25);
   });
 });
