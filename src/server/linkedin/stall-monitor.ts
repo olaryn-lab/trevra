@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from '../db.js';
 import { campaignExecutionState } from './execution-state.js';
+import { reviewLinkedInAction } from './action-policy.js';
 import { getManagedCampaign, seatWindowOpenNow } from './managed-campaigns.js';
 import { getSeat } from './seats.js';
 import { notifyLinkedInCampaignStalled } from '../notifications.js';
@@ -20,6 +21,54 @@ export type StalledCampaign = {
   oldestDue: string;
   approvedDue: number;
 };
+
+/**
+ * An approval row is not enough: approved copy can be edited after sign-off.
+ * The runner recomputes the content hash before every send, so the watcher
+ * must do the same or it will falsely alert about a row the executor cannot
+ * legally run. Read-only: never creates action-policy audit events.
+ *
+ * Bounded to eight previously approved rows per campaign per scan. Returning
+ * zero means "not enough evidence for a stall", not proof the queue is empty.
+ */
+export async function exactlyApprovedOverdueActions(
+  db: Db,
+  input: {
+    workspaceId: string;
+    campaignId: string;
+    seatKey: string;
+    cutoff: Date;
+  }
+): Promise<{ count: number; oldestDue: string | null }> {
+  const rows = await db
+    .prepare(
+      `SELECT a.id,a.planned_for
+     FROM linkedin_actions a JOIN linkedin_action_approvals approval
+       ON approval.workspace_id=a.workspace_id AND approval.action_id=a.id
+     WHERE a.workspace_id=? AND a.campaign_id=? AND a.seat_key=?
+       AND a.status='planned' AND a.claimed_at IS NULL
+       AND a.settlement_hold_at IS NULL AND a.target_ref IS NOT NULL
+       AND a.planned_for IS NOT NULL AND a.planned_for<=?::timestamptz
+     ORDER BY a.planned_for ASC, a.id ASC LIMIT 8`
+    )
+    .all<{ id: string; planned_for: Date | string }>(
+      input.workspaceId,
+      input.campaignId,
+      input.seatKey,
+      input.cutoff.toISOString()
+    );
+  const reviewed = await Promise.all(
+    rows.map(async (row) => {
+      const review = await reviewLinkedInAction(db, input.workspaceId, row.id);
+      return review?.approved && review.policy.effect !== 'deny' ? row : null;
+    })
+  );
+  const current = reviewed.filter((row): row is NonNullable<typeof row> => row !== null);
+  return {
+    count: current.length,
+    oldestDue: current.length ? new Date(current[0]!.planned_for).toISOString() : null
+  };
+}
 
 export async function findStalledLinkedInCampaigns(
   db: Db,
@@ -101,13 +150,22 @@ export async function findStalledLinkedInCampaigns(
     if (current.humanSendNext || earlier.humanSendNext) continue;
     if (current.restingUntil || earlier.restingUntil) continue;
     if (!current.gate?.allowed || !earlier.gate?.allowed) continue;
+    const exact = await exactlyApprovedOverdueActions(db, {
+      workspaceId: row.workspace_id,
+      campaignId: row.campaign_id,
+      seatKey: row.seat_key,
+      cutoff: new Date(now.getTime() - STALL_AGE_MS)
+    });
+    if (exact.count === 0 || !exact.oldestDue) continue;
     stalled.push({
       workspaceId: row.workspace_id,
       campaignId: row.campaign_id,
       campaignName: row.campaign_name,
       seatKey: row.seat_key,
-      oldestDue: new Date(row.oldest_due).toISOString(),
-      approvedDue: Number(row.approved_due)
+      oldestDue: exact.oldestDue,
+      // Deliberately only the re-verified rows in this bounded sample; the
+      // raw SQL join may include stale approvals or altered message bodies.
+      approvedDue: exact.count
     });
   }
   return stalled;

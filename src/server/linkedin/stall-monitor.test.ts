@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
 import { seatWindowOpenNow, type ManagedCampaign } from './managed-campaigns.js';
+import { reviewLinkedInAction } from './action-policy.js';
 import type { LinkedInSeat } from './seats.js';
 import {
   findStalledLinkedInCampaigns,
+  exactlyApprovedOverdueActions,
   notifyStalledLinkedInCampaigns,
   type StalledCampaign
 } from './stall-monitor.js';
@@ -99,6 +101,48 @@ describe('LinkedIn campaign stall notifications', () => {
         notify
       })
     ).toMatchObject({ notified: 1 });
+  });
+
+  it('refuses a stale approval after the approved LinkedIn message is edited', async () => {
+    const actionId = 'lact_stall_exact_approval';
+    await db
+      .prepare(
+        "INSERT INTO linkedin_actions(id,workspace_id,seat_key,campaign_id,kind,target_ref,status,planned_for,source,body) VALUES (?,?,'owner',?,'dm',?,'planned',?,'campaign',?)"
+      )
+      .run(
+        actionId,
+        WORKSPACE,
+        CAMPAIGN,
+        'https://www.linkedin.com/in/approved-test-lead/',
+        new Date(TIME.getTime() - 4 * 60 * 60_000).toISOString(),
+        'Approved text'
+      );
+    const review = await reviewLinkedInAction(db, WORKSPACE, actionId);
+    expect(review).not.toBeNull();
+    await db
+      .prepare(
+        'INSERT INTO linkedin_action_approvals(workspace_id,action_id,content_hash,approved_by,approved_at) VALUES (?,?,?,?,?)'
+      )
+      .run(WORKSPACE, actionId, review!.contentHash, 'owner', TIME.toISOString());
+    const lookup = () =>
+      exactlyApprovedOverdueActions(db, {
+        workspaceId: WORKSPACE,
+        campaignId: CAMPAIGN,
+        seatKey: 'owner',
+        cutoff: new Date(TIME.getTime() - 2 * 60 * 60_000)
+      });
+    expect((await lookup()).count).toBe(1);
+    // A campaign editor changes the text AFTER approval. The executor would
+    // refuse it; a monitor must not call that missing approval a worker stall.
+    await db
+      .prepare("UPDATE linkedin_actions SET body='Changed without review' WHERE id=?")
+      .run(actionId);
+    expect((await lookup()).count).toBe(0);
+    const changed = await reviewLinkedInAction(db, WORKSPACE, actionId);
+    await db
+      .prepare('UPDATE linkedin_action_approvals SET content_hash=? WHERE action_id=?')
+      .run(changed!.contentHash, actionId);
+    expect((await lookup()).count).toBe(1);
   });
 
   it('does not alert on a campaign with no approved overdue work', async () => {
