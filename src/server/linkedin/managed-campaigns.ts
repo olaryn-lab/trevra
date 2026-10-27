@@ -4234,7 +4234,7 @@ export async function campaignAdmissionForecast(
   };
 }
 
-function seatWindowOpenNow(
+export function seatWindowOpenNow(
   seat: Awaited<ReturnType<typeof getSeat>>,
   campaign: ManagedCampaign,
   now: Date

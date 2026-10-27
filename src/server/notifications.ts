@@ -6,6 +6,7 @@ import {
   sendIntegrationNeedsReauthEmail,
   sendLinkedInSeatNeedsAttentionEmail,
   sendLinkedInSeatRecoveredEmail,
+  sendTransactionalEmail,
   smtpConfigured
 } from './email.js';
 
@@ -223,6 +224,55 @@ export async function notifyLinkedInSeatRecovered(
       seatLabel
     })
   );
+  return true;
+}
+
+/** Sent only after the worker has proved work is overdue and current + past
+ * safety gates both allow execution. Owners see a useful next step, not a
+ * generic 'server down' alarm. */
+export async function notifyLinkedInCampaignStalled(
+  db: Db,
+  input: {
+    workspaceId: string;
+    campaignName: string;
+    approvedDue: number;
+    oldestDue: string;
+  }
+): Promise<boolean> {
+  if (!smtpConfigured()) return false;
+  const owners = await workspaceOwners(db, input.workspaceId);
+  if (owners.length === 0) return false;
+  const name = await workspaceName(db, input.workspaceId);
+  const reviewUrl = appBaseUrl() + '/outreach';
+  const clean = (s: string) =>
+    s.replace(
+      /[&<>"']/g,
+      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c
+    );
+  await deliverOwners(owners, (owner) => {
+    const text = [
+      'Trevra detected approved LinkedIn work that has not progressed.',
+      'Workspace: ' + name,
+      'Campaign: ' + input.campaignName,
+      'Overdue approved actions: ' + input.approvedDue,
+      'Oldest scheduled action: ' + input.oldestDue,
+      '',
+      'Open Trevra to review execution blockers and the connected computer.',
+      'Do not retry unknown-outcome actions without checking LinkedIn first.',
+      reviewUrl
+    ].join('\n');
+    return sendTransactionalEmail({
+      to: owner.email,
+      subject: 'LinkedIn campaign needs attention in Trevra',
+      text,
+      html: `<p>Approved LinkedIn work in <strong>${clean(name)}</strong> is overdue.</p>
+        <p>Campaign: ${clean(input.campaignName)}<br />
+        Approved actions: ${input.approvedDue}<br />
+        Oldest planned: ${clean(input.oldestDue)}</p>
+        <p><a href="${clean(reviewUrl)}">Check campaign execution</a>.
+        Do not retry uncertain LinkedIn actions without verifying the outcome.</p>`
+    });
+  });
   return true;
 }
 
