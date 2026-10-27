@@ -714,6 +714,47 @@ describe('listConversations', () => {
 });
 
 describe('readThread', () => {
+  it('waits for delayed client-side messages instead of calling them selector drift', async () => {
+    const state = world({
+      threads: [
+        thread(0, {
+          messages: [{ direction: 'in', body: 'Arrived after loading', stamp: '10:42 AM' }]
+        })
+      ],
+      messageList: 'missing'
+    });
+    const page = new FakePage(state);
+    const originalLocator = page.locator.bind(page);
+    let waited = 0;
+
+    // The real Playwright locator supports waitFor, but the fixture normally
+    // does not. Simulate a LinkedIn SPA inserting the message rows *after*
+    // DOMContentLoaded, when the first count returns zero.
+    page.locator = (selector) => {
+      const locator = originalLocator(selector);
+      if (selector === INBOX_SELECTORS.messageList + ' > li') {
+        const originalFirst = locator.first.bind(locator);
+        locator.first = () =>
+          Object.assign(originalFirst(), {
+            waitFor: async () => {
+              waited += 1;
+              state.messageList = 'ok';
+            }
+          });
+      }
+      return locator;
+    };
+
+    const transcript = await readThread(page, '2-thread0==', {
+      sleep: recorder().sleep,
+      now: clock
+    });
+    expect(waited).toBe(1);
+    if (!isThreadTranscript(transcript)) throw new Error('expected a readable delayed transcript');
+    expect(transcript.messages.map((entry) => entry.direction)).toEqual(['in']);
+    expect(transcript.messages.map((entry) => entry.body)).toEqual(['Arrived after loading']);
+  });
+
   it('returns the transcript in order, with direction read off the item', async () => {
     const state = world({
       threads: [
