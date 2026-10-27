@@ -217,6 +217,7 @@ interface StoreHarness {
   held: Array<{ id: string; failureKind: string }>;
   heartbeats: Array<{ batchId: string; id: string | null }>;
   cooldowns: number;
+  protectedBeforeSend: string[];
   closed: Array<{ status: string; haltReason: string | null; executed: number }>;
   recordedReplyMessages: Array<{ threadUrn: string; messages: LinkedInInboxMessage[] }>;
   recordedNewThreads: LinkedInThreadSummary[];
@@ -264,6 +265,7 @@ function fakeStore(
     held: [],
     heartbeats: [],
     cooldowns: 0,
+    protectedBeforeSend: [],
     closed: [],
     recordedReplyMessages: [],
     recordedNewThreads: [],
@@ -333,6 +335,9 @@ function fakeStore(
       branchDecision: async (action, now) => (options.branch ? options.branch(action, now) : null),
       holdClaim: async (id, failureKind) => {
         harness.held.push({ id, failureKind });
+      },
+      beginExternalEffect: async (_batchId, actionId) => {
+        harness.protectedBeforeSend.push(actionId);
       },
       // THE LEASE, RECORDED RATHER THAN IGNORED. What the loop owes a
       // multi-worker deployment is that the row it is mid-way through has a
@@ -1253,6 +1258,42 @@ describe('what LinkedIn says stops the batch', () => {
     expect(result.halted).toBe(false);
   });
 
+  it('durably protects every send attempt before the driver is called', async () => {
+    const harness = fakeStore([action({ id: 'protected-invite' })]);
+    const { driver } = fakeDriver(() => {
+      expect(harness.protectedBeforeSend).toEqual(['protected-invite']);
+      return ok;
+    });
+    const result = await runLinkedInLocalBatch(harness.store, {
+      driver,
+      page,
+      sleep: noSleep,
+      log: () => {},
+      evaluate: async () => verdict()
+    });
+    expect(result.executed).toBe(1);
+    expect(harness.sent).toEqual(['protected-invite']);
+  });
+
+  it('fails closed without touching the browser if durability cannot be established', async () => {
+    const harness = fakeStore([action({ id: 'no-wal-ack' })]);
+    harness.store.beginExternalEffect = async () => {
+      throw new Error('database went away');
+    };
+    const { driver, calls } = fakeDriver();
+    const result = await runLinkedInLocalBatch(harness.store, {
+      driver,
+      page,
+      sleep: noSleep,
+      log: () => {},
+      evaluate: async () => verdict()
+    });
+    expect(result.halted).toBe(true);
+    expect(result.haltReason).toContain('durably protected');
+    expect(calls).toHaveLength(0);
+    expect(harness.sent).toEqual([]);
+  });
+
   it('holds the claim and stops when an outcome is unknown', async () => {
     const harness = fakeStore(threeActions);
     const { driver } = fakeDriver(() => ({ ok: false, failureKind: 'unknown' }));
@@ -1554,11 +1595,9 @@ describe('what LinkedIn says stops the batch', () => {
   });
 
   it('stops on a lost browser session without accusing the selectors', async () => {
-    // The relay to the member's computer dies mid-batch (it did, in production,
-    // during the gap between two actions). The row is released untouched, just
-    // as drift is -- nothing was clicked either way -- but the halt must name
-    // the browser session, because sending an operator to repair selectors that
-    // are fine is the one outcome this classification exists to prevent.
+    // Losing the Companion transport during an action cannot prove whether
+    // LinkedIn received the click. Quarantine rather than retrying a potentially
+    // duplicate message, and point the operator to outcome reconciliation.
     const harness = fakeStore(threeActions);
     const { driver, calls } = fakeDriver(() => ({ ok: false, failureKind: 'session_lost' }));
 
@@ -1571,10 +1610,11 @@ describe('what LinkedIn says stops the batch', () => {
     });
 
     expect(calls).toHaveLength(1);
-    expect(harness.released).toEqual([{ id: 'lact_1', failureKind: 'session_lost' }]);
-    expect(harness.held).toHaveLength(0);
+    expect(harness.held).toEqual([{ id: 'lact_1', failureKind: 'unknown' }]);
+    expect(harness.released).toEqual([]);
+    expect(harness.protectedBeforeSend).toEqual(['lact_1']);
     expect(result.halted).toBe(true);
-    expect(result.haltReason).toMatch(/browser session for this seat ended mid-batch/);
+    expect(result.haltReason).toMatch(/browser connection disappeared during an action/);
     // Nobody is sent to repair a file that is not involved.
     expect(result.haltReason).not.toMatch(/repair/i);
     expect(result.haltReason).not.toMatch(/driver\.ts/);
@@ -4017,6 +4057,81 @@ describe.skipIf(!databaseUrl)('a claim has an owner and a deadline', () => {
     });
     await impostor.heartbeat(batchId, 'lact_lease_3', new Date(NOW.getTime() + 90_000));
     expect(await reapExpiredActionLeases(db, { now: new Date(NOW.getTime() + 200_000) })).toBe(1);
+  });
+
+  it('never replays an action after a worker crashes between clicking Send and settlement', async () => {
+    await planned('lact_after_click_crash', 'https://www.linkedin.com/in/after-click/');
+    const store = postgresLocalWorkerStore(db, WORKSPACE_ID, 'owner', {
+      workerId: 'worker-a',
+      leaseMs: 60_000
+    });
+    const batchId = await store.openBatch(NOW);
+    expect((await store.claimNextDueAction(batchId, NOW))?.id).toBe('lact_after_click_crash');
+    await store.beginExternalEffect(batchId, 'lact_after_click_crash', NOW);
+    // Simulated machine death: no settle, no holdClaim, no batch close, no
+    // heartbeat. The irreversible LinkedIn effect may have happened.
+    expect(
+      await reapExpiredActionLeases(db, {
+        now: new Date(NOW.getTime() + 30 * 86_400_000)
+      })
+    ).toBe(0);
+    expect((await row('lact_after_click_crash'))?.unheld).toBe(false);
+    expect((await row('lact_after_click_crash'))?.unclaimed).toBe(false);
+    expect(
+      (await seatsWithDueActions(db, NOW)).filter((seat) => seat.workspaceId === WORKSPACE_ID)
+    ).toEqual([]);
+  });
+
+  it('allows a crash before the durable Send boundary to be recovered safely', async () => {
+    await planned('lact_before_click_crash', 'https://www.linkedin.com/in/preclick/');
+    const store = postgresLocalWorkerStore(db, WORKSPACE_ID, 'owner', {
+      workerId: 'worker-a',
+      leaseMs: 60_000
+    });
+    const batchId = await store.openBatch(NOW);
+    expect((await store.claimNextDueAction(batchId, NOW))?.id).toBe('lact_before_click_crash');
+    // The worker died BEFORE beginExternalEffect: it could not have called
+    // the browser driver. Recover this safely after its lease expires.
+    expect(await reapExpiredActionLeases(db, { now: new Date(NOW.getTime() + 120_000) })).toBe(1);
+    expect((await row('lact_before_click_crash'))?.unclaimed).toBe(true);
+  });
+
+  it('rejects an impostor that tries to protect a claim owned by another worker', async () => {
+    await planned('lact_not_owned', 'https://www.linkedin.com/in/owner-check/');
+    const original = postgresLocalWorkerStore(db, WORKSPACE_ID, 'owner', {
+      workerId: 'worker-a',
+      leaseMs: 60_000
+    });
+    const stolen = postgresLocalWorkerStore(db, WORKSPACE_ID, 'owner', {
+      workerId: 'worker-b',
+      leaseMs: 60_000
+    });
+    const batchId = await original.openBatch(NOW);
+    expect((await original.claimNextDueAction(batchId, NOW))?.id).toBe('lact_not_owned');
+    await expect(stolen.beginExternalEffect(batchId, 'lact_not_owned', NOW)).rejects.toThrow(
+      'no longer owned'
+    );
+    expect((await row('lact_not_owned'))?.unheld).toBe(true);
+  });
+
+  it('clears the temporary safety hold after a proven sent or definite failed action', async () => {
+    await planned('lact_known_sent', 'https://www.linkedin.com/in/definitely-sent/');
+    const store = postgresLocalWorkerStore(db, WORKSPACE_ID, 'owner', {
+      workerId: 'worker-a',
+      leaseMs: 60_000
+    });
+    const firstBatch = await store.openBatch(NOW);
+    await store.claimNextDueAction(firstBatch, NOW);
+    await store.beginExternalEffect(firstBatch, 'lact_known_sent', NOW);
+    await store.settleSent('lact_known_sent', 'external-positive-ref', NOW);
+    expect((await row('lact_known_sent'))?.unheld).toBe(true);
+
+    await planned('lact_definite_failure', 'https://www.linkedin.com/in/definite-fail/');
+    const secondBatch = await store.openBatch(NOW);
+    await store.claimNextDueAction(secondBatch, NOW);
+    await store.beginExternalEffect(secondBatch, 'lact_definite_failure', NOW);
+    await store.settleSkipped('lact_definite_failure', 'not_found', NOW);
+    expect((await row('lact_definite_failure'))?.unheld).toBe(true);
   });
 
   it('NEVER touches the deliberate hold, however long it has been held', async () => {
