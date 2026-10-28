@@ -16,12 +16,38 @@ const withdrawalApprovals = readFileSync(
   new URL('../LinkedInWithdrawalApprovals.tsx', import.meta.url),
   'utf8'
 );
+const todayView = readFileSync(new URL('../views/LoopView.tsx', import.meta.url), 'utf8');
+const ideaView = readFileSync(new URL('../views/ResearchView.tsx', import.meta.url), 'utf8');
 const passkeySettings = readFileSync(
   new URL('../NativeTrevraPasskeySettings.tsx', import.meta.url),
   'utf8'
 );
 
 describe('Trevra compact work console, Olaryn-compatible without stale styling', () => {
+  it('offers task-first navigation with mobile access to secondary screens', () => {
+    for (const label of ['Today', 'Campaigns', 'Messages', 'Ideas', 'Activity', 'Settings'])
+      expect(source).toContain(`label: '${label}'`);
+    expect(source).toContain("path: '/outreach/inbox'");
+    expect(source).toContain("path: '/setup/workspace'");
+    expect(source).toContain('className="mobile-more-links"');
+    expect(source).toContain('key={route.path}');
+    expect(css).toContain('.mobile-more-links > a');
+    expect(source).toContain("route.section === 'outreach' && route.sub !== 'inbox'");
+  });
+
+  it('helps new marketers connect LinkedIn and prepare one campaign before advanced agents', () => {
+    expect(todayView).toContain('Connect LinkedIn to get started');
+    expect(todayView).toContain('Ready to prepare your first campaign?');
+    expect(todayView).toContain("'/outreach/new' : '/setup/workspace'");
+    expect(todayView).toContain('Agent setup (advanced)');
+    expect(todayView).toContain('Campaign activity and advanced planning');
+    expect(todayView).toContain("You're all caught up");
+    expect(ideaView).toContain('Ideas for your next post');
+    expect(ideaView).toContain('Ready-to-review ideas');
+    expect(ideaView).toContain('<details className="research-extra-panel">');
+    expect(ideaView).toContain('<details className="research-thread-filters">');
+  });
+
   it('limits sidebar width, gives content a zero-minimum track, and shortens navigation', () => {
     expect(css).toMatch(/\.app-shell\s*\{[^}]*grid-template-columns:\s*228px minmax\(0, 1fr\)/);
     expect(css).toMatch(/\.sidebar\s*\{[^}]*padding:\s*16px 12px/);
@@ -81,7 +107,7 @@ describe('Trevra compact work console, Olaryn-compatible without stale styling',
     expect(passkeySettings).toContain('<Button');
     expect(passkeySettings).not.toContain('style={{ padding: 20 }}');
     expect(passkeySettings).toContain("role={message.error ? 'alert' : 'status'}");
-    expect(source).toContain("if (route.sub === 'billing') return 'Setup · Billing';");
+    expect(source).toContain("if (route.sub === 'billing') return 'Billing';");
     expect(source).not.toContain('Open source and self-hostable');
   });
 

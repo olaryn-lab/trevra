@@ -2810,11 +2810,7 @@ export function OutreachManagerRead({
         <div className="section-heading">
           <div>
             <h3 aria-level={2}>Campaigns</h3>
-            <p>
-              One LinkedIn account, one lead list, one workflow each. Work is queued for the
-              account&rsquo;s own working hours and daily limits, so a campaign never moves faster
-              than the account safely can.
-            </p>
+            <p>See what is running, what needs attention and what has finished.</p>
           </div>
           {campaigns.length > 0 && (
             <div className="mgr-actions">
@@ -2832,7 +2828,7 @@ export function OutreachManagerRead({
         <p className="mgr-summary">
           <span>{plural(campaigns.length, 'campaign')}</span>
           <span>{runningCount} running</span>
-          <span>{plural(leadsInFlight, 'lead')} in a sequence</span>
+          <span>{plural(leadsInFlight, 'person')} in progress</span>
           <span>
             <a className="li-link" href="/outreach/inbox">
               {plural(pendingTasks.length, 'message')} waiting for you
@@ -2849,8 +2845,8 @@ export function OutreachManagerRead({
           <div className="mgr-empty">
             <h4 aria-level={3}>No campaigns yet</h4>
             <p>
-              The builder walks through the sending account, lead list and workflow in order.
-              Nothing is sent while you build.
+              Upload people, review your message and decide when to start. Nothing is sent while you
+              prepare.
             </p>
             <div className="mgr-actions">
               <button

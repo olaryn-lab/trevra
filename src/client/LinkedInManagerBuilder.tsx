@@ -107,12 +107,12 @@ export function OutreachManagerBuilder({
         <section className="onboarding-card mgr-first-campaign">
           <div className="onboarding-head">
             <div>
-              <h2>One thing is missing</h2>
-              <p>Connect the LinkedIn account you want Trevra to use, in Setup · Workspace.</p>
+              <h2>Connect LinkedIn first</h2>
+              <p>Add the LinkedIn account you want to use for your campaign.</p>
             </div>
           </div>
           <Button variant="primary" onClick={() => onNavigate('/setup/workspace')}>
-            Connect account in Setup <ChevronRight size={14} />
+            Connect LinkedIn <ChevronRight size={14} />
           </Button>
         </section>
       )}
@@ -299,9 +299,10 @@ function SimplePrepareOutreach({
     <section className="onboarding-card mgr-first-campaign">
       <div className="onboarding-head">
         <div>
-          <h2>Prepare outreach</h2>
+          <h2>Create a campaign</h2>
           <p>
-            Give Trevra the people. It will prepare a safe default LinkedIn campaign for review.
+            Give your campaign a name and choose who to contact. You can review everything before
+            starting.
           </p>
         </div>
       </div>
@@ -417,8 +418,8 @@ function SimplePrepareOutreach({
       </div>
 
       <p className="empty-copy">
-        Trevra uses your configured account limits and a versioned safe default sequence. Nothing is
-        sent until you review and start the draft campaign.
+        This creates a draft only. No invitations or messages are sent until you review and start
+        it. Your account limits and approval rules still apply.
       </p>
     </section>
   );
