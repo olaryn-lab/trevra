@@ -11,7 +11,8 @@ export async function exchangeAuthwardCode(
   issuer: string,
   clientId: string,
   clientSecret: string,
-  data: { code: string; codeVerifier?: string; redirectURI: string }
+  data: { code: string; codeVerifier?: string; redirectURI: string },
+  registeredRedirectURI: string
 ) {
   const response = await fetch(`${issuer}/.well-known/openid-configuration`, {
     headers: { accept: 'application/json' },
@@ -32,8 +33,12 @@ export async function exchangeAuthwardCode(
     return await validateAuthorizationCode({
       code: data.code,
       codeVerifier: data.codeVerifier,
-      redirectURI: data.redirectURI,
-      options: { clientId, clientSecret, redirectURI: data.redirectURI },
+      // Better Auth 1.7 passes its INTERNAL /callback/authward route here.
+      // Authward bound the code to our explicitly registered, legacy
+      // /oauth2/callback/authward URI during authorization. Token exchange
+      // MUST use that same original URI or Authward returns invalid_grant.
+      redirectURI: registeredRedirectURI,
+      options: { clientId, clientSecret, redirectURI: registeredRedirectURI },
       tokenEndpoint: tokenEndpoint.toString(),
       authentication: 'basic',
       additionalParams: { resource: 'https://api.usetrevra.com' }

@@ -5,6 +5,7 @@ import { authwardTokenErrorCode, exchangeAuthwardCode } from './authward-token.j
 const issuer = 'https://auth.example.test/api/auth';
 const endpoint = issuer + '/oauth2/token';
 const callback = 'https://app.usetrevra.com/api/auth/oauth2/callback/authward';
+const internalCallback = 'https://app.usetrevra.com/api/auth/callback/authward';
 
 function json(data: object, status = 200) {
   return new Response(JSON.stringify(data), {
@@ -33,11 +34,17 @@ describe('Trevra OAuth code exchange', () => {
     const logger = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
       await expect(
-        exchangeAuthwardCode(issuer, 'trevra-web', 'test-password', {
-          code: 'one-use-code',
-          codeVerifier: 'wrong-verifier',
-          redirectURI: callback
-        })
+        exchangeAuthwardCode(
+          issuer,
+          'trevra-web',
+          'test-password',
+          {
+            code: 'one-use-code',
+            codeVerifier: 'wrong-verifier',
+            redirectURI: internalCallback
+          },
+          callback
+        )
       ).rejects.toThrow(expected);
       expect(requests.filter((request) => request.url === endpoint)).toHaveLength(1);
       const tokenRequest = requests.find((request) => request.url === endpoint)!;
@@ -45,6 +52,8 @@ describe('Trevra OAuth code exchange', () => {
       expect(body.get('grant_type')).toBe('authorization_code');
       expect(body.get('code_verifier')).toBe('wrong-verifier');
       expect(body.get('resource')).toBe('https://api.usetrevra.com');
+      expect(body.get('redirect_uri')).toBe(callback);
+      expect(body.get('redirect_uri')).not.toBe(internalCallback);
       expect(new Headers(tokenRequest.init?.headers).get('authorization')).toBe(
         'Basic ' + Buffer.from('trevra-web:test-password').toString('base64')
       );
@@ -58,19 +67,31 @@ describe('Trevra OAuth code exchange', () => {
   });
 
   it('preserves successful token responses and exchanges once', async () => {
-    const spy = vi.fn(async (input: string | URL | Request) =>
+    const spy = vi.fn(async (input: string | URL | Request, _init?: RequestInit) =>
       String(input).endsWith('openid-configuration')
         ? json({ token_endpoint: endpoint })
         : json({ access_token: 'access', refresh_token: 'refresh', expires_in: 900 })
     );
     vi.stubGlobal('fetch', spy);
-    const result = await exchangeAuthwardCode(issuer, 'trevra-web', 'test-password', {
-      code: 'valid-code',
-      codeVerifier: 'valid-verifier',
-      redirectURI: callback
-    });
+    const result = await exchangeAuthwardCode(
+      issuer,
+      'trevra-web',
+      'test-password',
+      {
+        code: 'valid-code',
+        codeVerifier: 'valid-verifier',
+        redirectURI: internalCallback
+      },
+      callback
+    );
     expect(result.accessToken).toBe('access');
     expect(result.refreshToken).toBe('refresh');
+    const grant = spy.mock.calls[1];
+    // A simulated Better Auth 1.7 internal callback must not alter the
+    // redirect_uri originally bound to the one-time authorization code.
+    const actual = new URLSearchParams(String(grant?.[1]?.body));
+    expect(actual.get('redirect_uri')).toBe(callback);
+    expect(actual.get('redirect_uri')).not.toBe(internalCallback);
     expect(spy).toHaveBeenCalledTimes(2);
   });
 
@@ -80,10 +101,16 @@ describe('Trevra OAuth code exchange', () => {
     );
     vi.stubGlobal('fetch', spy);
     await expect(
-      exchangeAuthwardCode(issuer, 'trevra-web', 'test-password', {
-        code: 'code',
-        redirectURI: callback
-      })
+      exchangeAuthwardCode(
+        issuer,
+        'trevra-web',
+        'test-password',
+        {
+          code: 'code',
+          redirectURI: internalCallback
+        },
+        callback
+      )
     ).rejects.toThrow(/unexpected origin/);
     expect(spy).toHaveBeenCalledTimes(1);
   });
