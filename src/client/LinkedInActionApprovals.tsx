@@ -6,6 +6,8 @@ import {
 } from './api';
 import { useIsWorkspaceOwner } from './auth-client';
 import { useOutreachRefresh } from './LinkedInSafety';
+import { Panel } from './ui/layout';
+import { Button } from './ui/primitives';
 
 /** Holds and reviews exact queued LinkedIn writes before the Companion worker
  * acts. This is a workspace-wide queue, including non-campaign inbox replies. */
@@ -47,67 +49,79 @@ export function LinkedInActionApprovals() {
   useOutreachRefresh(load);
   if (!rows.length && !error) return null;
   return (
-    <section className="page-panel" aria-label="LinkedIn browser action approvals">
-      <h3>LinkedIn actions awaiting review</h3>
-      <p>
-        Each approval applies to one exact action, message and account. LinkedIn automation uses
-        your connected browser and may carry account restrictions.
-      </p>
+    <Panel
+      aria-label="LinkedIn browser action approvals"
+      title="LinkedIn actions awaiting review"
+      description="Review the exact recipient, account and message before authorizing an action."
+      actions={
+        <Button variant="ghost" onClick={() => void load()}>
+          Refresh reviews
+        </Button>
+      }
+    >
       {error && (
         <div role="alert" className="error-banner">
           {error}
         </div>
       )}
-      {rows.map((row) => (
-        <article className="panel" key={row.actionId}>
-          <p>
-            <strong>{row.kind.replaceAll('_', ' ')}</strong> · {row.seatKey} · {row.targetRef}
-          </p>
-          {row.subject && (
-            <p>
-              <strong>Subject:</strong> {row.subject}
-            </p>
-          )}
-          {row.body && (
-            <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{row.body}</pre>
-          )}
-          {row.threadUrn && <p>Reply thread: {row.threadUrn}</p>}
-          {row.hasAttachments && (
-            <p>Attachment included; review the original queued action before approving.</p>
-          )}
-          <p>
-            {row.policy.effect === 'deny'
-              ? `Blocked by workspace policy: ${row.policy.policyName}`
-              : 'Waiting for workspace owner approval.'}
-          </p>
-          {owner && row.policy.effect === 'require_approval' && (
-            <button
-              type="button"
-              disabled={busy !== '' || row.hasAttachments}
-              onClick={async () => {
-                setBusy(row.actionId);
-                try {
-                  await approveLinkedInActionReview(row.actionId, row.contentHash);
-                  await load();
-                } catch (cause) {
-                  setError(
-                    cause instanceof Error
-                      ? cause.message
-                      : 'Action changed; refresh before review.'
-                  );
-                } finally {
-                  setBusy('');
-                }
-              }}
-            >
-              {busy === row.actionId ? 'Approving…' : 'Approve this action'}
-            </button>
-          )}
-        </article>
-      ))}
-      <button type="button" className="ghost-button" onClick={() => void load()}>
-        Refresh LinkedIn reviews
-      </button>
-    </section>
+      <div className="li-review-list">
+        {rows.map((row) => (
+          <article className="li-review-item" key={row.actionId}>
+            <div className="li-review-heading">
+              <strong>{row.kind.replaceAll('_', ' ')}</strong>
+              <span>{row.targetRef}</span>
+            </div>
+            <p className="li-review-meta">LinkedIn account: {row.seatKey}</p>
+            {row.subject && (
+              <p>
+                <strong>Subject:</strong> {row.subject}
+              </p>
+            )}
+            {row.body && <pre className="li-review-message">{row.body}</pre>}
+            {row.threadUrn && (
+              <details className="li-review-details">
+                <summary>Technical details</summary>
+                <p>Reply thread: {row.threadUrn}</p>
+              </details>
+            )}
+            {row.hasAttachments && (
+              <p className="li-review-warning">
+                Attachment included. Review the original queued action before approving.
+              </p>
+            )}
+            <div className="li-review-footer">
+              <p>
+                {row.policy.effect === 'deny'
+                  ? `Blocked by workspace policy: ${row.policy.policyName}`
+                  : 'Waiting for workspace owner approval.'}
+              </p>
+              {owner && row.policy.effect === 'require_approval' && (
+                <Button
+                  variant="primary"
+                  disabled={busy !== '' || row.hasAttachments}
+                  onClick={async () => {
+                    setBusy(row.actionId);
+                    try {
+                      await approveLinkedInActionReview(row.actionId, row.contentHash);
+                      await load();
+                    } catch (cause) {
+                      setError(
+                        cause instanceof Error
+                          ? cause.message
+                          : 'Action changed; refresh before review.'
+                      );
+                    } finally {
+                      setBusy('');
+                    }
+                  }}
+                >
+                  {busy === row.actionId ? 'Approving…' : 'Approve this action'}
+                </Button>
+              )}
+            </div>
+          </article>
+        ))}
+      </div>
+    </Panel>
   );
 }

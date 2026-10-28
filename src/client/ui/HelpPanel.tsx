@@ -29,8 +29,8 @@ interface HelpTopic {
 
 const HELP: Record<Section, HelpTopic> = {
   loop: {
-    heading: 'Loop',
-    does: 'Shows the outreach loop from finding people to reaching them and handling replies. It highlights the first stage that needs action.',
+    heading: 'Today',
+    does: 'See which messages or decisions need you, start a campaign, and review recent results.',
     vocabulary: [
       { term: 'Stage', meaning: 'One step in the loop: Find, Reach, or Answer.' },
       { term: 'Stuck', meaning: 'The first stage that needs action.' }
@@ -43,8 +43,8 @@ const HELP: Record<Section, HelpTopic> = {
     )
   },
   outreach: {
-    heading: 'Outreach',
-    does: 'Build and run outreach campaigns, manage messages and opportunities, and publish posts. LinkedIn account setup lives in Setup → Workspace.',
+    heading: 'Campaigns and messages',
+    does: 'Choose people to contact, review a campaign, then start or pause it. Find LinkedIn account setup under Settings → Connections.',
     vocabulary: [
       { term: 'HARD FACT', meaning: 'A limit published or enforced by LinkedIn.' },
       { term: 'REPORTED', meaning: 'A practitioner-reported limit not confirmed by LinkedIn.' },
@@ -74,8 +74,8 @@ const HELP: Record<Section, HelpTopic> = {
     )
   },
   ledger: {
-    heading: 'Run ledger',
-    does: 'Every run this workspace has performed, newest first, with the evidence — and a way to take it with you. A job Trevra ran and a run by Trevra’s own agent are the same thing here: work that happened.',
+    heading: 'Activity',
+    does: 'Review what Trevra did, what is waiting for approval, and the results of each task.',
     vocabulary: [
       { term: 'Run', meaning: 'One job from start to finish.' },
       { term: 'Step', meaning: 'One model call, tool call, or approval inside a run.' },
@@ -90,8 +90,8 @@ const HELP: Record<Section, HelpTopic> = {
     )
   },
   research: {
-    heading: 'Research',
-    does: 'One feed over discovered community threads and company research briefs, across every connected platform.',
+    heading: 'Ideas',
+    does: 'Find source-backed topics you can turn into posts. Advanced trends and performance remain available on demand.',
     vocabulary: [
       { term: 'Thread', meaning: 'A community post scouted and scored for reply-worthiness.' },
       {
@@ -107,8 +107,8 @@ const HELP: Record<Section, HelpTopic> = {
     )
   },
   setup: {
-    heading: 'Setup',
-    does: 'Configure workspace access, integrations, LinkedIn accounts, safety limits, people, lead capture, and workspace data. Visited rarely after the first week.',
+    heading: 'Settings',
+    does: 'Connect accounts and email, manage your team, and find safety or agent settings when needed.',
     vocabulary: [
       { term: 'Agent token', meaning: 'A secret used by an agent to access the workspace.' },
       { term: 'Your key', meaning: 'Your encrypted model-provider API key.' },
@@ -273,30 +273,30 @@ const DESTINATIONS: Array<{ path: string; label: string; hint: string }> = [
   { path: '/outreach/inbound', label: 'Outreach · Inbound', hint: 'Captured people and requests' },
   {
     path: '/outreach/inbox',
-    label: 'Outreach · Messages',
+    label: 'Messages',
     hint: 'Conversations and LinkedIn inbox controls'
   },
   {
     path: '/outreach/opportunities',
-    label: 'Outreach · Opportunities',
+    label: 'Deals',
     hint: 'Commercial next steps'
   },
   {
     path: '/outreach/posts',
-    label: 'Outreach · Posts',
+    label: 'Social posts',
     hint: 'Scheduled and published LinkedIn posts'
   },
-  { path: '/ledger', label: 'Run ledger', hint: 'Every run, with the evidence' },
+  { path: '/ledger', label: 'Activity', hint: 'What happened and what needs review' },
   {
     path: '/research',
-    label: 'Research',
-    hint: 'Discovered threads and company research, across every platform'
+    label: 'Ideas',
+    hint: 'Source-backed topics for your next post'
   },
-  { path: '/setup', label: 'Setup · Access', hint: 'Agent access, hosted compute and spending' },
+  { path: '/setup', label: 'Advanced settings', hint: 'Agent access and spending' },
   {
     path: '/setup/workspace',
-    label: 'Setup · Workspace',
-    hint: 'LinkedIn accounts and their limits, Agents, people and workspace data'
+    label: 'Connections and settings',
+    hint: 'LinkedIn, email, team and safety settings'
   },
   {
     path: '/setup/capture',

@@ -2905,27 +2905,25 @@ export function OutreachManagerRead({
         <div className="section-heading">
           <div>
             <h3 aria-level={2}>Campaigns</h3>
-            <p>
-              One LinkedIn account, one lead list, one workflow each. Work is queued for the
-              account&rsquo;s own working hours and daily limits, so a campaign never moves faster
-              than the account safely can.
-            </p>
+            <p>See what is running, what needs attention and what has finished.</p>
           </div>
-          <div className="mgr-actions">
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => onNavigate('/outreach/new')}
-            >
-              <Plus size={14} /> New campaign
-            </button>
-          </div>
+          {campaigns.length > 0 && (
+            <div className="mgr-actions">
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => onNavigate('/outreach/new')}
+              >
+                <Plus size={14} /> New campaign
+              </button>
+            </div>
+          )}
         </div>
 
         <p className="mgr-summary">
           <span>{plural(campaigns.length, 'campaign')}</span>
           <span>{runningCount} running</span>
-          <span>{plural(leadsInFlight, 'lead')} in a sequence</span>
+          <span>{plural(leadsInFlight, 'person')} in progress</span>
           <span>
             <a className="li-link" href="/outreach/inbox">
               {plural(pendingTasks.length, 'message')} waiting for you
@@ -2942,8 +2940,8 @@ export function OutreachManagerRead({
           <div className="mgr-empty">
             <h4 aria-level={3}>No campaigns yet</h4>
             <p>
-              The builder walks through the sending account, lead list and workflow in order.
-              Nothing is sent while you build.
+              Upload people, review your message and decide when to start. Nothing is sent while you
+              prepare.
             </p>
             <div className="mgr-actions">
               <button
@@ -3093,7 +3091,7 @@ export function OutreachManagerRead({
                       )}
                       {terminal && rebuildable && (
                         <button
-                          className="primary-button"
+                          className="secondary-button"
                           type="button"
                           disabled={busyHere}
                           onClick={() => rebuild(campaign)}
@@ -3101,36 +3099,32 @@ export function OutreachManagerRead({
                           <Copy size={14} /> Build it again
                         </button>
                       )}
-                      {!terminal &&
-                        (campaign.failedCount > 0 || (operations?.queues.failed ?? 0) > 0) && (
-                          <button
-                            className="secondary-button"
-                            type="button"
-                            disabled={busyHere}
-                            title="Retries only failures known to have produced no side effect. Unknown sends remain held."
-                            onClick={() => void retryCampaignFailures(campaign)}
-                          >
-                            <RefreshCw size={14} /> Retry safe failures
-                          </button>
-                        )}
-                      {newerWorkflowAvailable && !terminal && (
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          disabled={busyHere}
-                          title={
-                            campaign.sequenceCustomized
-                              ? `This campaign's steps were edited for it alone. Applying v${workflow!.version} replaces them with the saved workflow's steps and discards those edits. Only pending, unadmitted leads change; existing waves keep their original snapshot.`
-                              : 'Only pending, unadmitted leads change. Existing waves keep their original workflow snapshot.'
-                          }
-                          onClick={() => void applyLatestWorkflow(campaign)}
-                        >
-                          <RefreshCw size={14} /> Apply workflow v{workflow!.version}
-                        </button>
-                      )}
                       <ActionMenu
                         label={`More actions for ${campaign.name}`}
                         items={[
+                          ...(!terminal &&
+                          (campaign.failedCount > 0 || (operations?.queues.failed ?? 0) > 0)
+                            ? [
+                                {
+                                  label: 'Retry safe failures',
+                                  icon: <RefreshCw size={14} />,
+                                  disabled: busyHere,
+                                  onSelect: () => retryCampaignFailures(campaign)
+                                }
+                              ]
+                            : []),
+                          ...(newerWorkflowAvailable && !terminal
+                            ? [
+                                {
+                                  label: campaign.sequenceCustomized
+                                    ? `Replace custom steps with v${workflow!.version}`
+                                    : `Apply workflow v${workflow!.version}`,
+                                  icon: <RefreshCw size={14} />,
+                                  disabled: busyHere,
+                                  onSelect: () => applyLatestWorkflow(campaign)
+                                }
+                              ]
+                            : []),
                           ...(workflow
                             ? [
                                 {

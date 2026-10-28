@@ -138,15 +138,14 @@ const OUTREACH_TABS: ReadonlyArray<{
   mobile: 'main' | 'more';
 }> = [
   { sub: '', path: '/outreach', label: 'Campaigns', mobile: 'main' },
-  { sub: 'inbound', path: '/outreach/inbound', label: 'Inbound', mobile: 'more' },
-  { sub: 'inbox', path: '/outreach/inbox', label: 'Messages', mobile: 'main' },
+  { sub: 'inbound', path: '/outreach/inbound', label: 'New leads', mobile: 'more' },
   {
     sub: 'opportunities',
     path: '/outreach/opportunities',
-    label: 'Opportunities',
+    label: 'Deals',
     mobile: 'main'
   },
-  { sub: 'posts', path: '/outreach/posts', label: 'Posts', mobile: 'more' }
+  { sub: 'posts', path: '/outreach/posts', label: 'Social posts', mobile: 'more' }
 ];
 
 function activeSub(sub: string): string {
@@ -192,42 +191,44 @@ export function OutreachView({
   return (
     <div className="page-stack outreach-simple li-polished">
       {sub !== 'inbound' && <LinkedInCompanionAttention setToast={setToast} />}
-      <nav className="outreach-nav" aria-label="Outreach sections">
-        {/*
+      {!['new', 'campaign', 'workflow', 'inbox'].includes(sub) && (
+        <nav className="outreach-nav" aria-label="Campaign sections">
+          {/*
           Each tab is the ADDRESS of a screen, so it is an anchor: cmd-click
           opens Messages in a second tab, `aria-current="page"` is finally on
           an element that has a page, and the shell's one link interceptor
           (`ui/route.ts`) still navigates without a reload.
         */}
-        {OUTREACH_TABS.map((tab) => (
-          <a
-            key={tab.path}
-            href={tab.path}
-            className={
-              'outreach-tab ' +
-              (tab.mobile === 'more' ? 'outreach-tab-more' : 'outreach-tab-main') +
-              (tab.sub === current ? ' is-active' : '')
+          {OUTREACH_TABS.map((tab) => (
+            <a
+              key={tab.path}
+              href={tab.path}
+              className={
+                'outreach-tab ' +
+                (tab.mobile === 'more' ? 'outreach-tab-more' : 'outreach-tab-main') +
+                (tab.sub === current ? ' is-active' : '')
+              }
+              aria-current={tab.sub === current ? 'page' : undefined}
+            >
+              {tab.label}
+            </a>
+          ))}
+          <ActionMenu
+            className={'outreach-more-menu' + (activeMore ? ' is-active' : '')}
+            label="More outreach sections"
+            triggerContent={
+              <span className="outreach-more-label">
+                {activeMore?.label ?? 'More'} <ChevronDown size={14} aria-hidden="true" />
+              </span>
             }
-            aria-current={tab.sub === current ? 'page' : undefined}
-          >
-            {tab.label}
-          </a>
-        ))}
-        <ActionMenu
-          className={'outreach-more-menu' + (activeMore ? ' is-active' : '')}
-          label="More outreach sections"
-          triggerContent={
-            <span className="outreach-more-label">
-              {activeMore?.label ?? 'More'} <ChevronDown size={14} aria-hidden="true" />
-            </span>
-          }
-          items={moreTabs.map((tab) => ({
-            label: tab.label,
-            active: tab.sub === current,
-            onSelect: () => onNavigate(tab.path)
-          }))}
-        />
-      </nav>
+            items={moreTabs.map((tab) => ({
+              label: tab.label,
+              active: tab.sub === current,
+              onSelect: () => onNavigate(tab.path)
+            }))}
+          />
+        </nav>
+      )}
 
       {sub === 'inbound' && <InboundPeople setToast={setToast} onNavigate={onNavigate} />}
       {sub === 'inbox' && (
