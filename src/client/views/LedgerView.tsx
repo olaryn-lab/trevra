@@ -63,8 +63,8 @@ const STATUS_FILTERS: Array<{ id: StatusFilter; label: string }> = [
 
 const ACTOR_FILTERS: Array<{ id: ActorFilter; label: string }> = [
   { id: 'all', label: 'All work' },
-  { id: 'jobs', label: 'Jobs & workflows' },
-  { id: 'agent', label: 'Trevra agent' }
+  { id: 'jobs', label: 'Automations' },
+  { id: 'agent', label: 'AI assistant' }
 ];
 
 const DAY_FILTERS = [7, 30, 90, 365] as const;
@@ -479,15 +479,15 @@ export function LedgerView({
 
   return (
     <div className="page-stack">
-      <section className="ledger-history-bar" aria-label="Run history controls">
+      <section className="ledger-history-bar" aria-label="Activity filters">
         <FilterToolbar
           density="compact"
           className="ledger-filter-toolbar"
           leading={
             <div className="ledger-history-title">
-              <strong>Run history</strong>
+              <strong>Recent activity</strong>
               <span>
-                · {shown.length.toLocaleString('en-US')} {shown.length === 1 ? 'run' : 'runs'}
+                · {shown.length.toLocaleString('en-US')} {shown.length === 1 ? 'task' : 'tasks'}
               </span>
             </div>
           }
@@ -526,7 +526,7 @@ export function LedgerView({
               ))}
             </Select>
           </FilterGroup>
-          <FilterGroup label="Run by">
+          <FilterGroup label="Started by">
             <Select value={actor} onChange={(event) => setActor(event.target.value as ActorFilter)}>
               {ACTOR_FILTERS.map((entry) => (
                 <option key={entry.id} value={entry.id}>
@@ -556,8 +556,8 @@ export function LedgerView({
 
       <Panel
         className="ledger-results-panel"
-        title="Runs"
-        description="Open any run to inspect every step, approval decision, and piece of evidence."
+        title="Tasks"
+        description="See what happened, what is waiting for approval and why."
       >
         <div className="playbook-run-list ledger-run-list">
           {shown.map((row) => {

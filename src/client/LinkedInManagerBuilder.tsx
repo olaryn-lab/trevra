@@ -20,7 +20,7 @@ import {
 import { LinkedInManagerLeadConfig } from './LinkedInManagerLeadConfig';
 import { LinkedInManagerWorkflowConfig } from './LinkedInManagerWorkflowConfig';
 import { errorMessage } from './LinkedInSafety';
-import { Select } from './ui/primitives';
+import { Button, Field, Input, Select } from './ui/primitives';
 interface Readiness {
   seats: number;
   lists: number;
@@ -90,9 +90,9 @@ export function OutreachManagerBuilder({
   return (
     <div className="page-stack">
       <div className="builder-back">
-        <button className="ghost-button" type="button" onClick={() => onNavigate('/outreach')}>
+        <Button variant="ghost" onClick={() => onNavigate('/outreach')}>
           <ChevronLeft size={14} /> Back to campaigns
-        </button>
+        </Button>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -107,17 +107,13 @@ export function OutreachManagerBuilder({
         <section className="onboarding-card mgr-first-campaign">
           <div className="onboarding-head">
             <div>
-              <h2>One thing is missing</h2>
-              <p>Connect the LinkedIn account you want Trevra to use, in Setup · Workspace.</p>
+              <h2>Connect LinkedIn first</h2>
+              <p>Add the LinkedIn account you want to use for your campaign.</p>
             </div>
           </div>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => onNavigate('/setup/workspace')}
-          >
-            Connect account in Setup <ChevronRight size={14} />
-          </button>
+          <Button variant="primary" onClick={() => onNavigate('/setup/workspace')}>
+            Connect LinkedIn <ChevronRight size={14} />
+          </Button>
         </section>
       )}
 
@@ -303,17 +299,17 @@ function SimplePrepareOutreach({
     <section className="onboarding-card mgr-first-campaign">
       <div className="onboarding-head">
         <div>
-          <h2>Prepare outreach</h2>
+          <h2>Create a campaign</h2>
           <p>
-            Give Trevra the people. It will prepare a safe default LinkedIn campaign for review.
+            Give your campaign a name and choose who to contact. You can review everything before
+            starting.
           </p>
         </div>
       </div>
 
       <div className="form-grid">
-        <label>
-          Campaign name
-          <input
+        <Field label="Campaign name">
+          <Input
             value={name}
             maxLength={160}
             onChange={(event) => {
@@ -321,11 +317,10 @@ function SimplePrepareOutreach({
               changeIntent();
             }}
           />
-        </label>
+        </Field>
 
         {seats.length > 1 && (
-          <label>
-            LinkedIn account
+          <Field label="LinkedIn account">
             <Select
               value={senderKey}
               onChange={(event) => {
@@ -340,7 +335,7 @@ function SimplePrepareOutreach({
                 </option>
               ))}
             </Select>
-          </label>
+          </Field>
         )}
       </div>
 
@@ -416,20 +411,15 @@ function SimplePrepareOutreach({
       {problem && <div className="error-banner">{problem}</div>}
 
       <div className="mgr-actions">
-        <button
-          className="primary-button"
-          type="button"
-          disabled={busy || !ready}
-          onClick={() => void prepare()}
-        >
+        <Button variant="primary" disabled={busy || !ready} onClick={() => void prepare()}>
           {busy ? <LoaderCircle className="spin" size={15} /> : null}
           Prepare campaign <ChevronRight size={15} />
-        </button>
+        </Button>
       </div>
 
       <p className="empty-copy">
-        Trevra uses your configured account limits and a versioned safe default sequence. Nothing is
-        sent until you review and start the draft campaign.
+        This creates a draft only. No invitations or messages are sent until you review and start
+        it. Your account limits and approval rules still apply.
       </p>
     </section>
   );

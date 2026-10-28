@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { KeyRound, LoaderCircle } from 'lucide-react';
 import { getPublicConfig } from './api';
+import { Panel } from './ui/layout';
+import { Button } from './ui/primitives';
 import { registerTrevraPasskey } from './native-product-passkey';
 
 export function NativeTrevraPasskeySettings() {
   const [enabled, setEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState('');
+  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null);
   useEffect(() => {
     void getPublicConfig()
       .then((config) => setEnabled(config.passkeyAuthEnabled === true))
@@ -14,28 +16,35 @@ export function NativeTrevraPasskeySettings() {
   }, []);
   if (!enabled) return null;
   return (
-    <section className="ui-panel" style={{ padding: 20 }}>
-      <h3>Passkeys</h3>
-      <p>Save a passkey for app.usetrevra.com. Existing Olaryn passkeys are not imported.</p>
-      <button
-        type="button"
-        className="primary-button"
+    <Panel
+      title="Passkeys"
+      description="Sign in directly to Trevra on this device. Existing Olaryn passkeys are separate."
+    >
+      <Button
         disabled={busy}
         onClick={() => {
           setBusy(true);
-          setMessage('');
+          setMessage(null);
           void registerTrevraPasskey()
-            .then(() => setMessage('Passkey saved. You can use it next time you sign in.'))
+            .then(() =>
+              setMessage({
+                text: 'Passkey saved. You can use it next time you sign in.',
+                error: false
+              })
+            )
             .catch((error) =>
-              setMessage(error instanceof Error ? error.message : 'Passkey setup failed')
+              setMessage({
+                text: error instanceof Error ? error.message : 'Passkey setup failed',
+                error: true
+              })
             )
             .finally(() => setBusy(false));
         }}
       >
         {busy ? <LoaderCircle size={17} className="spin" /> : <KeyRound size={17} />} Add a Trevra
         passkey
-      </button>
-      {message && <p role="status">{message}</p>}
-    </section>
+      </Button>
+      {message && <p role={message.error ? 'alert' : 'status'}>{message.text}</p>}
+    </Panel>
   );
 }
