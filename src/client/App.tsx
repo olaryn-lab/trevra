@@ -299,7 +299,7 @@ export function App() {
   const loadToken = useRef(0);
   const loadStallTimer = useRef<number | null>(null);
 
-  const load = async () => {
+  const load = async (completedSignIn = false) => {
     const token = ++loadToken.current;
     setLoadStalled(false);
     if (loadStallTimer.current !== null) window.clearTimeout(loadStallTimer.current);
@@ -313,9 +313,10 @@ export function App() {
       if (loadToken.current !== token) return;
       setData(next);
       setNeedsAuth(false);
-      // The authenticated shell must not remain at /login after signup or
-      // passkey/email sign-in. Deep links to app routes are preserved.
-      if (isLoginPath(window.location.pathname)) replaceNavigate('/loop');
+      // An explicit /login visit must show account choices even if this
+      // browser already holds an app session. Only a newly COMPLETED login
+      // leaves that screen; background session restore never bypasses it.
+      if (completedSignIn && isLoginPath(window.location.pathname)) replaceNavigate('/loop');
     } catch (err) {
       if (loadToken.current !== token) return;
       if (err instanceof ApiError && err.status === 401) {
@@ -392,10 +393,10 @@ export function App() {
   );
 
   if (needsAuth === null) return loadStalled ? stalledGate : loadingGate;
-  if (needsAuth)
+  if (needsAuth || isLoginPath(window.location.pathname))
     return (
       <AuthScreen
-        onAuthenticated={load}
+        onAuthenticated={() => load(true)}
         onBack={() => window.location.assign(HOSTED_MARKETING_SITE_URL)}
       />
     );
@@ -780,7 +781,7 @@ function startAuthwardSignIn(upstreamProvider?: string, authMethod?: 'passkey') 
     additionalParams: {
       resource: 'https://api.usetrevra.com',
       ...(upstreamProvider && allowed.includes(upstreamProvider)
-        ? { upstream_provider: upstreamProvider }
+        ? { upstream_provider: upstreamProvider, prompt: 'login' }
         : {}),
       ...(authMethod === 'passkey' ? { auth_method: 'passkey', prompt: 'login' } : {})
     }
@@ -801,6 +802,7 @@ function AuthScreen({
   const [busy, setBusy] = useState(false);
   const [socialBusy, setSocialBusy] = useState<string | null>(null);
   const [authError, setAuthError] = useState('');
+  const [inviteRequired, setInviteRequired] = useState(false);
   const [authwardEnabled, setAuthwardEnabled] = useState(false);
   const [passkeyEnabled, setPasskeyEnabled] = useState(false);
   const [socialProviders, setSocialProviders] = useState<string[]>([]);
@@ -837,6 +839,10 @@ function AuthScreen({
     // Preserve friendly errors for ordinary OAuth/magic-link failures, while
     // allowing one bounded retry for Authward's expired signed interaction.
     const callbackError = params.get('error');
+    const deniedInvitation =
+      callbackError === 'invite_required' ||
+      (callbackError === 'access_denied' && params.get('error_description') === 'invite_required');
+    if (deniedInvitation) setInviteRequired(true);
     if (callbackError !== null) {
       const message = loginAuthError(params);
       if (message) setAuthError(message);
@@ -876,6 +882,7 @@ function AuthScreen({
       }
     }
     if (params.has('auth_error')) {
+      if (params.get('auth_error') === 'invite_required') setInviteRequired(true);
       const outcome = resolveAuthError(params.get('auth_error') ?? '', sessionStorageOrNull());
       if (outcome.kind === 'restart') restartSignIn = true;
       else setAuthError(outcome.message);
@@ -1228,6 +1235,20 @@ function AuthScreen({
                 <button type="button" className="auth-text-button" onClick={() => setAuthError('')}>
                   Try again
                 </button>
+              </div>
+            )}
+            {inviteRequired && (
+              <div className="auth-waitlist-request" role="status">
+                <p>
+                  Trevra is invite-only. Request access for your verified email; approval is
+                  required before you can use the app.
+                </p>
+                <a
+                  className="secondary-button auth-submit"
+                  href="https://auth.olaryn.com/access/waitlist?client_id=trevra-web"
+                >
+                  Join waitlist
+                </a>
               </div>
             )}
             {emailPasswordEnabled && (

@@ -1,12 +1,22 @@
 /** Public, Trevra-branded messages for login return URLs. Never echo provider codes. */
 export function loginAuthError(params: URLSearchParams): string | null {
   if (params.has('auth_error')) {
-    return params.get('auth_error') === 'invalid_client'
+    const error = params.get('auth_error');
+    if (error === 'invite_required') return 'Trevra is invite-only. You can request access below.';
+    if (error === 'waitlist') return 'Your Trevra access request is waiting for approval.';
+    return error === 'invalid_client'
       ? 'Sign-in is temporarily unavailable. Please try again later.'
       : 'This sign-in link has expired. Request a new one.';
   }
   if (!params.has('error')) return null;
   const code = params.get('error');
+  if (
+    code === 'invite_required' ||
+    (code === 'access_denied' && params.get('error_description') === 'invite_required')
+  ) {
+    return 'Trevra is invite-only. You can request access below.';
+  }
+  if (code === 'waitlist') return 'Your Trevra access request is waiting for approval.';
   if (code === 'INVALID_TOKEN') {
     return 'That sign-in link is invalid, expired, or has already been used. Request a new one.';
   }

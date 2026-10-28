@@ -17,6 +17,16 @@ describe('Trevra login callback errors', () => {
     );
   });
 
+  it.each([
+    'auth_error=invite_required',
+    'error=invite_required',
+    'error=access_denied&error_description=invite_required'
+  ])('shows an invitation message, not raw OAuth JSON, for %s', (query) => {
+    const message = loginAuthError(new URLSearchParams(query));
+    expect(message).toMatch(/invite-only/);
+    expect(message).not.toContain('access_denied');
+  });
+
   it('handles Better Auth callback failures and old magic-link errors without raw codes', () => {
     expect(loginAuthError(new URLSearchParams('error=oauth_code_verification_failed'))).toMatch(
       /in this browser/
