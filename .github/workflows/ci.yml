@@ -27,6 +27,8 @@ jobs:
       - run: npm ci
       - name: Dependency audit
         run: npm audit
+      - name: Release safety gate negative regressions
+        run: bash scripts/require-green-ci.test.sh
       - name: Full PostgreSQL suite
         run: npm test
       - name: Production build
