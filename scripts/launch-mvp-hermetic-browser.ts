@@ -223,7 +223,7 @@ async function main() {
     console.log('L1 workspace created and readback, id omitted');
     // L5: exercise ACTUAL authenticated React screens, not a mocked UI.
     await page.goto(origin + '/outreach', { waitUntil: 'domcontentloaded' });
-    await prerequisite(page, /New campaign/i);
+    await prerequisite(page, /Build your first campaign/i);
     check('L5 authenticated campaigns screen renders and permits navigation', true);
     // UI-shell layout verification at desktop and mobile. Never infer visual
     // parity from static CSS alone: sample real computed styles in Chromium.
@@ -273,12 +273,32 @@ async function main() {
     );
     await page.setViewportSize({ width: 1280, height: 720 });
 
-    await page.getByRole('button', { name: /New campaign/i }).click();
+    await page.getByRole('button', { name: /Build your first campaign/i }).click();
     await page.getByRole('heading', { name: 'One thing is missing' }).waitFor({ timeout: 25000 });
     check('L5 missing LinkedIn sender blocks new campaign with actionable explanation', true);
     await page.getByRole('button', { name: /Connect account in Setup/i }).click();
     await page.waitForURL(/\/setup\/workspace$/, { timeout: 12000 });
     check('L5 configuration CTA reaches actual workspace setup', true);
+    await page.getByRole('heading', { name: 'Connect your workspace' }).waitFor();
+    const setupGroups = page.locator('.workspace-settings-group');
+    check(
+      'UX workspace presents essential connections and groups optional settings',
+      (await page.getByRole('heading', { name: 'Connections & sending' }).count()) === 1 &&
+        (await setupGroups.count()) === 2 &&
+        (await page.locator('.workspace-settings-group[open]').count()) === 0
+    );
+    await page.locator('.workspace-settings-group > summary').first().click();
+    check(
+      'UX secondary account settings open on demand',
+      (await page.locator('.workspace-settings-group[open]').count()) === 1
+    );
+    await page.setViewportSize({ width: 390, height: 844 });
+    const settingsFit = await page.locator('.workspace-settings').evaluate((element) => {
+      const bounds = element.getBoundingClientRect();
+      return bounds.width <= window.innerWidth && bounds.left >= -1;
+    });
+    check('UX workspace groups fit a narrow phone viewport', settingsFit);
+    await page.setViewportSize({ width: 1280, height: 720 });
     // Provider DOUBLE: only a workspace seat record inside the disposable DB;
     // no Companion, LinkedIn session or network connection is created.
     const { upsertSeat } = await import('../src/server/linkedin/seats.js');

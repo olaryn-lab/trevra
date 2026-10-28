@@ -2816,15 +2816,17 @@ export function OutreachManagerRead({
               than the account safely can.
             </p>
           </div>
-          <div className="mgr-actions">
-            <button
-              className="primary-button"
-              type="button"
-              onClick={() => onNavigate('/outreach/new')}
-            >
-              <Plus size={14} /> New campaign
-            </button>
-          </div>
+          {campaigns.length > 0 && (
+            <div className="mgr-actions">
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => onNavigate('/outreach/new')}
+              >
+                <Plus size={14} /> New campaign
+              </button>
+            </div>
+          )}
         </div>
 
         <p className="mgr-summary">
@@ -2998,7 +3000,7 @@ export function OutreachManagerRead({
                       )}
                       {terminal && rebuildable && (
                         <button
-                          className="primary-button"
+                          className="secondary-button"
                           type="button"
                           disabled={busyHere}
                           onClick={() => rebuild(campaign)}
@@ -3006,36 +3008,32 @@ export function OutreachManagerRead({
                           <Copy size={14} /> Build it again
                         </button>
                       )}
-                      {!terminal &&
-                        (campaign.failedCount > 0 || (operations?.queues.failed ?? 0) > 0) && (
-                          <button
-                            className="secondary-button"
-                            type="button"
-                            disabled={busyHere}
-                            title="Retries only failures known to have produced no side effect. Unknown sends remain held."
-                            onClick={() => void retryCampaignFailures(campaign)}
-                          >
-                            <RefreshCw size={14} /> Retry safe failures
-                          </button>
-                        )}
-                      {newerWorkflowAvailable && !terminal && (
-                        <button
-                          className="secondary-button"
-                          type="button"
-                          disabled={busyHere}
-                          title={
-                            campaign.sequenceCustomized
-                              ? `This campaign's steps were edited for it alone. Applying v${workflow!.version} replaces them with the saved workflow's steps and discards those edits. Only pending, unadmitted leads change; existing waves keep their original snapshot.`
-                              : 'Only pending, unadmitted leads change. Existing waves keep their original workflow snapshot.'
-                          }
-                          onClick={() => void applyLatestWorkflow(campaign)}
-                        >
-                          <RefreshCw size={14} /> Apply workflow v{workflow!.version}
-                        </button>
-                      )}
                       <ActionMenu
                         label={`More actions for ${campaign.name}`}
                         items={[
+                          ...(!terminal &&
+                          (campaign.failedCount > 0 || (operations?.queues.failed ?? 0) > 0)
+                            ? [
+                                {
+                                  label: 'Retry safe failures',
+                                  icon: <RefreshCw size={14} />,
+                                  disabled: busyHere,
+                                  onSelect: () => retryCampaignFailures(campaign)
+                                }
+                              ]
+                            : []),
+                          ...(newerWorkflowAvailable && !terminal
+                            ? [
+                                {
+                                  label: campaign.sequenceCustomized
+                                    ? `Replace custom steps with v${workflow!.version}`
+                                    : `Apply workflow v${workflow!.version}`,
+                                  icon: <RefreshCw size={14} />,
+                                  disabled: busyHere,
+                                  onSelect: () => applyLatestWorkflow(campaign)
+                                }
+                              ]
+                            : []),
                           ...(workflow
                             ? [
                                 {

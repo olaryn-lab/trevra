@@ -20,7 +20,7 @@ import {
 import { LinkedInManagerLeadConfig } from './LinkedInManagerLeadConfig';
 import { LinkedInManagerWorkflowConfig } from './LinkedInManagerWorkflowConfig';
 import { errorMessage } from './LinkedInSafety';
-import { Select } from './ui/primitives';
+import { Button, Field, Input, Select } from './ui/primitives';
 interface Readiness {
   seats: number;
   lists: number;
@@ -90,9 +90,9 @@ export function OutreachManagerBuilder({
   return (
     <div className="page-stack">
       <div className="builder-back">
-        <button className="ghost-button" type="button" onClick={() => onNavigate('/outreach')}>
+        <Button variant="ghost" onClick={() => onNavigate('/outreach')}>
           <ChevronLeft size={14} /> Back to campaigns
-        </button>
+        </Button>
       </div>
 
       {error && <div className="error-banner">{error}</div>}
@@ -111,13 +111,9 @@ export function OutreachManagerBuilder({
               <p>Connect the LinkedIn account you want Trevra to use, in Setup · Workspace.</p>
             </div>
           </div>
-          <button
-            className="primary-button"
-            type="button"
-            onClick={() => onNavigate('/setup/workspace')}
-          >
+          <Button variant="primary" onClick={() => onNavigate('/setup/workspace')}>
             Connect account in Setup <ChevronRight size={14} />
-          </button>
+          </Button>
         </section>
       )}
 
@@ -311,9 +307,8 @@ function SimplePrepareOutreach({
       </div>
 
       <div className="form-grid">
-        <label>
-          Campaign name
-          <input
+        <Field label="Campaign name">
+          <Input
             value={name}
             maxLength={160}
             onChange={(event) => {
@@ -321,11 +316,10 @@ function SimplePrepareOutreach({
               changeIntent();
             }}
           />
-        </label>
+        </Field>
 
         {seats.length > 1 && (
-          <label>
-            LinkedIn account
+          <Field label="LinkedIn account">
             <Select
               value={senderKey}
               onChange={(event) => {
@@ -340,7 +334,7 @@ function SimplePrepareOutreach({
                 </option>
               ))}
             </Select>
-          </label>
+          </Field>
         )}
       </div>
 
@@ -416,15 +410,10 @@ function SimplePrepareOutreach({
       {problem && <div className="error-banner">{problem}</div>}
 
       <div className="mgr-actions">
-        <button
-          className="primary-button"
-          type="button"
-          disabled={busy || !ready}
-          onClick={() => void prepare()}
-        >
+        <Button variant="primary" disabled={busy || !ready} onClick={() => void prepare()}>
           {busy ? <LoaderCircle className="spin" size={15} /> : null}
           Prepare campaign <ChevronRight size={15} />
-        </button>
+        </Button>
       </div>
 
       <p className="empty-copy">
