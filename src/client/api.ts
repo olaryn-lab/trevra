@@ -2816,11 +2816,18 @@ export async function updateLinkedInManagedCampaignSequence(
 }
 
 export type LinkedInUnknownOutcomeResolution = 'sent' | 'retry' | 'skip';
+export type LinkedInRetryVerificationMethod =
+  'linkedin_sent_items' | 'recipient_confirmed' | 'other_verified';
+export type LinkedInRetryAttestation = {
+  verifiedNotSent: true;
+  verificationMethod: LinkedInRetryVerificationMethod;
+};
 
 export async function resolveLinkedInManagedUnknownOutcome(
   surface: 'linkedin' | 'channel',
   actionId: string,
-  resolution: LinkedInUnknownOutcomeResolution
+  resolution: LinkedInUnknownOutcomeResolution,
+  retryAttestation?: LinkedInRetryAttestation
 ): Promise<boolean> {
   const path =
     surface === 'linkedin'
@@ -2829,7 +2836,10 @@ export async function resolveLinkedInManagedUnknownOutcome(
   return (
     await request<{ resolved: boolean }>(path, {
       method: 'POST',
-      body: JSON.stringify({ resolution })
+      body: JSON.stringify({
+        resolution,
+        ...(surface === 'linkedin' && resolution === 'retry' ? retryAttestation : {})
+      })
     })
   ).resolved;
 }
