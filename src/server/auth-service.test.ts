@@ -205,6 +205,21 @@ describe('hosted OAuth callback compatibility across Better Auth 1.7', () => {
     expect(response.headers.location).toBe('/login?error=oauth_failed');
   });
 
+  it.each([
+    ['invite_required', 'invite_required'],
+    ['waitlist', 'waitlist'],
+    ['access_denied&error_description=invite_required', 'invite_required'],
+    ['access_denied&error_description=waitlist', 'waitlist'],
+    ['access_denied&error_description=blocked', 'access_denied'],
+    ['access_denied&error_description=https%3A%2F%2Fevil.invalid', 'access_denied']
+  ])('preserves only known admission decisions for %s', async (query, expected) => {
+    const app = createApp(await freshDb());
+    const response = await request(app).get(`/api/auth/oauth2/callback/authward?error=${query}`);
+    expect(response.status).toBe(302);
+    expect(response.headers['cache-control']).toBe('no-store');
+    expect(response.headers.location).toBe(`/login?error=${expected}`);
+  });
+
   it.each(['access_denied', 'invalid_grant'])('redirects %s to the Trevra login', async (code) => {
     const app = createApp(await freshDb());
     const response = await request(app).get(`/api/auth/oauth2/callback/authward?error=${code}`);
