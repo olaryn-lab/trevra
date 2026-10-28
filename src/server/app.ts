@@ -96,6 +96,7 @@ import {
   resolveCommunityUnknownPost
 } from './outreach/store.js';
 import { getScout } from './outreach/registry.js';
+import { linkedinUnknownResolutionRequest } from './linkedin/unknown-outcome-resolution.js';
 import {
   createWatch,
   deleteWatch,
@@ -7343,10 +7344,7 @@ export function createApp(db: Db) {
   app.post(
     '/api/linkedin/manager/actions/:id/resolve',
     linkedinRoute(async (req, res) => {
-      const input = z
-        .object({ resolution: z.enum(['sent', 'retry', 'skip']) })
-        .strict()
-        .parse(req.body ?? {});
+      const input = linkedinUnknownResolutionRequest.parse(req.body ?? {});
       const actionId = String(req.params.id);
       const row = await db
         .prepare(
@@ -7380,7 +7378,14 @@ export function createApp(db: Db) {
           eventType: 'linkedin_campaign_member.unknown_outcome_resolved',
           entityType: 'linkedin_campaign_member',
           entityId: row.campaign_member_id,
-          metadata: { surface: 'linkedin', actionId, resolution: input.resolution, campaignId }
+          metadata: {
+            surface: 'linkedin',
+            actionId,
+            resolution: input.resolution,
+            campaignId,
+            verifiedNotSent: input.resolution === 'retry',
+            verificationMethod: input.resolution === 'retry' ? input.verificationMethod : null
+          }
         },
         now
       );

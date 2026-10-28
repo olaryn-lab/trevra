@@ -49,7 +49,9 @@ import {
   updateLinkedInCampaignControls,
   type LinkedInLimitsReport,
   type LinkedInWorkerStatus,
-  type LinkedInCompanionStatus
+  type LinkedInCompanionStatus,
+  type LinkedInRetryAttestation,
+  type LinkedInRetryVerificationMethod
 } from './api';
 import {
   awaitingResolutionBlocker,
@@ -1408,7 +1410,8 @@ function CampaignMembers({
   onResolveUnknown: (
     member: ManagedCampaignMember,
     event: CampaignMemberTimeline['events'][number],
-    resolution: 'sent' | 'retry' | 'skip'
+    resolution: 'sent' | 'retry' | 'skip',
+    evidence?: LinkedInRetryAttestation
   ) => void;
   followUpCampaigns: readonly ManagedCampaign[];
   onBulkRetry: (memberIds: string[]) => void;
@@ -1428,6 +1431,11 @@ function CampaignMembers({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [targetCampaignId, setTargetCampaignId] = useState('');
   const [removeCandidate, setRemoveCandidate] = useState<ManagedCampaignMember | null>(null);
+  const [retryVerification, setRetryVerification] = useState<{
+    actionId: string;
+    verified: boolean;
+    method: LinkedInRetryVerificationMethod;
+  } | null>(null);
   const [onlyDecisions, setOnlyDecisions] = useState(false);
   const [handledFocus, setHandledFocus] = useState(0);
   const [pendingFocus, setPendingFocus] = useState(0);
@@ -1821,7 +1829,21 @@ function CampaignMembers({
                                             className="secondary-button"
                                             type="button"
                                             disabled={busy !== ''}
-                                            onClick={() => onResolveUnknown(member, event, 'retry')}
+                                            onClick={() => {
+                                              if (event.kind === 'channel') {
+                                                onResolveUnknown(member, event, 'retry');
+                                                return;
+                                              }
+                                              setRetryVerification((current) =>
+                                                current?.actionId === event.eventId
+                                                  ? null
+                                                  : {
+                                                      actionId: event.eventId!,
+                                                      verified: false,
+                                                      method: 'linkedin_sent_items'
+                                                    }
+                                              );
+                                            }}
                                           >
                                             <RefreshCw size={13} /> Retry — it did not happen
                                           </button>
@@ -1834,6 +1856,77 @@ function CampaignMembers({
                                             Skip this step
                                           </button>
                                         </div>
+                                        {event.kind === 'action' &&
+                                          retryVerification?.actionId === event.eventId && (
+                                            <div className="mgr-inputs">
+                                              <p className="li-hint">
+                                                Retrying could send a duplicate LinkedIn message or
+                                                invitation. Check the recipient in LinkedIn before
+                                                removing this hold.
+                                              </p>
+                                              <label>
+                                                How did you verify it did not happen?
+                                                <Select
+                                                  value={retryVerification.method}
+                                                  onChange={(change) =>
+                                                    setRetryVerification((current) =>
+                                                      current && current.actionId === event.eventId
+                                                        ? {
+                                                            ...current,
+                                                            method: change.target
+                                                              .value as LinkedInRetryVerificationMethod
+                                                          }
+                                                        : current
+                                                    )
+                                                  }
+                                                >
+                                                  <option value="linkedin_sent_items">
+                                                    Checked LinkedIn sent items or invitations
+                                                  </option>
+                                                  <option value="recipient_confirmed">
+                                                    Recipient confirmed no action arrived
+                                                  </option>
+                                                  <option value="other_verified">
+                                                    Verified independently
+                                                  </option>
+                                                </Select>
+                                              </label>
+                                              <label className="li-check-row">
+                                                <input
+                                                  type="checkbox"
+                                                  checked={retryVerification.verified}
+                                                  onChange={(change) =>
+                                                    setRetryVerification((current) =>
+                                                      current && current.actionId === event.eventId
+                                                        ? {
+                                                            ...current,
+                                                            verified: change.target.checked
+                                                          }
+                                                        : current
+                                                    )
+                                                  }
+                                                />
+                                                I checked and confirmed that LinkedIn did not
+                                                receive this action.
+                                              </label>
+                                              <button
+                                                className="secondary-button"
+                                                type="button"
+                                                disabled={
+                                                  busy !== '' || !retryVerification.verified
+                                                }
+                                                onClick={() => {
+                                                  onResolveUnknown(member, event, 'retry', {
+                                                    verifiedNotSent: true,
+                                                    verificationMethod: retryVerification.method
+                                                  });
+                                                  setRetryVerification(null);
+                                                }}
+                                              >
+                                                Confirm safe retry
+                                              </button>
+                                            </div>
+                                          )}
                                       </div>
                                     )}
                                   </li>
@@ -2517,7 +2610,8 @@ export function OutreachManagerRead({
   const resolveUnknownOutcome = (
     member: ManagedCampaignMember,
     event: CampaignMemberTimeline['events'][number],
-    resolution: 'sent' | 'retry' | 'skip'
+    resolution: 'sent' | 'retry' | 'skip',
+    evidence?: LinkedInRetryAttestation
   ) => {
     if (!event.eventId || (event.kind !== 'action' && event.kind !== 'channel')) return;
     return guard(
@@ -2526,7 +2620,8 @@ export function OutreachManagerRead({
         await resolveLinkedInManagedUnknownOutcome(
           event.kind === 'action' ? 'linkedin' : 'channel',
           event.eventId!,
-          resolution
+          resolution,
+          evidence
         );
         setToast(
           resolution === 'sent'
@@ -3810,8 +3905,8 @@ export function OutreachManagerRead({
                         void rerunMemberCondition(member, stepId)
                       }
                       onResumeAtStep={(member, stepId) => void resumeMemberAtStep(member, stepId)}
-                      onResolveUnknown={(member, event, resolution) =>
-                        void resolveUnknownOutcome(member, event, resolution)
+                      onResolveUnknown={(member, event, resolution, evidence) =>
+                        void resolveUnknownOutcome(member, event, resolution, evidence)
                       }
                       followUpCampaigns={campaigns.filter(
                         (candidate) =>

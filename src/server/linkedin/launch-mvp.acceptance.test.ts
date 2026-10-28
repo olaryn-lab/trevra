@@ -184,6 +184,96 @@ afterEach(async () => {
 });
 
 describe('first customer L3–L6 acceptance with provider doubles and isolated PostgreSQL', () => {
+  it('requires an explicit, audited operator verification before retrying an unknown LinkedIn send', async () => {
+    const client = as(tokenA);
+    const data = await campaign(
+      'Unknown-send safety',
+      'First Name,Last Name,Company,LinkedIn URL\nMaya,Chen,Acme,https://www.linkedin.com/in/trevra-unknown-maya/',
+      [inviteStep]
+    );
+    await client
+      .post('/api/linkedin/manager/campaigns/' + data.created.id + '/start')
+      .send({})
+      .expect(200);
+    await runManagedCampaigns(db, workspace, plusHours(new Date(), 2));
+    const action = await db
+      .prepare(`SELECT id FROM linkedin_actions WHERE workspace_id=? AND campaign_id=? LIMIT 1`)
+      .get<{ id: string }>(workspace, data.created.id);
+    expect(action).toBeDefined();
+    await db
+      .prepare(
+        `UPDATE linkedin_actions SET claimed_at=now(), settlement_hold_at=now(),
+         failure_kind='unknown' WHERE workspace_id=? AND id=?`
+      )
+      .run(workspace, action!.id);
+    const url = '/api/linkedin/manager/actions/' + action!.id + '/resolve';
+    // The historical one-click UI/API request MUST NOT lift quarantine.
+    await client.post(url).send({ resolution: 'retry' }).expect(400);
+    await client
+      .post(url)
+      .send({
+        resolution: 'retry',
+        verifiedNotSent: false,
+        verificationMethod: 'linkedin_sent_items'
+      })
+      .expect(400);
+    await client
+      .post(url)
+      .send({
+        resolution: 'retry',
+        verifiedNotSent: true,
+        verificationMethod: 'unknown'
+      })
+      .expect(400);
+    await as(tokenB)
+      .post(url)
+      .send({
+        resolution: 'retry',
+        verifiedNotSent: true,
+        verificationMethod: 'linkedin_sent_items'
+      })
+      .expect(404);
+    const before = await db
+      .prepare(`SELECT settlement_hold_at IS NOT NULL AS held FROM linkedin_actions WHERE id=?`)
+      .get<{ held: boolean }>(action!.id);
+    expect(before?.held).toBe(true);
+    await client
+      .post(url)
+      .send({
+        resolution: 'retry',
+        verifiedNotSent: true,
+        verificationMethod: 'linkedin_sent_items'
+      })
+      .expect(200, { resolved: true });
+    const after = await db
+      .prepare(
+        `SELECT settlement_hold_at IS NOT NULL AS held, status FROM linkedin_actions WHERE id=?`
+      )
+      .get<{ held: boolean; status: string }>(action!.id);
+    expect(after).toMatchObject({ held: false, status: 'planned' });
+    const audit = await db
+      .prepare(
+        `SELECT metadata_json FROM audit_events
+       WHERE workspace_id=? AND event_type='linkedin_campaign_member.unknown_outcome_resolved'
+       ORDER BY created_at DESC LIMIT 1`
+      )
+      .get<{
+        metadata_json: { resolution: string; verifiedNotSent: boolean; verificationMethod: string };
+      }>(workspace);
+    const recorded =
+      typeof audit?.metadata_json === 'string'
+        ? JSON.parse(audit.metadata_json)
+        : audit?.metadata_json;
+    expect(recorded).toMatchObject({
+      resolution: 'retry',
+      verifiedNotSent: true,
+      verificationMethod: 'linkedin_sent_items'
+    });
+    // No browser or provider was called by reconciliation; it only makes the
+    // now-owner-verified action eligible for its usual deterministic gates.
+    expect(provider.post).not.toHaveBeenCalled();
+  });
+
   it('links the real API, CSV, personalized approvals, worker ledgers, reply stop, and campaign controls', async () => {
     const now = new Date();
     const client = as(tokenA);
