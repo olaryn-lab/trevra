@@ -7,6 +7,7 @@ import {
   Bot,
   Check,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   CircleHelp,
   Compass,
@@ -635,34 +636,76 @@ function SetupView({
       ) : onBilling ? (
         <BillingSettings />
       ) : onWorkspace ? (
-        <PageGrid columns={2} className="workspace-reference-grid">
-          <AccountMigration />
-          <NativeTrevraPasskeySettings />
-          <ConnectionsView
-            data={data}
-            reload={reload}
-            setToast={setToast}
-            busyId={busyId}
-            setBusyId={setBusyId}
-          />
-          <GitHubReposPanel setToast={setToast} />
-          <EmailChannelPanel setToast={setToast} />
-          <SenderIdentityPanel setToast={setToast} role={role} />
-          <LimitsView setToast={setToast} />
-          <EnrichmentSetup setToast={setToast} />
-          <LinkedInExclusions setToast={setToast} />
-          <TeamSettingsView
-            route={route}
-            setToast={setToast}
-            reload={reload}
-            onNavigate={onNavigate}
-          />
-          {isOwner && (
-            <GridSpan full>
-              <WorkspaceDataBlock setToast={setToast} />
-            </GridSpan>
-          )}
-        </PageGrid>
+        <div className="workspace-settings page-stack">
+          <header className="workspace-settings-intro">
+            <h2>Connect your workspace</h2>
+            <p>Start with the accounts you use for outreach. Other settings are grouped below.</p>
+          </header>
+          <section
+            className="workspace-settings-section"
+            aria-labelledby="workspace-connections-title"
+          >
+            <h3 id="workspace-connections-title">Connections &amp; sending</h3>
+            <PageGrid columns={2}>
+              <GridSpan full>
+                <ConnectionsView
+                  data={data}
+                  reload={reload}
+                  setToast={setToast}
+                  busyId={busyId}
+                  setBusyId={setBusyId}
+                />
+              </GridSpan>
+              <EmailChannelPanel setToast={setToast} />
+              <SenderIdentityPanel setToast={setToast} role={role} />
+            </PageGrid>
+          </section>
+          <details className="workspace-settings-group">
+            <summary>
+              <span>
+                <strong>Account &amp; team</strong>
+                <small>Sign-in methods, account migration and members</small>
+              </span>
+              <ChevronDown size={18} aria-hidden="true" />
+            </summary>
+            <div className="workspace-settings-group-body">
+              <PageGrid columns={2}>
+                <AccountMigration />
+                <NativeTrevraPasskeySettings />
+                <GridSpan full>
+                  <TeamSettingsView
+                    route={route}
+                    setToast={setToast}
+                    reload={reload}
+                    onNavigate={onNavigate}
+                  />
+                </GridSpan>
+              </PageGrid>
+            </div>
+          </details>
+          <details className="workspace-settings-group">
+            <summary>
+              <span>
+                <strong>Safety &amp; advanced settings</strong>
+                <small>Contact exclusions, limits, enrichment and other integrations</small>
+              </span>
+              <ChevronDown size={18} aria-hidden="true" />
+            </summary>
+            <div className="workspace-settings-group-body">
+              <PageGrid columns={2}>
+                <LinkedInExclusions setToast={setToast} />
+                <LimitsView setToast={setToast} />
+                <EnrichmentSetup setToast={setToast} />
+                <GitHubReposPanel setToast={setToast} />
+                {isOwner && (
+                  <GridSpan full>
+                    <WorkspaceDataBlock setToast={setToast} />
+                  </GridSpan>
+                )}
+              </PageGrid>
+            </div>
+          </details>
+        </div>
       ) : (
         <PageGrid columns={1}>
           <AgentAccessPanel setToast={setToast} />
@@ -932,7 +975,7 @@ function AuthScreen({
               <Check size={16} /> Hard limits for agents
             </span>
             <span>
-              <Check size={16} /> Open source and self-hostable
+              <Check size={16} /> Clear history for approved actions
             </span>
           </div>
         </section>
@@ -3364,6 +3407,7 @@ function viewTitle(route: Route): string {
   if (route.section === 'setup') {
     if (route.sub === 'workspace') return 'Setup · Workspace';
     if (route.sub === 'capture') return 'Setup · Lead capture';
+    if (route.sub === 'billing') return 'Setup · Billing';
     return 'Setup · Access';
   }
   return 'Setup';
