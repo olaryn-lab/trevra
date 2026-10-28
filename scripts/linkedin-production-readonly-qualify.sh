@@ -25,7 +25,7 @@ fi
 [[ "$HOST" =~ ^[a-zA-Z0-9.:-]+$ ]] || die 'Invalid Oracle hostname'
 KEY="${TREVRA_ORACLE_SSH_KEY:-$HOME/.ssh/trevra_oracle}"
 [[ -f "$KEY" ]] || die 'Missing SSH key'
-ssh_args=(-i "$KEY" -o BatchMode=yes -o ConnectTimeout=10)
+ssh_args=(-i "$KEY" -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new)
 remote=(ssh "${ssh_args[@]}" "ubuntu@$HOST")
 TARGET="ghcr.io/olaryn-lab/trevra:sha-$SHA"
 IMAGES="$("${remote[@]}" "docker inspect --format '{{.Config.Image}}' trevra-worker-1 trevra-trevra-1")"
@@ -41,9 +41,14 @@ pass "API/worker image $SHA"
  console.log('PASS scheduler, execution cycles, stall monitor');
 })().catch(e=>{console.error('FAIL worker:',e.message);process.exitCode=1});
 JS
-curl --silent --show-error --fail --max-time 20 "$ORIGIN/api/health" | jq -e '.ok == true and .service == "trevra-api" and .database == "postgresql"' >/dev/null || die 'API health failed'
+# GitHub's hosted runner egress can be challenged by Cloudflare Bot Fight
+# Mode. Probe the real public domain from the Oracle server instead; this
+# still traverses public DNS, TLS and the Cloudflare edge.
+API_HEALTH="$("${remote[@]}" "curl --silent --show-error --fail --max-time 20 '$ORIGIN/api/health'")" ||
+  die 'Public API health request failed'
+printf '%s\n' "$API_HEALTH" | jq -e '.ok == true and .service == "trevra-api" and .database == "postgresql"' >/dev/null || die 'API health failed'
 pass 'public API health'
-CALLBACK="$(curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code} %{redirect_url}' "$ORIGIN/api/auth/oauth2/callback/authward?error=access_denied")"
+CALLBACK="$("${remote[@]}" "curl --silent --show-error --max-time 20 --output /dev/null --write-out '%{http_code} %{redirect_url}' '$ORIGIN/api/auth/oauth2/callback/authward?error=access_denied'")"
 [[ "$CALLBACK" == "302 $ORIGIN/login?error=access_denied" ]] || die 'Authward error callback incorrect'
 pass 'Authward error callback'
 # Verify TLS and authentication only; intentionally never call sendMail().
