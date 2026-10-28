@@ -35,6 +35,9 @@ export type RestartMarkerStorage = Pick<Storage, 'getItem' | 'setItem'>;
 export type AuthErrorOutcome = { kind: 'restart' } | { kind: 'message'; message: string };
 
 export function authErrorMessage(code: string): string {
+  if (code === 'invite_required')
+    return 'Trevra is invite-only. Request access on the sign-in page.';
+  if (code === 'waitlist') return 'Your access request is waiting for approval.';
   if (code === 'google_not_configured') return GOOGLE_NOT_CONFIGURED_MESSAGE;
   if (code === 'interaction_expired') return INTERACTION_EXPIRED_MESSAGE;
   if (code === 'oauth_code_verification_failed') return OAUTH_SESSION_RECOVERY_MESSAGE;
