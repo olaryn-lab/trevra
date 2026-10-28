@@ -1,0 +1,89 @@
+name: LinkedIn R7 read-only qualification
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full 40-character production release commit SHA
+        required: true
+        type: string
+      held_actions:
+        description: Required pre-check count of held actions
+        required: true
+        type: string
+      unknown_outcomes:
+        description: Required pre-check count of unresolved outcomes
+        required: true
+        type: string
+      paused_campaigns:
+        description: Required pre-check count of paused campaigns
+        required: true
+        type: string
+      running_campaigns:
+        description: Required pre-check count of running campaigns
+        required: true
+        type: string
+      sent_last_30m:
+        description: Required pre-check count of sent actions in last 30 minutes
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: Verify production without sending
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - name: Install production SSH identity
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.ORACLE_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$SSH_PRIVATE_KEY"
+          install -m 700 -d "$RUNNER_TEMP/ssh"
+          printf '%s\n' "$SSH_PRIVATE_KEY" > "$RUNNER_TEMP/ssh/oracle"
+          chmod 600 "$RUNNER_TEMP/ssh/oracle"
+      - name: Read-only release qualification
+        id: smoke
+        env:
+          SHA: ${{ inputs.release_sha }}
+          TREVRA_ORACLE_HOST: ${{ vars.ORACLE_APP_IP }}
+          TREVRA_ORACLE_SSH_KEY: ${{ runner.temp }}/ssh/oracle
+          EXPECT_HELD_ACTIONS: ${{ inputs.held_actions }}
+          EXPECT_UNKNOWN_OUTCOMES: ${{ inputs.unknown_outcomes }}
+          EXPECT_PAUSED_CAMPAIGNS: ${{ inputs.paused_campaigns }}
+          EXPECT_RUNNING_CAMPAIGNS: ${{ inputs.running_campaigns }}
+          EXPECT_SENT_LAST_30M: ${{ inputs.sent_last_30m }}
+        run: |
+          set -euo pipefail
+          for value in "$EXPECT_HELD_ACTIONS" "$EXPECT_UNKNOWN_OUTCOMES" "$EXPECT_PAUSED_CAMPAIGNS" "$EXPECT_RUNNING_CAMPAIGNS" "$EXPECT_SENT_LAST_30M"; do
+            [[ "$value" =~ ^[0-9]+$ ]] || { echo 'All five protected-ledger counts must be nonnegative integers'; exit 1; }
+          done
+          [[ "$SHA" =~ ^[a-fA-F0-9]{40}$ ]] || { echo 'A full 40-character commit SHA is required'; exit 1; }
+          scripts/linkedin-production-readonly-qualify.sh "$SHA" 2>&1 | tee "$RUNNER_TEMP/linkedin-r7-qualify.log"
+      - name: Publish qualification report
+        if: always()
+        env:
+          SHA: ${{ inputs.release_sha }}
+          OUTCOME: ${{ steps.smoke.outcome }}
+        run: |
+          {
+            echo '## LinkedIn R7 read-only qualification'
+            echo "Release: \`$SHA\` · Outcome: **$OUTCOME**"
+            echo ''
+            echo 'No LinkedIn action or email was sent by this workflow.'
+            echo 'Passing this check does not certify real LinkedIn delivery, reply suppression, or owner email receipt.'
+            if [[ -f "$RUNNER_TEMP/linkedin-r7-qualify.log" ]]; then
+              echo ''
+              echo '```text'
+              cat "$RUNNER_TEMP/linkedin-r7-qualify.log"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
