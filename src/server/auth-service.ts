@@ -344,6 +344,10 @@ export async function handleAuthwardBackchannelLogout(logoutToken: string): Prom
   return invalidateAuthwardSubjectSessions(sub, authPool, issuedAt);
 }
 
+// A stable external callback is registered with Authward. Better Auth 1.7's
+// internal handler has a different URL: never send that URL in the token grant.
+const registeredAuthwardCallbackURI = `${baseURL}/api/auth/oauth2/callback/authward`;
+
 const authwardProvider = genericOAuth({
   config:
     authwardAuthEnabled && authwardIssuer && authwardClientId && authwardClientSecret
@@ -363,11 +367,17 @@ const authwardProvider = genericOAuth({
             authorizationUrlParams: authwardAuthorizationParams(null, authority.isolated),
             tokenUrlParams: { resource: 'https://api.usetrevra.com' },
             getToken: (data) =>
-              exchangeAuthwardCode(authwardIssuer, authwardClientId, authwardClientSecret, data),
+              exchangeAuthwardCode(
+                authwardIssuer,
+                authwardClientId,
+                authwardClientSecret,
+                data,
+                registeredAuthwardCallbackURI
+              ),
             // Preserve the redirect URI already registered with Authward.
             // Express forwards it to the new handler without exchanging code
             // or changing the token request's OAuth redirect_uri.
-            redirectURI: `${baseURL}/api/auth/oauth2/callback/authward`
+            redirectURI: registeredAuthwardCallbackURI
           }
         ]
       : []
