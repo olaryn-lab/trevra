@@ -1297,6 +1297,19 @@ details[open] > .ui-disclosure-summary::after {
   display: grid;
   gap: 2px;
 }
+.sidebar-nav-more {
+  display: grid;
+  gap: 2px;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--t-line);
+}
+.sidebar-nav-caption {
+  padding: 0 12px 6px;
+  color: var(--muted);
+  font-size: var(--t-text-chip);
+  font-weight: var(--t-w-strong);
+}
 .nav-item {
   width: 100%;
   border: 0;
@@ -3503,11 +3516,8 @@ button:disabled {
   cursor: pointer;
 }
 
-/* The phone navigation. Below 760px the sidebar is display:none, so this is
-   the only way to change page; it mirrors the sidebar's active treatment.
-
-   Five items: Loop, Outreach, Ledger, Research, Setup. Labels may clip rather than widen
-   a cell on the narrowest supported screens. */
+/* Phone navigation: four everyday jobs, with Activity and Settings in More.
+   A marketer never has to decode internal product module names. */
 .mobile-tabbar {
   display: none;
   position: fixed;
@@ -3557,6 +3567,63 @@ button:disabled {
   background: var(--t-surface);
   color: var(--green);
   box-shadow: var(--t-shadow-sm);
+}
+.mobile-tabbar > .mobile-more {
+  position: relative;
+  overflow: visible;
+  padding: 0;
+}
+.mobile-more > summary {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 3px;
+  min-height: 44px;
+  padding: 5px 4px;
+  list-style: none;
+  cursor: pointer;
+}
+.mobile-more > summary::-webkit-details-marker {
+  display: none;
+}
+.mobile-more > summary span {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mobile-more-links {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 12px);
+  width: max-content;
+  min-width: 172px;
+  padding: 6px;
+  display: grid;
+  gap: 2px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-lg);
+  background: var(--t-surface);
+  box-shadow: var(--t-shadow-lg);
+  white-space: nowrap;
+}
+.mobile-more-links > a {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: var(--t-r-sm);
+  color: var(--ink);
+  text-decoration: none;
+  font-size: var(--t-text-sm);
+}
+.mobile-more-links > a:hover,
+.mobile-more-links > a[aria-current='page'] {
+  background: var(--t-surface-2);
+}
+.mobile-more-links > a:focus-visible {
+  outline: 1px solid var(--t-focus);
+  outline-offset: 0;
 }
 
 @media (max-width: 1150px) {
@@ -13762,6 +13829,61 @@ button:disabled {
   font-size: var(--t-text-sm);
 }
 
+.marketer-start {
+  display: grid;
+  gap: 16px;
+  justify-items: start;
+}
+.marketer-start h2 {
+  margin: 5px 0 8px;
+  font-size: var(--t-text-xl);
+  letter-spacing: var(--t-track-heading);
+}
+.marketer-start p {
+  max-width: var(--t-measure);
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+.marketer-start .marketer-safety-copy {
+  font-size: var(--t-text-xs);
+}
+.marketer-next-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-lg);
+  padding: 16px 20px;
+  background: var(--t-surface);
+}
+.marketer-next-actions strong {
+  font-size: var(--t-text-sm);
+}
+.marketer-next-actions p {
+  margin: 4px 0 0;
+  font-size: var(--t-text-xs);
+  color: var(--muted);
+}
+.marketer-next-buttons {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+@media (max-width: 760px) {
+  .marketer-next-actions,
+  .marketer-next-buttons {
+    display: grid;
+    width: 100%;
+  }
+  .marketer-next-buttons .ui-button {
+    width: 100%;
+    justify-content: center;
+  }
+}
 .loop-secondary {
   margin-top: 16px;
 }
@@ -13807,8 +13929,21 @@ button:disabled {
   padding-top: 16px;
 }
 
-.outreach-more-menu {
+.outreach-nav > .outreach-tab-more {
   display: none;
+}
+.outreach-more-menu {
+  display: block;
+}
+.outreach-more-menu .li-action-menu-trigger {
+  min-height: var(--t-tap);
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.outreach-more-menu.is-active .li-action-menu-trigger {
+  color: var(--green);
+  background: var(--green-3);
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -13851,7 +13986,7 @@ button:disabled {
 
   .outreach-nav {
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     overflow: visible;
   }
 
@@ -14001,6 +14136,46 @@ button:disabled {
 }
 
 /* Deterministic market pulse over the existing account watchlist. */
+.research-thread-filters {
+  margin-bottom: 14px;
+}
+.research-thread-filters > summary {
+  padding: 8px 0;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: var(--t-text-xs);
+}
+.research-thread-filters > .li-filter-row {
+  margin-top: 8px;
+}
+.research-extra-panel {
+  min-width: 0;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-lg);
+  background: var(--t-surface);
+}
+.research-extra-panel > summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-height: var(--t-tap);
+  padding: 14px 18px;
+  cursor: pointer;
+  font-weight: var(--t-w-strong);
+}
+.research-extra-panel > summary span {
+  color: var(--muted);
+  font-weight: 400;
+  font-size: var(--t-text-xs);
+}
+.research-extra-content {
+  padding: 0 12px 12px;
+}
+.research-extra-panel > summary:focus-visible {
+  outline: 1px solid var(--t-focus);
+  outline-offset: -1px;
+}
 .research-pulse-panel,
 .research-pulse-body {
   min-width: 0;

@@ -1345,276 +1345,266 @@ export function ResearchView({
       <section className="research-toolbar">
         <div className="section-heading">
           <div>
-            <h2>Research</h2>
-            <p>
-              Everything discovered or drafted from community and company research, across every
-              connected platform.
-            </p>
+            <h2>Ideas for your next post</h2>
+            <p>Find useful topics, backed by real sources. Review each draft before publishing.</p>
           </div>
-        </div>
-        <div className="li-filter-row" role="group" aria-label="Platform">
-          <span className="li-filter-label">Platform</span>
-          {PLATFORM_FILTERS.map((key) => (
-            <button
-              key={key}
-              type="button"
-              className={`li-range ${platform === key ? 'is-active' : ''}`}
-              aria-pressed={platform === key}
-              onClick={() => setPlatform(key)}
-            >
-              {key === 'all' ? 'All' : platformLabel(key)}
-            </button>
-          ))}
         </div>
       </section>
 
-      <section className="page-panel research-pulse-panel">
-        <div className="section-heading">
-          <div>
-            <h3 aria-level={2}>Market pulse</h3>
-            <p>
-              Cross-account changes from your existing watchlist. Trevra only calls something a
-              pattern when at least two companies independently support it.
-            </p>
-          </div>
-          <div className="li-filter-row" role="group" aria-label="Market pulse period">
-            {([7, 30] as const).map((days) => (
-              <button
-                key={days}
-                type="button"
-                className={`li-range ${pulseDays === days ? 'is-active' : ''}`}
-                aria-pressed={pulseDays === days}
-                onClick={() => setPulseDays(days)}
-              >
-                {days === 7 ? '7 days' : '30 days'}
-              </button>
-            ))}
-          </div>
-        </div>
-        {pulseError ? <div className="error-banner">{pulseError}</div> : null}
-        {!pulseLoaded ? (
-          <div className="empty-state">
-            <LoaderCircle className="spin" size={24} />
-            <p>Compiling source-backed changes across the watchlist…</p>
-          </div>
-        ) : pulse ? (
-          <div className="research-pulse-body">
-            <div className="research-pulse-metrics">
+      <details className="research-extra-panel">
+        <summary>
+          Market trends <span>Explore changes across companies</span>
+        </summary>
+        <div className="research-extra-content">
+          <section className="page-panel research-pulse-panel">
+            <div className="section-heading">
               <div>
-                <strong>{pulse.accountCount}</strong>
-                <span>watched accounts</span>
+                <h3 aria-level={2}>Market pulse</h3>
+                <p>
+                  Cross-account changes from your existing watchlist. Trevra only calls something a
+                  pattern when at least two companies independently support it.
+                </p>
               </div>
-              <div>
-                <strong>{pulse.changedAccountCount}</strong>
-                <span>with changes</span>
-              </div>
-              <div>
-                <strong>{pulse.signalCount}</strong>
-                <span>source-backed changes</span>
+              <div className="li-filter-row" role="group" aria-label="Market pulse period">
+                {([7, 30] as const).map((days) => (
+                  <button
+                    key={days}
+                    type="button"
+                    className={`li-range ${pulseDays === days ? 'is-active' : ''}`}
+                    aria-pressed={pulseDays === days}
+                    onClick={() => setPulseDays(days)}
+                  >
+                    {days === 7 ? '7 days' : '30 days'}
+                  </button>
+                ))}
               </div>
             </div>
-            {pulse.patterns.length > 0 ? (
-              <div className="research-pulse-patterns">
-                {pulse.patterns.slice(0, 3).map((pattern) => (
-                  <article key={pattern.kind}>
-                    <div>
-                      <strong>{pattern.label}</strong>
+            {pulseError ? <div className="error-banner">{pulseError}</div> : null}
+            {!pulseLoaded ? (
+              <div className="empty-state">
+                <LoaderCircle className="spin" size={24} />
+                <p>Compiling source-backed changes across the watchlist…</p>
+              </div>
+            ) : pulse ? (
+              <div className="research-pulse-body">
+                <div className="research-pulse-metrics">
+                  <div>
+                    <strong>{pulse.accountCount}</strong>
+                    <span>watched accounts</span>
+                  </div>
+                  <div>
+                    <strong>{pulse.changedAccountCount}</strong>
+                    <span>with changes</span>
+                  </div>
+                  <div>
+                    <strong>{pulse.signalCount}</strong>
+                    <span>source-backed changes</span>
+                  </div>
+                </div>
+                {pulse.patterns.length > 0 ? (
+                  <div className="research-pulse-patterns">
+                    {pulse.patterns.slice(0, 3).map((pattern) => (
+                      <article key={pattern.kind}>
+                        <div>
+                          <strong>{pattern.label}</strong>
+                          <span>
+                            {pattern.accountCount} companies · {pattern.signalCount} changes
+                          </span>
+                        </div>
+                        <div className="research-pulse-examples">
+                          {pattern.examples.slice(0, 3).map((example) => (
+                            <a
+                              key={example.signalId}
+                              href={example.sourceUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              {example.accountName}: {example.detail}
+                            </a>
+                          ))}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="research-watch-empty">{pulse.draftBlocker}</p>
+                )}
+                {marketIndex ? (
+                  <div className="research-index-preview">
+                    <div className="research-index-preview-head">
+                      <div>
+                        <strong>Market Momentum Index</strong>
+                        <span>
+                          Explainable ranking: diversity + source-backed activity + recency. No
+                          model score.
+                        </span>
+                      </div>
                       <span>
-                        {pattern.accountCount} companies · {pattern.signalCount} changes
+                        {marketIndex.scoredAccountCount}/{marketIndex.accountCount} changing
                       </span>
                     </div>
-                    <div className="research-pulse-examples">
-                      {pattern.examples.slice(0, 3).map((example) => (
-                        <a
-                          key={example.signalId}
-                          href={example.sourceUrl}
-                          target="_blank"
-                          rel="noreferrer"
+                    {marketIndex.rows.slice(0, 3).map((row) => (
+                      <div className="research-index-row" key={`${row.rank}:${row.accountName}`}>
+                        <strong>#{row.rank}</strong>
+                        <span>{row.accountName}</span>
+                        <b>{row.score}</b>
+                        <small>
+                          {row.components.diversity} diversity · {row.components.activity} activity
+                          · {row.components.recency} recency
+                        </small>
+                      </div>
+                    ))}
+                    {!marketIndex.canPublish && marketIndex.publishBlocker ? (
+                      <small className="research-pulse-blocker">{marketIndex.publishBlocker}</small>
+                    ) : null}
+                  </div>
+                ) : null}
+                <div className="research-pulse-schedule">
+                  <span>Prepare drafts</span>
+                  <div
+                    className="li-filter-row"
+                    role="group"
+                    aria-label="Recurring market pulse drafts"
+                  >
+                    {(['off', 'weekly', 'monthly'] as const).map((mode) => {
+                      const active =
+                        mode === 'off'
+                          ? !pulseSchedule?.enabled
+                          : pulseSchedule?.enabled && pulseSchedule.cadence === mode;
+                      return (
+                        <button
+                          key={mode}
+                          type="button"
+                          className={`li-range ${active ? 'is-active' : ''}`}
+                          aria-pressed={active}
+                          disabled={pulseScheduleBusy}
+                          onClick={() => void updatePulseSchedule(mode)}
                         >
-                          {example.accountName}: {example.detail}
-                        </a>
-                      ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <p className="research-watch-empty">{pulse.draftBlocker}</p>
-            )}
-            {marketIndex ? (
-              <div className="research-index-preview">
-                <div className="research-index-preview-head">
-                  <div>
-                    <strong>Market Momentum Index</strong>
-                    <span>
-                      Explainable ranking: diversity + source-backed activity + recency. No model
-                      score.
-                    </span>
+                          {mode === 'off' ? 'Off' : mode === 'weekly' ? 'Weekly' : 'Monthly'}
+                        </button>
+                      );
+                    })}
                   </div>
-                  <span>
-                    {marketIndex.scoredAccountCount}/{marketIndex.accountCount} changing
-                  </span>
-                </div>
-                {marketIndex.rows.slice(0, 3).map((row) => (
-                  <div className="research-index-row" key={`${row.rank}:${row.accountName}`}>
-                    <strong>#{row.rank}</strong>
-                    <span>{row.accountName}</span>
-                    <b>{row.score}</b>
+                  {pulseSchedule?.enabled ? (
                     <small>
-                      {row.components.diversity} diversity · {row.components.activity} activity ·{' '}
-                      {row.components.recency} recency
+                      Next draft {new Date(pulseSchedule.nextRunAt).toLocaleString()}
+                      {pulseSchedule.lastBlocker ? ` · Last run: ${pulseSchedule.lastBlocker}` : ''}
                     </small>
+                  ) : null}
+                </div>
+                <Field
+                  label="Public report CTA"
+                  hint="Optional. Send readers to your own demo, scan, pricing or signup page. Trevra adds report attribution automatically."
+                  className="research-report-cta"
+                >
+                  <Input
+                    type="url"
+                    value={publicReportCtaUrl}
+                    placeholder="https://yourcompany.com/demo"
+                    maxLength={2048}
+                    onChange={(event) => setPublicReportCtaUrl(event.target.value)}
+                  />
+                </Field>
+                <div className="research-pulse-actions">
+                  <span>{pulse.scopeLabel}</span>
+                  <div className="research-pulse-action-buttons">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={!marketIndex?.canPublish || publicReportBusy !== null}
+                      onClick={() => void publishIndex()}
+                    >
+                      {publicReportBusy === 'index' ? (
+                        <LoaderCircle className="spin" size={15} />
+                      ) : null}
+                      Publish index
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={!pulse.canDraft || publicReportBusy !== null}
+                      onClick={() => void publishPulse()}
+                    >
+                      {publicReportBusy === 'publish' ? (
+                        <LoaderCircle className="spin" size={15} />
+                      ) : null}
+                      Publish report
+                    </button>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={!pulse.canDraft || pulseBusy}
+                      onClick={() => void draftPulse()}
+                    >
+                      {pulseBusy ? <LoaderCircle className="spin" size={15} /> : null}
+                      Draft pulse
+                    </button>
                   </div>
-                ))}
-                {!marketIndex.canPublish && marketIndex.publishBlocker ? (
-                  <small className="research-pulse-blocker">{marketIndex.publishBlocker}</small>
+                </div>
+                {publicReports.length > 0 ? (
+                  <div className="research-public-reports">
+                    <strong>Public reports</strong>
+                    {publicReports.slice(0, 3).map((report) => {
+                      const reportPerformance = publicReportPerformance[report.id];
+                      return (
+                        <div key={report.id} className="research-public-report-row">
+                          <div>
+                            <span>{report.title}</span>
+                            <small>
+                              {report.status === 'published' ? 'Public' : 'Unpublished'} ·{' '}
+                              {new Date(report.publishedAt).toLocaleDateString()}
+                              {reportPerformance
+                                ? ` · ${reportPerformance.uniqueVisitors} readers · ${reportPerformance.ctaClicks} CTA · ${reportPerformance.signupCompletions + reportPerformance.demoStarts} conversions`
+                                : ''}
+                            </small>
+                          </div>
+                          <div>
+                            {report.status === 'published' ? (
+                              <a
+                                className="secondary-button"
+                                href={`/signals/${encodeURIComponent(report.slug)}`}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                <ExternalLink size={14} />
+                                View
+                              </a>
+                            ) : null}
+                            {report.status === 'published' ? (
+                              <button
+                                type="button"
+                                className="secondary-button"
+                                disabled={publicReportBusy !== null}
+                                onClick={() => void unpublishReport(report)}
+                              >
+                                {publicReportBusy === report.id ? (
+                                  <LoaderCircle className="spin" size={14} />
+                                ) : null}
+                                Unpublish
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                {!pulse.canDraft && pulse.draftBlocker ? (
+                  <p className="research-pulse-blocker">{pulse.draftBlocker}</p>
                 ) : null}
               </div>
             ) : null}
-            <div className="research-pulse-schedule">
-              <span>Prepare drafts</span>
-              <div
-                className="li-filter-row"
-                role="group"
-                aria-label="Recurring market pulse drafts"
-              >
-                {(['off', 'weekly', 'monthly'] as const).map((mode) => {
-                  const active =
-                    mode === 'off'
-                      ? !pulseSchedule?.enabled
-                      : pulseSchedule?.enabled && pulseSchedule.cadence === mode;
-                  return (
-                    <button
-                      key={mode}
-                      type="button"
-                      className={`li-range ${active ? 'is-active' : ''}`}
-                      aria-pressed={active}
-                      disabled={pulseScheduleBusy}
-                      onClick={() => void updatePulseSchedule(mode)}
-                    >
-                      {mode === 'off' ? 'Off' : mode === 'weekly' ? 'Weekly' : 'Monthly'}
-                    </button>
-                  );
-                })}
-              </div>
-              {pulseSchedule?.enabled ? (
-                <small>
-                  Next draft {new Date(pulseSchedule.nextRunAt).toLocaleString()}
-                  {pulseSchedule.lastBlocker ? ` · Last run: ${pulseSchedule.lastBlocker}` : ''}
-                </small>
-              ) : null}
-            </div>
-            <Field
-              label="Public report CTA"
-              hint="Optional. Send readers to your own demo, scan, pricing or signup page. Trevra adds report attribution automatically."
-              className="research-report-cta"
-            >
-              <Input
-                type="url"
-                value={publicReportCtaUrl}
-                placeholder="https://yourcompany.com/demo"
-                maxLength={2048}
-                onChange={(event) => setPublicReportCtaUrl(event.target.value)}
-              />
-            </Field>
-            <div className="research-pulse-actions">
-              <span>{pulse.scopeLabel}</span>
-              <div className="research-pulse-action-buttons">
-                <button
-                  type="button"
-                  className="secondary-button"
-                  disabled={!marketIndex?.canPublish || publicReportBusy !== null}
-                  onClick={() => void publishIndex()}
-                >
-                  {publicReportBusy === 'index' ? (
-                    <LoaderCircle className="spin" size={15} />
-                  ) : null}
-                  Publish index
-                </button>
-                <button
-                  type="button"
-                  className="secondary-button"
-                  disabled={!pulse.canDraft || publicReportBusy !== null}
-                  onClick={() => void publishPulse()}
-                >
-                  {publicReportBusy === 'publish' ? (
-                    <LoaderCircle className="spin" size={15} />
-                  ) : null}
-                  Publish report
-                </button>
-                <button
-                  type="button"
-                  className="primary-button"
-                  disabled={!pulse.canDraft || pulseBusy}
-                  onClick={() => void draftPulse()}
-                >
-                  {pulseBusy ? <LoaderCircle className="spin" size={15} /> : null}
-                  Draft pulse
-                </button>
-              </div>
-            </div>
-            {publicReports.length > 0 ? (
-              <div className="research-public-reports">
-                <strong>Public reports</strong>
-                {publicReports.slice(0, 3).map((report) => {
-                  const reportPerformance = publicReportPerformance[report.id];
-                  return (
-                    <div key={report.id} className="research-public-report-row">
-                      <div>
-                        <span>{report.title}</span>
-                        <small>
-                          {report.status === 'published' ? 'Public' : 'Unpublished'} ·{' '}
-                          {new Date(report.publishedAt).toLocaleDateString()}
-                          {reportPerformance
-                            ? ` · ${reportPerformance.uniqueVisitors} readers · ${reportPerformance.ctaClicks} CTA · ${reportPerformance.signupCompletions + reportPerformance.demoStarts} conversions`
-                            : ''}
-                        </small>
-                      </div>
-                      <div>
-                        {report.status === 'published' ? (
-                          <a
-                            className="secondary-button"
-                            href={`/signals/${encodeURIComponent(report.slug)}`}
-                            target="_blank"
-                            rel="noreferrer"
-                          >
-                            <ExternalLink size={14} />
-                            View
-                          </a>
-                        ) : null}
-                        {report.status === 'published' ? (
-                          <button
-                            type="button"
-                            className="secondary-button"
-                            disabled={publicReportBusy !== null}
-                            onClick={() => void unpublishReport(report)}
-                          >
-                            {publicReportBusy === report.id ? (
-                              <LoaderCircle className="spin" size={14} />
-                            ) : null}
-                            Unpublish
-                          </button>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            ) : null}
-            {!pulse.canDraft && pulse.draftBlocker ? (
-              <p className="research-pulse-blocker">{pulse.draftBlocker}</p>
-            ) : null}
-          </div>
-        ) : null}
-      </section>
+          </section>
+        </div>
+      </details>
 
       <section className="page-panel research-story-panel">
         <div className="section-heading">
           <div>
-            <h3 aria-level={2}>Market stories</h3>
+            <h3 aria-level={2}>Ready-to-review ideas</h3>
             <p>
-              Source-backed market changes worth explaining publicly. Nothing here is generated from
-              an unsupported claim.
+              Pick a useful topic, check the evidence, and prepare a post. Nothing is published
+              automatically.
             </p>
           </div>
           <button
@@ -1851,108 +1841,118 @@ export function ResearchView({
         )}
       </section>
 
-      <section className="page-panel research-performance-panel">
-        <div className="section-heading">
-          <div>
-            <h3 aria-level={2}>Distribution outcomes</h3>
-            <p>
-              What published market intelligence turned into people, replies and pipeline. Reach
-              stays blank until Trevra has an observed platform metric.
-            </p>
-          </div>
-        </div>
-        {!performanceLoaded ? (
-          <div className="empty-state">
-            <LoaderCircle className="spin" size={24} />
-            <p>Tracing published stories to commercial outcomes…</p>
-          </div>
-        ) : performanceError ? (
-          <div className="error-banner">{performanceError}</div>
-        ) : !performance || performance.totals.published === 0 ? (
-          <div className="empty-state">
-            <Target size={24} />
-            <h4 aria-level={3}>No published story has an outcome trail yet</h4>
-            <p>
-              Publish an evidence-backed draft first; Trevra will keep the provenance from post to
-              pipeline.
-            </p>
-          </div>
-        ) : (
-          <>
-            <div className="research-performance-metrics" aria-label="Distribution outcome totals">
-              {[
-                ['Published', performance.totals.published],
-                ['Engagers', performance.totals.engagers],
-                ['Qualified', performance.totals.qualifiedDemand],
-                ['Replies', performance.totals.verifiedReplies],
-                ['Opportunities', performance.totals.opportunities],
-                ['Won', performance.totals.won]
-              ].map(([label, value]) => (
-                <div key={String(label)}>
-                  <strong>{Number(value).toLocaleString()}</strong>
-                  <span>{label}</span>
-                </div>
-              ))}
-            </div>
-            <div className="research-performance-body">
+      <details className="research-extra-panel">
+        <summary>
+          Post performance <span>See what your published content achieved</span>
+        </summary>
+        <div className="research-extra-content">
+          <section className="page-panel research-performance-panel">
+            <div className="section-heading">
               <div>
-                <h4 aria-level={3}>Recent published stories</h4>
-                <div className="research-performance-publications">
-                  {performance.publications.slice(0, 5).map((publication) => (
-                    <article key={publication.postId}>
-                      <div>
-                        <strong>
-                          {publication.opportunityKind?.replaceAll('_', ' ') ?? 'Market story'}
-                        </strong>
-                        <span>
-                          {publication.latestMetrics?.impressions == null
-                            ? 'Reach not observed'
-                            : `${publication.latestMetrics.impressions.toLocaleString()} impressions`}
-                        </span>
-                        <small className="research-performance-velocity">
-                          {performanceVelocityCopy(publication, performance.velocityBaseline)}
-                        </small>
-                      </div>
-                      <div className="research-performance-chain">
-                        <span>{publication.commercial.engagers} engaged</span>
-                        <span>{publication.commercial.qualifiedDemand} qualified</span>
-                        <span>{publication.commercial.verifiedReplies} replied</span>
-                        <span>{publication.commercial.opportunities} opps</span>
-                        <span>{publication.commercial.won} won</span>
-                      </div>
-                      {publication.postedUrl && (
-                        <a href={publication.postedUrl} target="_blank" rel="noreferrer">
-                          See post
-                        </a>
-                      )}
-                    </article>
+                <h3 aria-level={2}>Distribution outcomes</h3>
+                <p>
+                  What published market intelligence turned into people, replies and pipeline. Reach
+                  stays blank until Trevra has an observed platform metric.
+                </p>
+              </div>
+            </div>
+            {!performanceLoaded ? (
+              <div className="empty-state">
+                <LoaderCircle className="spin" size={24} />
+                <p>Tracing published stories to commercial outcomes…</p>
+              </div>
+            ) : performanceError ? (
+              <div className="error-banner">{performanceError}</div>
+            ) : !performance || performance.totals.published === 0 ? (
+              <div className="empty-state">
+                <Target size={24} />
+                <h4 aria-level={3}>No published story has an outcome trail yet</h4>
+                <p>
+                  Publish an evidence-backed draft first; Trevra will keep the provenance from post
+                  to pipeline.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div
+                  className="research-performance-metrics"
+                  aria-label="Distribution outcome totals"
+                >
+                  {[
+                    ['Published', performance.totals.published],
+                    ['Engagers', performance.totals.engagers],
+                    ['Qualified', performance.totals.qualifiedDemand],
+                    ['Replies', performance.totals.verifiedReplies],
+                    ['Opportunities', performance.totals.opportunities],
+                    ['Won', performance.totals.won]
+                  ].map(([label, value]) => (
+                    <div key={String(label)}>
+                      <strong>{Number(value).toLocaleString()}</strong>
+                      <span>{label}</span>
+                    </div>
                   ))}
                 </div>
-              </div>
-              <div>
-                <h4 aria-level={3}>What Trevra has learned</h4>
-                <div className="research-learning-list">
-                  {performance.learning
-                    .filter(
-                      (bucket) =>
-                        bucket.dimension === 'angle' || bucket.dimension === 'opportunity_kind'
-                    )
-                    .slice(0, 6)
-                    .map((bucket) => (
-                      <p key={`${bucket.dimension}:${bucket.value}`}>
-                        <strong>{bucket.value.replaceAll('_', ' ')}</strong>
-                        <span>{bucket.summary}</span>
-                        {!bucket.eligibleForComparison && (
-                          <small>Needs at least 3 published samples before comparison.</small>
-                        )}
-                      </p>
-                    ))}
+                <div className="research-performance-body">
+                  <div>
+                    <h4 aria-level={3}>Recent published stories</h4>
+                    <div className="research-performance-publications">
+                      {performance.publications.slice(0, 5).map((publication) => (
+                        <article key={publication.postId}>
+                          <div>
+                            <strong>
+                              {publication.opportunityKind?.replaceAll('_', ' ') ?? 'Market story'}
+                            </strong>
+                            <span>
+                              {publication.latestMetrics?.impressions == null
+                                ? 'Reach not observed'
+                                : `${publication.latestMetrics.impressions.toLocaleString()} impressions`}
+                            </span>
+                            <small className="research-performance-velocity">
+                              {performanceVelocityCopy(publication, performance.velocityBaseline)}
+                            </small>
+                          </div>
+                          <div className="research-performance-chain">
+                            <span>{publication.commercial.engagers} engaged</span>
+                            <span>{publication.commercial.qualifiedDemand} qualified</span>
+                            <span>{publication.commercial.verifiedReplies} replied</span>
+                            <span>{publication.commercial.opportunities} opps</span>
+                            <span>{publication.commercial.won} won</span>
+                          </div>
+                          {publication.postedUrl && (
+                            <a href={publication.postedUrl} target="_blank" rel="noreferrer">
+                              See post
+                            </a>
+                          )}
+                        </article>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <h4 aria-level={3}>What Trevra has learned</h4>
+                    <div className="research-learning-list">
+                      {performance.learning
+                        .filter(
+                          (bucket) =>
+                            bucket.dimension === 'angle' || bucket.dimension === 'opportunity_kind'
+                        )
+                        .slice(0, 6)
+                        .map((bucket) => (
+                          <p key={`${bucket.dimension}:${bucket.value}`}>
+                            <strong>{bucket.value.replaceAll('_', ' ')}</strong>
+                            <span>{bucket.summary}</span>
+                            {!bucket.eligibleForComparison && (
+                              <small>Needs at least 3 published samples before comparison.</small>
+                            )}
+                          </p>
+                        ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
-          </>
-        )}
-      </section>
+              </>
+            )}
+          </section>
+        </div>
+      </details>
 
       {watchesLoaded && (
         <section className="research-watch-bar">
@@ -2100,10 +2100,28 @@ export function ResearchView({
         <section className="page-panel research-thread-panel">
           <div className="section-heading">
             <div>
-              <h3 aria-level={2}>Discovered threads</h3>
-              <p>Community threads scouted and scored for reply-worthiness.</p>
+              <h3 aria-level={2}>Conversations worth exploring</h3>
+              <p>Discussions that might be relevant to your audience.</p>
             </div>
           </div>
+          <details className="research-thread-filters">
+            <summary>
+              Filter discussion sources{platform === 'all' ? '' : `: ${platformLabel(platform)}`}
+            </summary>
+            <div className="li-filter-row" role="group" aria-label="Discussion platform">
+              {PLATFORM_FILTERS.map((key) => (
+                <button
+                  key={key}
+                  type="button"
+                  className={`li-range ${platform === key ? 'is-active' : ''}`}
+                  aria-pressed={platform === key}
+                  onClick={() => setPlatform(key)}
+                >
+                  {key === 'all' ? 'All' : platformLabel(key)}
+                </button>
+              ))}
+            </div>
+          </details>
           <div className="client-table">
             {threadsLoaded &&
               !threadsError &&

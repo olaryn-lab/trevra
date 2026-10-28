@@ -175,8 +175,8 @@ function ActivationGuide({
     <section className="onboarding-card activation-card" aria-labelledby="activation-title">
       <div className="onboarding-head">
         <div>
-          <span className="activation-kicker">Workspace activation</span>
-          <h2 id="activation-title">Get to one evidence-backed job</h2>
+          <span className="activation-kicker">Advanced setup</span>
+          <h2 id="activation-title">Connect your AI tools</h2>
           <p>
             Trevra checks each prerequisite and gives you one next action. Nothing is sent merely
             because you finish setup.
@@ -432,7 +432,7 @@ export function LoopView({
           ' ' +
           (waitingCount === 1 ? 'run needs' : 'runs need') +
           ' your approval.',
-        action: 'Open ledger',
+        action: 'Review activity',
         href: '/ledger'
       };
     if (queued === 0)
@@ -454,37 +454,56 @@ export function LoopView({
           onNavigate={onNavigate}
           onRefresh={() => void loadToday()}
         />
-        {today && (
-          <>
-            <TodayStatusSection
-              title="Working"
-              description="Durable GTM work currently running without needing a decision from you."
-              items={today.working}
-              empty="Nothing is running in the background right now."
-              mode="working"
+        <section className="onboarding-card marketer-start" aria-labelledby="marketer-start-title">
+          <div>
+            <span className="activation-kicker">Start here</span>
+            <h2 id="marketer-start-title">
+              {seat?.configured
+                ? 'Ready to prepare your first campaign?'
+                : 'Connect LinkedIn to get started'}
+            </h2>
+            <p>
+              {seat?.configured
+                ? 'Upload a list of people, review the message, then decide when to start.'
+                : 'Connect your account once. Then upload a list of people and prepare a campaign.'}
+            </p>
+          </div>
+          <Button
+            variant="primary"
+            onClick={() => onNavigate(seat?.configured ? '/outreach/new' : '/setup/workspace')}
+          >
+            {seat?.configured ? 'Create a campaign' : 'Connect LinkedIn'}
+            <ChevronRight size={16} />
+          </Button>
+          <p className="marketer-safety-copy">
+            Preparing a campaign never sends messages. Sending still follows your account limits and
+            approval rules.
+          </p>
+        </section>
+        <details className="loop-secondary">
+          <summary>
+            <span>
+              <strong>Agent setup (advanced)</strong>
+              <small>
+                Only needed if you want to run Trevra with Claude Code, Codex, or other agents.
+              </small>
+            </span>
+            <ChevronRight size={17} aria-hidden="true" />
+          </summary>
+          <div className="loop-secondary-body">
+            <ActivationGuide
+              signals={activation.signals}
+              problems={activation.problems}
+              onRetry={() => void activation.reload()}
               onNavigate={onNavigate}
+              onPlan={() => {
+                setPlannerInitiallyOpen(true);
+                setExplore(true);
+              }}
+              onExplore={() => setExplore(true)}
             />
-            <TodayStatusSection
-              title="Recent results"
-              description="Verified GTM outcomes from the last seven days."
-              items={today.recentResults}
-              empty="No verified GTM outcomes have landed in the last seven days."
-              mode="results"
-              onNavigate={onNavigate}
-            />
-          </>
-        )}
-        <ActivationGuide
-          signals={activation.signals}
-          problems={activation.problems}
-          onRetry={() => void activation.reload()}
-          onNavigate={onNavigate}
-          onPlan={() => {
-            setPlannerInitiallyOpen(true);
-            setExplore(true);
-          }}
-          onExplore={() => setExplore(true)}
-        />
+          </div>
+        </details>
       </>
     );
   }
@@ -499,25 +518,39 @@ export function LoopView({
         onNavigate={onNavigate}
         onRefresh={() => void loadToday()}
       />
-      {today && (
-        <>
-          <TodayStatusSection
-            title="Working"
-            description="Durable GTM work currently running without needing a decision from you."
-            items={today.working}
-            empty="Nothing is running in the background right now."
-            mode="working"
-            onNavigate={onNavigate}
-          />
-          <TodayStatusSection
-            title="Recent results"
-            description="Verified GTM outcomes from the last seven days."
-            items={today.recentResults}
-            empty="No verified GTM outcomes have landed in the last seven days."
-            mode="results"
-            onNavigate={onNavigate}
-          />
-        </>
+      {today && today.needsAttention.length === 0 && (
+        <section className="marketer-next-actions" aria-label="What to do next">
+          <div>
+            <strong>Keep your outreach moving</strong>
+            <p>Start another campaign or catch up on conversations.</p>
+          </div>
+          <div className="marketer-next-buttons">
+            <Button variant="primary" onClick={() => onNavigate('/outreach/new')}>
+              Create a campaign <ChevronRight size={15} />
+            </Button>
+            <Button onClick={() => onNavigate('/outreach/inbox')}>Read messages</Button>
+          </div>
+        </section>
+      )}
+      {today && today.working.length > 0 && (
+        <TodayStatusSection
+          title="In progress"
+          description="Tasks Trevra is currently handling."
+          items={today.working}
+          empty=""
+          mode="working"
+          onNavigate={onNavigate}
+        />
+      )}
+      {today && today.recentResults.length > 0 && (
+        <TodayStatusSection
+          title="Recent results"
+          description="Confirmed outcomes from the last seven days."
+          items={today.recentResults}
+          empty=""
+          mode="results"
+          onNavigate={onNavigate}
+        />
       )}
 
       {today && today.needsAttention.length === 0 && block && (
@@ -541,72 +574,85 @@ export function LoopView({
         </div>
       )}
 
-      <section className="loop-stages" aria-label="The outreach loop, stage by stage">
-        {stages.map((stage) => {
-          const className =
-            'loop-stage' +
-            (block?.stage === stage.id ? ' is-stuck' : '') +
-            (stage.unavailable ? ' is-unavailable' : '');
-          const inner = (
-            <>
-              <span>{stage.label}</span>
-              <strong>{stage.value}</strong>
-              <small>{stage.unit}</small>
-            </>
-          );
-          return stage.href ? (
-            <button
-              key={stage.id}
-              type="button"
-              className={className}
-              onClick={() => onNavigate(stage.href as string)}
-            >
-              {inner}
-            </button>
-          ) : (
-            <div key={stage.id} className={className}>
-              {inner}
-            </div>
-          );
-        })}
-      </section>
+      <details className="loop-secondary">
+        <summary>
+          <span>
+            <strong>Campaign activity and advanced planning</strong>
+            <small>Queued actions, outreach steps and custom agent plans.</small>
+          </span>
+          <ChevronRight size={17} aria-hidden="true" />
+        </summary>
+        <div className="loop-secondary-body page-stack">
+          <section className="loop-stages" aria-label="The outreach loop, stage by stage">
+            {stages.map((stage) => {
+              const className =
+                'loop-stage' +
+                (block?.stage === stage.id ? ' is-stuck' : '') +
+                (stage.unavailable ? ' is-unavailable' : '');
+              const inner = (
+                <>
+                  <span>{stage.label}</span>
+                  <strong>{stage.value}</strong>
+                  <small>{stage.unit}</small>
+                </>
+              );
+              return stage.href ? (
+                <button
+                  key={stage.id}
+                  type="button"
+                  className={className}
+                  onClick={() => onNavigate(stage.href as string)}
+                >
+                  {inner}
+                </button>
+              ) : (
+                <div key={stage.id} className={className}>
+                  {inner}
+                </div>
+              );
+            })}
+          </section>
 
-      <section className="metrics-grid metrics-grid-two" aria-label="Current outreach movement">
-        <Metric
-          icon={<Send />}
-          label="Going out"
-          value={
-            invitesQueued === null || followUpsQueued === null
-              ? '—'
-              : String(invitesQueued) + ' / ' + String(followUpsQueued)
-          }
-          detail={
-            !seat?.configured
-              ? 'No LinkedIn account connected'
-              : invitesQueued === null || followUpsQueued === null
-                ? loopLoading
-                  ? 'Reading queued actions…'
-                  : 'Queued actions unavailable'
-                : String(invitesQueued) +
-                  ' invite' +
-                  (invitesQueued === 1 ? '' : 's') +
-                  ' · ' +
-                  String(followUpsQueued) +
-                  ' follow-up' +
-                  (followUpsQueued === 1 ? '' : 's') +
-                  ' queued' +
-                  (inviteDay ? ' · ' + String(inviteDay.ceiling) + '/day invite limit' : '')
-          }
-        />
-        <Metric
-          icon={<Inbox />}
-          label="Waiting on a reply"
-          value={awaitingReply === null ? '—' : String(awaitingReply)}
-          detail={analyticsError ? 'Outreach ledger unavailable' : 'Last ' + String(days) + ' days'}
-        />
-      </section>
+          <section className="metrics-grid metrics-grid-two" aria-label="Current outreach movement">
+            <Metric
+              icon={<Send />}
+              label="Going out"
+              value={
+                invitesQueued === null || followUpsQueued === null
+                  ? '—'
+                  : String(invitesQueued) + ' / ' + String(followUpsQueued)
+              }
+              detail={
+                !seat?.configured
+                  ? 'No LinkedIn account connected'
+                  : invitesQueued === null || followUpsQueued === null
+                    ? loopLoading
+                      ? 'Reading queued actions…'
+                      : 'Queued actions unavailable'
+                    : String(invitesQueued) +
+                      ' invite' +
+                      (invitesQueued === 1 ? '' : 's') +
+                      ' · ' +
+                      String(followUpsQueued) +
+                      ' follow-up' +
+                      (followUpsQueued === 1 ? '' : 's') +
+                      ' queued' +
+                      (inviteDay ? ' · ' + String(inviteDay.ceiling) + '/day invite limit' : '')
+              }
+            />
+            <Metric
+              icon={<Inbox />}
+              label="Waiting on a reply"
+              value={awaitingReply === null ? '—' : String(awaitingReply)}
+              detail={
+                analyticsError ? 'Outreach ledger unavailable' : 'Last ' + String(days) + ' days'
+              }
+            />
+          </section>
 
-      <PlanWork onNavigate={onNavigate} initiallyOpen={plannerInitiallyOpen} />
+          <PlanWork onNavigate={onNavigate} initiallyOpen={plannerInitiallyOpen} />
+        </div>
+      </details>
 
       <details className="loop-secondary">
         <summary>
@@ -750,7 +796,7 @@ function todayActionLabel(
     return item.metadata.demandOrigin === 'known_contact' ? 'Prepare outreach' : 'Prepare response';
   }
   if (item.kind === 'verified_reply') return 'Reply';
-  if (item.kind === 'deliverability_blocked') return 'Fix DNS';
+  if (item.kind === 'deliverability_blocked') return 'Fix email setup';
   if (item.kind === 'inbound_submission') return 'Review inbound';
   if (item.kind === 'customer_cancelled') return 'Review customer';
   if (item.kind === 'high_priority_account') return 'Review account';
@@ -839,7 +885,7 @@ function TodayAttention({
       <div className="section-heading">
         <div>
           <h2>Needs you</h2>
-          <p>Only GTM work Trevra cannot safely finish without your judgment.</p>
+          <p>Messages and decisions waiting for you.</p>
         </div>
         {today && <span className="status-pill">{items.length} open</span>}
       </div>
@@ -847,16 +893,13 @@ function TodayAttention({
       {(problem || actionError) && <div className="error-banner">{problem || actionError}</div>}
       {!problem && !today ? (
         <p className="onboarding-loading">
-          <LoaderCircle className="spin" size={16} /> Reading your GTM state…
+          <LoaderCircle className="spin" size={16} /> Checking for updates…
         </p>
       ) : today && items.length === 0 ? (
         <div className="empty-state">
           <CheckCircle2 size={24} />
-          <h4>Nothing needs you right now</h4>
-          <p>
-            Trevra has no unresolved safety block, reply, approval, qualified demand, inbound
-            request, or hot-account review to hand you.
-          </p>
+          <h4>You're all caught up</h4>
+          <p>No messages or decisions need your attention right now.</p>
         </div>
       ) : (
         <ol className="onboarding-steps">

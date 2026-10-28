@@ -217,14 +217,31 @@ async function main() {
     check(
       'L1 page leaves login after signup',
       new URL(page.url()).pathname === '/loop' &&
-        (await page.getByRole('link', { name: 'Outreach' }).count()) > 0,
+        (await page.getByRole('link', { name: 'Campaigns', exact: true }).count()) > 0,
       'url=' + page.url()
     );
     console.log('L1 workspace created and readback, id omitted');
+    await page.getByRole('heading', { name: 'Connect LinkedIn to get started' }).waitFor({
+      timeout: 20000
+    });
+    check(
+      'UX new marketer sees one clear first action rather than agent setup',
+      (await page.getByRole('button', { name: 'Connect LinkedIn' }).count()) === 1 &&
+        (await page.locator('.loop-secondary[open]').count()) === 0
+    );
+    if (process.env.TREVRA_UX_SCREENSHOTS === '1')
+      await page.screenshot({ path: '/tmp/trevra-marketer-today.png' });
     // L5: exercise ACTUAL authenticated React screens, not a mocked UI.
     await page.goto(origin + '/outreach', { waitUntil: 'domcontentloaded' });
     await prerequisite(page, /Build your first campaign/i);
     check('L5 authenticated campaigns screen renders and permits navigation', true);
+    check(
+      'UX campaign navigation keeps only campaign and deal links plus More',
+      (await page.locator('.outreach-nav > a.outreach-tab-main').count()) === 2 &&
+        (await page.locator('.outreach-more-menu').count()) === 1
+    );
+    if (process.env.TREVRA_UX_SCREENSHOTS === '1')
+      await page.screenshot({ path: '/tmp/trevra-marketer-campaigns.png' });
     // UI-shell layout verification at desktop and mobile. Never infer visual
     // parity from static CSS alone: sample real computed styles in Chromium.
     const desktopShell = await page.evaluate(() => {
@@ -263,6 +280,8 @@ async function main() {
         headerPadding: topbar ? getComputedStyle(topbar).paddingTop : ''
       };
     });
+    if (process.env.TREVRA_UX_SCREENSHOTS === '1')
+      await page.screenshot({ path: '/tmp/trevra-marketer-mobile.png' });
     check(
       'UI mobile shell keeps content, navigation and safe-area spacing',
       mobileShell.sidebar === 'none' &&
@@ -271,15 +290,43 @@ async function main() {
         mobileShell.bottomPadding >= 74 &&
         mobileShell.headerPadding === '18px'
     );
+    await page.locator('.mobile-more > summary').click();
+    await page.locator('.mobile-more-links a[href="/ledger"]').click();
+    await page.waitForURL('**/ledger', { timeout: 12000 });
+    await page.getByRole('heading', { name: 'Activity', exact: true }).waitFor();
+    check('UX mobile More opens Activity as a real screen', true);
+    await page.locator('.mobile-more > summary').click();
+    await page.locator('.mobile-more-links a[href="/setup/workspace"]').click();
+    await page.waitForURL('**/setup/workspace', { timeout: 12000 });
+    await page.getByRole('heading', { name: 'Connections and settings' }).waitFor();
+    check('UX mobile More opens Connections without a dead end', true);
     await page.setViewportSize({ width: 1280, height: 720 });
+    await page.goto(origin + '/research', { waitUntil: 'domcontentloaded' });
+    await page.getByRole('heading', { name: 'Ideas for your next post' }).waitFor();
+    check(
+      'UX ideas foreground drafts while advanced trends and analytics stay collapsed',
+      (await page.getByRole('heading', { name: 'Ready-to-review ideas' }).count()) === 1 &&
+        (await page.locator('.research-extra-panel').count()) === 2 &&
+        (await page.locator('.research-extra-panel[open]').count()) === 0 &&
+        (await page.locator('.research-thread-filters').count()) === 1 &&
+        (await page.locator('.research-toolbar .li-filter-row').count()) === 0
+    );
+    await page.goto(origin + '/outreach', { waitUntil: 'domcontentloaded' });
+    await prerequisite(page, /Build your first campaign/i);
 
     await page.getByRole('button', { name: /Build your first campaign/i }).click();
-    await page.getByRole('heading', { name: 'One thing is missing' }).waitFor({ timeout: 25000 });
+    await page.getByRole('heading', { name: 'Connect LinkedIn first' }).waitFor({ timeout: 25000 });
+    check(
+      'UX campaign creation hides distracting navigation tabs',
+      (await page.locator('.outreach-nav').count()) === 0
+    );
     check('L5 missing LinkedIn sender blocks new campaign with actionable explanation', true);
-    await page.getByRole('button', { name: /Connect account in Setup/i }).click();
+    await page.getByRole('button', { name: 'Connect LinkedIn' }).click();
     await page.waitForURL(/\/setup\/workspace$/, { timeout: 12000 });
     check('L5 configuration CTA reaches actual workspace setup', true);
     await page.getByRole('heading', { name: 'Connect your workspace' }).waitFor();
+    if (process.env.TREVRA_UX_SCREENSHOTS === '1')
+      await page.screenshot({ path: '/tmp/trevra-marketer-settings.png' });
     const setupGroups = page.locator('.workspace-settings-group');
     check(
       'UX workspace presents essential connections and groups optional settings',
@@ -379,7 +426,7 @@ async function main() {
     );
 
     await page.goto(origin + '/outreach/new', { waitUntil: 'domcontentloaded' });
-    await page.getByRole('heading', { name: 'Prepare outreach' }).waitFor({ timeout: 25000 });
+    await page.getByRole('heading', { name: 'Create a campaign' }).waitFor({ timeout: 25000 });
     check('L5 provider-double seat exposes real CSV preparation UI', true);
     const csv = [
       'First Name,Last Name,Company,Email,LinkedIn URL',

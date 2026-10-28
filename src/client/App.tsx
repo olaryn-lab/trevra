@@ -16,13 +16,15 @@ import {
   KeyRound,
   Linkedin,
   Link2,
+  House,
+  MessageCircle,
+  MoreHorizontal,
   LoaderCircle,
   LogOut,
   Mail,
   Pencil,
   Play,
   Plus,
-  Repeat,
   Settings2,
   ShieldCheck,
   Terminal,
@@ -121,19 +123,25 @@ import { LoopCostView, LoopView } from './views/LoopView';
 import { OutreachView } from './views/OutreachView';
 import { initials, money, prettyProvider, usd } from './views/format';
 
-/** Five primary product areas: loop, outreach, ledger, research, and setup. */
-const NAV_ITEMS: Array<{ section: Section; path: string; icon: React.ReactNode; label: string }> = [
-  { section: 'loop', path: '/loop', icon: <Repeat size={18} />, label: 'Loop' },
-  {
-    section: 'outreach',
-    path: '/outreach',
-    icon: <Linkedin size={18} />,
-    label: 'Outreach'
-  },
-  { section: 'ledger', path: '/ledger', icon: <Workflow size={18} />, label: 'Ledger' },
-  { section: 'research', path: '/research', icon: <Compass size={18} />, label: 'Research' },
-  { section: 'setup', path: '/setup', icon: <Settings2 size={18} />, label: 'Setup' }
+/** Task names, not internal architecture. Every existing route stays reachable.
+ * On phones, the two infrequent destinations live under More. */
+type NavDestination = { path: string; icon: React.ReactNode; label: string };
+const NAV_MAIN: NavDestination[] = [
+  { path: '/loop', icon: <House size={18} />, label: 'Today' },
+  { path: '/outreach', icon: <Linkedin size={18} />, label: 'Campaigns' },
+  { path: '/outreach/inbox', icon: <MessageCircle size={18} />, label: 'Messages' },
+  { path: '/research', icon: <Compass size={18} />, label: 'Ideas' }
 ];
+const NAV_MORE: NavDestination[] = [
+  { path: '/ledger', icon: <Workflow size={18} />, label: 'Activity' },
+  { path: '/setup/workspace', icon: <Settings2 size={18} />, label: 'Settings' }
+];
+function navActive(route: Route, path: string): boolean {
+  if (path === '/outreach/inbox') return route.section === 'outreach' && route.sub === 'inbox';
+  if (path === '/outreach') return route.section === 'outreach' && route.sub !== 'inbox';
+  if (path === '/setup/workspace') return route.section === 'setup';
+  return route.section === path.slice(1);
+}
 
 type ToastMessage = { message: string; undo?: () => void };
 
@@ -429,16 +437,28 @@ export function App() {
             await reloadOutreach();
           }}
         />
-        <nav>
-          {NAV_ITEMS.map((item) => (
+        <nav aria-label="Main navigation">
+          {NAV_MAIN.map((item) => (
             <NavButton
-              key={item.section}
-              active={route.section === item.section}
+              key={item.path}
+              active={navActive(route, item.path)}
               icon={item.icon}
               label={item.label}
               href={item.path}
             />
           ))}
+          <div className="sidebar-nav-more">
+            <span className="sidebar-nav-caption">More</span>
+            {NAV_MORE.map((item) => (
+              <NavButton
+                key={item.path}
+                active={navActive(route, item.path)}
+                icon={item.icon}
+                label={item.label}
+                href={item.path}
+              />
+            ))}
+          </div>
         </nav>
       </aside>
 
@@ -477,18 +497,42 @@ export function App() {
         )}
       </main>
 
-      <nav className="mobile-tabbar" aria-label="Sections">
-        {NAV_ITEMS.map((item) => (
+      <nav className="mobile-tabbar" aria-label="Main navigation">
+        {NAV_MAIN.map((item) => (
           <a
-            key={item.section}
+            key={item.path}
             href={item.path}
-            className={route.section === item.section ? 'is-active' : undefined}
-            aria-current={route.section === item.section ? 'page' : undefined}
+            className={navActive(route, item.path) ? 'is-active' : undefined}
+            aria-current={navActive(route, item.path) ? 'page' : undefined}
           >
             {item.icon}
             <span>{item.label}</span>
           </a>
         ))}
+        <details
+          key={route.path}
+          className={
+            'mobile-more' +
+            (NAV_MORE.some((item) => navActive(route, item.path)) ? ' is-active' : '')
+          }
+        >
+          <summary aria-label="More pages">
+            <MoreHorizontal size={19} aria-hidden="true" />
+            <span>More</span>
+          </summary>
+          <div className="mobile-more-links">
+            {NAV_MORE.map((item) => (
+              <a
+                key={item.path}
+                href={item.path}
+                aria-current={navActive(route, item.path) ? 'page' : undefined}
+              >
+                {item.icon}
+                {item.label}
+              </a>
+            ))}
+          </div>
+        </details>
       </nav>
 
       {overlay === 'help' && <HelpPanel route={route} onClose={() => setOverlay(null)} />}
@@ -576,10 +620,10 @@ const HIDDEN_LIVE_REGION: React.CSSProperties = {
 
 /** Setup has four live screens: Access, Workspace, Lead capture, and Billing. */
 const SETUP_TABS = [
-  { sub: '', label: 'Access', path: '/setup' },
-  { sub: 'workspace', label: 'Workspace', path: '/setup/workspace' },
+  { sub: 'workspace', label: 'Connections', path: '/setup/workspace' },
   { sub: 'capture', label: 'Lead capture', path: '/setup/capture' },
-  { sub: 'billing', label: 'Billing', path: '/setup/billing' }
+  { sub: 'billing', label: 'Billing', path: '/setup/billing' },
+  { sub: '', label: 'Advanced', path: '/setup' }
 ] as const;
 
 function SetupView({
@@ -961,21 +1005,21 @@ function AuthScreen({
             <span>Trevra</span>
           </a>
           <div>
-            <h1>Run GTM with Claude Code or Codex.</h1>
-            <p>Research, inbound, outreach, approvals, and run history in one workspace.</p>
+            <h1>More conversations. Less busywork.</h1>
+            <p>Find people, prepare campaigns, and handle replies in one place.</p>
           </div>
           <div className="auth-proof-list">
             <span>
-              <Check size={16} /> Evidence on every recommendation
+              <Check size={16} /> Find people worth contacting
             </span>
             <span>
-              <Check size={16} /> Approval before external actions
+              <Check size={16} /> Review messages before sending
             </span>
             <span>
-              <Check size={16} /> Hard limits for agents
+              <Check size={16} /> Keep replies in one place
             </span>
             <span>
-              <Check size={16} /> Clear history for approved actions
+              <Check size={16} /> Pause outreach whenever needed
             </span>
           </div>
         </section>
@@ -3391,24 +3435,24 @@ function NavButton({
 }
 
 function viewTitle(route: Route): string {
-  if (route.section === 'loop') return route.sub === 'cost' ? 'What this cost' : 'Your loop';
+  if (route.section === 'loop') return route.sub === 'cost' ? 'Usage and cost' : 'Today';
   if (route.section === 'outreach') {
-    if (route.sub === 'inbound') return 'Inbound';
+    if (route.sub === 'inbound') return 'New leads';
     if (route.sub === 'inbox') return 'Messages';
-    if (route.sub === 'opportunities') return 'Opportunities';
-    if (route.sub === 'posts') return 'Scheduled posts';
+    if (route.sub === 'opportunities') return 'Deals';
+    if (route.sub === 'posts') return 'Social posts';
     if (route.sub === 'new') return 'New campaign';
     if (route.sub === 'campaign') return 'Campaign';
     if (route.sub === 'workflow') return 'Campaign workflow';
     return 'Campaigns';
   }
-  if (route.section === 'ledger') return 'Run ledger';
-  if (route.section === 'research') return 'Research';
+  if (route.section === 'ledger') return 'Activity';
+  if (route.section === 'research') return 'Ideas';
   if (route.section === 'setup') {
-    if (route.sub === 'workspace') return 'Setup · Workspace';
-    if (route.sub === 'capture') return 'Setup · Lead capture';
-    if (route.sub === 'billing') return 'Setup · Billing';
-    return 'Setup · Access';
+    if (route.sub === 'workspace') return 'Connections and settings';
+    if (route.sub === 'capture') return 'Lead capture';
+    if (route.sub === 'billing') return 'Billing';
+    return 'Advanced settings';
   }
-  return 'Setup';
+  return 'Today';
 }
