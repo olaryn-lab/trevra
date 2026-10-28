@@ -86,6 +86,13 @@ jobs:
 
           echo "App release: v$app_version"
 
+      - name: Require green main App quality for exact release SHA
+        if: steps.release.outputs.current == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: bash scripts/require-green-ci.sh "$RELEASE_SHA"
+
   deploy_oracle:
     name: Deploy Oracle production
     needs: prepare
