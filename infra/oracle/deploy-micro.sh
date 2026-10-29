@@ -187,6 +187,14 @@ ssh "ubuntu@${DB_IP}" "sudo install -d -m 700 -o ubuntu -g ubuntu /mnt/data/back
 echo "backup: ${BACKUP}"
 
 echo "==> app instance"
+# Refresh from scoped OpenBao before changing any API/worker process.
+# Existing containers are left untouched on Vault auth/TLS/network failure.
+if ssh "ubuntu@${APP_IP}" "test -f ${APP_DIR}/.openbao-enabled"; then
+  echo "==> refreshing scoped OpenBao server credentials"
+  scp -q "${HERE}/openbao-env.py" "ubuntu@${APP_IP}:${APP_DIR}/openbao-env.py"
+  ssh "ubuntu@${APP_IP}" "chmod 700 ${APP_DIR}/openbao-env.py && python3 ${APP_DIR}/openbao-env.py --apply"
+fi
+
 scp -q "${HERE}/compose.micro-app.yml" "${HERE}/pull-ghcr-image.sh" "ubuntu@${APP_IP}:${APP_DIR}/"
 if [ "${TREVRA_SKIP_PULL:-false}" = "true" ]; then
   echo "==> using preloaded ghcr.io/olaryn-lab/trevra:${TAG}"

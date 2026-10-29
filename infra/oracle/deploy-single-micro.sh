@@ -126,6 +126,14 @@ REMOTE_UNLOCK
 }
 trap release_lock EXIT
 
+# OpenBao is the release-time authority after the protected OCI activation
+# marker is installed. Fail closed when the scoped machine credential expires.
+if ssh "$REMOTE" "test -f ${APP_DIR}/.openbao-enabled"; then
+  echo "==> refreshing scoped OpenBao server credentials"
+  scp -q "${HERE}/openbao-env.py" "${REMOTE}:${APP_DIR}/openbao-env.py"
+  ssh "$REMOTE" "chmod 700 ${APP_DIR}/openbao-env.py && python3 ${APP_DIR}/openbao-env.py --apply"
+fi
+
 echo "==> syncing single-micro compose files"
 scp -q "${HERE}/compose.micro-app.yml" "${HERE}/compose.micro-db.yml" "${HERE}/pull-ghcr-image.sh" "${REMOTE}:${APP_DIR}/"
 

@@ -72,6 +72,14 @@ then
 fi
 
 # Only the compose files need to be on the box now that the image is prebuilt.
+# When activated on this exact host, OpenBao is the authoritative
+# server-secret source. Refuse a release if its Trevra-only login fails.
+if ssh "$REMOTE" "test -f ${APP_DIR}/.openbao-enabled"; then
+  echo "==> refreshing scoped OpenBao server credentials"
+  scp -q "${REPO_ROOT}/infra/oracle/openbao-env.py" "${REMOTE}:${APP_DIR}/openbao-env.py"
+  ssh "$REMOTE" "chmod 700 ${APP_DIR}/openbao-env.py && python3 ${APP_DIR}/openbao-env.py --apply"
+fi
+
 echo "==> syncing compose files"
 scp -q "${REPO_ROOT}/infra/oracle/compose.oracle.yml" \
        "${REPO_ROOT}/infra/oracle/compose.oracle.nango.yml" \

@@ -51,7 +51,7 @@ Run `npm run check` before committing. Tests use a real PostgreSQL Testcontainer
 
 - Scope every commercial query by workspace.
 - Use PostgreSQL transactions for multi-step writes and row locks for competing executions.
-- Keep provider credentials in Nango or Secret Manager, never application tables or source control.
+- Keep customer/workspace provider credentials in Nango or the reviewed encrypted workspace custody store. Trevra's server-level Oracle runtime credentials are now loaded from the Trevra-scoped OpenBao KV v2 AppRole via `infra/oracle/openbao-env.py`; preserve protected host bootstrap/rollback copies. Legacy Secret Manager sources remain authoritative for any applications not explicitly migrated. Never commit plaintext credentials.
 - External writes require deterministic idempotency keys.
 - Scope changes always require manual approval.
 - Analytics must not contain client content, email bodies, document text, invoice details, or IP addresses.
