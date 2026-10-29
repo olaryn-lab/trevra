@@ -1,0 +1,20 @@
+[Unit]
+Description=Renew Trevra scoped OpenBao SecretID before expiry
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/opt/trevra/.openbao-enabled
+ConditionPathExists=/opt/trevra/.openbao-renew-enabled
+ConditionPathExists=/opt/trevra/rotate-app-approle.py
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+UMask=0077
+ExecStart=/usr/bin/python3 -I /opt/trevra/rotate-app-approle.py trevra --rotate-if-due
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/trevra
+TimeoutStartSec=180
