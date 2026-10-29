@@ -82,7 +82,7 @@ def api(method: str, path: str, body: dict|None=None, token: str|None=None)->dic
             if response.geturl()!=url:
                 raise RuntimeError("Unexpected OpenBao URL change")
             payload=response.read(196608)
-            return json.loads(payload)
+            return json.loads(payload) if payload else {}
     except urllib.error.HTTPError as exc:
         # Only HTTP status and the fixed caller-selected path are logged.
         raise RuntimeError("OpenBao request HTTP "+str(exc.code)+" (details concealed)") from None

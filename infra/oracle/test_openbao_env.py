@@ -69,6 +69,19 @@ class HostedSecretSourceTest(unittest.TestCase):
                 mod.run("--apply")
         self.assertEqual(self.env.read_bytes(),old)
 
+    def test_empty_success_response_is_accepted_for_token_revocation(self):
+        import io
+        class EmptySuccessfulResponse:
+            def __init__(self):
+                self.headers={}
+            def __enter__(self):return self
+            def __exit__(self,*args):return None
+            def geturl(self):return mod.BASE+"/v1/auth/token/revoke-self"
+            def read(self,limit):return b""
+        with patch.object(mod.urllib.request,"build_opener") as opener:
+            opener.return_value.open.return_value=EmptySuccessfulResponse()
+            self.assertEqual(mod.api("POST","auth/token/revoke-self",token="synthetic-only"),{})
+
     def test_every_oracle_deployer_blocks_when_enabled_vault_fetch_fails(self):
         root=Path(__file__).parent
         for filename in ("deploy.sh","deploy-micro.sh","deploy-single-micro.sh"):
