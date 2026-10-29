@@ -191,8 +191,8 @@ echo "==> app instance"
 # Existing containers are left untouched on Vault auth/TLS/network failure.
 if ssh "ubuntu@${APP_IP}" "test -f ${APP_DIR}/.openbao-enabled"; then
   echo "==> refreshing scoped OpenBao server credentials"
-  scp -q "${HERE}/openbao-env.py" "ubuntu@${APP_IP}:${APP_DIR}/openbao-env.py"
-  ssh "ubuntu@${APP_IP}" "chmod 700 ${APP_DIR}/openbao-env.py && python3 ${APP_DIR}/openbao-env.py --apply"
+  scp -q "${HERE}/openbao-env.py" "${HERE}/rotate-app-approle.py" "ubuntu@${APP_IP}:${APP_DIR}/"
+  ssh "ubuntu@${APP_IP}" "chmod 700 ${APP_DIR}/openbao-env.py ${APP_DIR}/rotate-app-approle.py && if test -f ${APP_DIR}/.openbao-renew-enabled; then python3 ${APP_DIR}/rotate-app-approle.py trevra --rotate-if-due; fi && python3 ${APP_DIR}/openbao-env.py --apply"
 fi
 
 scp -q "${HERE}/compose.micro-app.yml" "${HERE}/pull-ghcr-image.sh" "ubuntu@${APP_IP}:${APP_DIR}/"

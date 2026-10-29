@@ -88,6 +88,7 @@ class HostedSecretSourceTest(unittest.TestCase):
             source=(root/filename).read_text()
             self.assertIn(".openbao-enabled",source,filename)
             self.assertIn("openbao-env.py --apply",source,filename)
+            self.assertIn("rotate-app-approle.py trevra --rotate-if-due",source,filename)
             self.assertNotIn("|| true",source.split("openbao-env.py --apply")[0][-120:])
 
     def test_duplicate_or_world_readable_env_rejected(self):

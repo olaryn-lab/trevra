@@ -92,12 +92,26 @@ Emergency rollback to former protected host env, after operator review:
    alter tokens, reset provider keys, or destroy Nango/tenant custody.
 4. Re-enable the marker only after real OCI HTTPS requalification succeeds.
 
-The AppRole **SecretID expires after 90 days** (from enrollment on
-2026-10-29). Before expiration, a GPG-authorized operator should replace
-it on the Oracle host using the protected OpenBao administrator workflow,
-verify fresh token+KV read, and revoke the old SecretID. Do not put
-long-lived root or owner TOTP credentials on the OCI host. The read-only
-role is never empowered to generate its own SecretIDs.
+**SecretID expiration and automatic rotation:** The role is configured
+for 90 days, but the OpenBao auth-mount max TTL can cap each issued
+SecretID to **32 days**. Use the actual `expiration_time` reported by
+OpenBao, not the configured duration. Automatic renewal is implemented
+in `rotate-app-approle.py`; a six-hour systemd timer and all three
+deployment release hooks are staged. Renewal creates a replacement
+credential **only for this same narrowly-scoped Trevra role**, proves
+it can read the exact host's existing KV values, atomically commits it,
+then revokes the old ID. Rotation begins when fewer than 10 days remain.
+
+**2026-10-29 activation pending:** the existing owner-GPG administrator
+must enable the narrowly bounded policy and authorize the
+`.openbao-renew-enabled` marker once, using the single command in
+[Olaryn rotation runbook](https://github.com/olaryn-lab/secrets/blob/main/docs/operations/auto-approle-rotation.md).
+The host renewal unit has been installed but deliberately left
+**disabled** until the actual OCI canary passes. The existing
+`.openbao-enabled` source path remains active and application health
+is unaffected; do not describe auto-renewal as active before the
+activation command reports both hosts PASS. Never put root or owner
+TOTP credentials on the OCI host.
 
 ## Status
 
@@ -108,7 +122,8 @@ role is never empowered to generate its own SecretIDs.
 - [x] Real API/worker restart with original immutable image
 - [x] Live environment match and API/worker/Postgres health
 - [x] Reusable fail-closed hook in all Oracle deployment modes
-- [ ] Scheduled AppRole SecretID renewal before 2027-01-27
+- [x] Self-renewal worker and six-hour systemd unit staged on OCI
+- [ ] One-time owner-GPG scoped policy delegation and timer activation on OCI
 - [ ] Any additional optional credentials provisioned after today's inventory
 
 **This is the production secret-source cutover for Trevra, not a
