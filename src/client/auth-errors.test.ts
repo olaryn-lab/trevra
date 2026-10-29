@@ -27,6 +27,13 @@ describe('Trevra login callback errors', () => {
     expect(message).not.toContain('access_denied');
   });
 
+  it('explains other known admission errors without reflecting provider text', () => {
+    expect(loginAuthError(new URLSearchParams('error=capacity'))).toMatch(/at capacity/);
+    expect(loginAuthError(new URLSearchParams('error=verification_required'))).toMatch(
+      /Verify your email/
+    );
+  });
+
   it('handles Better Auth callback failures and old magic-link errors without raw codes', () => {
     expect(loginAuthError(new URLSearchParams('error=oauth_code_verification_failed'))).toMatch(
       /in this browser/

@@ -1132,10 +1132,29 @@ export function createApp(db: Db) {
     res.setHeader('Cache-Control', 'no-store');
     const error = typeof req.query.error === 'string' ? req.query.error : null;
     if (error) {
-      const allowed = new Set(['access_denied', 'invalid_grant', 'interaction_expired']);
+      // OAuth may encode a product admission decision either as its error
+      // or as a fixed error_description under access_denied. Preserve only
+      // recognized admission codes for the branded Trevra waitlist UI; never
+      // reflect arbitrary provider descriptions or redirect destinations.
+      const admissionCodes = new Set([
+        'invite_required',
+        'waitlist',
+        'capacity',
+        'verification_required'
+      ]);
+      const description =
+        typeof req.query.error_description === 'string' ? req.query.error_description : '';
+      const code =
+        error === 'access_denied' && admissionCodes.has(description) ? description : error;
+      const allowed = new Set([
+        'access_denied',
+        'invalid_grant',
+        'interaction_expired',
+        ...admissionCodes
+      ]);
       res.redirect(
         302,
-        '/login?error=' + encodeURIComponent(allowed.has(error) ? error : 'oauth_failed')
+        '/login?error=' + encodeURIComponent(allowed.has(code) ? code : 'oauth_failed')
       );
       return;
     }

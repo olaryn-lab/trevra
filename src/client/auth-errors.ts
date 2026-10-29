@@ -17,6 +17,8 @@ export function loginAuthError(params: URLSearchParams): string | null {
     return 'Trevra is invite-only. You can request access below.';
   }
   if (code === 'waitlist') return 'Your Trevra access request is waiting for approval.';
+  if (code === 'capacity') return 'Trevra is at capacity. Request access and wait for approval.';
+  if (code === 'verification_required') return 'Verify your email before requesting Trevra access.';
   if (code === 'INVALID_TOKEN') {
     return 'That sign-in link is invalid, expired, or has already been used. Request a new one.';
   }
