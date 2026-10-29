@@ -4,6 +4,8 @@ Trevra production targets the Oracle Always Free resources this tenancy can
 actually allocate in the home region. The marketing site stays on Cloudflare
 Pages.
 
+Production's server-owned runtime credentials are now sourced from Olaryn OpenBao at startup/release, with an independent read-only Trevra machine identity and protected rollback. See [OpenBao live consumer runbook](OPENBAO.md) for the exact 2026-10-29 evidence, architecture, host guards, and recovery steps. Customer BYOK and Nango OAuth refresh tokens remain on their existing tenant-scoped custody systems.
+
 Production now uses:
 
 - **single E2 micro** — one `VM.Standard.E2.1.Micro` runs API + worker + Postgres;
