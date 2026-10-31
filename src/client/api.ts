@@ -177,10 +177,19 @@ type ExportFormat = 'dripify' | 'heyreach' | 'expandi' | 'generic';
 export class ApiError extends Error {
   constructor(
     message: string,
-    public readonly status: number
+    public readonly status: number,
+    /** Machine-readable refusal, e.g. `entitlement_denied` (TRV-057). */
+    public readonly code?: string,
+    /** Where the user can resolve an entitlement refusal. */
+    public readonly billingUrl?: string
   ) {
     super(message);
   }
+}
+
+/** True when the server refused the write because of the workspace plan. */
+export function isEntitlementError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.code === 'entitlement_denied';
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -191,7 +200,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText }));
-    throw new ApiError(body.error ?? 'Request failed', response.status);
+    throw new ApiError(
+      body.error ?? 'Request failed',
+      response.status,
+      typeof body.code === 'string' ? body.code : undefined,
+      typeof body.billingUrl === 'string' ? body.billingUrl : undefined
+    );
   }
   // 204 No Content has no body to parse -- watches' DELETE is the only route
   // that returns it today, and every other caller of `request` always gets a
@@ -226,28 +240,33 @@ export async function resolveUncertainCommunityPost(
   return response.post;
 }
 
+export type BillingUsageLine = {
+  key: 'campaigns' | 'outreach_prepare' | 'team';
+  label: string;
+  used: number;
+  /** `null` = unlimited, `0` = not included in the plan. */
+  limit: number | null;
+  over: boolean;
+};
+
 export type BillingSnapshot =
   | { enabled: false }
   | {
       enabled: true;
+      canManage: boolean;
       customer: {
-        id: string;
-        product: 'trevra';
-        external_customer_id: string;
-        name: string;
-        billing_email: string | null;
-        currency: string;
-        stripe_customer_id: string | null;
         plan_code: string | null;
+        currency: string;
+        has_payment_profile: boolean;
       };
       subscription: {
         status: string;
         plan_code: string | null;
         scheduled_plan_code?: string | null;
-        stripe_subscription_id?: string | null;
         current_period_start?: string | null;
         current_period_end?: string | null;
         cancel_at_period_end?: boolean;
+        current_period_payment_status?: string;
       };
       credits: {
         balance: string | number;
@@ -259,6 +278,24 @@ export type BillingSnapshot =
       entitlements: {
         features: Record<string, Record<string, unknown>>;
       };
+      state: {
+        fetchedAt: string | null;
+        stale: boolean;
+        withinGrace: boolean;
+        graceEndsAt: string | null;
+      };
+      trial: { active: boolean; expired: boolean; endsAt: string | null } | null;
+      renewal: {
+        renewsOn: string | null;
+        endsOn: string | null;
+        annual: boolean;
+        cancelAtPeriodEnd: boolean;
+        scheduledPlanCode: string | null;
+        noticeDays: number;
+        noticeDue: boolean;
+      };
+      usage: BillingUsageLine[];
+      expansionBlock: { code: string; reason: string } | null;
     };
 
 export type BillingPlan = {
@@ -292,14 +329,60 @@ export async function getBillingPlans(): Promise<BillingPlans> {
   return request('/api/billing/plans');
 }
 
+/** `nonce` identifies one user intent; retrying with it never repeats the action. */
 export async function startBillingCheckout(
   planCode: string,
-  idempotencyKey: string
+  nonce: string
 ): Promise<BillingCheckout> {
   return request('/api/billing/checkout', {
     method: 'POST',
-    body: JSON.stringify({ planCode, idempotencyKey })
+    body: JSON.stringify({ planCode, nonce })
   });
+}
+
+export type BillingPlanPreview = {
+  preview: {
+    change_type: string;
+    apply_immediately: boolean;
+    amount_due: number;
+    currency: string;
+    current_plan_code: string | null;
+    new_plan_code: string;
+    credits_new: string | number;
+    current_period_end?: string | null;
+  };
+  /** Resources already over the target plan's limits; null when unknown. */
+  overLimit: BillingUsageLine[] | null;
+};
+
+export async function previewBillingPlan(planCode: string): Promise<BillingPlanPreview> {
+  return request('/api/billing/preview', {
+    method: 'POST',
+    body: JSON.stringify({ planCode })
+  });
+}
+
+export type BillingLifecycleResponse = {
+  result: { status?: string; url?: string | null; message?: string | null };
+  overLimit?: BillingUsageLine[] | null;
+};
+
+export async function changeBillingPlan(
+  planCode: string,
+  nonce: string
+): Promise<BillingLifecycleResponse> {
+  return request('/api/billing/change', {
+    method: 'POST',
+    body: JSON.stringify({ planCode, nonce })
+  });
+}
+
+export async function cancelBillingPlan(nonce: string): Promise<BillingLifecycleResponse> {
+  return request('/api/billing/cancel', { method: 'POST', body: JSON.stringify({ nonce }) });
+}
+
+export async function resumeBillingPlan(nonce: string): Promise<BillingLifecycleResponse> {
+  return request('/api/billing/resume', { method: 'POST', body: JSON.stringify({ nonce }) });
 }
 
 export async function getPublicConfig(): Promise<PublicConfig> {

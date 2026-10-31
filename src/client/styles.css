@@ -15113,6 +15113,54 @@ label.inbox-row-select {
   }
 }
 
+/* TRV-057 plan state: stale snapshot, trial, renewal and entitlement notices. */
+.billing-notice {
+  max-width: var(--t-measure);
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--t-amber-line);
+  border-radius: var(--t-r-sm);
+  background: var(--t-amber-bg);
+  color: var(--t-amber-ink);
+  font-size: var(--t-text-xs);
+  line-height: 1.55;
+}
+.billing-notice-blocked {
+  border-left: 3px solid var(--t-amber);
+}
+.billing-notice + .metrics-grid {
+  margin-top: 16px;
+}
+.billing-over-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+.billing-confirm-body {
+  display: grid;
+  gap: 10px;
+}
+.billing-confirm-body p {
+  margin: 0;
+}
+.billing-lifecycle-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.billing-blocked-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+.billing-blocked-notice a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--t-tap);
+  font-weight: var(--t-w-strong);
+}
+
 /* Shared Olaryn login contract: centered, product-branded, compact method list.
    Hide the old split-screen marketing pitch on the authentication route only. */
 .auth-shell-centered {

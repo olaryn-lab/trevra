@@ -15,6 +15,7 @@ import { authClient, useIsWorkspaceOwner } from './auth-client';
 import { relativeTime } from './LinkedInScreen';
 import { reloadOutreach } from './LinkedInSafety';
 import { ConfirmDrawer } from './ui/dialog';
+import { ErrorOrBillingBlocked } from './ui/BillingBlockedNotice';
 import { EmptyState, InlineActions, Panel } from './ui/layout';
 import { Button, Field, Input, Select, Textarea } from './ui/primitives';
 import type { Route } from './ui/route';
@@ -658,12 +659,14 @@ function TeamMembersPanel({
   const [showInvite, setShowInvite] = useState(false);
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState('');
+  const [addErrorCause, setAddErrorCause] = useState<unknown>(null);
 
   const addTeammate = async () => {
     const trimmed = email.trim();
     if (!trimmed) return;
     setAddBusy(true);
     setAddError('');
+    setAddErrorCause(null);
     try {
       // Always a real invitation now -- no email joins instantly, existing
       // Trevra account or not. When transactional SMTP is configured, Better
@@ -678,6 +681,7 @@ function TeamMembersPanel({
       );
       await loadInvitations();
     } catch (err) {
+      setAddErrorCause(err);
       setAddError(
         err instanceof ApiError || err instanceof Error
           ? err.message
@@ -818,7 +822,7 @@ function TeamMembersPanel({
                 <p>They receive workspace access only after accepting the invitation.</p>
               </div>
             </div>
-            {addError && <div className="error-banner">{addError}</div>}
+            {addError && <ErrorOrBillingBlocked message={addError} error={addErrorCause} />}
             <div className="li-filter-row">
               <Field label="Email">
                 <Input

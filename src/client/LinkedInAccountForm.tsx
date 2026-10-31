@@ -17,6 +17,7 @@ import {
 import { OWNER_ACCOUNT_KEY } from './LinkedInActiveAccount';
 import { Wall } from './LinkedInCompanion';
 import { errorMessage } from './LinkedInSafety';
+import { ErrorOrBillingBlocked } from './ui/BillingBlockedNotice';
 import { plural } from './ui/plural';
 import { Select, SwitchField } from './ui/primitives';
 /**
@@ -836,6 +837,7 @@ export function AddAccountForm({
   const [stage, setStage] = useState<'credentials' | 'otp' | 'waiting'>('credentials');
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState('');
+  const [failureCause, setFailureCause] = useState<unknown>(null);
   const [credentialsStored, setCredentialsStored] = useState(false);
 
   const finish = async () => {
@@ -875,12 +877,14 @@ export function AddAccountForm({
     }
     setBusy(true);
     setFailure('');
+    setFailureCause(null);
     try {
       await saveLinkedInCredentials({ email: address, password, seatKey });
       setCredentialsStored(true);
       setPassword('');
       await runLogin();
     } catch (error) {
+      setFailureCause(error);
       setFailure(errorMessage(error, 'Unable to connect this LinkedIn account'));
     } finally {
       setBusy(false);
@@ -891,9 +895,11 @@ export function AddAccountForm({
     if (!otp.trim()) return;
     setBusy(true);
     setFailure('');
+    setFailureCause(null);
     try {
       await runLogin(otp.trim());
     } catch (error) {
+      setFailureCause(error);
       setFailure(errorMessage(error, 'Unable to verify this LinkedIn account'));
     } finally {
       setBusy(false);
@@ -942,9 +948,12 @@ export function AddAccountForm({
         </p>
       </div>
 
-      {failure && (
-        <div className={stage === 'waiting' ? 'li-signin-note' : 'error-banner'}>{failure}</div>
-      )}
+      {failure &&
+        (stage === 'waiting' ? (
+          <div className="li-signin-note">{failure}</div>
+        ) : (
+          <ErrorOrBillingBlocked message={failure} error={failureCause} />
+        ))}
 
       {stage === 'waiting' ? (
         <div className="li-connect-waiting">

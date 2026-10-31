@@ -97,6 +97,7 @@ import { LinkedInActionApprovals } from './LinkedInActionApprovals';
 import { LinkedInWithdrawalApprovals } from './LinkedInWithdrawalApprovals';
 import { useWorkspaceMembers } from './TeamScreen';
 import { ConfirmDrawer } from './ui/dialog';
+import { ErrorOrBillingBlocked } from './ui/BillingBlockedNotice';
 import { ChoiceMenu } from './ui/choice-menu';
 import { ActionMenu } from './ui/action-menu';
 import { Select } from './ui/primitives';
@@ -2218,6 +2219,7 @@ export function OutreachManagerRead({
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [errorCause, setErrorCause] = useState<unknown>(null);
   const [starting, setStarting] = useState<ManagedCampaign | null>(null);
   const [stopping, setStopping] = useState<ManagedCampaign | null>(null);
   const [deleting, setDeleting] = useState<ManagedCampaign | null>(null);
@@ -2441,9 +2443,11 @@ export function OutreachManagerRead({
   const guard = async (key: string, work: () => Promise<void>, fallback: string) => {
     setBusy(key);
     setError('');
+    setErrorCause(null);
     try {
       await work();
     } catch (err) {
+      setErrorCause(err);
       setError(errorMessage(err, fallback));
     } finally {
       setBusy('');
@@ -2897,7 +2901,7 @@ export function OutreachManagerRead({
   })();
   return (
     <div className="page-stack li-polished">
-      {error && <div className="error-banner">{error}</div>}
+      {error && <ErrorOrBillingBlocked message={error} error={errorCause} />}
       <LinkedInActionApprovals />
       <LinkedInWithdrawalApprovals />
 
