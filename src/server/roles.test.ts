@@ -33,6 +33,7 @@ const MANAGER_FORBIDDEN: Capability[] = [
 const MANAGER_ONLY_OVER_MEMBER: Capability[] = [
   'outreach.approve',
   'campaigns.manage_all',
+  'campaigns.auto_enrol',
   'workflows.manage_workspace',
   'seats.assign',
   'lead_lists.manage',

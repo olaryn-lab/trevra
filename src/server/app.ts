@@ -515,6 +515,7 @@ import {
   importLeadCsv,
   importLeadProfileUrls,
   importLeadSourceContacts,
+  importPeopleIntoLeadList,
   previewLeadProfileUrls,
   ingestLeadSignal,
   listLeadLists,
@@ -673,7 +674,13 @@ import { listContacts } from './lead-capture/people.js';
 import { listInboundSubmissions } from './lead-capture/submissions.js';
 import { listProductMilestones } from './lead-capture/milestone-recorder.js';
 import { inboundAttributionSummary } from './lead-capture/attribution.js';
-import { persistImportedPeople } from './lead-capture/import.js';
+import { persistImportedPeopleWithIds } from './lead-capture/import.js';
+import {
+  createAutoEnrolRule,
+  disableAutoEnrolRule,
+  getAutoEnrolRule,
+  listAutoEnrolRules
+} from './linkedin/auto-enrol.js';
 import { captureSourceCreateSchema, LeadCaptureError } from './lead-capture/types.js';
 import { createHunterProvider } from './enrichment/hunter.js';
 import { EnrichmentProviderError } from './enrichment/provider.js';
@@ -7533,6 +7540,83 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     })
   );
 
+  // TRV-029: a capture source or lead list enrolling its new leads into this
+  // campaign through the manual admission path (linkedin/auto-enrol.ts).
+  app.get(
+    '/api/linkedin/manager/campaigns/:id/auto-enrol-rules',
+    linkedinRoute(async (req, res) => {
+      const campaignId = String(req.params.id);
+      if (!(await getManagedCampaign(db, req.auth!.workspaceId, campaignId)))
+        throw new LinkedInApiError('Managed campaign not found', 404);
+      res.json({ rules: await listAutoEnrolRules(db, req.auth!.workspaceId, campaignId) });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/auto-enrol-rules',
+    linkedinRoute(async (req, res) => {
+      assertCapability(req, 'campaigns.auto_enrol', 'set up auto-enrol rules');
+      const campaignId = String(req.params.id);
+      const campaign = await assertCanManageManagedCampaign(
+        db,
+        req,
+        campaignId,
+        'set up auto-enrol rules'
+      );
+      const input = z
+        .object({
+          sourceKind: z.enum(['capture_source', 'lead_list']),
+          sourceId: z.string().trim().min(1).max(160)
+        })
+        .strict()
+        .parse(req.body ?? {});
+      await assertCanUseLinkedInSeats(
+        db,
+        req,
+        campaign.senderKeys,
+        'auto-enrol into this campaign'
+      );
+      if (input.sourceKind === 'lead_list')
+        await assertCanUseLeadListSeat(
+          db,
+          req,
+          await leadListSeatOf(db, req.auth!.workspaceId, input.sourceId),
+          'auto-enrol leads from this list'
+        );
+      const rule = await createAutoEnrolRule(
+        db,
+        { workspaceId: req.auth!.workspaceId, campaignId, ...input, actorUserId: req.auth!.userId },
+        new Date()
+      );
+      res.status(201).json({ rule });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/manager/auto-enrol-rules/:id/disable',
+    linkedinRoute(async (req, res) => {
+      assertCapability(req, 'campaigns.auto_enrol', 'disable auto-enrol rules');
+      z.object({})
+        .strict()
+        .parse(req.body ?? {});
+      const ruleId = String(req.params.id);
+      const existing = await getAutoEnrolRule(db, req.auth!.workspaceId, ruleId);
+      if (!existing) throw new LinkedInApiError('Auto-enrol rule not found', 404);
+      await assertCanManageManagedCampaign(
+        db,
+        req,
+        existing.campaignId,
+        'disable auto-enrol rules'
+      );
+      const rule = await disableAutoEnrolRule(
+        db,
+        { workspaceId: req.auth!.workspaceId, ruleId, actorUserId: req.auth!.userId },
+        new Date()
+      );
+      res.json({ rule });
+    })
+  );
+
   app.get(
     '/api/linkedin/manager/members/:id/timeline',
     linkedinRoute(async (req, res) => {
@@ -9575,15 +9659,32 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     try {
       const input = accountImportSchema.parse(req.body ?? {});
       const workspaceId = req.auth!.workspaceId;
+      // A named lead list is checked like a CSV import into it, before anything is written.
+      if (input.leadListId)
+        await assertCanUseLeadListSeat(
+          db,
+          req,
+          await leadListSeatOf(db, workspaceId, input.leadListId),
+          'import leads'
+        );
       const result = await importAccounts(db, workspaceId, input.text, {
         source: input.source,
         tags: input.tags
       });
       if (input.people.length > 0) {
-        result.people = await persistImportedPeople(db, workspaceId, input.people, {
+        const persisted = await persistImportedPeopleWithIds(db, workspaceId, input.people, {
           type: 'human',
           id: req.auth!.userId
         });
+        result.people = persisted.result;
+        // TRV-029: the People reach campaigns through the list, by the same
+        // admission path as a CSV row (and the list's auto-enrol rules).
+        if (input.leadListId)
+          result.leadList = await importPeopleIntoLeadList(
+            db,
+            { workspaceId, listId: input.leadListId, personIds: persisted.personIds },
+            new Date()
+          );
       }
       // ONE BULK RESCORE, not one per row: an import is up to 2,000 accounts,
       // and a round trip each would make the paste the slowest thing in the
@@ -9601,6 +9702,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       // created, and saying 201 would make a no-op look like work.
       res.status(result.created > 0 || (result.people?.created ?? 0) > 0 ? 201 : 200).json(result);
     } catch (error) {
+      if (error instanceof LinkedInApiError)
+        return res.status(error.status).json({ error: error.message });
       next(error);
     }
   });
@@ -10386,6 +10489,15 @@ async function assertCanUseLeadListSeat(
     throw new LinkedInApiError('LinkedIn account not found', 404);
   }
   await assertCanUseLinkedInSeats(db, req, [seatKey], act);
+}
+
+/** The seat a lead list belongs to, found by id inside this workspace only. */
+async function leadListSeatOf(db: Db, workspaceId: string, listId: string): Promise<string> {
+  const row = await db
+    .prepare('SELECT seat_key FROM linkedin_lead_lists WHERE workspace_id=? AND id=?')
+    .get<{ seat_key: string }>(workspaceId, listId);
+  if (!row) throw new LinkedInApiError('Lead list not found', 404);
+  return row.seat_key;
 }
 
 async function assertCanManageManagedCampaign(
@@ -12098,7 +12210,9 @@ const accountImportSchema = z
           })
       )
       .max(4000)
-      .default([])
+      .default([]),
+    /** Put the imported People in this lead list as well (TRV-029). */
+    leadListId: z.string().trim().min(1).max(120).optional()
   })
   .strict();
 

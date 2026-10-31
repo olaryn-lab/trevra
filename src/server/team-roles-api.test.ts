@@ -190,6 +190,17 @@ describe('TRV-045 capability map over HTTP', () => {
       member: await pendingDm(workspaceId)
     };
     const memberMemberId = await memberRowId(workspaceId, member);
+    const sourceLists = Object.fromEntries(
+      await Promise.all(
+        ROLES.map(async (who) => {
+          const created = await owner.agent
+            .post('/api/linkedin/manager/lead-lists')
+            .send({ seatKey: 'team-seat', name: `Feed for ${who}`, sourceKind: 'csv' })
+            .expect(201);
+          return [who, (created.body.list as { id: string }).id] as const;
+        })
+      )
+    ) as Record<(typeof ROLES)[number], string>;
 
     type Row = {
       group: string;
@@ -225,6 +236,14 @@ describe('TRV-045 capability map over HTTP', () => {
           as(who)
             .patch(`/api/linkedin/manager/campaigns/${campaign.id}/owner`)
             .send({ ownerUserId: null })
+      },
+      {
+        group: 'campaigns.auto_enrol',
+        expect: OWNER_OR_MANAGER(201),
+        send: (who) =>
+          as(who)
+            .post(`/api/linkedin/manager/campaigns/${campaign.id}/auto-enrol-rules`)
+            .send({ sourceKind: 'lead_list', sourceId: sourceLists[who] })
       },
       {
         group: 'workflows.manage_workspace',

@@ -8,11 +8,12 @@
  * mailbox binding that does not exist, so a planned email row is held rather
  * than sent.
  *
- * What exists and is proven here: signed capture, account import with People,
- * Stripe payer convergence, and the MANUAL capture -> lead list -> campaign
- * bridge (the Inbound screen's one-row CSV import). What does not exist and is
- * therefore not proven: an automatic capture-source -> campaign rule, and any
- * path from account-import People into lead lists or campaigns.
+ * Proven here: signed capture, account import with People, Stripe payer
+ * convergence, the MANUAL capture -> lead list -> campaign bridge (the Inbound
+ * screen's one-row CSV import), auto-enrol rules (a capture source or a lead
+ * list enrolling new leads into a chosen campaign through the same admission
+ * path), account-import People reaching a lead list and its campaigns, and
+ * email / linked-Person suppressions holding at the send-time LinkedIn guard.
  */
 import { createHash, createHmac, randomBytes } from 'node:crypto';
 import type { Express } from 'express';
@@ -23,8 +24,10 @@ import { createApp } from '../app.js';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { openDatabase, type Db } from '../db.js';
 import { createProviderWebhookEndpoint } from '../provider-webhooks/index.js';
+import { evaluateLinkedInSafety } from '../linkedin/guard.js';
 import { runManagedCampaigns } from '../linkedin/runner.js';
 import { upsertSeat } from '../linkedin/seats.js';
+import { resolveContact } from './people.js';
 import { createCaptureSource } from './sources.js';
 
 const HOUR = 3_600_000;
@@ -211,11 +214,17 @@ async function leadList(ws: Ws, name: string): Promise<string> {
 /**
  * The Inbound screen's "Add to lead list": one row through the CSV reader with
  * its exact headers and mapping. `withProfile` adds the LinkedIn profile column
- * that screen does not send today.
+ * that screen does not send today; `withEmail` false leaves the email cell empty.
  */
-async function addToLeadList(ws: Ws, listId: string, p: Person, withProfile = true) {
+async function addToLeadList(
+  ws: Ws,
+  listId: string,
+  p: Person,
+  withProfile = true,
+  withEmail = true
+) {
   const headers: string[] = [...LEAD_HEADERS];
-  const values = [p.first, p.last, p.company, p.email, ''];
+  const values = [p.first, p.last, p.company, withEmail ? p.email : '', ''];
   const mapping: Record<string, string> = { ...LEAD_MAPPING };
   if (withProfile) {
     headers.push('profileUrl');
@@ -341,6 +350,119 @@ async function actionsTargeting(ws: Ws, p: Person): Promise<ActionRow[]> {
 async function count(sql: string, ...params: unknown[]): Promise<number> {
   const row = await db.prepare(sql).get<{ n: number }>(...params);
   return Number(row?.n ?? 0);
+}
+
+/** The send-time guard's suppression check for one LinkedIn invite at `p`'s profile. */
+async function sendTimeSuppression(ws: Ws, p: Person) {
+  const now = new Date();
+  const verdict = await evaluateLinkedInSafety(
+    db,
+    { workspaceId: ws.id, kind: 'invite', targetRef: profileOf(p), plannedFor: now.toISOString() },
+    now
+  );
+  const check = verdict.checks.find((entry) => entry.check === 'suppression');
+  if (!check) throw new Error('suppression check missing');
+  return check;
+}
+
+async function leadByProfile(ws: Ws, p: Person) {
+  const row = await db
+    .prepare(
+      "SELECT id,person_id,email FROM linkedin_lead_contacts WHERE workspace_id=? AND LOWER(RTRIM(profile_url,'/'))=LOWER(?)"
+    )
+    .get<{ id: string; person_id: string | null; email: string | null }>(ws.id, profileOf(p));
+  if (!row) throw new Error(`lead ${p.slug} not found`);
+  return row;
+}
+
+async function memberByContact(ws: Ws, campaignId: string, contactId: string): Promise<MemberRow> {
+  const row = await db
+    .prepare(
+      `SELECT id,status,exclusion_reason,admitted_at::text AS admitted_at FROM linkedin_campaign_members
+       WHERE workspace_id=? AND campaign_id=? AND contact_id=?`
+    )
+    .get<MemberRow>(ws.id, campaignId, contactId);
+  if (!row) throw new Error(`member ${contactId} not found`);
+  return row;
+}
+
+/** Campaign members whose lead carries `email`, whatever their status. */
+async function membersWithEmail(ws: Ws, campaignId: string, email: string): Promise<number> {
+  return count(
+    `SELECT COUNT(*)::int AS n FROM linkedin_campaign_members m
+     JOIN linkedin_lead_contacts c ON c.workspace_id=m.workspace_id AND c.id=m.contact_id
+     WHERE m.workspace_id=? AND m.campaign_id=? AND LOWER(c.email)=LOWER(?)`,
+    ws.id,
+    campaignId,
+    email
+  );
+}
+
+/** A Person Trevra already knows with a LinkedIn profile (an earlier list import or enrichment). */
+async function knownWithProfile(ws: Ws, p: Person): Promise<string> {
+  const resolved = await resolveContact(db, ws.id, {
+    name: `${p.first} ${p.last}`,
+    email: p.email,
+    linkedinUrl: profileOf(p)
+  });
+  return resolved.contact.id;
+}
+
+function captureBody(p: Person) {
+  return {
+    kind: 'demo_request',
+    person: { name: `${p.first} ${p.last}`, email: p.email },
+    company: { domain: 'acme-inbound.example', name: p.company }
+  };
+}
+
+/** A started invite campaign over a fresh list holding one control lead. */
+async function runningCampaign(ws: Ws, name: string): Promise<{ id: string; listId: string }> {
+  const listId = await leadList(ws, name);
+  await addToLeadList(ws, listId, person('control'));
+  const made = await campaign(ws, listId, [inviteStep()]);
+  await start(ws, made.id);
+  return { id: made.id, listId };
+}
+
+interface AutoRule {
+  id: string;
+  campaignId: string;
+  sourceKind: string;
+  sourceId: string;
+  status: string;
+}
+
+async function autoRule(
+  ws: Ws,
+  campaignId: string,
+  sourceKind: 'capture_source' | 'lead_list',
+  sourceId: string
+): Promise<AutoRule> {
+  const created = await as(ws)
+    .post(`/api/linkedin/manager/campaigns/${campaignId}/auto-enrol-rules`)
+    .send({ sourceKind, sourceId });
+  expect(created.status, JSON.stringify(created.body)).toBe(201);
+  return created.body.rule as AutoRule;
+}
+
+interface AutoEnrolEvent {
+  stream_type: string;
+  stream_id: string;
+  actor_type: string;
+  actor_id: string;
+  correlation_id: string | null;
+  payload_json: Record<string, unknown>;
+}
+
+async function autoEnrolEvents(ws: Ws, campaignId: string): Promise<AutoEnrolEvent[]> {
+  return db
+    .prepare(
+      `SELECT stream_type,stream_id,actor_type,actor_id,correlation_id,payload_json FROM domain_events
+       WHERE workspace_id=? AND event_type='linkedin_campaign.member_auto_enrolled'
+         AND payload_json->>'campaignId'=? ORDER BY position`
+    )
+    .all<AutoEnrolEvent>(ws.id, campaignId);
 }
 
 beforeAll(async () => {
@@ -1027,6 +1149,473 @@ describe('TRV-029 workspace isolation', () => {
     await suppressNotALead(A, contactId, p.email);
     expect(
       await count('SELECT COUNT(*)::int AS n FROM suppressions WHERE workspace_id=?', B.id)
+    ).toBe(0);
+  });
+});
+
+describe('TRV-029 email and Person suppressions stop LinkedIn at the send-time guard', () => {
+  it('an email-only suppression written before the Person existed refuses a LinkedIn action at the lead profile carrying that email', async () => {
+    const p = person('guardemail');
+    const control = person('control');
+    const created = await as(A)
+      .post('/api/suppressions')
+      .send({ channel: 'all', email: p.email, reason: 'Email-only opt-out' })
+      .expect(201);
+    expect(created.body.suppression.personId).toBeNull();
+    const listId = await leadList(A, 'Guard email');
+    await addToLeadList(A, listId, p);
+    await addToLeadList(A, listId, control);
+    expect((await lead(A, p.email)).person_id).toMatch(/^con_/);
+
+    expect(await sendTimeSuppression(A, p)).toMatchObject({
+      passed: false,
+      detail: expect.stringContaining('Email-only opt-out')
+    });
+    expect((await sendTimeSuppression(A, control)).passed).toBe(true);
+
+    // An email-channel suppression is the email boundary's business, not LinkedIn's.
+    await as(A)
+      .post('/api/suppressions')
+      .send({ channel: 'email', email: control.email, reason: 'Email channel only' })
+      .expect(201);
+    expect((await sendTimeSuppression(A, control)).passed).toBe(true);
+
+    // The same profile and email in workspace B is untouched by A's suppression.
+    const listB = await leadList(B, 'Guard email B');
+    await addToLeadList(B, listB, p);
+    expect((await sendTimeSuppression(B, p)).passed).toBe(true);
+  });
+
+  it('a Person suppression refuses a LinkedIn action at a lead profile the Person record does not carry', async () => {
+    const p = person('guardperson');
+    // The Person already holds an older profile, so the lead's newer one is a
+    // recorded conflict rather than a fill.
+    const resolved = await resolveContact(db, A.id, {
+      name: `${p.first} ${p.last}`,
+      email: p.email,
+      linkedinUrl: `https://www.linkedin.com/in/${p.slug}-old`
+    });
+    await suppressNotALead(A, resolved.contact.id, null);
+    const listId = await leadList(A, 'Guard person');
+    await addToLeadList(A, listId, p);
+    expect((await lead(A, p.email)).person_id).toBe(resolved.contact.id);
+    const canonical = await db
+      .prepare('SELECT linkedin_url_normalized FROM contacts WHERE workspace_id=? AND id=?')
+      .get<{ linkedin_url_normalized: string }>(A.id, resolved.contact.id);
+    expect(canonical?.linkedin_url_normalized).toBe(`https://www.linkedin.com/in/${p.slug}-old/`);
+
+    expect((await sendTimeSuppression(A, p)).passed).toBe(false);
+    expect((await sendTimeSuppression(B, p)).passed).toBe(true);
+  });
+
+  it("an email-only suppression matching the linked Person's email, not the lead's, retires the member and refuses the send", async () => {
+    const p = person('personemail');
+    const control = person('control');
+    const listId = await leadList(A, 'Person email');
+    await addToLeadList(A, listId, p, true, false);
+    await addToLeadList(A, listId, control);
+    const row = await leadByProfile(A, p);
+    expect(row.email).toBeNull();
+    expect(row.person_id).toMatch(/^con_/);
+    const made = await campaign(A, listId, [inviteStep()]);
+    await start(A, made.id);
+    await runManagedCampaigns(db, A.id, later(1));
+    const queued = await memberByContact(A, made.id, row.id);
+    expect((await actionsFor(A, queued.id)).map((action) => action.status)).toEqual(['planned']);
+
+    // The opt-out arrives for an address no Person holds yet, so it is email-only...
+    const created = await as(A)
+      .post('/api/suppressions')
+      .send({ channel: 'all', email: p.email, reason: 'Email-only opt-out' })
+      .expect(201);
+    expect(created.body.suppression.personId).toBeNull();
+    // ...and later evidence gives the lead's Person that address. The lead row
+    // itself never carries it.
+    const resolved = await resolveContact(db, A.id, { email: p.email, linkedinUrl: profileOf(p) });
+    expect(resolved.contact.id).toBe(row.person_id);
+    expect((await leadByProfile(A, p)).email).toBeNull();
+
+    expect((await sendTimeSuppression(A, p)).passed).toBe(false);
+    await runManagedCampaigns(db, A.id, later(2));
+    expect(await memberByContact(A, made.id, row.id)).toMatchObject({
+      status: 'excluded',
+      exclusion_reason: 'Workspace suppression'
+    });
+    expect((await actionsFor(A, queued.id)).map((action) => action.status)).toEqual(['skipped']);
+    expect((await sendTimeSuppression(A, control)).passed).toBe(true);
+  });
+});
+
+describe('TRV-029 auto-enrol rules enrol new leads into a chosen campaign through admission', () => {
+  it('a capture-source rule enrols each new capture into the running campaign once, through the same eligibility, with one event', async () => {
+    const { id: campaignId, listId } = await runningCampaign(A, 'Auto capture');
+    const rule = await autoRule(A, campaignId, 'capture_source', A.source.id);
+    expect(rule).toMatchObject({
+      campaignId,
+      sourceKind: 'capture_source',
+      sourceId: A.source.id,
+      status: 'active'
+    });
+
+    const known = person('autoknown');
+    const personId = await knownWithProfile(A, known);
+    const key = `cap-${known.slug}`;
+    const accepted = await capture(A.source, key, captureBody(known)).response.expect(202);
+    expect(accepted.body.personId).toBe(personId);
+
+    // Placed in the campaign's own list as the same canonical Person, and
+    // enrolled at once -- pending admission, exactly like a manual import.
+    const row = await lead(A, known.email);
+    expect(row.person_id).toBe(personId);
+    expect(row.profile_url?.replace(/\/$/, '')).toBe(profileOf(known));
+    expect(
+      await count(
+        'SELECT COUNT(*)::int AS n FROM linkedin_lead_list_members WHERE workspace_id=? AND list_id=? AND contact_id=?',
+        A.id,
+        listId,
+        row.id
+      )
+    ).toBe(1);
+    const enrolled = await member(A, campaignId, known.email);
+    expect(enrolled).toMatchObject({
+      status: 'pending',
+      exclusion_reason: null,
+      admitted_at: null
+    });
+    const events = await autoEnrolEvents(A, campaignId);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      stream_type: 'linkedin_campaign_member',
+      stream_id: enrolled.id,
+      actor_type: 'system',
+      actor_id: rule.id,
+      correlation_id: accepted.body.submissionId
+    });
+    expect(events[0].payload_json).toMatchObject({
+      ruleId: rule.id,
+      campaignId,
+      memberId: enrolled.id,
+      personId,
+      status: 'pending'
+    });
+
+    // A sender retry is a duplicate submission; a second, distinct capture of
+    // the same Person finds the member already there. Neither enrols again.
+    await capture(A.source, key, captureBody(known)).response.expect(200);
+    await capture(A.source, `${key}-again`, captureBody(known)).response.expect(202);
+    expect(await autoEnrolEvents(A, campaignId)).toHaveLength(1);
+    expect(await membersWithEmail(A, campaignId, known.email)).toBe(1);
+
+    // Same eligibility as any lead: a capture with no LinkedIn profile is
+    // enrolled as excluded, never planned.
+    const bare = person('autobare');
+    await captured(A, bare);
+    expect(await member(A, campaignId, bare.email)).toMatchObject({
+      status: 'excluded',
+      exclusion_reason: 'Missing LinkedIn profile URL'
+    });
+    expect(
+      (await autoEnrolEvents(A, campaignId)).map((event) => event.payload_json.status)
+    ).toEqual(['pending', 'excluded']);
+
+    // A source with no rule enrols nobody.
+    const other = person('autoother');
+    await knownWithProfile(A, other);
+    await capture(A.webinar, `cap-${other.slug}`, captureBody(other)).response.expect(202);
+    expect(await membersWithEmail(A, campaignId, other.email)).toBe(0);
+
+    // The runner admits and plans the enrolled Person like any other member.
+    await runManagedCampaigns(db, A.id, later(1));
+    const admitted = await member(A, campaignId, known.email);
+    expect(admitted.status).toBe('waiting');
+    expect(
+      (await actionsFor(A, admitted.id)).map((action) => [action.kind, action.status])
+    ).toEqual([['invite', 'planned']]);
+    expect(await actionsTargeting(A, bare)).toEqual([]);
+  });
+
+  it('a suppressed Person captured through a rule is enrolled as excluded and never planned', async () => {
+    const { id: campaignId } = await runningCampaign(A, 'Auto suppressed');
+    await autoRule(A, campaignId, 'capture_source', A.source.id);
+    const p = person('autosup');
+    const personId = await knownWithProfile(A, p);
+    await suppressNotALead(A, personId, p.email);
+    await captured(A, p);
+    expect(await member(A, campaignId, p.email)).toMatchObject({
+      status: 'excluded',
+      exclusion_reason: 'Workspace suppression'
+    });
+    await runManagedCampaigns(db, A.id, later(1));
+    expect(await actionsTargeting(A, p)).toEqual([]);
+  });
+
+  it('a rule never enrols into a paused or stopped campaign, and a disabled rule stops enrolling', async () => {
+    const { id: campaignId } = await runningCampaign(A, 'Auto paused');
+    const rule = await autoRule(A, campaignId, 'capture_source', A.source.id);
+    await as(A).post(`/api/linkedin/manager/campaigns/${campaignId}/pause`).send({}).expect(200);
+    const whilePaused = person('autopaused');
+    await knownWithProfile(A, whilePaused);
+    await captured(A, whilePaused);
+    expect(await membersWithEmail(A, campaignId, whilePaused.email)).toBe(0);
+
+    // Arrivals during the pause are not a backlog that fires on resume.
+    await start(A, campaignId);
+    await runManagedCampaigns(db, A.id, later(1));
+    expect(await membersWithEmail(A, campaignId, whilePaused.email)).toBe(0);
+    const afterResume = person('autoresumed');
+    await knownWithProfile(A, afterResume);
+    await captured(A, afterResume);
+    expect((await member(A, campaignId, afterResume.email)).status).toBe('pending');
+
+    const disabled = await as(A)
+      .post(`/api/linkedin/manager/auto-enrol-rules/${rule.id}/disable`)
+      .send({})
+      .expect(200);
+    expect(disabled.body.rule).toMatchObject({ id: rule.id, status: 'disabled' });
+    await as(A)
+      .post(`/api/linkedin/manager/auto-enrol-rules/${rule.id}/disable`)
+      .send({})
+      .expect(404);
+    const listed = await as(A)
+      .get(`/api/linkedin/manager/campaigns/${campaignId}/auto-enrol-rules`)
+      .expect(200);
+    expect(listed.body.rules.map((entry: AutoRule) => [entry.id, entry.status])).toEqual([
+      [rule.id, 'disabled']
+    ]);
+    const afterDisable = person('autodisabled');
+    await knownWithProfile(A, afterDisable);
+    await captured(A, afterDisable);
+    expect(await membersWithEmail(A, campaignId, afterDisable.email)).toBe(0);
+
+    // A stopped campaign takes no new rule, and an active one on it enrols nobody.
+    await autoRule(A, campaignId, 'capture_source', A.webinar.id);
+    await as(A).post(`/api/linkedin/manager/campaigns/${campaignId}/stop`).send({}).expect(200);
+    const afterStop = person('autostopped');
+    await knownWithProfile(A, afterStop);
+    await capture(A.webinar, `cap-${afterStop.slug}`, captureBody(afterStop)).response.expect(202);
+    expect(await membersWithEmail(A, campaignId, afterStop.email)).toBe(0);
+    expect(
+      (
+        await as(A)
+          .post(`/api/linkedin/manager/campaigns/${campaignId}/auto-enrol-rules`)
+          .send({ sourceKind: 'capture_source', sourceId: A.source.id })
+      ).status
+    ).toBe(409);
+    expect(await autoEnrolEvents(A, campaignId)).toHaveLength(1);
+  });
+
+  it('a lead-list rule enrols leads as they land in the source list, through the same eligibility, once', async () => {
+    const { id: campaignId, listId } = await runningCampaign(A, 'Auto list');
+    const sourceList = await leadList(A, 'Webinar attendees');
+    // The campaign's own list already enrols on every tick.
+    expect(
+      (
+        await as(A)
+          .post(`/api/linkedin/manager/campaigns/${campaignId}/auto-enrol-rules`)
+          .send({ sourceKind: 'lead_list', sourceId: listId })
+      ).status
+    ).toBe(400);
+    const rule = await autoRule(A, campaignId, 'lead_list', sourceList);
+    // One active rule per source and campaign.
+    expect(
+      (
+        await as(A)
+          .post(`/api/linkedin/manager/campaigns/${campaignId}/auto-enrol-rules`)
+          .send({ sourceKind: 'lead_list', sourceId: sourceList })
+      ).status
+    ).toBe(409);
+
+    const p = person('autolist');
+    const suppressed = person('autolistsup');
+    await as(A)
+      .post('/api/suppressions')
+      .send({ channel: 'all', email: suppressed.email, reason: 'Opted out' })
+      .expect(201);
+    await addToLeadList(A, sourceList, p);
+    await addToLeadList(A, sourceList, suppressed);
+
+    expect(await member(A, campaignId, p.email)).toMatchObject({
+      status: 'pending',
+      exclusion_reason: null
+    });
+    expect(await member(A, campaignId, suppressed.email)).toMatchObject({
+      status: 'excluded',
+      exclusion_reason: 'Workspace suppression'
+    });
+    // In the campaign's list as the same lead row, not a copy.
+    expect(
+      await count(
+        'SELECT COUNT(*)::int AS n FROM linkedin_lead_list_members WHERE workspace_id=? AND list_id=? AND contact_id=?',
+        A.id,
+        listId,
+        (await lead(A, p.email)).id
+      )
+    ).toBe(1);
+    expect(
+      (await autoEnrolEvents(A, campaignId)).map((event) => [
+        event.payload_json.status,
+        event.actor_id
+      ])
+    ).toEqual([
+      ['pending', rule.id],
+      ['excluded', rule.id]
+    ]);
+
+    // Re-importing the same row is a duplicate and enrols nobody twice.
+    await addToLeadList(A, sourceList, p);
+    expect(await autoEnrolEvents(A, campaignId)).toHaveLength(2);
+
+    await runManagedCampaigns(db, A.id, later(1));
+    expect((await actionsTargeting(A, p)).map((action) => [action.kind, action.status])).toEqual([
+      ['invite', 'planned']
+    ]);
+    expect(await actionsTargeting(A, suppressed)).toEqual([]);
+  });
+
+  it("refuses another workspace's campaign, capture source or lead list, and B's captures never enrol into A", async () => {
+    const { id: campaignId } = await runningCampaign(A, 'Auto isolated');
+    const listB = await leadList(B, 'B list');
+    for (const body of [
+      { sourceKind: 'capture_source', sourceId: B.source.id },
+      { sourceKind: 'lead_list', sourceId: listB }
+    ])
+      expect(
+        (
+          await as(A)
+            .post(`/api/linkedin/manager/campaigns/${campaignId}/auto-enrol-rules`)
+            .send(body)
+        ).status
+      ).toBe(404);
+    expect(
+      (
+        await as(B)
+          .post(`/api/linkedin/manager/campaigns/${campaignId}/auto-enrol-rules`)
+          .send({ sourceKind: 'capture_source', sourceId: B.source.id })
+      ).status
+    ).toBe(404);
+    expect(
+      (await as(B).get(`/api/linkedin/manager/campaigns/${campaignId}/auto-enrol-rules`)).status
+    ).toBe(404);
+    const rule = await autoRule(A, campaignId, 'capture_source', A.source.id);
+    expect(
+      (await as(B).post(`/api/linkedin/manager/auto-enrol-rules/${rule.id}/disable`).send({}))
+        .status
+    ).toBe(404);
+
+    const p = person('autoiso');
+    await knownWithProfile(B, p);
+    await captured(B, p);
+    expect(
+      await count(
+        'SELECT COUNT(*)::int AS n FROM linkedin_campaign_members WHERE campaign_id=?',
+        campaignId
+      )
+    ).toBe(1);
+    expect(
+      await count(
+        'SELECT COUNT(*)::int AS n FROM linkedin_lead_contacts WHERE workspace_id=? AND LOWER(email)=LOWER(?)',
+        A.id,
+        p.email
+      )
+    ).toBe(0);
+  });
+});
+
+describe('TRV-029 account-import People reach campaigns through a lead list', () => {
+  it('account import with a lead list places the imported People in it, and the running campaign on that list enrols them on the next tick', async () => {
+    const { id: campaignId, listId } = await runningCampaign(A, 'Imported people');
+    const linkedPerson = person('importlinked');
+    const personId = await knownWithProfile(A, linkedPerson);
+    const bareEmail = `bare-${randomBytes(3).toString('hex')}@import2.example`;
+    const body = {
+      text: 'import2.example',
+      leadListId: listId,
+      people: [
+        {
+          accountDomain: 'import2.example',
+          name: `${linkedPerson.first} ${linkedPerson.last}`,
+          email: linkedPerson.email
+        },
+        { accountDomain: 'import2.example', name: 'Bare Importee', email: bareEmail }
+      ]
+    };
+    const imported = await as(A).post('/api/accounts/import').send(body);
+    expect(imported.status, JSON.stringify(imported.body)).toBe(201);
+    expect(imported.body.people).toEqual({ created: 1, matched: 1, linked: 2, skipped: 0 });
+    expect(imported.body.leadList).toEqual({
+      listId,
+      inserted: 2,
+      reused: 0,
+      duplicates: 0,
+      skipped: 0
+    });
+
+    const linked = await lead(A, linkedPerson.email);
+    expect(linked.person_id).toBe(personId);
+    expect(linked.profile_url?.replace(/\/$/, '')).toBe(profileOf(linkedPerson));
+    const bareContact = await db
+      .prepare('SELECT id FROM contacts WHERE workspace_id=? AND email_normalized=?')
+      .get<{ id: string }>(A.id, bareEmail);
+    expect((await lead(A, bareEmail)).person_id).toBe(bareContact?.id);
+
+    await runManagedCampaigns(db, A.id, later(1));
+    const enrolled = await member(A, campaignId, linkedPerson.email);
+    expect(enrolled.status).toBe('waiting');
+    expect(
+      (await actionsFor(A, enrolled.id)).map((action) => [action.kind, action.status])
+    ).toEqual([['invite', 'planned']]);
+    // Same eligibility as any lead: no LinkedIn profile, no LinkedIn step.
+    expect(await member(A, campaignId, bareEmail)).toMatchObject({
+      status: 'excluded',
+      exclusion_reason: 'Missing LinkedIn profile URL'
+    });
+
+    const again = await as(A).post('/api/accounts/import').send(body).expect(200);
+    expect(again.body.leadList).toEqual({
+      listId,
+      inserted: 0,
+      reused: 0,
+      duplicates: 2,
+      skipped: 0
+    });
+    expect(
+      await count(
+        'SELECT COUNT(*)::int AS n FROM linkedin_lead_contacts WHERE workspace_id=? AND LOWER(email)=LOWER(?)',
+        A.id,
+        bareEmail
+      )
+    ).toBe(1);
+  });
+
+  it("refuses another workspace's lead list before writing anything", async () => {
+    const listB = await leadList(B, 'B import list');
+    const email = `iso-${randomBytes(3).toString('hex')}@import3.example`;
+    const refused = await as(A)
+      .post('/api/accounts/import')
+      .send({
+        text: 'import3.example',
+        leadListId: listB,
+        people: [{ accountDomain: 'import3.example', name: 'Iso Person', email }]
+      });
+    expect(refused.status).toBe(404);
+    expect(
+      await count(
+        'SELECT COUNT(*)::int AS n FROM contacts WHERE workspace_id=? AND email_normalized=?',
+        A.id,
+        email
+      )
+    ).toBe(0);
+    expect(
+      await count(
+        "SELECT COUNT(*)::int AS n FROM accounts WHERE workspace_id=? AND domain='import3.example'",
+        A.id
+      )
+    ).toBe(0);
+    expect(
+      await count(
+        'SELECT COUNT(*)::int AS n FROM linkedin_lead_list_members WHERE list_id=?',
+        listB
+      )
     ).toBe(0);
   });
 });

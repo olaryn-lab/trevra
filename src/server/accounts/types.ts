@@ -204,6 +204,14 @@ export interface AccountImportRow {
 export interface AccountImportResult {
   /** Optional Person persistence summary when reviewed contact evidence accompanied the import. */
   people?: { created: number; matched: number; linked: number; skipped: number };
+  /** When the import named a lead list: how its People landed there (duplicates include reused). */
+  leadList?: {
+    listId: string;
+    inserted: number;
+    reused: number;
+    duplicates: number;
+    skipped: number;
+  };
   /** Rows written. */
   created: number;
   /** Rows that matched an existing account on domain and were left alone. */

@@ -14,6 +14,7 @@ import {
 // cycle.
 import { LinkedInApiError } from './errors.js';
 import {
+  canonicalProfileUrl,
   leadDedupeKey,
   normalizeLeadRow,
   normalizeScrapedLead,
@@ -21,6 +22,7 @@ import {
   parseProfileUrlPaste,
   profileUrlCapMessage,
   PROFILE_URL_IMPORT_CAP,
+  splitAndScrubName,
   type LeadFieldMapping,
   type NormalizedLeadInput,
   type PastedProfile,
@@ -684,6 +686,187 @@ async function insertLead(
   return { contactId, inserted: Boolean(row), reused: !row && link.changes > 0 };
 }
 
+/** The leads an insert actually brought into the list: new rows and reused ones. */
+function arrivals(outcomes: readonly LeadInsertOutcome[]): string[] {
+  return outcomes
+    .filter((outcome) => outcome.contactId && (outcome.inserted || outcome.reused))
+    .map((outcome) => outcome.contactId);
+}
+
+/**
+ * Leads that just ARRIVED in a list are what a lead-list auto-enrol rule
+ * enrols (TRV-029). Called inside the import's own transaction, so an import
+ * and the enrolments it causes land together or not at all. A dynamic import:
+ * auto-enrol.ts imports this module.
+ */
+async function enrolListArrivals(
+  tx: Db,
+  workspaceId: string,
+  listId: string,
+  contactIds: readonly string[],
+  now: Date
+): Promise<void> {
+  if (contactIds.length === 0) return;
+  const { applyListAutoEnrolRules } = await import('./auto-enrol.js');
+  await applyListAutoEnrolRules(tx, { workspaceId, listId, leadContactIds: contactIds }, now);
+}
+
+/** One canonical Person (a `contacts` row) to put in a lead list. */
+export interface PersonPlacement {
+  personId: string;
+  /** The company this arrival named (a capture's company); else the Person's Account. */
+  company?: string | null;
+}
+
+export interface PersonPlacementOutcome extends LeadInsertOutcome {
+  personId: string;
+}
+
+/**
+ * Canonical People into a lead list, as lead rows, through the same writer as a
+ * CSV import (`insertLead`: workspace dedupe, canonical Person link,
+ * membership). A Person who already IS a lead -- linked by Person id, or by the
+ * same email -- is added to the list as that row, never copied. Otherwise the
+ * lead is built from the Person: name split and scrubbed like a CSV name, email,
+ * phone, the canonical LinkedIn profile, and the company named by the arrival
+ * or the Person's Account. Eligibility still decides whether it may be
+ * contacted (a lead without a profile is excluded from LinkedIn steps).
+ *
+ * The caller owns the transaction. Fires no auto-enrol rules itself.
+ */
+export async function placePeopleInLeadList(
+  db: Db,
+  input: {
+    workspaceId: string;
+    listId: string;
+    people: readonly PersonPlacement[];
+    /** Provenance recorded on an email this call writes; capture is first-party. */
+    emailProvenance?: 'first_party' | 'imported';
+  },
+  now: Date = new Date()
+): Promise<PersonPlacementOutcome[]> {
+  const hints = new Map<string, string | null>();
+  for (const person of input.people)
+    if (person.personId && !hints.has(person.personId))
+      hints.set(person.personId, person.company?.trim() || null);
+  if (hints.size === 0) return [];
+  const timestamp = now.toISOString();
+  const rows = await db
+    .prepare(
+      `SELECT c.id,c.name,c.email_normalized,c.phone,c.linkedin_url,
+              (SELECT l.id FROM linkedin_lead_contacts l
+                WHERE l.workspace_id=c.workspace_id
+                  AND (l.person_id=c.id
+                       OR (c.email_normalized IS NOT NULL AND LOWER(BTRIM(l.email))=c.email_normalized))
+                ORDER BY (l.person_id IS NOT DISTINCT FROM c.id) DESC, l.created_at, l.id
+                LIMIT 1) AS lead_id,
+              (SELECT COALESCE(NULLIF(BTRIM(a.name),''), a.domain)
+                 FROM account_contacts ac
+                 JOIN accounts a ON a.workspace_id=ac.workspace_id AND a.id=ac.account_id
+                WHERE ac.workspace_id=c.workspace_id AND ac.contact_id=c.id
+                ORDER BY ac.created_at DESC, ac.id LIMIT 1) AS account_name
+       FROM contacts c WHERE c.workspace_id=? AND c.id = ANY(?::text[]) ORDER BY c.id`
+    )
+    .all<{
+      id: string;
+      name: string | null;
+      email_normalized: string | null;
+      phone: string | null;
+      linkedin_url: string | null;
+      lead_id: string | null;
+      account_name: string | null;
+    }>(input.workspaceId, [...hints.keys()]);
+  const outcomes: PersonPlacementOutcome[] = [];
+  for (const row of rows) {
+    if (row.lead_id) {
+      const link = await db
+        .prepare(
+          'INSERT INTO linkedin_lead_list_members (workspace_id,list_id,contact_id,created_at) VALUES (?,?,?,?) ON CONFLICT DO NOTHING'
+        )
+        .run(input.workspaceId, input.listId, row.lead_id, timestamp);
+      outcomes.push({
+        personId: row.id,
+        contactId: row.lead_id,
+        inserted: false,
+        reused: link.changes > 0
+      });
+      continue;
+    }
+    const { firstName, lastName } = splitAndScrubName(row.name ?? '');
+    const lead: NormalizedLeadInput = {
+      firstName,
+      lastName,
+      company: hints.get(row.id) ?? row.account_name ?? '',
+      email: row.email_normalized,
+      phone: row.phone,
+      country: null,
+      profileUrl: canonicalProfileUrl(row.linkedin_url),
+      dedupeKey: '',
+      customFields: {},
+      original: { source: 'canonical_person', personId: row.id }
+    };
+    lead.dedupeKey = leadDedupeKey(lead);
+    const outcome = await insertLead(db, input.workspaceId, input.listId, lead, timestamp);
+    if (outcome.inserted && lead.email && input.emailProvenance === 'first_party')
+      await db
+        .prepare(
+          `UPDATE linkedin_lead_contacts SET email_source='first_party',email_provenance='first_party',updated_at=?
+           WHERE workspace_id=? AND id=?`
+        )
+        .run(timestamp, input.workspaceId, outcome.contactId);
+    outcomes.push({ personId: row.id, ...outcome });
+  }
+  return outcomes;
+}
+
+/**
+ * Account-import People into a lead list (TRV-029): the same placement a
+ * capture rule uses, then the list's own auto-enrol rules, in one transaction.
+ * A campaign built on the list enrols them on its next tick, exactly as it
+ * would a CSV row. The route checks the list's seat before calling this.
+ */
+export async function importPeopleIntoLeadList(
+  db: Db,
+  input: { workspaceId: string; listId: string; personIds: readonly string[] },
+  now: Date = new Date()
+): Promise<{
+  listId: string;
+  inserted: number;
+  reused: number;
+  duplicates: number;
+  skipped: number;
+}> {
+  const personIds = [...new Set(input.personIds.filter(Boolean))];
+  return db.transaction(async (tx) => {
+    const list = await tx
+      .prepare('SELECT id FROM linkedin_lead_lists WHERE workspace_id=? AND id=? FOR SHARE')
+      .get<{ id: string }>(input.workspaceId, input.listId);
+    if (!list) throw new LinkedInApiError('Lead list not found', 404);
+    const outcomes = await placePeopleInLeadList(
+      tx,
+      {
+        workspaceId: input.workspaceId,
+        listId: input.listId,
+        people: personIds.map((personId) => ({ personId }))
+      },
+      now
+    );
+    const placed = outcomes.filter((outcome) => outcome.contactId);
+    await enrolListArrivals(tx, input.workspaceId, input.listId, arrivals(placed), now);
+    await tx
+      .prepare('UPDATE linkedin_lead_lists SET updated_at=? WHERE id=? AND workspace_id=?')
+      .run(now.toISOString(), input.listId, input.workspaceId);
+    const inserted = placed.filter((outcome) => outcome.inserted).length;
+    return {
+      listId: input.listId,
+      inserted,
+      reused: placed.filter((outcome) => outcome.reused).length,
+      duplicates: placed.length - inserted,
+      skipped: personIds.length - placed.length
+    };
+  });
+}
+
 export async function ingestLeadSignal(
   db: Db,
   input: {
@@ -758,6 +941,7 @@ export async function ingestLeadSignal(
 
     const lead = await insertLead(tx, input.workspaceId, input.listId, normalized, timestamp);
     if (!lead.contactId) throw new Error('Signal lead could not be stored.');
+    await enrolListArrivals(tx, input.workspaceId, input.listId, arrivals([lead]), now);
     if (normalized.email) {
       const provenance = input.emailProvenance ?? 'external';
       await tx
@@ -880,8 +1064,10 @@ export async function importLeadProfileUrls(
     return a < b ? -1 : a > b ? 1 : 0;
   });
   await db.transaction(async (tx) => {
+    const outcomes: LeadInsertOutcome[] = [];
     for (const { entry, lead } of valid) {
       const outcome = await insertLead(tx, input.workspaceId, input.listId, lead, timestamp);
+      outcomes.push(outcome);
       if (!outcome.contactId) {
         rejected.push({
           line: entry.line,
@@ -896,6 +1082,7 @@ export async function importLeadProfileUrls(
         if (outcome.reused) reused += 1;
       }
     }
+    await enrolListArrivals(tx, input.workspaceId, input.listId, arrivals(outcomes), now);
   });
   rejected.sort((left, right) => left.line - right.line);
   return { inserted, duplicates, reused, rejected };
@@ -930,8 +1117,10 @@ export async function importLeadCsv(
   // CSVs from holding one another's existing contact/Person locks in a cycle.
   const accepted = orderedLeadWrites(parsed.accepted);
   await db.transaction(async (tx) => {
+    const outcomes: LeadInsertOutcome[] = [];
     for (const lead of accepted) {
       const outcome = await insertLead(tx, input.workspaceId, input.listId, lead, timestamp);
+      outcomes.push(outcome);
       if (outcome.inserted) inserted += 1;
       else {
         duplicates += 1;
@@ -943,6 +1132,7 @@ export async function importLeadCsv(
         if (outcome.reused) reused += 1;
       }
     }
+    await enrolListArrivals(tx, input.workspaceId, input.listId, arrivals(outcomes), now);
     await tx
       .prepare('UPDATE linkedin_lead_lists SET updated_at=? WHERE id=? AND workspace_id=?')
       .run(timestamp, input.listId, input.workspaceId);
@@ -1059,14 +1249,17 @@ export async function importLeadSourceContacts(
     normalizedLeads.filter((lead): lead is NormalizedLeadInput => !!lead)
   );
   await db.transaction(async (tx) => {
+    const outcomes: LeadInsertOutcome[] = [];
     for (const normalized of ordered) {
       const outcome = await insertLead(tx, input.workspaceId, list.id, normalized, timestamp);
+      outcomes.push(outcome);
       if (outcome.inserted) inserted += 1;
       else {
         duplicates += 1;
         if (outcome.reused) reused += 1;
       }
     }
+    await enrolListArrivals(tx, input.workspaceId, list.id, arrivals(outcomes), now);
     await tx
       .prepare('UPDATE linkedin_lead_lists SET updated_at=? WHERE id=? AND workspace_id=?')
       .run(timestamp, list.id, input.workspaceId);

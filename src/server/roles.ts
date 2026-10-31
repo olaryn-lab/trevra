@@ -43,6 +43,8 @@ export const CAPABILITIES = {
   'outreach.approve': OWNER_OR_MANAGER,
   /** Manage every campaign regardless of its owner, on any seat; delete and transfer campaigns. */
   'campaigns.manage_all': OWNER_OR_MANAGER,
+  /** Create or disable a rule that enrols new leads from a capture source or lead list into a campaign. */
+  'campaigns.auto_enrol': OWNER_OR_MANAGER,
   /** Workspace workflow templates and any teammate's personal workflow. */
   'workflows.manage_workspace': OWNER_OR_MANAGER,
   /** Assign which teammate a LinkedIn seat belongs to (assignment only, not its limits). */

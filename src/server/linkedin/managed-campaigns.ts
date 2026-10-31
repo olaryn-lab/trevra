@@ -1414,6 +1414,82 @@ export async function enrolNewContacts(
   return Number(promoted?.total ?? 0);
 }
 
+/** One member an auto-enrol rule just created, with the verdict eligibility gave it. */
+export interface ListedContactEnrolment {
+  memberId: string;
+  contactId: string;
+  status: string;
+  exclusionReason: string | null;
+}
+
+/**
+ * {@link enrolNewContacts} for named contacts only: the same derived member id,
+ * the same `__eligibility__` placeholder and the same
+ * {@link reevaluateCampaignExclusions} verdict, so an auto-enrol rule admits
+ * exactly who a manual import into the campaign's list would. The contacts must
+ * already be members of the campaign's lead list; anyone who is not is skipped.
+ *
+ * Returns only the members THIS call created. A contact already in the
+ * campaign, or live in another campaign (`idx_linkedin_campaign_members_one_active`),
+ * conflicts and is not reported -- which is what makes a replayed arrival a
+ * no-op rather than a second enrolment. The caller owns the transaction and the
+ * campaign-state check.
+ */
+export async function enrolListedContacts(
+  db: Db,
+  workspaceId: string,
+  campaign: { id: string; leadListId: string; steps: readonly WorkflowStep[] },
+  contactIds: readonly string[],
+  now: Date = new Date()
+): Promise<ListedContactEnrolment[]> {
+  const ids = [...new Set(contactIds.filter(Boolean))];
+  if (campaign.steps.length === 0 || ids.length === 0) return [];
+  const timestamp = now.toISOString();
+  const inserted = await db
+    .prepare(
+      `
+    INSERT INTO linkedin_campaign_members
+      (id,workspace_id,campaign_id,contact_id,status,step_index,current_step_id,completed_step_ids,next_eligible_at,assigned_variants,exclusion_reason,created_at,updated_at)
+    SELECT ${DERIVED_MEMBER_ID}, ?, ?, m.contact_id, 'excluded', 0, NULL, '[]'::jsonb, NULL, '{}'::jsonb, '__eligibility__', ?, ?
+    FROM linkedin_lead_list_members m
+    WHERE m.workspace_id=? AND m.list_id=? AND m.contact_id = ANY(?::text[])
+    ORDER BY m.contact_id
+    ON CONFLICT DO NOTHING RETURNING id
+  `
+    )
+    .all<{ id: string }>(
+      workspaceId,
+      campaign.id,
+      workspaceId,
+      campaign.id,
+      timestamp,
+      timestamp,
+      workspaceId,
+      campaign.leadListId,
+      ids
+    );
+  if (inserted.length === 0) return [];
+  // lc-debt: re-evaluates every unadmitted member of the campaign, as the
+  // tick does, for each arrival; upgrade path: scope the pass to the inserted ids.
+  await reevaluateCampaignExclusions(db, workspaceId, campaign.id, now);
+  const rows = await db
+    .prepare(
+      `SELECT id,contact_id,status,exclusion_reason FROM linkedin_campaign_members
+       WHERE workspace_id=? AND campaign_id=? AND id = ANY(?::text[]) ORDER BY contact_id`
+    )
+    .all<{ id: string; contact_id: string; status: string; exclusion_reason: string | null }>(
+      workspaceId,
+      campaign.id,
+      inserted.map((row) => row.id)
+    );
+  return rows.map((row) => ({
+    memberId: row.id,
+    contactId: row.contact_id,
+    status: row.status,
+    exclusionReason: row.exclusion_reason
+  }));
+}
+
 export async function listCampaignWaves(
   db: Db,
   workspaceId: string,
