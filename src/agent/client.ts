@@ -212,10 +212,17 @@ export class TrevraAgentClient {
       signal: AbortSignal.timeout(Number(process.env.TREVRA_AGENT_TIMEOUT_MS ?? 60_000))
     });
     const body = (await response.json().catch(() => ({ error: response.statusText }))) as {
-      error?: string;
+      error?: string | { code?: string; message?: string; requestId?: string };
     } & T;
-    if (!response.ok)
-      throw new Error(body.error || `Trevra API request failed with ${response.status}`);
+    if (!response.ok) {
+      // The public API answers `{ error: { code, message, requestId } }`
+      // (docs/api/public-api.md); a proxy or older server may still send a string.
+      const error = body.error;
+      let message = typeof error === 'string' ? error : (error?.message ?? '');
+      if (message && typeof error === 'object' && error.code)
+        message += ` (${error.code}${error.requestId ? `, request ${error.requestId}` : ''})`;
+      throw new Error(message || `Trevra API request failed with ${response.status}`);
+    }
     return body;
   }
 }

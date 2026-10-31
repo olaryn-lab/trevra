@@ -74,12 +74,8 @@ import {
 import {
   AGENT_SCOPES,
   createAgentToken,
-  hasAgentScope,
   listAgentTokens,
-  resolveAgentIdentity,
-  revokeAgentToken,
-  type AgentIdentity,
-  type AgentScope
+  revokeAgentToken
 } from './agent-access.js';
 import {
   executeWorkspaceSkill,
@@ -116,7 +112,9 @@ import {
   citationSourceView,
   connectCitationSource
 } from './watch/citations.js';
-import { handleMcpHttpRequest, rejectMcpNonPost } from './mcp-http.js';
+import { isPublicApiPath, mountPublicApi } from './public-api/mount.js';
+import { PublicApiError, REQUEST_ID_PATTERN, sendPublicApiError } from './public-api/errors.js';
+import type { PublicApiRateLimitPolicy } from './public-api/rate-limit.js';
 import {
   decidePlaybookApproval,
   getPlaybookRun,
@@ -140,10 +138,8 @@ import {
 import { AgentBudgetError, getAgentBudget, setAgentBudget } from './agent/budget.js';
 import {
   AgentPrincipalError,
-  configuredAgentSkillIds,
   createAgent,
   ensureDefaultAgent,
-  getAgent,
   listAgents,
   updateAgent
 } from './agents.js';
@@ -675,9 +671,13 @@ const linkedinTargetsUpload = multer({
 type AuthedRequest = Request & {
   auth?: { userId: string; workspaceId: string; email: string; role: 'owner' | 'member' };
 };
-type AgentRequest = Request & { agent?: AgentIdentity };
 
-export function createApp(db: Db) {
+export interface CreateAppOptions {
+  /** Test seam for the TRV-053 public API limiter; production uses the defaults. */
+  publicApi?: { rateLimits?: PublicApiRateLimitPolicy; now?: () => Date };
+}
+
+export function createApp(db: Db, options: CreateAppOptions = {}) {
   // Wires `db` to auth-service.ts's better-auth `afterCreateOrganization` hook
   // (see the block comment near the top of that file). Idempotent, so calling
   // it again here is harmless even when index.ts's boot sequence already did --
@@ -728,7 +728,13 @@ export function createApp(db: Db) {
         level: process.env.NODE_ENV === 'test' ? 'silent' : (process.env.LOG_LEVEL ?? 'info')
       }),
       genReqId: (req, res) => {
-        const requestId = String(req.headers['x-request-id'] ?? randomUUID());
+        // Echo a caller's id only when it is a short, header-safe token; any
+        // other value is replaced rather than reflected into logs and headers.
+        const supplied = req.headers['x-request-id'];
+        const requestId =
+          typeof supplied === 'string' && REQUEST_ID_PATTERN.test(supplied)
+            ? supplied
+            : randomUUID();
         res.setHeader('x-request-id', requestId);
         return requestId;
       },
@@ -1221,7 +1227,22 @@ export function createApp(db: Db) {
     windowMs: 60 * 1000,
     limit: 300,
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    // Same 429 as the library default everywhere except the TRV-053 public
+    // routes, which answer in their documented error envelope.
+    handler: (req, res, _next, limiterOptions) => {
+      if (isPublicApiPath(req))
+        return sendPublicApiError(
+          req,
+          res,
+          new PublicApiError(
+            429,
+            'rate_limited',
+            'Too many requests from this address. Retry after the Retry-After interval.'
+          )
+        );
+      res.status(limiterOptions.statusCode).send(limiterOptions.message);
+    }
   });
   const workspaceLimiter = rateLimit({
     windowMs: 60 * 1000,
@@ -1314,168 +1335,21 @@ export function createApp(db: Db) {
     }
   });
 
-  // Agent tokens deliberately expose a smaller surface than browser sessions.
-  // Claude Code, Codex, and other MCP clients can inspect and run skills, but
-  // cannot silently inherit billing, integration, or account-management access.
-  // Claude Code, Codex, and other MCP clients can inspect and run skills, but
-  // cannot silently inherit billing, integration, or account-management access.
-  app.post(
-    '/api/agent/mcp',
-    requireAgentScope(db, 'skills:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        await handleMcpHttpRequest(db, req.agent!, req, res);
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-  app.get('/api/agent/mcp', requireAgentScope(db, 'skills:read'), rejectMcpNonPost);
-  app.delete('/api/agent/mcp', requireAgentScope(db, 'skills:read'), rejectMcpNonPost);
-
-  app.get(
-    '/api/agent/skills',
-    requireAgentScope(db, 'skills:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const skills = await listWorkspaceSkills(db, req.agent!.workspaceId);
-        const agent = await getAgent(db, req.agent!.workspaceId, req.agent!.agentId);
-        const allowed = agent ? configuredAgentSkillIds(agent) : null;
-        res.json({
-          skills: skills.filter(
-            (skill) => skill.enabled && (allowed === null || allowed.includes(skill.id))
-          )
-        });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.post(
-    '/api/agent/skills/:id/run',
-    requireAgentScope(db, 'skills:run'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const skillId = String(req.params.id);
-        const agent = await getAgent(db, req.agent!.workspaceId, req.agent!.agentId);
-        const allowed = agent ? configuredAgentSkillIds(agent) : null;
-        if (allowed !== null && !allowed.includes(skillId)) {
-          return res.status(403).json({ error: `Skill is not assigned to this Agent: ${skillId}` });
-        }
-        const result = await executeWorkspaceSkill(db, {
-          workspaceId: req.agent!.workspaceId,
-          skillId,
-          payload: req.body ?? {},
-          actorType: 'agent',
-          actorId: req.agent!.agentId
-        });
-        res.status(201).json(result);
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/runs',
-    requireAgentScope(db, 'runs:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const filters = skillRunFiltersSchema.parse(req.query);
-        res.json({ runs: await listWorkspaceSkillRuns(db, req.agent!.workspaceId, filters) });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/runs/:id',
-    requireAgentScope(db, 'runs:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const run = await getWorkspaceSkillRun(db, req.agent!.workspaceId, String(req.params.id));
-        if (!run) return res.status(404).json({ error: 'Skill run not found' });
-        res.json({ run });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/playbooks',
-    requireAgentScope(db, 'playbooks:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        res.json({ playbooks: await listWorkspacePlaybooks(db, req.agent!.workspaceId) });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.post(
-    '/api/agent/playbooks/:id/runs',
-    requireAgentScope(db, 'playbooks:run'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const input = playbookStartSchema.parse(req.body ?? {});
-        const run = await startPlaybookRun(db, {
-          workspaceId: req.agent!.workspaceId,
-          playbookId: String(req.params.id),
-          version: input.version,
-          payload: input.input,
-          actorType: 'agent',
-          actorId: req.agent!.agentId
-        });
-        res.status(201).json({ run });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/playbook-runs',
-    requireAgentScope(db, 'workflows:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const filters = playbookRunFiltersSchema.parse(req.query);
-        res.json({ runs: await listPlaybookRuns(db, req.agent!.workspaceId, filters) });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/playbook-runs/:id',
-    requireAgentScope(db, 'workflows:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const run = await getPlaybookRun(db, req.agent!.workspaceId, String(req.params.id));
-        if (!run) return res.status(404).json({ error: 'Playbook run not found' });
-        res.json({ run });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/events',
-    requireAgentScope(db, 'workflows:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const filters = eventFiltersSchema.parse(req.query);
-        res.json({ events: await listDomainEvents(db, req.agent!.workspaceId, filters) });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
+  // The supported public API (TRV-053): agent-token routes declared once in
+  // src/server/public-api/registry.ts, each behind token auth, the shared
+  // PostgreSQL rate limiter, scope checks, validation and the documented error
+  // envelope, plus GET /api/v1/openapi.json. Agent tokens deliberately expose a
+  // smaller surface than browser sessions: MCP clients and integrations can
+  // inspect and run skills and playbooks, but cannot silently inherit billing,
+  // integration, approval, or account-management access. Any other /api path
+  // falls through to requireSession below and answers a token with 401.
+  mountPublicApi(app, db, {
+    readSession: (req) => readSession(db, req),
+    rateLimits: options.publicApi?.rateLimits,
+    now: options.publicApi?.now,
+    beforeUnauthenticated: (req, res, next) =>
+      carriesSessionCredential(req) ? unattributedLimiter(req, res, next) : next()
+  });
 
   app.use('/api', requireSession(db, unattributedLimiter));
   // Mounted immediately after the session resolves, which is the first moment
@@ -9577,21 +9451,6 @@ function wait(ms: number): Promise<null> {
   });
 }
 
-function requireAgentScope(db: Db, scope: AgentScope) {
-  return async (req: AgentRequest, res: Response, next: NextFunction) => {
-    try {
-      const identity = await resolveAgentIdentity(db, req.headers);
-      if (!identity) return res.status(401).json({ error: 'Valid Trevra agent token required' });
-      if (!hasAgentScope(identity, scope))
-        return res.status(403).json({ error: `Agent token is missing scope: ${scope}` });
-      req.agent = identity;
-      next();
-    } catch (error) {
-      next(error);
-    }
-  };
-}
-
 function requireSession(db: Db, unattributedLimiter: RequestHandler) {
   return async (req: AuthedRequest, res: Response, next: NextFunction) => {
     try {
@@ -10156,7 +10015,15 @@ function enforceAllowedOrigin(req: Request, res: Response, next: NextFunction) {
     'http://localhost:43173',
     'http://localhost:43887'
   ]);
-  if (!allowed.has(origin)) return res.status(403).json({ error: 'Origin not allowed' });
+  if (!allowed.has(origin)) {
+    if (isPublicApiPath(req))
+      return sendPublicApiError(
+        req,
+        res,
+        new PublicApiError(403, 'origin_not_allowed', 'Origin not allowed')
+      );
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
   next();
 }
 

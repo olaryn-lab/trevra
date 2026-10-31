@@ -42,6 +42,7 @@ import { runDueResearchSources } from '../server/research/service.js';
 import { runDueBrandWatches } from '../server/watch/service.js';
 import { runQueuedEnrichmentRuns } from '../server/enrichment/runs.js';
 import { pruneCitationSamples } from '../server/watch/citations.js';
+import { prunePublicApiRateWindows } from '../server/public-api/rate-limit.js';
 import { refreshDueEmailDeliverability } from '../server/email/sender-deliverability.js';
 import { registerEmailComplianceProvider } from '../server/email/compliance.js';
 import { senderComplianceProvider } from '../server/compliance/provider.js';
@@ -170,7 +171,10 @@ async function cycle(): Promise<void> {
       runDueAgentSchedules(db),
       runDueResearchSources(db),
       runDueBrandWatches(db),
-      pruneCitationSamples(db)
+      pruneCitationSamples(db),
+      prunePublicApiRateWindows(db).catch((error: unknown) =>
+        console.error('Public API rate-window prune failed', error)
+      )
     ]);
   } catch (error) {
     console.error('Worker control-plane cycle failed', error);
