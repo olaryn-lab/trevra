@@ -699,7 +699,7 @@ function PostRow({ post, onChanged }: { post: LinkedInPost; onChanged: () => voi
                 ? 'Workspace policy allows publishing.'
                 : review.approved
                   ? 'This exact post is approved.'
-                  : 'Owner approval required before the post is published.'}
+                  : 'Owner or manager approval required before the post is published.'}
           </p>
           {canApprove && review.policy.effect === 'require_approval' && !review.approved && (
             <button

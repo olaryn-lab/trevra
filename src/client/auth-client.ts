@@ -1,11 +1,10 @@
 import { createAuthClient } from 'better-auth/react';
 import { magicLinkClient, organizationClient } from 'better-auth/client/plugins';
-import {
-  hasCapability,
-  parseWorkspaceRole,
-  type Capability,
-  type WorkspaceRole as ResolvedWorkspaceRole
-} from '../server/roles';
+import { hasCapability, parseWorkspaceRole, type Capability } from '../server/roles';
+import type { WorkspaceRole } from './workspace-role';
+
+export { lacksOwnerRole, type WorkspaceRole } from './workspace-role';
+
 /**
  * The `organization` plugin (docs/superpowers/specs/2026-08-13-team-
  * workspace-access-design.md): unlocks `authClient.organization.*` --
@@ -26,14 +25,6 @@ export const authClient = createAuthClient({
   // Better Auth 1.7 treats Generic OAuth as a regular social provider.
   plugins: [magicLinkClient(), organizationClient()]
 });
-
-/**
- * `pending` until BOTH the organization and the member read have resolved, so
- * a panel can hold back the owner controls AND the member's read-only line:
- * an owner on a hard reload must not see "Only the workspace owner can ..."
- * flash on, and a member must not see an owner control flash on.
- */
-export type WorkspaceRole = 'pending' | ResolvedWorkspaceRole;
 
 /**
  * The one role signal every role-gated control in the app reads. The server's
@@ -63,12 +54,4 @@ export function useIsWorkspaceOwner(): boolean {
 export function useWorkspaceCan(capability: Capability): boolean {
   const role = useWorkspaceRole();
   return role !== 'pending' && hasCapability(role, capability);
-}
-
-/**
- * The resolved non-owner case for panels that show a read-only line instead
- * of an owner control: a manager reads the same line a member does.
- */
-export function lacksOwnerRole(role: WorkspaceRole): boolean {
-  return role === 'member' || role === 'manager';
 }

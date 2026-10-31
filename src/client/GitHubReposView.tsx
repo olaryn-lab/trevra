@@ -5,7 +5,7 @@ import type {
   GitHubRepoWatch,
   GitHubReposState
 } from './api';
-import { lacksOwnerRole, type WorkspaceRole } from './auth-client';
+import { lacksOwnerRole, type WorkspaceRole } from './workspace-role';
 import { OwnerOnlyNote } from './ui/forms';
 import { EmptyState, Panel } from './ui/layout';
 import { plural } from './ui/plural';

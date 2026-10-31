@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import type { EmailChannelStatus, StoredDeliverability } from '../server/email/types';
-import { lacksOwnerRole, type WorkspaceRole } from './auth-client';
+import { lacksOwnerRole, type WorkspaceRole } from './workspace-role';
 import { ConfirmDrawer } from './ui/dialog';
 import { OwnerOnlyNote } from './ui/forms';
 import { Button, Field, Input } from './ui/primitives';

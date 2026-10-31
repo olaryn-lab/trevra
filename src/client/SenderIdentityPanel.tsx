@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Mail } from 'lucide-react';
 import type { SenderIdentity } from '../server/compliance/sender-identity';
 import { getSenderIdentity, saveSenderIdentity } from './api';
-import { lacksOwnerRole, type WorkspaceRole } from './auth-client';
+import { lacksOwnerRole, type WorkspaceRole } from './workspace-role';
 import { errorMessage } from './LinkedInSafety';
 import { ActionRow, FormGrid, OwnerOnlyNote } from './ui/forms';
 import { Panel } from './ui/layout';

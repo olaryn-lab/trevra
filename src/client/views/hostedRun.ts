@@ -1,4 +1,4 @@
-import { lacksOwnerRole, type WorkspaceRole } from '../auth-client';
+import { lacksOwnerRole, type WorkspaceRole } from '../workspace-role';
 import { usd } from './format';
 
 export interface HostedRunBlockerInput {
