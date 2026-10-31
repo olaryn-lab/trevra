@@ -237,12 +237,18 @@ export interface CampaignQueueSummary {
    * What is already allocated on this campaign's sender seat (`seatKey`) by
    * every campaign and route on it: rows (any status but skipped) planned for
    * the 24h either side of now, in the planner's budget buckets (`runner.ts`
-   * `budgetKindForLedgerKind`). A seat's daily ceiling minus this is the room
-   * the card shows for ANY campaign on it; ceiling minus `allocatedCampaignDay`
-   * showed the same room on every campaign sharing a seat. The planner itself
-   * sizes the seat from the gate's allowance minus every row still queued.
+   * `budgetKindForLedgerKind`). Shown as what is allocated on the account; the
+   * room the card shows is `seatRoomToday`, which the planner itself uses.
    */
   allocatedSeatDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
+  /**
+   * The room the planner will actually use on this campaign's sender seat
+   * today, per headline bucket: `runner.ts` `seatDayRoom` (the send gate's
+   * allowance less every row still queued on the seat). This, not ceiling
+   * minus `allocatedSeatDay`, is the card's "remaining" (TRV-020). Zero for a
+   * seat that is not configured.
+   */
+  seatRoomToday: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
   /**
    * WHAT EACH WORKFLOW STEP IS ACTUALLY WAITING FOR, one row per step.
    *
@@ -2940,6 +2946,22 @@ export async function campaignQueueSummary(
       new Date(now.getTime() - 86_400_000).toISOString(),
       new Date(now.getTime() + 86_400_000).toISOString()
     );
+  // A dynamic import: runner.ts imports this module.
+  const seatRoomToday = { invite: 0, dm: 0, profile_view: 0, follow: 0 };
+  const sender = await getSeat(db, workspaceId, campaign.seatKey);
+  if (sender) {
+    const { seatDayRoom } = await import('./runner.js');
+    const room = await seatDayRoom(
+      db,
+      workspaceId,
+      campaign.seatKey,
+      sender,
+      ['invite', 'dm', 'profile_view', 'follow'],
+      now
+    );
+    for (const kind of ['invite', 'dm', 'profile_view', 'follow'] as const)
+      seatRoomToday[kind] = room.get(kind)?.room ?? 0;
+  }
   const blocked =
     (
       await db
@@ -2976,6 +2998,7 @@ export async function campaignQueueSummary(
       profile_view: Number(seatAllocations?.profile_view ?? 0),
       follow: Number(seatAllocations?.follow ?? 0)
     },
+    seatRoomToday,
     backlogByStep: [...backlog.entries()].map(([index, value]) => ({
       stepId: campaign.steps[index]?.id ?? `step-${index + 1}`,
       ...value

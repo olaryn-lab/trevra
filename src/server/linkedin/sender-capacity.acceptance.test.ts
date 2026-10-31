@@ -349,6 +349,7 @@ async function operations(campaignId: string, at: Date) {
   return response.body.queues as {
     allocatedCampaignDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
     allocatedSeatDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
+    seatRoomToday: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
   };
 }
 
@@ -635,6 +636,9 @@ describe('TRV-020 sender capacity: screens, planner and worker agree', () => {
 
     // What the gate admits today: the planner's whole budget for the seat.
     const today = row(await limitsAt(NOW), 'profile_view').today!;
+    // Before planning, both cards' room is exactly that budget.
+    expect((await operations(first, NOW)).seatRoomToday.profile_view).toBe(today.remaining);
+    expect((await operations(second, NOW)).seatRoomToday.profile_view).toBe(today.remaining);
     await runManagedCampaigns(db, WS, NOW);
     const planned = await plannedByCampaign('profile_view');
     expect(sum(planned)).toBe(today.remaining);
@@ -657,6 +661,9 @@ describe('TRV-020 sender capacity: screens, planner and worker agree', () => {
     expect(beta.allocatedSeatDay.profile_view).toBe(today.remaining);
     expect(Math.max(0, today.remaining - alpha.allocatedSeatDay.profile_view)).toBe(0);
     expect(Math.max(0, today.remaining - beta.allocatedSeatDay.profile_view)).toBe(0);
+    // The card's room is the planner's own: nothing left once it has planned.
+    expect(alpha.seatRoomToday.profile_view).toBe(0);
+    expect(beta.seatRoomToday.profile_view).toBe(0);
 
     // Bring every planned row due now; the worker sends every one of them,
     // which is exactly what the gate admits today, and never past the seat ceiling.
@@ -817,9 +824,13 @@ describe('TRV-020 the planner sizes each seat from the send gate allowance', () 
 
     const workflowId = await profileViewWorkflow();
     const campaign = await runningCampaign('Partly', 8, workflowId);
+    // The card's room is the planner's: the sends planned outside the old
+    // ±24 h window still count, so one, not ceiling minus the planted rows.
+    expect((await operations(campaign, NOW)).seatRoomToday.profile_view).toBe(1);
     await runManagedCampaigns(db, WS, NOW);
     // One below the boundary: exactly one more row.
     expect((await plannedByCampaign('profile_view'))[campaign]).toBe(1);
+    expect((await operations(campaign, NOW)).seatRoomToday.profile_view).toBe(0);
     expect(await plannedOnSeat('profile_view')).toBe(today.remaining);
     // At the boundary: nothing more.
     await runManagedCampaigns(db, WS, new Date(NOW.getTime() + MINUTE));

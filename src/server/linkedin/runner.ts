@@ -87,6 +87,47 @@ const BUDGETED_KINDS = [
   'endorse'
 ] as const;
 type BudgetedKind = (typeof BUDGETED_KINDS)[number];
+
+/**
+ * THE ROOM THE PLANNER GIVES ONE SEAT TODAY, per budget kind: what the send
+ * gate admits (`linkedInDailyAllowance`) less every row still `planned` on the
+ * seat from any campaign or route, whenever it is due. The planner fair-shares
+ * this between campaigns (InMail's monthly limits are applied on top there);
+ * the campaign card's "remaining" reads the same function so the two cannot
+ * disagree. The gate stays authoritative at send time.
+ */
+export async function seatDayRoom(
+  db: Db,
+  workspaceId: string,
+  seatKey: string,
+  seat: LinkedInSeat,
+  kinds: readonly BudgetedKind[],
+  now: Date
+): Promise<Map<BudgetedKind, { ceiling: number; room: number }>> {
+  const queued = await db
+    .prepare(
+      `SELECT kind,COUNT(*)::int AS total FROM linkedin_actions
+       WHERE workspace_id=? AND seat_key=? AND status='planned'
+         AND kind = ANY(?::text[]) GROUP BY kind`
+    )
+    .all<{ kind: string; total: number }>(workspaceId, seatKey, [...MANAGED_LEDGER_KINDS]);
+  const queuedByKind = new Map<BudgetedKind, number>();
+  for (const row of queued) {
+    const bucket = budgetKindForLedgerKind(row.kind as LinkedInActionKind);
+    if (bucket) queuedByKind.set(bucket, (queuedByKind.get(bucket) ?? 0) + Number(row.total));
+  }
+  const out = new Map<BudgetedKind, { ceiling: number; room: number }>();
+  for (const kind of BUDGETED_KINDS) {
+    if (!kinds.includes(kind)) continue;
+    // The bucket is the gate's family for this kind (`seatLedgerFacts`).
+    const allowance = await linkedInDailyAllowance(db, { workspaceId, seatKey }, seat, kind, now);
+    out.set(kind, {
+      ceiling: allowance.ceiling,
+      room: Math.max(0, allowance.remaining - (queuedByKind.get(kind) ?? 0))
+    });
+  }
+  return out;
+}
 const MANAGED_LEDGER_KINDS: readonly LinkedInActionKind[] = [
   'invite',
   'dm',
@@ -1148,18 +1189,8 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
   for (const seatKey of seatsInDemand) {
     const seat = await loadSeat(seatKey);
     if (!seat) continue;
-    const queued = await db
-      .prepare(
-        `SELECT kind,COUNT(*)::int AS total FROM linkedin_actions
-         WHERE workspace_id=? AND seat_key=? AND status='planned'
-           AND kind = ANY(?::text[]) GROUP BY kind`
-      )
-      .all<{ kind: string; total: number }>(workspaceId, seatKey, [...MANAGED_LEDGER_KINDS]);
-    const queuedByKind = new Map<BudgetedKind, number>();
-    for (const row of queued) {
-      const bucket = budgetKindForLedgerKind(row.kind as LinkedInActionKind);
-      if (bucket) queuedByKind.set(bucket, (queuedByKind.get(bucket) ?? 0) + Number(row.total));
-    }
+    const demanded = kindsInDemand.get(seatKey) ?? new Set<BudgetedKind>();
+    const room = await seatDayRoom(db, workspaceId, seatKey, seat, [...demanded], now);
     const inmailUsage = await db
       .prepare(
         `SELECT COUNT(*) FILTER (WHERE kind='inmail' AND status<>'skipped')::int AS total,
@@ -1174,13 +1205,9 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
       );
     const byKind = new Map<BudgetedKind, number>();
     const ceilings = new Map<BudgetedKind, number>();
-    const demanded = kindsInDemand.get(seatKey) ?? new Set<BudgetedKind>();
-    for (const kind of BUDGETED_KINDS) {
-      if (!demanded.has(kind)) continue;
-      // The bucket is the gate's family for this kind (`seatLedgerFacts`).
-      const allowance = await linkedInDailyAllowance(db, { workspaceId, seatKey }, seat, kind, now);
-      ceilings.set(kind, allowance.ceiling);
-      let remaining = Math.max(0, allowance.remaining - (queuedByKind.get(kind) ?? 0));
+    for (const [kind, { ceiling, room: seatRoom }] of room) {
+      ceilings.set(kind, ceiling);
+      let remaining = seatRoom;
       if (kind === 'inmail') {
         const monthlyLimit = seat.inmailMonthlyBudget ?? INMAIL_MONTHLY_QUOTA;
         remaining = Math.min(

@@ -582,17 +582,18 @@ const CAPACITY_LABEL: Record<ManagedKind, string> = {
 };
 
 /**
- * ONE SEAT, ONE BUDGET. `remaining` is the seat's ceiling minus what EVERY
- * campaign on the seat has been allocated (`allocatedSeatDay`), so two
- * campaigns sharing an account show the same remaining room rather than
- * each showing it in full.
+ * ONE SEAT, ONE BUDGET. `remaining` is the room the planner will actually use
+ * on the seat today (`seatRoomToday`: the send gate's allowance less every row
+ * still queued there, from any campaign), so two campaigns sharing an account
+ * show the same remaining room rather than each showing it in full, and the
+ * card never promises more than the planner will plan.
  */
 function CapacityBreakdown({
   ceilings,
   queues
 }: {
   ceilings: Record<ManagedKind, EnforcedCeiling>;
-  queues: Pick<CampaignQueueSummary, 'allocatedCampaignDay' | 'allocatedSeatDay'>;
+  queues: Pick<CampaignQueueSummary, 'allocatedCampaignDay' | 'allocatedSeatDay' | 'seatRoomToday'>;
 }) {
   return (
     <div className="mgr-summary">
@@ -600,7 +601,7 @@ function CapacityBreakdown({
         const limit = ceilings[kind].today;
         const onSeat = queues.allocatedSeatDay[kind];
         const mine = queues.allocatedCampaignDay[kind];
-        const remaining = Math.max(0, limit - onSeat);
+        const remaining = Math.min(Math.max(0, limit - onSeat), queues.seatRoomToday[kind]);
         return (
           <span key={kind}>
             <b>{CAPACITY_LABEL[kind]}</b>: limit {limit} · {onSeat} allocated on this account (
@@ -698,7 +699,7 @@ function campaignBlockers({
       seen.add(kind);
       const allocated = operations.queues.allocatedSeatDay[kind];
       const limit = ceilings[kind].today;
-      if (allocated >= limit) {
+      if (allocated >= limit || operations.queues.seatRoomToday[kind] <= 0) {
         const dayLimit = report?.limits.find(
           (candidate) => candidate.kind === kind && candidate.window === 'day'
         );
@@ -719,7 +720,7 @@ function campaignBlockers({
                 title: `${CAPACITY_LABEL[kind]} capacity fully allocated`,
                 // Today's allowance is spent. Tomorrow's arrives by itself.
                 severity: 'waiting' as const,
-                detail: `${plural(backlog.due, 'lead')} ${are(backlog.due)} sequence-eligible at this step, but this account's limit is ${limit} and ${allocated} are already allocated across its campaigns. Remaining planner capacity is 0.`
+                detail: `${plural(backlog.due, 'lead')} ${are(backlog.due)} sequence-eligible at this step, but this account's limit is ${limit} today and ${allocated} are already allocated across its campaigns, with what has already been sent counted by the send check. Remaining planner capacity is 0.`
               }
         );
       }
