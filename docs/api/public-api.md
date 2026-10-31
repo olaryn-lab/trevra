@@ -131,9 +131,10 @@ counters), charged per token and per workspace, with a lower budget for writes:
 | write | 30                 | 120                    |
 
 - `write` is `POST /api/agent/skills/:id/run` and
-  `POST /api/agent/playbooks/:id/runs`. On `POST /api/agent/mcp` a JSON-RPC
-  `tools/call` (or a batch containing one) is a write; every other method is a
-  read.
+  `POST /api/agent/playbooks/:id/runs`. On `POST /api/agent/mcp` each JSON-RPC
+  `tools/call` is one write, so a batch of N calls costs N writes (and a batch
+  larger than the remaining budget is refused whole); a request with no
+  `tools/call` is one read.
 - Every authenticated request is charged, including ones later refused with
   4xx. A request refused by its own token limit is not charged to the
   workspace, so one runaway token cannot exhaust other tokens' budget.

@@ -2,7 +2,12 @@ import type { Request, Response } from 'express';
 import { z } from 'zod/v3';
 import type { AgentIdentity, AgentScope } from '../agent-access.js';
 import { configuredAgentSkillIds, getAgent } from '../agents.js';
-import { callAgentTool, listSkillsForAgent } from '../agent/tools.js';
+import {
+  callAgentTool,
+  listSkillsForAgent,
+  unassignedPlaybookSkills,
+  unassignedPlaybookSkillsMessage
+} from '../agent/tools.js';
 import { listDomainEvents } from '../control-plane/events.js';
 import type { Db } from '../db.js';
 import { handleMcpHttpRequest, rejectMcpNonPost } from '../mcp-http.js';
@@ -47,7 +52,7 @@ export const PUBLIC_API_VERSION = '1.0.0';
 
 export type PublicApiMethod = 'get' | 'post' | 'delete';
 export type PublicApiAuth = 'token' | 'token_or_session';
-/** `jsonrpc_method`: write for MCP `tools/call`, read for every other JSON-RPC method. */
+/** `jsonrpc_method`: one write per MCP `tools/call` (batches included), else one read. */
 export type PublicApiRateLimitClass = PublicApiRequestClass | 'jsonrpc_method';
 
 export interface PublicApiResponseSpec {
@@ -499,7 +504,7 @@ export const PUBLIC_API_ROUTES: readonly PublicApiRoute[] = Object.freeze([
     tag: 'Playbooks',
     summary: 'Start a durable playbook run',
     description:
-      'Starts a run that pauses at every approval step until a human decides inside Trevra. Agents cannot approve. Prepared-only playbooks are refused with 409. Not idempotent: every accepted call starts a new run.',
+      'Starts a run that pauses at every approval step until a human decides inside Trevra. Agents cannot approve. Prepared-only playbooks are refused with 409. A playbook with a skill step the Agent is not assigned is refused with 403 `skill_not_assigned`. Not idempotent: every accepted call starts a new run.',
     scope: 'playbooks:run',
     rateLimitClass: 'write',
     params: idParams,
@@ -511,6 +516,19 @@ export const PUBLIC_API_ROUTES: readonly PublicApiRoute[] = Object.freeze([
     },
     errors: [400, 403, 404, 409, 413],
     handler: async (ctx) => {
+      const unassigned = await unassignedPlaybookSkills(
+        ctx.db,
+        ctx.agent.workspaceId,
+        ctx.agent.agentId,
+        ctx.params.id,
+        ctx.body.version
+      );
+      if (unassigned.length > 0)
+        throw new PublicApiError(
+          403,
+          'skill_not_assigned',
+          unassignedPlaybookSkillsMessage(ctx.params.id, unassigned)
+        );
       try {
         const run = await startPlaybookRun(ctx.db, {
           workspaceId: ctx.agent.workspaceId,
@@ -706,7 +724,7 @@ export const PUBLIC_API_ROUTES: readonly PublicApiRoute[] = Object.freeze([
     tag: 'MCP',
     summary: 'MCP Streamable HTTP endpoint (stateless)',
     description:
-      'Model Context Protocol over Streamable HTTP. The JSON-RPC body and response follow the MCP specification; the error envelope applies only to authentication, scope, rate-limit and transport failures. Rate-limit class: write for `tools/call`, read for every other method.',
+      'Model Context Protocol over Streamable HTTP. The JSON-RPC body and response follow the MCP specification; the error envelope applies only to authentication, scope, rate-limit and transport failures. Rate-limit class: write for `tools/call`, charged once per call (a batch of N calls costs N writes); read for every other method.',
     scope: 'skills:read',
     rateLimitClass: 'jsonrpc_method',
     body: z.unknown().describe('A JSON-RPC 2.0 message or batch.'),

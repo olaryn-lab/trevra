@@ -52,10 +52,18 @@ export async function consumePublicApiRateLimit(
     requestClass: PublicApiRequestClass;
     now: Date;
     policy: PublicApiRateLimitPolicy;
+    /**
+     * Hits this request costs in both buckets (default 1). An MCP JSON-RPC batch
+     * costs one write per `tools/call`, so batching cannot multiply the budget.
+     */
+    cost?: number;
   }
 ): Promise<PublicApiRateDecision> {
   const { windowMs } = input.policy;
   const limits = input.policy[input.requestClass];
+  const cost = input.cost ?? 1;
+  if (!Number.isInteger(cost) || cost < 1)
+    throw new Error(`Rate-limit cost must be a positive integer, got ${cost}`);
   const windowStartMs = Math.floor(input.now.getTime() / windowMs) * windowMs;
   const windowStart = new Date(windowStartMs).toISOString();
   const resetAt = new Date(windowStartMs + windowMs);
@@ -72,15 +80,15 @@ export async function consumePublicApiRateLimit(
         `
       WITH token_bucket AS (
         INSERT INTO public_api_rate_windows (workspace_id,subject,request_class,window_start,hits)
-        VALUES (?,?,?,?::timestamptz,1)
+        VALUES (?,?,?,?::timestamptz,?::int)
         ON CONFLICT (workspace_id,subject,request_class,window_start)
-        DO UPDATE SET hits=public_api_rate_windows.hits+1
+        DO UPDATE SET hits=public_api_rate_windows.hits+excluded.hits
         RETURNING hits
       ), workspace_bucket AS (
         INSERT INTO public_api_rate_windows (workspace_id,subject,request_class,window_start,hits)
-        SELECT ?,'workspace',?,?::timestamptz,1 FROM token_bucket WHERE token_bucket.hits <= ?::int
+        SELECT ?,'workspace',?,?::timestamptz,?::int FROM token_bucket WHERE token_bucket.hits <= ?::int
         ON CONFLICT (workspace_id,subject,request_class,window_start)
-        DO UPDATE SET hits=public_api_rate_windows.hits+1
+        DO UPDATE SET hits=public_api_rate_windows.hits+excluded.hits
         RETURNING hits
       )
       SELECT (SELECT hits FROM token_bucket) AS token_hits,
@@ -92,9 +100,11 @@ export async function consumePublicApiRateLimit(
         `token:${input.tokenId}`,
         input.requestClass,
         windowStart,
+        cost,
         input.workspaceId,
         input.requestClass,
         windowStart,
+        cost,
         limits.token
       );
     tokenHits = row?.token_hits == null ? null : Number(row.token_hits);
@@ -104,13 +114,13 @@ export async function consumePublicApiRateLimit(
       .prepare(
         `
       INSERT INTO public_api_rate_windows (workspace_id,subject,request_class,window_start,hits)
-      VALUES (?,'workspace',?,?::timestamptz,1)
+      VALUES (?,'workspace',?,?::timestamptz,?::int)
       ON CONFLICT (workspace_id,subject,request_class,window_start)
-      DO UPDATE SET hits=public_api_rate_windows.hits+1
+      DO UPDATE SET hits=public_api_rate_windows.hits+excluded.hits
       RETURNING hits
     `
       )
-      .get<{ hits: number }>(input.workspaceId, input.requestClass, windowStart);
+      .get<{ hits: number }>(input.workspaceId, input.requestClass, windowStart, cost);
     workspaceHits = row ? Number(row.hits) : null;
   }
 

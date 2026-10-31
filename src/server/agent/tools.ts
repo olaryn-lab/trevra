@@ -12,20 +12,22 @@
  * THE INVARIANT, before you add a tool here. app-spec.md §11:
  *
  *   "No agent approves its own work. Not the one on your laptop, not the one
- *    Trevra hosts, not a future one that is very convincing.
+ *    Trevra hosts, not a future one that is very convincing."
  *
- *    `actions:prepare` is an agent scope. `approve` and `execute` deliberately
- *    are not, and adding them is not a feature request -- it is a redesign of
- *    the product's only real promise. Every external write goes through the
- *    hash-pinned approval path: a human signs an exact payload, and a payload
- *    that changed afterwards is rejected rather than sent."
+ * There is no approve or execute agent scope, and adding one is not a feature
+ * request -- it is a redesign of the product's only real promise. Every
+ * external write goes through the hash-pinned approval path: a human signs an
+ * exact payload, and a payload that changed afterwards is rejected rather than
+ * sent.
  *
  * So: no tool in this list may approve an action, execute an external write,
- * or send anything. `trevra_prepare_recommendation` stops at 'draft' on
- * purpose. `callAgentTool` enforces scopes, but a scope check cannot save a
- * surface that offers the wrong capability in the first place -- the list
- * itself is the boundary. `tools.test.ts` asserts this and will fail loudly.
- * ---------------------------------------------------------------------------
+ * or send anything. The one built-in that starts consequential work,
+ * `trevra_start_playbook`, parks the run at `waiting_approval` with the exact
+ * payload hash; only a human deciding inside Trevra releases it. External-write
+ * skills are refused outright. `callAgentTool` enforces scopes, but a scope
+ * check cannot save a surface that offers the wrong capability in the first
+ * place -- the list itself is the boundary. `tools.test.ts` asserts this and
+ * will fail loudly.
  */
 
 import type { AgentScope } from '../agent-access.js';
@@ -37,6 +39,7 @@ import {
   listWorkspacePlaybooks,
   startPlaybookRun
 } from '../playbooks/engine.js';
+import { getPlaybook } from '../playbooks/registry.js';
 import { listDomainEvents } from '../control-plane/events.js';
 import { listContacts } from '../lead-capture/people.js';
 import { listRankedAccounts } from '../accounts/store.js';
@@ -237,12 +240,23 @@ export const BUILT_IN_AGENT_TOOLS: readonly AgentToolDefinition[] = [
     destructive: false,
     idempotent: false,
     openWorld: true,
-    run: (ctx, args) => {
+    run: async (ctx, args) => {
       const input = asObject(args);
+      const playbookId = requiredString(input.playbookId, 'playbookId');
+      const version = optionalString(input.version);
+      const unassigned = await unassignedPlaybookSkills(
+        ctx.db,
+        ctx.workspaceId,
+        ctx.actorId,
+        playbookId,
+        version
+      );
+      if (unassigned.length > 0)
+        throw new Error(unassignedPlaybookSkillsMessage(playbookId, unassigned));
       return startPlaybookRun(ctx.db, {
         workspaceId: ctx.workspaceId,
-        playbookId: requiredString(input.playbookId, 'playbookId'),
-        version: optionalString(input.version),
+        playbookId,
+        version,
         payload: input.input ?? {},
         actorType: 'agent',
         actorId: ctx.actorId
@@ -411,6 +425,40 @@ export async function listSkillsForAgent(
   return skills.filter(
     (skill) => skill.enabled && (allowed === null || allowed.includes(skill.id))
   );
+}
+
+/**
+ * Skills a playbook would run that this Agent is not assigned. A playbook's
+ * skill steps are checked only against the workspace catalog when they run, so
+ * without this an Agent restricted to no skills could still run them by
+ * starting a playbook. Every agent path that starts a playbook (MCP, the hosted
+ * loop, REST) calls this first. Empty when the Agent has no allow-list (it
+ * inherits every enabled skill) or the playbook is unknown -- `startPlaybookRun`
+ * reports that itself.
+ */
+export async function unassignedPlaybookSkills(
+  db: Db,
+  workspaceId: string,
+  agentId: string,
+  playbookId: string,
+  version?: string
+): Promise<string[]> {
+  const playbook = getPlaybook(playbookId, version);
+  if (!playbook) return [];
+  const agent = await getAgent(db, workspaceId, agentId);
+  const allowed = agent ? configuredAgentSkillIds(agent) : null;
+  if (allowed === null) return [];
+  return [
+    ...new Set(
+      playbook.steps.flatMap((step) =>
+        step.type === 'skill' && !allowed.includes(step.skillId) ? [step.skillId] : []
+      )
+    )
+  ];
+}
+
+export function unassignedPlaybookSkillsMessage(playbookId: string, skillIds: string[]): string {
+  return `Playbook ${playbookId} runs skills not assigned to this Agent: ${skillIds.join(', ')}`;
 }
 
 /** Built-ins + one tool per enabled skill assigned to this Agent. */

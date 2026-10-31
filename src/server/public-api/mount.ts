@@ -131,7 +131,7 @@ function routeHandler(
       const decision = await consumePublicApiRateLimit(db, {
         workspaceId: principal.workspaceId,
         tokenId: principal.agent?.tokenId ?? null,
-        requestClass: requestClassFor(route, req),
+        ...requestChargeFor(route, req),
         now: now(),
         policy
       });
@@ -200,18 +200,26 @@ async function authenticate(
   );
 }
 
-function requestClassFor(route: PublicApiRoute, req: Request): PublicApiRequestClass {
-  if (route.rateLimitClass !== 'jsonrpc_method') return route.rateLimitClass;
+/**
+ * What one request costs. A JSON-RPC body is charged one write per `tools/call`
+ * message -- MCP accepts batches, and a batch of N calls runs N tools -- and one
+ * read when it holds none.
+ */
+function requestChargeFor(
+  route: PublicApiRoute,
+  req: Request
+): { requestClass: PublicApiRequestClass; cost: number } {
+  if (route.rateLimitClass !== 'jsonrpc_method')
+    return { requestClass: route.rateLimitClass, cost: 1 };
   const body: unknown = req.body;
   const messages = Array.isArray(body) ? body : [body];
-  return messages.some(
+  const calls = messages.filter(
     (message) =>
       typeof message === 'object' &&
       message !== null &&
       (message as { method?: unknown }).method === 'tools/call'
-  )
-    ? 'write'
-    : 'read';
+  ).length;
+  return calls > 0 ? { requestClass: 'write', cost: calls } : { requestClass: 'read', cost: 1 };
 }
 
 function parsePart(
