@@ -8678,6 +8678,10 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     '/api/linkedin/inbox/threads/:threadUrn/reply',
     linkedinRoute(async (req, res) => {
       const input = linkedinReplySchema.parse(req.body ?? {});
+      // A reply is sent FROM a LinkedIn account, so it takes the same seat rule
+      // as starting a campaign on it: an owner or manager, or the teammate the
+      // seat is assigned to. Reading and syncing the shared inbox stay open.
+      await assertCanUseLinkedInSeats(db, req, [input.seatKey], 'reply');
       const queued = await enqueueReply(
         db,
         {

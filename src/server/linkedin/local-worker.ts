@@ -4975,8 +4975,9 @@ export async function closeLinkedInBrowser(workspaceId?: string, seatKey?: strin
     ? (() => {
         // A seat key names exactly one handle; without one, every seat under
         // this workspace, which is what "close this workspace's browser" has
-        // to mean now that a workspace can have several.
-        const prefix = `${workspaceId}`;
+        // to mean now that a workspace can have several. The prefix carries the
+        // handle key's separator, so closing ws_1 cannot close ws_10's seats.
+        const prefix = seatHandleKey(workspaceId, '');
         const keys = seatKey
           ? [seatHandleKey(workspaceId, seatKey)]
           : [...browsers.keys()].filter((key) => key.startsWith(prefix));
