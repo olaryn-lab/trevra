@@ -504,6 +504,17 @@ import {
   reviewLinkedInAction
 } from './linkedin/action-policy.js';
 import {
+  AI_DRAFT_BATCH_MAX,
+  AI_DRAFT_SETUP_PATH,
+  AiDraftError,
+  approveAiDraft,
+  assertDraftBatch,
+  editAiDraft,
+  listAiDrafts,
+  rejectAiDraft,
+  requestAiDrafts
+} from './linkedin/ai-drafts.js';
+import {
   guardSeatSendModeChange,
   handoffResolutionSchema,
   resolveLinkedInHandoff
@@ -6661,6 +6672,116 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           409
         );
       }
+    })
+  );
+
+  // TRV-039: AI drafts of one lead's queued outreach copy. The model only
+  // proposes text; approval is owner-only, binds the exact payload hash and
+  // goes through the same per-action approvals as above.
+  const aiDraftRoute = (handler: (req: AuthedRequest, res: Response) => Promise<unknown>) =>
+    linkedinRoute(async (req, res) => {
+      try {
+        await handler(req, res);
+      } catch (error) {
+        if (!(error instanceof AiDraftError)) throw error;
+        res
+          .status(error.status)
+          .json({ error: error.message, code: error.code, setupPath: AI_DRAFT_SETUP_PATH });
+      }
+    });
+  const aiDraftHash = z.string().regex(/^[0-9a-f]{64}$/);
+  app.get(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts',
+    aiDraftRoute(async (req, res) => {
+      const campaignId = String(req.params.id);
+      if (!(await getManagedCampaign(db, req.auth!.workspaceId, campaignId)))
+        throw new LinkedInApiError('Managed campaign not found', 404);
+      res.json(await listAiDrafts(db, req.auth!.workspaceId, campaignId));
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts',
+    aiDraftRoute(async (req, res) => {
+      // Count first, so 51 targets get the batch message rather than a schema error.
+      const raw = z
+        .object({ targets: z.array(z.unknown()) })
+        .strict()
+        .parse(req.body ?? {});
+      if (raw.targets.length > AI_DRAFT_BATCH_MAX || raw.targets.length === 0)
+        assertDraftBatch(raw.targets.map((_, index) => ({ memberId: String(index) })));
+      const targets = z
+        .array(
+          z
+            .object({
+              memberId: z.string().min(1).max(100),
+              stepId: z.string().min(1).max(64).nullable().optional()
+            })
+            .strict()
+        )
+        .parse(raw.targets);
+      res.json(
+        await requestAiDrafts(db, {
+          workspaceId: req.auth!.workspaceId,
+          campaignId: String(req.params.id),
+          targets,
+          requestedBy: req.auth!.userId
+        })
+      );
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts/:draftId/edit',
+    aiDraftRoute(async (req, res) => {
+      const input = z
+        .object({ text: z.string().max(20_000), payloadHash: aiDraftHash })
+        .strict()
+        .parse(req.body ?? {});
+      res.json({
+        draft: await editAiDraft(db, {
+          workspaceId: req.auth!.workspaceId,
+          campaignId: String(req.params.id),
+          draftId: String(req.params.draftId),
+          payloadHash: input.payloadHash,
+          text: input.text,
+          actorId: req.auth!.userId
+        })
+      });
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts/:draftId/approve',
+    aiDraftRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'approve an AI-drafted message');
+      const input = z
+        .object({ payloadHash: aiDraftHash })
+        .strict()
+        .parse(req.body ?? {});
+      res.json({
+        draft: await approveAiDraft(db, {
+          workspaceId: req.auth!.workspaceId,
+          campaignId: String(req.params.id),
+          draftId: String(req.params.draftId),
+          payloadHash: input.payloadHash,
+          actorId: req.auth!.userId
+        })
+      });
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts/:draftId/reject',
+    aiDraftRoute(async (req, res) => {
+      assertWorkspaceOwner(req, 'reject an AI-drafted message');
+      z.object({})
+        .strict()
+        .parse(req.body ?? {});
+      res.json({
+        draft: await rejectAiDraft(db, {
+          workspaceId: req.auth!.workspaceId,
+          campaignId: String(req.params.id),
+          draftId: String(req.params.draftId),
+          actorId: req.auth!.userId
+        })
+      });
     })
   );
 

@@ -16,10 +16,21 @@ interface ActionRow {
   attachment_json: unknown;
   channel_metadata_json: unknown;
   status: string;
+  campaign_member_id: string | null;
+  workflow_step_id: string | null;
+}
+/** Provenance of an AI-drafted body that was applied to this action (TRV-039). */
+export interface AppliedAiDraft {
+  draftId: string;
+  origin: string;
+  modelLabel: string | null;
+  evidenceHash: string;
 }
 export interface LinkedInActionReview {
   actionId: string;
   campaignId: string | null;
+  memberId: string | null;
+  workflowStepId: string | null;
   seatKey: string;
   kind: string;
   targetRef: string;
@@ -30,6 +41,8 @@ export interface LinkedInActionReview {
   contentHash: string;
   approved: boolean;
   policy: PolicyDecision;
+  /** Non-null when the queued body came from an AI draft: it never auto-sends. */
+  aiDraft: AppliedAiDraft | null;
 }
 const equal = (left: string, right: string) =>
   /^[a-f0-9]{64}$/.test(left) &&
@@ -57,18 +70,51 @@ async function rowFor(db: Db, workspaceId: string, id: string): Promise<ActionRo
   return db
     .prepare(
       `SELECT id,workspace_id,campaign_id,seat_key,kind,target_ref,subject,body,
-            thread_urn,attachment_json,channel_metadata_json,status
+            thread_urn,attachment_json,channel_metadata_json,status,
+            campaign_member_id,workflow_step_id
      FROM linkedin_actions WHERE workspace_id=? AND id=? AND status='planned'`
     )
     .get<ActionRow>(workspaceId, id);
 }
-export async function reviewLinkedInAction(
+/** The applied (approved or already sent) AI draft behind a LinkedIn action, if any. */
+async function appliedAiDraft(
   db: Db,
   workspaceId: string,
   actionId: string
+): Promise<AppliedAiDraft | null> {
+  const row = await db
+    .prepare(
+      `SELECT id,origin,model_label,evidence_hash FROM ai_outreach_drafts
+       WHERE workspace_id=? AND linkedin_action_id=? AND status IN ('approved','sent')
+       ORDER BY decided_at DESC NULLS LAST,created_at DESC LIMIT 1`
+    )
+    .get<{ id: string; origin: string; model_label: string | null; evidence_hash: string }>(
+      workspaceId,
+      actionId
+    );
+  return row
+    ? {
+        draftId: row.id,
+        origin: row.origin,
+        modelLabel: row.model_label,
+        evidenceHash: row.evidence_hash
+      }
+    : null;
+}
+/**
+ * `override.body` hashes the action AS IF its body were the given text, without
+ * writing it. AI drafts use it to bind a proposal to the exact payload the send
+ * boundary will later re-hash; nothing else may pass it.
+ */
+export async function reviewLinkedInAction(
+  db: Db,
+  workspaceId: string,
+  actionId: string,
+  override?: { body: string }
 ): Promise<LinkedInActionReview | null> {
   const row = await rowFor(db, workspaceId, actionId);
   if (!row || !row.target_ref) return null;
+  const body = override ? override.body : row.body;
   const contentHash = createHash('sha256')
     .update(
       JSON.stringify([
@@ -80,7 +126,7 @@ export async function reviewLinkedInAction(
         row.kind,
         row.target_ref,
         row.subject,
-        row.body,
+        body,
         row.thread_urn,
         stable(row.attachment_json),
         stable(row.channel_metadata_json)
@@ -102,11 +148,13 @@ export async function reviewLinkedInAction(
   return {
     actionId: row.id,
     campaignId: row.campaign_id,
+    memberId: row.campaign_member_id,
+    workflowStepId: row.workflow_step_id,
     seatKey: row.seat_key,
     kind: row.kind,
     targetRef: row.target_ref,
     subject: row.subject,
-    body: row.body,
+    body,
     threadUrn: row.thread_urn,
     hasAttachments:
       row.attachment_json != null &&
@@ -114,7 +162,8 @@ export async function reviewLinkedInAction(
       JSON.stringify(row.attachment_json) !== '[]',
     contentHash,
     approved: Boolean(grant && equal(grant.content_hash, contentHash)),
-    policy
+    policy,
+    aiDraft: await appliedAiDraft(db, workspaceId, row.id)
   };
 }
 export async function listLinkedInActionReviews(
@@ -145,7 +194,9 @@ export async function listLinkedInActionReviews(
       if (!review) continue;
       if (
         review.policy.effect === 'deny' ||
-        (review.policy.effect === 'require_approval' && !review.approved)
+        (review.policy.effect === 'require_approval' && !review.approved) ||
+        // TRV-039: an AI-drafted body waits for a human even under `allow`.
+        (review.aiDraft && !review.approved)
       )
         result.push(review);
       if (result.length === 100) break;
@@ -226,7 +277,9 @@ export async function approveLinkedInAction(
   approvedBy: string,
   now = new Date()
 ): Promise<LinkedInActionReview> {
-  return db.transaction(async (tx) => {
+  // Inline when the caller already holds a transaction (AI draft approval
+  // writes the body and this grant atomically); a fresh one otherwise.
+  return db.transactionOrInline(async (tx) => {
     await tx
       .prepare(
         "SELECT id FROM linkedin_actions WHERE workspace_id=? AND id=? AND status='planned' FOR UPDATE"
@@ -305,6 +358,17 @@ export async function linkedinActionPolicyGate(
       'denied',
       false,
       `Workspace policy denies ${review.kind}: ${review.policy.policyName}`
+    );
+  // TRV-039 HARD RULE: an AI-drafted body NEVER auto-sends. Workspace policy
+  // may be `allow` for this action kind, but a model wrote these words, so the
+  // browser write still needs a human approval of this exact content hash (or
+  // the founder sends it by hand through human-send mode, which never calls
+  // this gate). Any edit after approval changes the hash and lands here again.
+  if (review.aiDraft && !review.approved)
+    return finish(
+      'held',
+      false,
+      `This ${review.kind} carries an AI-drafted body; a workspace owner must approve its exact content before it can send.`
     );
   if (review.policy.effect === 'require_approval' && !review.approved)
     return finish(

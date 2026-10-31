@@ -2,11 +2,14 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import type { Db } from '../db.js';
 import { emailComplianceProvider } from '../email/compliance.js';
 import { evaluatePolicy, type PolicyDecision } from '../control-plane/policy.js';
+import type { AppliedAiDraft } from './action-policy.js';
 
 interface Candidate {
   id: string;
   campaign_id: string;
   contact_id: string;
+  member_id: string;
+  workflow_step_id: string;
   connection_id: string | null;
   payload_json: unknown;
   mailbox_address: string | null;
@@ -15,6 +18,8 @@ interface Candidate {
 export interface CampaignEmailReview {
   actionId: string;
   campaignId: string;
+  memberId: string;
+  workflowStepId: string;
   recipient: string;
   subject: string;
   body: string;
@@ -26,6 +31,8 @@ export interface CampaignEmailReview {
   contentHash: string;
   approved: boolean;
   policy: PolicyDecision;
+  /** Non-null when the queued body came from an AI draft: it never auto-sends. */
+  aiDraft: AppliedAiDraft | null;
 }
 
 function payloadObject(raw: unknown): Record<string, unknown> {
@@ -58,8 +65,8 @@ async function candidate(
 ): Promise<Candidate | undefined> {
   return db
     .prepare(
-      `SELECT a.id,a.campaign_id,a.contact_id,a.connection_id,a.payload_json,a.status,
-      cn.mailbox_address
+      `SELECT a.id,a.campaign_id,a.contact_id,a.member_id,a.workflow_step_id,a.connection_id,
+      a.payload_json,a.status,cn.mailbox_address
     FROM linkedin_campaign_channel_actions a
     JOIN linkedin_campaigns c ON c.id=a.campaign_id AND c.workspace_id=a.workspace_id
     LEFT JOIN connections cn ON cn.id=a.connection_id AND cn.workspace_id=a.workspace_id
@@ -68,19 +75,47 @@ async function candidate(
     .get<Candidate>(workspaceId, actionId);
 }
 
-/** This same server-produced preview is what the operator reviews and what the
- * worker checks immediately before creating tracking tokens/provider side effects. */
-export async function previewCampaignEmail(
+async function appliedAiDraft(
   db: Db,
   workspaceId: string,
   actionId: string
+): Promise<AppliedAiDraft | null> {
+  const row = await db
+    .prepare(
+      `SELECT id,origin,model_label,evidence_hash FROM ai_outreach_drafts
+       WHERE workspace_id=? AND channel_action_id=? AND status IN ('approved','sent')
+       ORDER BY decided_at DESC NULLS LAST,created_at DESC LIMIT 1`
+    )
+    .get<{ id: string; origin: string; model_label: string | null; evidence_hash: string }>(
+      workspaceId,
+      actionId
+    );
+  return row
+    ? {
+        draftId: row.id,
+        origin: row.origin,
+        modelLabel: row.model_label,
+        evidenceHash: row.evidence_hash
+      }
+    : null;
+}
+
+/** This same server-produced preview is what the operator reviews and what the
+ * worker checks immediately before creating tracking tokens/provider side effects.
+ * `override.body` hashes the email as if its body were that text, without writing
+ * it; AI drafts (TRV-039) bind a proposal to the exact digest this way. */
+export async function previewCampaignEmail(
+  db: Db,
+  workspaceId: string,
+  actionId: string,
+  override?: { body: string }
 ): Promise<CampaignEmailReview | null> {
   const row = await candidate(db, workspaceId, actionId);
   if (!row || !['planned', 'claimed'].includes(row.status)) return null;
   const p = payloadObject(row.payload_json);
   const recipient = String(p.recipient ?? '').trim();
   const subject = String(p.subject ?? '').trim();
-  const body = String(p.body ?? '').trim();
+  const body = (override ? override.body : String(p.body ?? '')).trim();
   const tracking = p.tracking === 'opens' || p.tracking === 'opens_clicks' ? p.tracking : 'off';
   const threaded = p.threaded === true;
   const sender = row.mailbox_address?.trim().toLowerCase() ?? null;
@@ -114,6 +149,8 @@ export async function previewCampaignEmail(
   return {
     actionId: row.id,
     campaignId: row.campaign_id,
+    memberId: row.member_id,
+    workflowStepId: row.workflow_step_id,
     recipient,
     subject,
     body,
@@ -124,7 +161,8 @@ export async function previewCampaignEmail(
     threaded,
     contentHash,
     approved: Boolean(previous && equalHash(previous.content_hash, contentHash)),
-    policy
+    policy,
+    aiDraft: await appliedAiDraft(db, workspaceId, row.id)
   };
 }
 
@@ -158,7 +196,9 @@ export async function approveCampaignEmail(
   approvedBy: string,
   now: Date = new Date()
 ): Promise<CampaignEmailReview> {
-  return db.transaction(async (tx) => {
+  // Inline when the caller already holds a transaction (AI draft approval
+  // writes the body and this grant atomically); a fresh one otherwise.
+  return db.transactionOrInline(async (tx) => {
     const locked = await tx
       .prepare(
         "SELECT id FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND id=? AND kind='email' AND status='planned' FOR UPDATE"
@@ -211,6 +251,16 @@ export async function campaignEmailPolicyGate(
     return {
       allowed: false,
       reason: `Workspace policy denies campaign email: ${review.policy.policyName}.`,
+      review
+    };
+  // TRV-039 HARD RULE: an AI-drafted body NEVER auto-sends. Even when workspace
+  // policy is `allow` for email, a model wrote these words, so a human must
+  // approve this exact digest; an edit after approval changes it and holds again.
+  if (review.aiDraft && !review.approved)
+    return {
+      allowed: false,
+      reason:
+        'This email carries an AI-drafted body; a workspace owner must approve its exact content before it can send.',
       review
     };
   if (review.policy.effect === 'require_approval' && !review.approved)
