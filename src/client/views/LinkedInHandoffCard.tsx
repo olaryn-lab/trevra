@@ -38,9 +38,12 @@ export function handoffCopyLabel(kind: string): string {
 }
 
 /**
- * One human-send handoff in Today. Trevra drafted it, the approval covered
- * these exact bytes, and the safety gate passed it; the founder sends it on
- * LinkedIn and reports back. "Mark sent" is the one primary action.
+ * One human-send handoff in Today. Trevra drafted it and the safety gate
+ * passed it; these are the row's exact stored bytes, frozen from the moment
+ * Today showed them, so "Mark sent" records what the founder pasted. The
+ * founder's own reading is the review here (no separate approval is required),
+ * they send it on LinkedIn and report back. "Mark sent" is the one primary
+ * action.
  */
 export function LinkedInHandoffCard({
   item,

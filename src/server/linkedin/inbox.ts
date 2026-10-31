@@ -1547,7 +1547,7 @@ export async function enqueueReply(db: Db, input: ReplyRequest, now: Date): Prom
  * a new one, which spends a fresh trip through the replay guard and leaves a
  * dead row behind, all to change one word nobody had read yet.
  *
- * FOUR THINGS MAKE A ROW EDITABLE, and the SQL asks for all four again at the
+ * FIVE THINGS MAKE A ROW EDITABLE, and the SQL asks for all five again at the
  * moment of the write rather than trusting the read above it:
  *
  *   - it is this workspace's row (every route here is scoped that way);
@@ -1556,11 +1556,16 @@ export async function enqueueReply(db: Db, input: ReplyRequest, now: Date): Prom
  *   - nothing has CLAIMED it -- once the worker holds it, the browser may be
  *     typing these very bytes, and an edit landing mid-keystroke would send
  *     half of one message and half of another;
+ *   - Today has not PRESENTED it as a human-send handoff
+ *     (`handoff_presented_at`, handoff.ts). That is the hand-send twin of a
+ *     claim: the founder may already have pasted the shown words into
+ *     LinkedIn, and "Mark sent" records this row's body as what went out, so
+ *     an edit now would make the ledger record words nobody sent;
  *   - it was queued by hand (`source='manual'`). A campaign's copy is approved
  *     copy and belongs to the campaign; editing one member's row here would
  *     make the campaign's own record of what it sends a lie.
  *
- * The read above exists only to say WHICH of the four failed, because "cannot
+ * The read above exists only to say WHICH of the five failed, because "cannot
  * edit" is not an answer anybody can act on.
  */
 export interface QueuedMessageEdit {
@@ -1571,6 +1576,18 @@ export interface QueuedMessageEdit {
 }
 
 const EDITABLE_KINDS = ['reply', 'dm'];
+
+const PRESENTED_HANDOFF_EDIT_REFUSAL =
+  'This message was shown to you in Today to send by hand, so its words are frozen: you may already have pasted them into LinkedIn, and "Mark sent" records exactly the words that were shown. Mark it sent or skip it in Today, then queue a new message if it needs different words.';
+
+async function presentedAsHandoff(db: Db, workspaceId: string, actionId: string): Promise<boolean> {
+  const row = await db
+    .prepare(
+      'SELECT handoff_presented_at IS NOT NULL AS presented FROM linkedin_actions WHERE workspace_id=? AND id=?'
+    )
+    .get<{ presented: boolean }>(workspaceId, actionId);
+  return row?.presented === true;
+}
 
 export async function editQueuedMessage(
   db: Db,
@@ -1614,17 +1631,25 @@ export async function editQueuedMessage(
       409
     );
   }
+  if (await presentedAsHandoff(db, input.workspaceId, input.actionId)) {
+    throw new LinkedInApiError(PRESENTED_HANDOFF_EDIT_REFUSAL, 409);
+  }
 
   const written = await db
     .prepare(
       `
     UPDATE linkedin_actions SET body=?
     WHERE id=? AND workspace_id=? AND status='planned' AND claimed_at IS NULL AND source='manual'
-      AND kind IN ('reply','dm')
+      AND kind IN ('reply','dm') AND handoff_presented_at IS NULL
   `
     )
     .run(body, input.actionId, input.workspaceId);
   if (written.changes === 0) {
+    // Today presenting it between the read and the write is the one race with
+    // its own answer; it is a different instruction to the founder.
+    if (await presentedAsHandoff(db, input.workspaceId, input.actionId)) {
+      throw new LinkedInApiError(PRESENTED_HANDOFF_EDIT_REFUSAL, 409);
+    }
     // The row moved between the read and the write -- almost always the worker
     // claiming it. Reported rather than retried: the operator has to know their
     // change did not land.

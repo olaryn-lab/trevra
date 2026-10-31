@@ -2,6 +2,7 @@ import { z } from 'zod/v3';
 import type { Db } from '../db.js';
 import { appendDomainEvent } from '../control-plane/events.js';
 import { ingestOutcome, skipAction } from './action-ledger.js';
+import { reviewLinkedInAction } from './action-policy.js';
 import { profileUrlFor } from './driver.js';
 import { LinkedInApiError } from './errors.js';
 import { gateVerdict, type NextDueRow } from './execution-state.js';
@@ -20,10 +21,22 @@ import { HUMAN_SEND_KINDS, isHumanSendKind, type HumanSendKind } from './seats.j
  * HUMAN-SEND HANDOFFS.
  *
  * A seat in human-send mode keeps its invites and messages out of the browser
- * worker (local-worker.ts). They are still drafted, approved and gated exactly
+ * worker (local-worker.ts). They are still drafted and safety-gated exactly
  * like automated ones; this module hands the founder the ONE row the worker
  * would have taken next, and only once the safety gate would let it go. The
  * founder sends it on LinkedIn and reports back. Nothing here ever sends.
+ *
+ * APPROVAL IS NOT A PRECONDITION, POLICY DENY IS. The per-action approval
+ * (`require_approval`, and the TRV-039 AI-draft hold) exists so a human
+ * reviews exact bytes before a BROWSER writes them; here the founder reading
+ * and sending by hand is that review (see `linkedinActionPolicyGate`). A
+ * workspace policy that DENIES the action kind is different -- nobody may send
+ * it -- so a denied row is never handed over.
+ *
+ * THE HANDED BYTES ARE FROZEN. Today shows `copyText`/`subject` exactly as
+ * stored at the moment it stamps the row presented, and every writer of a
+ * planned row's words refuses a presented row (`editQueuedMessage`,
+ * `approveAiDraft`), so "Mark sent" records the words the founder was shown.
  *
  * PRESENTED ROWS STAY HANDED. Once Today has shown a row to the founder
  * (`handoff_presented_at`, stamped by `presentLinkedInHandoffs`), it is that
@@ -48,7 +61,11 @@ export interface LinkedInHandoff {
   targetRef: string;
   /** A LinkedIn URL the founder can open, or null when the target is not one. */
   targetUrl: string | null;
-  /** The approved bytes to paste. Null for an invite sent without a note. */
+  /**
+   * The row's stored body, byte for byte, to paste. Frozen once presented, and
+   * what "Mark sent" records. Not necessarily owner-approved: for a hand send
+   * the founder's own reading is the review. Null for an invite without a note.
+   */
   copyText: string | null;
   subject: string | null;
   plannedFor: string;
@@ -98,6 +115,14 @@ const HANDOFF_COLUMNS = `a.id, a.seat_key, a.kind, a.target_ref,
                a.body, a.subject, a.thread_urn, a.workflow_step_id,
                s.label AS seat_label, c.name AS campaign_name`;
 
+const handedText = (value: string | null) => (value && value.trim() ? value : null);
+
+/** A presented row's words as the stamp saw them. */
+interface StampedWords {
+  body: string | null;
+  subject: string | null;
+}
+
 function toHandoff(row: HandoffRow & { kind: HumanSendKind }): LinkedInHandoff {
   return {
     actionId: row.id,
@@ -106,8 +131,8 @@ function toHandoff(row: HandoffRow & { kind: HumanSendKind }): LinkedInHandoff {
     kind: row.kind,
     targetRef: row.target_ref,
     targetUrl: profileUrlFor(row.target_ref),
-    copyText: row.body && row.body.trim() ? row.body : null,
-    subject: row.subject && row.subject.trim() ? row.subject : null,
+    copyText: handedText(row.body),
+    subject: handedText(row.subject),
     plannedFor: row.planned_for,
     campaignId: row.campaign_id,
     campaignName: row.campaign_name
@@ -181,7 +206,8 @@ async function presentedHandoffRows(
  * (see `presentedHandoffRows`); otherwise the next send the worker would take
  * and the gate would allow -- same predicates and order as the claim
  * (`claimNextDueAction`) and the campaign preview (`execution-state.ts`),
- * restricted to the kinds a founder sends by hand. Read-only: Today stamps
+ * restricted to the kinds a founder sends by hand, minus any row workspace
+ * policy denies. Read-only (the policy review records nothing): Today stamps
  * what it shows through `presentLinkedInHandoffs`.
  */
 export async function listLinkedInHandoffs(
@@ -236,6 +262,10 @@ export async function listLinkedInHandoffs(
     if ((await store.actionExecutionState(action, { handoff: true })) !== 'execute') continue;
     const branch = await store.branchDecision(action, now);
     if (branch && branch.outcome !== 'due') continue;
+    // Workspace policy `deny` means nobody sends it, by browser or by hand.
+    // Only `deny`: approval is what the founder's hand send stands in for.
+    const review = await reviewLinkedInAction(db, workspaceId, row.id);
+    if (!review || review.policy.effect === 'deny') continue;
     const gate = await gateVerdict(db, workspaceId, row, now, options);
     if (!gate?.allowed) continue;
     bySeat.set(row.seat_key, toHandoff(row as HandoffRow & { kind: HumanSendKind }));
@@ -251,6 +281,10 @@ export async function listLinkedInHandoffs(
  * are read FOR SHARE and only rows whose seat is still human-send are stamped,
  * so a seat that flipped mid-read drops out of Today instead of leaving a
  * stamped row the worker is about to send. The first stamp is kept.
+ *
+ * The copy returned is the row's words AS STAMPED, not as listed: an edit that
+ * landed between the list and the stamp is what the row now holds, and from
+ * the stamp on nothing may change it, so that is what Today must show.
  */
 export async function presentLinkedInHandoffs(
   db: Db,
@@ -269,7 +303,7 @@ export async function presentLinkedInHandoffs(
          FOR SHARE`
       )
       .all<{ seat_key: string }>(workspaceId, seatKeys);
-    if (human.length === 0) return new Set<string>();
+    if (human.length === 0) return new Map<string, StampedWords>();
     const rows = await tx
       .prepare(
         `UPDATE linkedin_actions
@@ -277,17 +311,24 @@ export async function presentLinkedInHandoffs(
          WHERE workspace_id = ? AND id = ANY(?::text[]) AND seat_key = ANY(?::text[])
            AND status IN ('planned', 'held') AND claimed_at IS NULL
            AND settlement_hold_at IS NULL
-         RETURNING id`
+         RETURNING id, body, subject`
       )
-      .all<{ id: string }>(
+      .all<StampedWords & { id: string }>(
         now.toISOString(),
         workspaceId,
         handoffs.map((handoff) => handoff.actionId),
         human.map((seat) => seat.seat_key)
       );
-    return new Set(rows.map((row) => row.id));
+    return new Map<string, StampedWords>(
+      rows.map((row) => [row.id, { body: row.body, subject: row.subject }])
+    );
   });
-  return handoffs.filter((handoff) => stamped.has(handoff.actionId));
+  return handoffs.flatMap((handoff) => {
+    const words = stamped.get(handoff.actionId);
+    return words
+      ? [{ ...handoff, copyText: handedText(words.body), subject: handedText(words.subject) }]
+      : [];
+  });
 }
 
 export const handoffResolutionSchema = z.object({ resolution: z.enum(['sent', 'skip']) }).strict();
