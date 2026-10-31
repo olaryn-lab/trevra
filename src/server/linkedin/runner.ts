@@ -23,7 +23,8 @@ import {
   campaignActionLimit,
   campaignAdmissionForecast,
   campaignSnapshotSteps,
-  enrolNewContacts
+  enrolNewContacts,
+  retireSuppressedCampaignMembers
 } from './managed-campaigns.js';
 import { addLocalDays, localDateOf, weekdayOf, zonedToUtc } from './pacing.js';
 import { effectivePosture, getSeat, warmupWeekOf, type LinkedInSeat } from './seats.js';
@@ -1304,6 +1305,10 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
         )
         .run(now.toISOString(), now.toISOString(), workspaceId, campaign.id);
     }
+    // The planning boundary: a suppression, Never Contact entry or DNC flag
+    // written after enrolment retires the member before admission and before
+    // any step of theirs is planned this tick.
+    await retireSuppressedCampaignMembers(db, workspaceId, campaign.id, now);
 
     const budgetBySeat = new Map<string, Map<BudgetedKind, number>>();
     const paidInmailRemainingBySeat = new Map<string, number>();

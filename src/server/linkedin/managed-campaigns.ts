@@ -946,6 +946,160 @@ function emailMatchesSuppressedDomain(email: string | null, domains: readonly st
   return domains.some((blocked) => domain === blocked || domain.endsWith(`.${blocked}`));
 }
 
+/** `pk.profile_key`: the canonical key of the member lead's `c.profile_url`. */
+const PROFILE_KEY_LATERAL_SQL = `CROSS JOIN LATERAL (
+         SELECT CASE WHEN c.profile_url IS NULL OR BTRIM(c.profile_url)='' THEN NULL
+                     ELSE LOWER(RTRIM(SPLIT_PART(SPLIT_PART(c.profile_url, chr(63),1),'#',1),'/')) END AS profile_key
+       ) pk`;
+
+/**
+ * THE workspace-suppression predicate for a campaign member (aliases `m`, `c`,
+ * `pk`): an unlifted all/LinkedIn suppression matching the lead's Person, email
+ * or LinkedIn profile. Eligibility and the runner's planning boundary share
+ * this one expression so they cannot disagree about who is suppressed.
+ */
+const WORKSPACE_SUPPRESSION_SQL = `EXISTS (
+                SELECT 1 FROM suppressions s
+                WHERE s.workspace_id=m.workspace_id AND s.lifted_at IS NULL
+                  AND s.channel IN ('all','linkedin')
+                  AND (
+                    (s.person_id IS NOT NULL AND s.person_id=c.person_id)
+                    OR (s.email_normalized IS NOT NULL AND c.email IS NOT NULL
+                        AND s.email_normalized=LOWER(BTRIM(c.email)))
+                    OR (s.linkedin_url IS NOT NULL AND pk.profile_key IS NOT NULL
+                        AND LOWER(RTRIM(SPLIT_PART(SPLIT_PART(s.linkedin_url, chr(63),1),'#',1),'/'))=pk.profile_key)
+                  )
+              )`;
+
+async function neverContactReasonsFor(
+  db: Db,
+  workspaceId: string,
+  profileUrls: ReadonlyArray<string | null>
+): Promise<Map<string, string>> {
+  const neverContact = await filterExcluded(
+    db,
+    workspaceId,
+    profileUrls.filter((url): url is string => Boolean(url))
+  );
+  return new Map(neverContact.excluded.map((entry) => [entry.targetRef.trim(), entry.reason]));
+}
+
+/**
+ * The workspace-authority part of eligibility, in precedence order. Campaign
+ * policy may relax local heuristics, but it cannot opt a Never Contact or
+ * suppressed Person back into outreach; only the lead-level do-not-contact flag
+ * honours the campaign's `excludeDoNotContact`.
+ */
+function workspaceAuthorityReason(
+  row: { profile_url: string | null; global_suppression: boolean; do_not_contact: boolean },
+  neverContactReasons: ReadonlyMap<string, string>,
+  excludeDoNotContact: boolean
+): string | null {
+  if (row.profile_url && neverContactReasons.has(row.profile_url.trim()))
+    return `Never contact: ${neverContactReasons.get(row.profile_url.trim()) || 'Excluded by workspace'}`;
+  if (row.global_suppression) return 'Workspace suppression';
+  if (excludeDoNotContact && row.do_not_contact) return 'Do not contact';
+  return null;
+}
+
+/**
+ * Retire every LIVE member of one campaign, admitted or not, whom workspace
+ * authority now forbids contacting. Same predicate and reason strings as
+ * {@link reevaluateCampaignExclusions}.
+ *
+ * WHY THE RUNNER CALLS THIS BEFORE ADMISSION AND PLANNING, EVERY TICK.
+ * Eligibility was otherwise computed only when a member was enrolled. A
+ * suppression written afterwards (Inbound "Mark not a lead", an email-only
+ * opt-out, a lead marked do-not-contact) reached no campaign: enrolment
+ * returns early when nothing new arrived, admission takes any pending member,
+ * and the planner never looked. The send-time guard caught part of that later,
+ * but a suppressed Person must never be planned at all.
+ *
+ * Unadmitted members get the eligibility semantics (excluded with an
+ * eligibility reason, restorable by a later re-evaluation once lifted).
+ * Admitted members are ended the way `addExclusions` ends them, and their
+ * unclaimed queued work is skipped; claimed work stays with the send-time guard.
+ *
+ * lc-debt: rescans every live member of every running campaign each tick;
+ * upgrade path is a suppression/exclusion watermark so unchanged campaigns skip
+ * the scan.
+ */
+export async function retireSuppressedCampaignMembers(
+  db: Db,
+  workspaceId: string,
+  campaignId: string,
+  now: Date = new Date()
+): Promise<number> {
+  return db.transactionOrInline(async (tx) => {
+    const campaign = await tx
+      .prepare('SELECT exclusion_policy_json FROM linkedin_campaigns WHERE workspace_id=? AND id=?')
+      .get<{ exclusion_policy_json: unknown }>(workspaceId, campaignId);
+    if (!campaign) return 0;
+    const policy = parseJsonObject(campaign.exclusion_policy_json) as CampaignExclusionPolicy;
+    const rows = await tx
+      .prepare(
+        `SELECT m.id,c.profile_url,c.do_not_contact,${WORKSPACE_SUPPRESSION_SQL} AS global_suppression
+         FROM linkedin_campaign_members m
+         JOIN linkedin_lead_contacts c ON c.id=m.contact_id AND c.workspace_id=m.workspace_id
+         ${PROFILE_KEY_LATERAL_SQL}
+         WHERE m.workspace_id=? AND m.campaign_id=? AND m.status = ANY(?::text[])`
+      )
+      .all<{
+        id: string;
+        profile_url: string | null;
+        do_not_contact: boolean;
+        global_suppression: boolean;
+      }>(workspaceId, campaignId, [...ACTIVE_MEMBER_STATUSES]);
+    if (rows.length === 0) return 0;
+    const neverContactReasons = await neverContactReasonsFor(
+      tx,
+      workspaceId,
+      rows.map((row) => row.profile_url)
+    );
+    const ids: string[] = [];
+    const reasons: string[] = [];
+    for (const row of rows) {
+      const reason = workspaceAuthorityReason(
+        row,
+        neverContactReasons,
+        policy.excludeDoNotContact !== false
+      );
+      if (!reason) continue;
+      ids.push(row.id);
+      reasons.push(reason);
+    }
+    if (ids.length === 0) return 0;
+    const timestamp = now.toISOString();
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_members m
+         SET status='excluded', exclusion_reason=x.reason,
+             ended_at=CASE WHEN m.admitted_at IS NULL THEN m.ended_at ELSE ?::timestamptz END,
+             next_eligible_at=NULL, updated_at=?::timestamptz
+         FROM unnest(?::text[],?::text[]) AS x(id,reason)
+         WHERE m.workspace_id=? AND m.campaign_id=? AND m.id=x.id AND m.status = ANY(?::text[])`
+      )
+      .run(timestamp, timestamp, ids, reasons, workspaceId, campaignId, [
+        ...ACTIVE_MEMBER_STATUSES
+      ]);
+    await tx
+      .prepare(
+        `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL
+         WHERE workspace_id=? AND campaign_member_id=ANY(?::text[])
+           AND status IN ('planned','held') AND claimed_at IS NULL`
+      )
+      .run(workspaceId, ids);
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+         SET status='skipped',claimed_at=NULL,updated_at=?::timestamptz
+         WHERE workspace_id=? AND member_id=ANY(?::text[]) AND status='planned'`
+      )
+      .run(timestamp, workspaceId, ids);
+    return ids.length;
+  });
+}
+
 /**
  * Recompute explainable eligibility for every UNADMITTED member of one campaign.
  * Creation, dynamic-list enrolment and paused campaign edits all call this exact
@@ -971,18 +1125,7 @@ export async function reevaluateCampaignExclusions(
   const rows = await db
     .prepare(
       `SELECT m.id,m.status,m.exclusion_reason,c.email,c.company,c.first_name,c.last_name,c.profile_url,c.do_not_contact,
-              EXISTS (
-                SELECT 1 FROM suppressions s
-                WHERE s.workspace_id=m.workspace_id AND s.lifted_at IS NULL
-                  AND s.channel IN ('all','linkedin')
-                  AND (
-                    (s.person_id IS NOT NULL AND s.person_id=c.person_id)
-                    OR (s.email_normalized IS NOT NULL AND c.email IS NOT NULL
-                        AND s.email_normalized=LOWER(BTRIM(c.email)))
-                    OR (s.linkedin_url IS NOT NULL AND pk.profile_key IS NOT NULL
-                        AND LOWER(RTRIM(SPLIT_PART(SPLIT_PART(s.linkedin_url, chr(63),1),'#',1),'/'))=pk.profile_key)
-                  )
-              ) AS global_suppression,
+              ${WORKSPACE_SUPPRESSION_SQL} AS global_suppression,
               EXISTS (
                 SELECT 1 FROM linkedin_campaign_members other
                 WHERE other.workspace_id=m.workspace_id AND other.contact_id=m.contact_id
@@ -1029,10 +1172,7 @@ export async function reevaluateCampaignExclusions(
               )::int AS profile_rank
        FROM linkedin_campaign_members m
        JOIN linkedin_lead_contacts c ON c.id=m.contact_id AND c.workspace_id=m.workspace_id
-       CROSS JOIN LATERAL (
-         SELECT CASE WHEN c.profile_url IS NULL OR BTRIM(c.profile_url)='' THEN NULL
-                     ELSE LOWER(RTRIM(SPLIT_PART(SPLIT_PART(c.profile_url, chr(63),1),'#',1),'/')) END AS profile_key
-       ) pk
+       ${PROFILE_KEY_LATERAL_SQL}
        WHERE m.workspace_id=? AND m.campaign_id=? AND m.admitted_at IS NULL
          AND m.status IN ('pending','excluded')
        ORDER BY m.created_at,m.id`
@@ -1061,13 +1201,10 @@ export async function reevaluateCampaignExclusions(
     (policy.suppressedCompanies ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean)
   );
   const domains = normalizedSuppressedDomains(policy.suppressedDomains);
-  const neverContact = await filterExcluded(
+  const neverContactReasons = await neverContactReasonsFor(
     db,
     workspaceId,
-    rows.map((row) => row.profile_url).filter((url): url is string => Boolean(url))
-  );
-  const neverContactReasons = new Map(
-    neverContact.excluded.map((entry) => [entry.targetRef.trim(), entry.reason])
+    rows.map((row) => row.profile_url)
   );
   const ids: string[] = [];
   const statuses: string[] = [];
@@ -1085,10 +1222,12 @@ export async function reevaluateCampaignExclusions(
     // Global suppression is a workspace authority boundary. Campaign policy may
     // relax local eligibility heuristics, but it cannot opt a suppressed Person
     // back into outreach.
-    if (row.profile_url && neverContactReasons.has(row.profile_url.trim()))
-      reason = `Never contact: ${neverContactReasons.get(row.profile_url.trim()) || 'Excluded by workspace'}`;
-    else if (row.global_suppression) reason = 'Workspace suppression';
-    else if (policy.excludeDoNotContact !== false && row.do_not_contact) reason = 'Do not contact';
+    const authority = workspaceAuthorityReason(
+      row,
+      neverContactReasons,
+      policy.excludeDoNotContact !== false
+    );
+    if (authority) reason = authority;
     else if (!row.first_name.trim() || !row.last_name.trim() || !row.company.trim())
       reason = 'Missing lead identity';
     else if (policy.excludeMissingProfile !== false && !row.profile_url?.trim())
