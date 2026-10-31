@@ -700,11 +700,6 @@ describe('TRV-045 role management', () => {
       .get(bPending.actionId);
     expect(approval).toBeUndefined();
 
-    // A lead list binds to a connected LinkedIn account (TRV-044).
-    await b.owner.agent
-      .post('/api/linkedin/manager/seats')
-      .send({ seatKey: 'owner', label: 'B founder', timezone: 'UTC' })
-      .expect(201);
     const bList = (
       await b.owner.agent
         .post('/api/linkedin/manager/lead-lists')

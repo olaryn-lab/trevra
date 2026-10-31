@@ -10350,6 +10350,10 @@ async function assertCanUseLinkedInSeats(
  * A lead list belongs to one seat, so creating or importing into one needs a
  * seat that exists in THIS workspace (still connected) and that the caller may
  * use. Another workspace's seat answers exactly like one that never existed.
+ *
+ * The default seat key is the exception: it is the placeholder the first
+ * connected account fills, so lists built before any account is connected
+ * (CSV onboarding, the Inbound list) keep working as they did before.
  */
 async function assertCanUseLeadListSeat(
   db: Db,
@@ -10357,8 +10361,10 @@ async function assertCanUseLeadListSeat(
   seatKey: string,
   act: string
 ): Promise<void> {
-  if (!(await getSeat(db, req.auth!.workspaceId, seatKey)))
+  if (!(await getSeat(db, req.auth!.workspaceId, seatKey))) {
+    if (seatKey === OWNER_SEAT_KEY) return;
     throw new LinkedInApiError('LinkedIn account not found', 404);
+  }
   await assertCanUseLinkedInSeats(db, req, [seatKey], act);
 }
 

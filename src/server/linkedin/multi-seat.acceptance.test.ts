@@ -1015,6 +1015,14 @@ describe.skipIf(!databaseUrl)('TRV-044 seat ownership over HTTP (TRV-045 roles)'
       .prepare('SELECT COUNT(*)::int AS total FROM linkedin_lead_lists WHERE workspace_id=?')
       .get<{ total: number }>(otherWorkspace);
     expect(otherLists?.total).toBe(0);
+
+    // The default seat is a placeholder until the first account connects: a
+    // brand-new workspace can still build a list (CSV onboarding, Inbound).
+    const fresh = await signUp('fresh-owner');
+    await fresh.agent
+      .post('/api/linkedin/manager/lead-lists')
+      .send({ name: 'Before any account', sourceKind: 'csv' })
+      .expect(201);
   });
 
   it("cannot address another workspace's seat, even under the same seat key", async () => {

@@ -5,7 +5,7 @@ import type { Express } from 'express';
 import { createApp } from '../app.js';
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { openDatabase, type Db } from '../db.js';
-import { createLeadList, importLeadCsv, importLeadProfileUrls } from './lead-lists.js';
+import { importLeadCsv, importLeadProfileUrls } from './lead-lists.js';
 import { recordAction } from './actions.js';
 import { ADDITIONAL_WORKFLOW_STARTERS } from '../../client/workflow-starter-recipes.js';
 import {
@@ -899,17 +899,12 @@ describe('LinkedIn manager HTTP surface', () => {
   it('reports the missing LinkedIn account as a 400, not a 500, when creating a campaign before one is connected', async () => {
     const workspaceId = 'ws_li_manager_api_no_seat';
     const token = await session(workspaceId);
-    // The route will not bind a new list to an account that is not connected
-    // (TRV-044), so this list is one an account that has since gone left behind.
-    await as(token)
-      .post('/api/linkedin/manager/lead-lists')
-      .send({ name: 'No seat leads', sourceKind: 'csv' })
-      .expect(404);
-    const list = await createLeadList(
-      db,
-      { workspaceId, name: 'No seat leads', sourceKind: 'csv' },
-      NOW
-    );
+    const list = (
+      await as(token)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'No seat leads', sourceKind: 'csv' })
+        .expect(201)
+    ).body.list;
     await importLeadCsv(
       db,
       { workspaceId, listId: list.id, csv: 'First Name,Last Name,Company\nMaya,Smith,Acme\n' },
