@@ -29,7 +29,8 @@ import { toolNameForSkill } from './tools.js';
  * so nothing below trusts a unit seam. The properties proven:
  *
  *   - the endpoint is token-authenticated and requires `skills:read`;
- *   - tools/list is exactly the documented built-ins plus assigned, enabled skills;
+ *   - tools/list is exactly the documented built-ins plus assigned, enabled skills,
+ *     narrowed to the tools the token's scopes allow it to call;
  *   - each tool is held to its own scope, the token's workspace, and the Agent's
  *     skill allow-list -- including skills reached through a playbook;
  *   - write-capable tools stop at the prepared-action / approval boundary and
@@ -542,6 +543,69 @@ describe('MCP per-tool scope', () => {
     const skills = await callTool(app, readOnly.authorization, 'trevra_list_skills');
     expect(skills.isError).toBe(false);
     expect(skills.value.some((skill: { id: string }) => skill.id === SCORE_SKILL)).toBe(true);
+  });
+
+  it('lists only the tools the token may call, by the same check tools/call applies', async () => {
+    const tenant = await workspace('list_scope');
+    const skillTools = await enabledSkillTools(tenant.workspaceId);
+    expect(skillTools).toContain(SCORE_TOOL);
+    const workspaceReads = [
+      'trevra_list_people',
+      'trevra_list_accounts',
+      'trevra_list_opportunities',
+      'trevra_list_conversations',
+      'trevra_list_deliveries'
+    ];
+    const cases: Array<[AgentScope[], string[]]> = [
+      [['skills:read'], ['trevra_list_skills']],
+      [
+        ['skills:read', 'workspace:read'],
+        ['trevra_list_skills', ...workspaceReads]
+      ],
+      [
+        ['skills:read', 'skills:run'],
+        ['trevra_list_skills', ...skillTools]
+      ],
+      [
+        ['skills:read', 'playbooks:read', 'playbooks:run'],
+        ['trevra_list_skills', 'trevra_list_playbooks', 'trevra_start_playbook']
+      ],
+      [
+        ['skills:read', 'workflows:read', 'runs:read'],
+        [
+          'trevra_list_skills',
+          'trevra_list_playbook_runs',
+          'trevra_get_playbook_run',
+          'trevra_list_events',
+          'trevra_list_runs',
+          'trevra_get_run'
+        ]
+      ],
+      [[...AGENT_SCOPES], [...DOCUMENTED_BUILT_INS, ...skillTools]]
+    ];
+    for (const [scopes, expected] of cases) {
+      const { authorization } = await tenant.token(scopes);
+      const listed = (await listTools(app, authorization)).map((tool) => tool.name);
+      expect(listed, scopes.join(' ')).toEqual(expected);
+      // Everything hidden is still refused on call, before it runs. (Built-ins
+      // and one skill tool: every skill tool shares one scope, and the write
+      // bucket bounds how many calls one test can make.)
+      for (const name of [...DOCUMENTED_BUILT_INS, SCORE_TOOL].filter(
+        (candidate) => !listed.includes(candidate)
+      )) {
+        const outcome = await callTool(app, authorization, name, {});
+        expect(outcome.isError, `${scopes.join(' ')} ${name}`).toBe(true);
+        expect(String(outcome.value.error)).toMatch(/^Agent token is missing scope: /);
+      }
+      // And nothing listed is refused for scope when called.
+      for (const name of listed.filter((candidate) => DOCUMENTED_BUILT_INS.includes(candidate))) {
+        const outcome = await callTool(app, authorization, name, {});
+        expect(String(outcome.value?.error ?? ''), `${scopes.join(' ')} ${name}`).not.toMatch(
+          /missing scope/
+        );
+      }
+    }
+    expect(await count('skill_runs', tenant.workspaceId)).toBe(0);
   });
 });
 

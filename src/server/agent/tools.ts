@@ -461,16 +461,33 @@ export function unassignedPlaybookSkillsMessage(playbookId: string, skillIds: st
   return `Playbook ${playbookId} runs skills not assigned to this Agent: ${skillIds.join(', ')}`;
 }
 
-/** Built-ins + one tool per enabled skill assigned to this Agent. */
+/**
+ * May a credential holding `scopes` call `tool`? THE scope check: `callAgentTool`
+ * refuses on it and `listAgentTools` filters on it, so what an agent is offered
+ * and what it may call cannot drift apart.
+ */
+export function agentToolPermitted(
+  tool: AgentToolDefinition,
+  scopes: readonly AgentScope[]
+): boolean {
+  return tool.scope === null || scopes.includes(tool.scope);
+}
+
+/**
+ * Built-ins + one tool per enabled skill assigned to this Agent. Given the
+ * credential's `scopes`, only the tools it may call (see `agentToolPermitted`).
+ */
 export async function listAgentTools(
   db: Db,
   workspaceId: string,
-  agentId?: string
+  agentId?: string,
+  scopes?: readonly AgentScope[]
 ): Promise<AgentToolDefinition[]> {
   const skills = agentId
     ? await listSkillsForAgent(db, workspaceId, agentId)
     : (await listWorkspaceSkills(db, workspaceId)).filter((skill) => skill.enabled);
-  return [...BUILT_IN_AGENT_TOOLS, ...skills.map(skillToolDefinition)];
+  const tools = [...BUILT_IN_AGENT_TOOLS, ...skills.map(skillToolDefinition)];
+  return scopes ? tools.filter((tool) => agentToolPermitted(tool, scopes)) : tools;
 }
 
 /** Resolve, enforce scope, run. Throws on an unknown tool or a missing scope. */
@@ -488,7 +505,7 @@ export async function callAgentTool(
       throw new Error(`Skill is not available to this Agent: ${name}`);
     }
   }
-  if (tool.scope && !identityScopes.includes(tool.scope)) {
+  if (!agentToolPermitted(tool, identityScopes)) {
     throw new Error(`Agent token is missing scope: ${tool.scope}`);
   }
   return tool.run(ctx, args);

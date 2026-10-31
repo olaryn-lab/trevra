@@ -38,8 +38,11 @@ export async function handleMcpHttpRequest(
     }
   );
 
+  // Filtered by the token's scopes with the same predicate tools/call enforces.
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: (await listAgentTools(db, identity.workspaceId, identity.agentId)).map(mcpTool)
+    tools: (await listAgentTools(db, identity.workspaceId, identity.agentId, identity.scopes)).map(
+      mcpTool
+    )
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
