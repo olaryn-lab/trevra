@@ -57,8 +57,19 @@ import {
   enrollTrevraPasskey,
   getAuthwardCapabilities,
   handleAuthwardBackchannelLogout,
-  resolveBetterAuthIdentity
+  resolveBetterAuthIdentity,
+  runAsRoleChange
 } from './auth-service.js';
+import {
+  WORKSPACE_ROLES,
+  canManageTeammate,
+  capabilityRefusal,
+  hasCapability,
+  parseWorkspaceRole,
+  requireCapability,
+  type Capability,
+  type WorkspaceRole
+} from './roles.js';
 import {
   createNangoConnectSession,
   disconnectIntegration,
@@ -724,7 +735,7 @@ const linkedinTargetsUpload = multer({
 });
 
 type AuthedRequest = Request & {
-  auth?: { userId: string; workspaceId: string; email: string; role: 'owner' | 'member' };
+  auth?: { userId: string; workspaceId: string; email: string; role: WorkspaceRole };
 };
 
 export interface CreateAppOptions {
@@ -1413,12 +1424,13 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // else's.
   app.use('/api', workspaceLimiter);
 
-  // Merchant outbound event notifications. Mutations are owner-only; event
-  // type allowlist and destination egress policy are server-enforced.
+  // Merchant outbound event notifications. Mutations are owner-only
+  // (`outbound_webhooks.manage`, roles.ts); event type allowlist and
+  // destination egress policy are server-enforced.
   // A signing secret is returned ONLY by create and rotate, never on GET.
   app.get(
     '/api/outbound-webhooks',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         res.setHeader('Cache-Control', 'no-store');
@@ -1432,7 +1444,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.post(
     '/api/outbound-webhooks',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1460,7 +1472,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.get(
     '/api/outbound-webhooks/:id/deliveries',
-    ownerOnly('inspect outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'inspect outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1481,7 +1493,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.delete(
     '/api/outbound-webhooks/:id',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1501,7 +1513,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.patch(
     '/api/outbound-webhooks/:id',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1539,7 +1551,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.post(
     '/api/outbound-webhooks/:id/rotate-secret',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1563,7 +1575,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.get(
     '/api/outbound-webhooks/:id/health',
-    ownerOnly('inspect outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'inspect outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1582,7 +1594,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.post(
     '/api/outbound-webhooks/:id/replay',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1607,7 +1619,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.post(
     '/api/outbound-webhooks/:id/deliveries/:deliveryId/replay',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1626,7 +1638,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     }
   );
 
-  mountBillingRoutes(app, db, ownerOnly);
+  // Billing stays owner-only: `billing.manage` (src/server/roles.ts).
+  mountBillingRoutes(app, db, (act) => requireCapability('billing.manage', act));
 
   app.get('/api/skills', async (req: AuthedRequest, res, next) => {
     try {
@@ -1653,7 +1666,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.put(
     '/api/setup/meetings/booking-link',
-    ownerOnly('change the booking link'),
+    requireCapability('integrations.manage', 'change the booking link'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1690,7 +1703,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/capture-sources',
-    ownerOnly('create a lead capture source'),
+    requireCapability('integrations.manage', 'create a lead capture source'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = captureSourceCreateSchema.parse(req.body ?? {});
@@ -1725,7 +1738,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.patch(
     '/api/capture-sources/:id/status',
-    ownerOnly('change a lead capture source'),
+    requireCapability('integrations.manage', 'change a lead capture source'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1748,7 +1761,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/capture-sources/:id/rotate',
-    ownerOnly('rotate a lead capture source secret'),
+    requireCapability('integrations.manage', 'rotate a lead capture source secret'),
     async (req: AuthedRequest, res, next) => {
       try {
         const rotated = await rotateCaptureSourceSecret(db, {
@@ -1789,7 +1802,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/github/repos',
-    ownerOnly('watch a GitHub repository'),
+    requireCapability('integrations.manage', 'watch a GitHub repository'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1810,7 +1823,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.delete(
     '/api/github/repos/:id',
-    ownerOnly('stop watching a GitHub repository'),
+    requireCapability('integrations.manage', 'stop watching a GitHub repository'),
     async (req: AuthedRequest, res, next) => {
       try {
         const removed = await unwatchRepository(db, req.auth!.workspaceId, String(req.params.id));
@@ -1835,7 +1848,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.get(
     '/api/setup/webhooks',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const endpoints = await listProviderWebhookEndpoints(db, req.auth!.workspaceId);
@@ -1853,7 +1866,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/setup/webhooks/draft',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1876,7 +1889,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/setup/webhooks',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1939,7 +1952,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.patch(
     '/api/setup/webhooks/:id/status',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const endpointId = webhookEndpointIdSchema.parse(String(req.params.id));
@@ -1963,7 +1976,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.delete(
     '/api/setup/webhooks/:id',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const endpointId = webhookEndpointIdSchema.parse(String(req.params.id));
@@ -2087,7 +2100,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
         // workspace, so that remains owner-only. Using or disconnecting the
         // already-paired machine is ordinary workspace operation and every
         // member may do it.
-        canManage: req.auth!.role === 'owner',
+        canManage: hasCapability(req.auth!.role, 'credentials.manage'),
         canUse: true,
         canDisconnect: true
       });
@@ -2098,7 +2111,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/linkedin/companion/pair',
-    ownerOnly('pair a computer for LinkedIn'),
+    requireCapability('credentials.manage', 'pair a computer for LinkedIn'),
     async (req: AuthedRequest, res, next) => {
       try {
         const pairing = await createCompanionPairing(db, {
@@ -2149,53 +2162,111 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
    * a Trevra account anywhere else -- so this route has no need to look that
    * up itself, and the adder never learns it either way.
    *
-   * Owner-only, same carve-out shape as the LinkedIn credential routes: full
-   * workspace parity for members, except who gets to change who is IN the
-   * workspace.
+   * Who may invite whom is the capability map's (roles.ts): an owner or a
+   * manager may invite a `member` (`team.invite`); only the owner may invite
+   * a manager or another owner (`team.roles`). Better Auth's own
+   * `beforeCreateInvitation` hook (auth-service.ts) applies the same rule, so
+   * the plugin route cannot be used to get around this one.
    */
   const teamAddMemberSchema = z.object({
     email: z.string().trim().email().max(320),
-    role: z.enum(['owner', 'member']).default('member')
+    role: z.enum(WORKSPACE_ROLES).default('member')
   });
-  app.post('/api/team/members', async (req: AuthedRequest, res, next) => {
-    try {
-      if (req.auth!.role !== 'owner')
-        return res.status(403).json({ error: 'Only the workspace owner can add teammates' });
-      const input = teamAddMemberSchema.parse(req.body ?? {});
-      const workspaceId = req.auth!.workspaceId;
-      // `createInvitation` requires this request's own session (the inviter),
-      // so it is the one call in this route that needs headers rather than
-      // the userId system-action shortcut the rest of this route's callers
-      // (e.g. the backfill) use elsewhere in this codebase.
-      const invite = () =>
-        betterAuth.api.createInvitation({
-          headers: fromNodeHeaders(req.headers),
-          body: { email: input.email, organizationId: workspaceId, role: input.role }
-        });
-      // TRV-057: members + pending invitations must fit the plan's team limit.
-      // Under TREVRA_BILLING_ENFORCEMENT=enforce the entitlement lock is held
-      // until the invitation is committed, so two concurrent invites at the
-      // limit cannot both pass the count. In observe mode nothing blocks, so
-      // there is nothing to serialize: Better Auth's beforeCreateInvitation
-      // hook records the would-deny on its own connection (recording it here,
-      // inside a transaction that waits on that hook, would deadlock on the
-      // dedupe claim).
-      const entitlements = await loadEntitlements(db, workspaceId);
-      const invitation = denialsBlock(entitlements)
-        ? await db.transaction(async (tx) => {
-            await assertTeamInvite(tx, entitlements, workspaceId, { lock: true });
-            return invite();
-          })
-        : await invite();
-      res.status(201).json({ status: 'invited', invitation });
-    } catch (error) {
-      if (error instanceof APIError)
-        return res
-          .status(error.statusCode ?? 400)
-          .json({ error: error.body?.message ?? error.message });
-      next(error);
+  app.post(
+    '/api/team/members',
+    requireCapability('team.invite', 'add teammates'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = teamAddMemberSchema.parse(req.body ?? {});
+        if (!canManageTeammate(req.auth!.role, input.role, 'invite'))
+          return res
+            .status(403)
+            .json({ error: capabilityRefusal('team.roles', 'invite a manager or owner') });
+        const workspaceId = req.auth!.workspaceId;
+        // `createInvitation` requires this request's own session (the inviter),
+        // so it is the one call in this route that needs headers rather than
+        // the userId system-action shortcut the rest of this route's callers
+        // (e.g. the backfill) use elsewhere in this codebase.
+        const invite = () =>
+          betterAuth.api.createInvitation({
+            headers: fromNodeHeaders(req.headers),
+            body: { email: input.email, organizationId: workspaceId, role: input.role }
+          });
+        // TRV-057: members + pending invitations must fit the plan's team limit.
+        // Under TREVRA_BILLING_ENFORCEMENT=enforce the entitlement lock is held
+        // until the invitation is committed, so two concurrent invites at the
+        // limit cannot both pass the count. In observe mode nothing blocks, so
+        // there is nothing to serialize: Better Auth's beforeCreateInvitation
+        // hook records the would-deny on its own connection (recording it here,
+        // inside a transaction that waits on that hook, would deadlock on the
+        // dedupe claim).
+        const entitlements = await loadEntitlements(db, workspaceId);
+        const invitation = denialsBlock(entitlements)
+          ? await db.transaction(async (tx) => {
+              await assertTeamInvite(tx, entitlements, workspaceId, { lock: true });
+              return invite();
+            })
+          : await invite();
+        res.status(201).json({ status: 'invited', invitation });
+      } catch (error) {
+        if (error instanceof APIError)
+          return res
+            .status(error.statusCode ?? 400)
+            .json({ error: error.body?.message ?? error.message });
+        next(error);
+      }
     }
-  });
+  );
+
+  /**
+   * Change a teammate's role (TRV-045): promote a member to manager, demote a
+   * manager to member, or move ownership. Owner-only (`team.roles`).
+   *
+   * THE ONLY WAY IN. Better Auth's own `/organization/update-member-role` is
+   * refused unless this route opened the role-change scope
+   * (`runAsRoleChange`, auth-service.ts) -- that scope is what lets
+   * `afterUpdateMemberRole` append a `workspace.member_role_changed` domain
+   * event naming who changed whom from what to what. Better Auth still applies
+   * its own checks underneath: `member:update` (owner only) and the last-owner
+   * guard (`assertOwnerChangeAllowed`).
+   */
+  const teamRoleChangeSchema = z.object({ role: z.enum(WORKSPACE_ROLES) }).strict();
+  app.patch(
+    '/api/team/members/:memberId',
+    requireCapability('team.roles', "change a teammate's role"),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const { role } = teamRoleChangeSchema.parse(req.body ?? {});
+        const workspaceId = req.auth!.workspaceId;
+        const memberId = String(req.params.memberId);
+        const target = await db
+          .prepare('SELECT id,"userId",role FROM member WHERE id=? AND "organizationId"=?')
+          .get<{ id: string; userId: string; role: string }>(memberId, workspaceId);
+        if (!target) return res.status(404).json({ error: 'Teammate not found in this workspace' });
+        if (target.role === role)
+          return res.json({
+            member: { id: target.id, userId: target.userId, role: target.role },
+            changed: false
+          });
+        const updated = await runAsRoleChange({ actorUserId: req.auth!.userId }, () =>
+          betterAuth.api.updateMemberRole({
+            headers: fromNodeHeaders(req.headers),
+            body: { memberId, role, organizationId: workspaceId }
+          })
+        );
+        res.json({
+          member: { id: updated.id, userId: updated.userId, role: updated.role },
+          changed: true
+        });
+      } catch (error) {
+        if (error instanceof APIError)
+          return res
+            .status(error.statusCode ?? 400)
+            .json({ error: error.body?.message ?? error.message });
+        next(error);
+      }
+    }
+  );
 
   app.get('/api/skills', async (req: AuthedRequest, res, next) => {
     try {
@@ -2356,6 +2427,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/playbook-runs/:id/steps/:stepId/decision',
+    requireCapability('playbooks.decide', 'decide a playbook approval'),
     async (req: AuthedRequest, res, next) => {
       try {
         const decision = playbookDecisionSchema.parse(req.body ?? {});
@@ -2399,7 +2471,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // not a privilege, and a teammate who cannot see the policy cannot obey it.
   app.post(
     '/api/policies',
-    ownerOnly("change this workspace's policies"),
+    requireCapability('policy.manage', "change this workspace's policies"),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = policyWriteSchema.parse(req.body ?? {});
@@ -2438,7 +2510,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // it. `updated_at` moves; `version` does not, because nothing reads it.
   app.patch(
     '/api/policies/:id',
-    ownerOnly("change this workspace's policies"),
+    requireCapability('policy.manage', "change this workspace's policies"),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = policyPatchSchema.parse(req.body ?? {});
@@ -2470,7 +2542,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // deleting a `deny` policy is how you turn a refusal off.
   app.delete(
     '/api/policies/:id',
-    ownerOnly("change this workspace's policies"),
+    requireCapability('policy.manage', "change this workspace's policies"),
     async (req: AuthedRequest, res, next) => {
       try {
         const result = await db
@@ -2498,7 +2570,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // strangers -- there is no way to un-say that afterwards.
   app.post(
     '/api/registry/publishers',
-    ownerOnly('create a module publisher for this workspace'),
+    requireCapability('registry.manage', 'create a module publisher for this workspace'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = publisherCreateSchema.parse(req.body ?? {});
@@ -2521,7 +2593,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // workspace's name in front of everybody else's install route.
   app.post(
     '/api/registry/modules/:id/releases',
-    ownerOnly('publish a module release'),
+    requireCapability('registry.manage', 'publish a module release'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = moduleReleaseSchema.parse(req.body ?? {});
@@ -2562,7 +2634,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // per-teammate decision.
   app.post(
     '/api/registry/modules/:id/install',
-    ownerOnly('install a community module'),
+    requireCapability('registry.manage', 'install a community module'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = moduleInstallSchema.parse(req.body ?? {});
@@ -2585,7 +2657,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // generic commercial projection control surface no longer exists.
   app.delete(
     '/api/registry/modules/:id/install',
-    ownerOnly('uninstall a community module'),
+    requireCapability('registry.manage', 'uninstall a community module'),
     async (req: AuthedRequest, res, next) => {
       try {
         const removed = await uninstallModuleRelease(
@@ -2611,36 +2683,40 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     }
   });
 
-  app.post('/api/agents', ownerOnly('create an Agent'), async (req: AuthedRequest, res, next) => {
-    try {
-      const input = z
-        .object({
-          name: z.string().trim().min(1).max(100),
-          purpose: z.string().trim().min(1).max(500),
-          instructions: z.string().trim().max(4000).optional(),
-          skillIds: z.array(z.string().trim().min(1).max(200)).max(100).optional()
-        })
-        .strict()
-        .parse(req.body ?? {});
-      await assertAssignableAgentSkills(db, req.auth!.workspaceId, input.skillIds);
-      res.status(201).json({
-        agent: await createAgent(db, {
-          workspaceId: req.auth!.workspaceId,
-          createdByUserId: req.auth!.userId,
-          ...input
-        })
-      });
-    } catch (error) {
-      if (error instanceof AgentPrincipalError) {
-        return res.status(error.status).json({ error: error.message });
+  app.post(
+    '/api/agents',
+    requireCapability('agents.manage', 'create an Agent'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            name: z.string().trim().min(1).max(100),
+            purpose: z.string().trim().min(1).max(500),
+            instructions: z.string().trim().max(4000).optional(),
+            skillIds: z.array(z.string().trim().min(1).max(200)).max(100).optional()
+          })
+          .strict()
+          .parse(req.body ?? {});
+        await assertAssignableAgentSkills(db, req.auth!.workspaceId, input.skillIds);
+        res.status(201).json({
+          agent: await createAgent(db, {
+            workspaceId: req.auth!.workspaceId,
+            createdByUserId: req.auth!.userId,
+            ...input
+          })
+        });
+      } catch (error) {
+        if (error instanceof AgentPrincipalError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        next(error);
       }
-      next(error);
     }
-  });
+  );
 
   app.patch(
     '/api/agents/:id',
-    ownerOnly('change an Agent'),
+    requireCapability('agents.manage', 'change an Agent'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -2689,33 +2765,37 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     }
   });
 
-  app.post('/api/agent-tokens', async (req: AuthedRequest, res, next) => {
-    try {
-      const input = z
-        .object({
-          agentId: z.string().trim().min(1).max(200).optional(),
-          name: z.string().trim().min(1).max(100),
-          scopes: z.array(z.enum(AGENT_SCOPES)).min(1).max(AGENT_SCOPES.length).optional(),
-          expiresAt: z.string().datetime().nullable().optional()
-        })
-        .parse(req.body ?? {});
-      const created = await createAgentToken(db, {
-        workspaceId: req.auth!.workspaceId,
-        userId: req.auth!.userId,
-        agentId: input.agentId,
-        name: input.name,
-        scopes: input.scopes,
-        expiresAt: input.expiresAt
-      });
-      res.setHeader('Cache-Control', 'no-store');
-      res.status(201).json(created);
-    } catch (error) {
-      if (error instanceof AgentPrincipalError) {
-        return res.status(error.status).json({ error: error.message });
+  app.post(
+    '/api/agent-tokens',
+    requireCapability('agent_tokens.create', 'create an agent token'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            agentId: z.string().trim().min(1).max(200).optional(),
+            name: z.string().trim().min(1).max(100),
+            scopes: z.array(z.enum(AGENT_SCOPES)).min(1).max(AGENT_SCOPES.length).optional(),
+            expiresAt: z.string().datetime().nullable().optional()
+          })
+          .parse(req.body ?? {});
+        const created = await createAgentToken(db, {
+          workspaceId: req.auth!.workspaceId,
+          userId: req.auth!.userId,
+          agentId: input.agentId,
+          name: input.name,
+          scopes: input.scopes,
+          expiresAt: input.expiresAt
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(201).json(created);
+      } catch (error) {
+        if (error instanceof AgentPrincipalError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        next(error);
       }
-      next(error);
     }
-  });
+  );
 
   // Owner-only. Revoking is the act that stops somebody's Claude Code or Codex
   // working mid-session, and it is not reversible -- a revoked token cannot be
@@ -2724,7 +2804,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // ordinary use, and every token it mints is scoped to this workspace anyway.
   app.delete(
     '/api/agent-tokens/:id',
-    ownerOnly('revoke an agent token'),
+    requireCapability('api_tokens.manage', 'revoke an agent token'),
     async (req: AuthedRequest, res, next) => {
       try {
         const revoked = await revokeAgentToken(
@@ -2803,7 +2883,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // prompts are sent.
   app.put(
     '/api/agent-setup/config',
-    ownerOnly("change this workspace's model endpoint"),
+    requireCapability('agent.configure', "change this workspace's model endpoint"),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentConfigSchema.parse(req.body ?? {});
@@ -2836,7 +2916,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.put(
     '/api/agent-setup/key',
     authLimiter,
-    ownerOnly("store this workspace's model API key"),
+    requireCapability('credentials.manage', "store this workspace's model API key"),
     async (req: AuthedRequest, res, next) => {
       try {
         if (!secretsConfigured()) {
@@ -2864,7 +2944,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.delete(
     '/api/agent-setup/key',
-    ownerOnly("remove this workspace's model API key"),
+    requireCapability('credentials.manage', "remove this workspace's model API key"),
     async (req: AuthedRequest, res, next) => {
       try {
         const deleted = await deleteWorkspaceSecret(
@@ -2902,7 +2982,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.put(
     '/api/enrichment/key',
     authLimiter,
-    ownerOnly("store this workspace's Hunter API key"),
+    requireCapability('credentials.manage', "store this workspace's Hunter API key"),
     async (req: AuthedRequest, res, next) => {
       try {
         if (!secretsConfigured()) {
@@ -2967,7 +3047,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.delete(
     '/api/enrichment/key',
-    ownerOnly("remove this workspace's Hunter API key"),
+    requireCapability('credentials.manage', "remove this workspace's Hunter API key"),
     async (req: AuthedRequest, res, next) => {
       try {
         await deleteWorkspaceSecret(db, req.auth!.workspaceId, 'hunter_api_key', req.auth!.userId);
@@ -2982,7 +3062,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.put(
     '/api/enrichment/cap',
-    ownerOnly('change the enrichment credit cap'),
+    requireCapability('enrichment.spend', 'change the enrichment credit cap'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -3018,7 +3098,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // config or a token.
   app.put(
     '/api/agent-setup/cli-config',
-    ownerOnly('choose which CLI agent this workspace runs'),
+    requireCapability('agent.configure', 'choose which CLI agent this workspace runs'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentCliConfigSchema.parse(req.body ?? {});
@@ -3047,7 +3127,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.put(
     '/api/agent-setup/cli-token',
     authLimiter,
-    ownerOnly("store this workspace's CLI subscription token"),
+    requireCapability('credentials.manage', "store this workspace's CLI subscription token"),
     async (req: AuthedRequest, res, next) => {
       try {
         if (!secretsConfigured()) {
@@ -3074,7 +3154,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.delete(
     '/api/agent-setup/cli-token',
-    ownerOnly("remove this workspace's CLI subscription token"),
+    requireCapability('credentials.manage', "remove this workspace's CLI subscription token"),
     async (req: AuthedRequest, res, next) => {
       try {
         const deleted = await deleteWorkspaceSecret(
@@ -3101,7 +3181,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // gated, and a member who wants it off can pause the schedule or the budget.
   app.put(
     '/api/agent-setup/cli-risk-accept',
-    ownerOnly('accept the CLI agent risk disclaimer'),
+    requireCapability('agent.configure', 'accept the CLI agent risk disclaimer'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentCliRiskAcceptSchema.parse(req.body ?? {});
@@ -3124,7 +3204,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // see why a run stopped.
   app.put(
     '/api/agent-setup/budget',
-    ownerOnly('change the agent budget'),
+    requireCapability('agent.configure', 'change the agent budget'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentBudgetSchema.parse(req.body ?? {});
@@ -3145,7 +3225,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // nobody in the room, and both of them are the owner's.
   app.put(
     '/api/agent-setup/schedule',
-    ownerOnly('change the unattended agent schedule'),
+    requireCapability('agent.configure', 'change the unattended agent schedule'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentScheduleSchema.parse(req.body ?? {});
@@ -3326,7 +3406,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // and a file that has left cannot be un-downloaded when a membership ends.
   app.get(
     '/api/ledger/exports/:id',
-    ownerOnly('download a ledger export'),
+    requireCapability('exports.download', 'download a ledger export'),
     async (req: AuthedRequest, res, next) => {
       try {
         const stored = await readLedgerExport(db, req.auth!.workspaceId, String(req.params.id));
@@ -3389,7 +3469,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
    */
   app.get(
     '/api/workspace/export',
-    ownerOnly('export this workspace'),
+    requireCapability('workspace.export', 'export this workspace'),
     async (req: AuthedRequest, res, next) => {
       try {
         const workspaceId = req.auth!.workspaceId;
@@ -3421,7 +3501,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
    */
   app.get(
     '/api/workspace/erasure',
-    ownerOnly('erase this workspace'),
+    requireCapability('workspace.erase', 'erase this workspace'),
     async (req: AuthedRequest, res, next) => {
       try {
         const workspaceId = req.auth!.workspaceId;
@@ -3499,7 +3579,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
    */
   app.delete(
     '/api/workspace',
-    ownerOnly('erase this workspace'),
+    requireCapability('workspace.erase', 'erase this workspace'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = workspaceErasureSchema.parse(req.body ?? {});
@@ -3665,7 +3745,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // owner who inspected the original public thread can settle their outcome.
   app.get(
     '/api/outreach/posts/unresolved',
-    ownerOnly('review unresolved community replies'),
+    requireCapability('community.resolve', 'review unresolved community replies'),
     async (req: AuthedRequest, res, next) => {
       try {
         res.setHeader('Cache-Control', 'no-store');
@@ -3680,7 +3760,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/outreach/posts/:id/resolve',
-    ownerOnly('resolve an uncertain community reply'),
+    requireCapability('community.resolve', 'resolve an uncertain community reply'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -4250,46 +4330,54 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   // TRV-051: prepare a `crm.upsert-contact` behind founder approval. Nothing is
   // written to the CRM here; the approval run at `/ledger/run/:id` executes it.
-  app.post('/api/crm/contact-upserts', async (req: AuthedRequest, res, next) => {
-    try {
-      const input = prepareCrmUpsertSchema.parse(req.body ?? {});
-      const result = await prepareCrmContactUpsert(db, req.auth!.workspaceId, {
-        ...input,
-        actorType: 'user',
-        actorId: req.auth!.userId
-      });
-      res.setHeader('Cache-Control', 'no-store');
-      res.status(result.created ? 201 : 200).json({ upsert: result.upsert, run: result.run });
-    } catch (error) {
-      if (error instanceof CrmUpsertError)
-        return res.status(error.status).json({ error: error.message, code: error.code });
-      next(error);
-    }
-  });
-
-  app.post('/api/crm/contact-upserts/bulk', async (req: AuthedRequest, res, next) => {
-    try {
-      const ids = (req.body ?? {}).leadContactIds;
-      if (Array.isArray(ids) && ids.length > CRM_UPSERT_BULK_MAX)
-        return res.status(400).json({
-          error: `A bulk CRM sync prepares at most ${CRM_UPSERT_BULK_MAX} leads at a time; ${ids.length} were sent.`,
-          code: 'bulk_limit',
-          max: CRM_UPSERT_BULK_MAX
+  app.post(
+    '/api/crm/contact-upserts',
+    requireCapability('crm.prepare', 'prepare a CRM contact sync'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = prepareCrmUpsertSchema.parse(req.body ?? {});
+        const result = await prepareCrmContactUpsert(db, req.auth!.workspaceId, {
+          ...input,
+          actorType: 'user',
+          actorId: req.auth!.userId
         });
-      const input = prepareCrmUpsertBulkSchema.parse(req.body ?? {});
-      const result = await prepareCrmContactUpserts(db, req.auth!.workspaceId, {
-        ...input,
-        actorType: 'user',
-        actorId: req.auth!.userId
-      });
-      res.setHeader('Cache-Control', 'no-store');
-      res.json(result);
-    } catch (error) {
-      if (error instanceof CrmUpsertError)
-        return res.status(error.status).json({ error: error.message, code: error.code });
-      next(error);
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(result.created ? 201 : 200).json({ upsert: result.upsert, run: result.run });
+      } catch (error) {
+        if (error instanceof CrmUpsertError)
+          return res.status(error.status).json({ error: error.message, code: error.code });
+        next(error);
+      }
     }
-  });
+  );
+
+  app.post(
+    '/api/crm/contact-upserts/bulk',
+    requireCapability('crm.prepare', 'prepare a CRM contact sync'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const ids = (req.body ?? {}).leadContactIds;
+        if (Array.isArray(ids) && ids.length > CRM_UPSERT_BULK_MAX)
+          return res.status(400).json({
+            error: `A bulk CRM sync prepares at most ${CRM_UPSERT_BULK_MAX} leads at a time; ${ids.length} were sent.`,
+            code: 'bulk_limit',
+            max: CRM_UPSERT_BULK_MAX
+          });
+        const input = prepareCrmUpsertBulkSchema.parse(req.body ?? {});
+        const result = await prepareCrmContactUpserts(db, req.auth!.workspaceId, {
+          ...input,
+          actorType: 'user',
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(result);
+      } catch (error) {
+        if (error instanceof CrmUpsertError)
+          return res.status(error.status).json({ error: error.message, code: error.code });
+        next(error);
+      }
+    }
+  );
 
   app.post('/api/content/opportunities/:id/carousel', async (req: AuthedRequest, res, next) => {
     try {
@@ -4672,7 +4760,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.put(
     '/api/email/inbound-mailbox',
-    ownerOnly('choose the inbound mailbox'),
+    requireCapability('integrations.manage', 'choose the inbound mailbox'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -4697,7 +4785,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.delete(
     '/api/email/inbound-mailbox',
-    ownerOnly('stop reading the inbound mailbox'),
+    requireCapability('integrations.manage', 'stop reading the inbound mailbox'),
     async (req: AuthedRequest, res, next) => {
       try {
         await clearInboundMailbox(db, req.auth!.workspaceId);
@@ -4721,7 +4809,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.put(
     '/api/email/dkim-selector',
-    ownerOnly('set the DKIM selector'),
+    requireCapability('integrations.manage', 'set the DKIM selector'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -4979,7 +5067,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // Owner-only: connecting creates a signing secret, like any capture source.
   app.put(
     '/api/watches/:id/citation-source',
-    ownerOnly('connect AI-answer citation samples'),
+    requireCapability('integrations.manage', 'connect AI-answer citation samples'),
     async (req: AuthedRequest, res, next) => {
       try {
         const watch = await getWatch(db, req.auth!.workspaceId, String(req.params.id));
@@ -5389,7 +5477,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.put(
     '/api/linkedin/seat',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, "change a LinkedIn account's limits");
+      assertCapability(req, 'account_safety.manage', "change a LinkedIn account's limits");
       const { seatKey = OWNER_SEAT_KEY, ...input } = linkedinSeatSchema.parse(req.body ?? {});
       assertSeatProxyUsable(req.auth!.workspaceId, seatKey, input.proxyUrl);
       const now = new Date();
@@ -5475,7 +5563,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       // account was paused because somebody thought something was wrong, and
       // deciding it is fine now is the decision the audit row below records
       // against a name.
-      assertWorkspaceOwner(req, 'resume a paused LinkedIn account');
+      assertCapability(req, 'account_safety.manage', 'resume a paused LinkedIn account');
       const { seatKey, reason } = linkedinResumeSchema.parse({ ...(req.body ?? {}), ...req.query });
       const workspaceId = req.auth!.workspaceId;
       const now = new Date();
@@ -5555,7 +5643,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.delete(
     '/api/linkedin/seat',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'disconnect a LinkedIn account');
+      assertCapability(req, 'account_safety.manage', 'disconnect a LinkedIn account');
       const { seatKey } = linkedinSeatSelectorSchema.parse(req.query);
       const workspaceId = req.auth!.workspaceId;
       // The queue first: planned and held rows to 'skipped', pending manual tasks
@@ -5621,7 +5709,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       // Credential-management carve-out (design doc "Decisions made during
       // brainstorming" #2): full workspace parity for any member, EXCEPT this.
       // Only the workspace owner may replace the stored LinkedIn sign-in.
-      if (req.auth!.role !== 'owner') {
+      if (!hasCapability(req.auth!.role, 'credentials.manage')) {
         throw new LinkedInApiError(
           'Only the workspace owner can manage the stored LinkedIn credentials',
           403
@@ -5691,7 +5779,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     linkedinRoute(async (req, res) => {
       const workspaceId = req.auth!.workspaceId;
       // Same owner-only carve-out as the save route above.
-      if (req.auth!.role !== 'owner') {
+      if (!hasCapability(req.auth!.role, 'credentials.manage')) {
         throw new LinkedInApiError(
           'Only the workspace owner can manage the stored LinkedIn credentials',
           403
@@ -5754,7 +5842,11 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/linkedin/hosted-execution',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'authorise Trevra to act on this LinkedIn account');
+      assertCapability(
+        req,
+        'credentials.manage',
+        'authorise Trevra to act on this LinkedIn account'
+      );
       const input = z
         .object({
           // EXPLICIT, AND THE VERSION MUST MATCH. A client that agreed to wording
@@ -5787,7 +5879,11 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.delete(
     '/api/linkedin/hosted-execution',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'withdraw the authorisation for hosted LinkedIn execution');
+      assertCapability(
+        req,
+        'credentials.manage',
+        'withdraw the authorisation for hosted LinkedIn execution'
+      );
       const ack = await revokeHostedExecutionAck(db, {
         workspaceId: req.auth!.workspaceId,
         actorUserId: req.auth!.userId
@@ -5837,7 +5933,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       // Whoever can call it can drive an authentication attempt against the
       // owner's real LinkedIn account -- and a run of failed ones is exactly the
       // signal that gets an account challenged or restricted.
-      assertWorkspaceOwner(req, 'sign a LinkedIn account in');
+      assertCapability(req, 'credentials.manage', 'sign a LinkedIn account in');
       const input = linkedinSeatLoginSchema.parse(req.body ?? {});
 
       let config: LinkedInLocalWorkerConfig;
@@ -5893,7 +5989,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       // wearing a different name -- and on the manual path it re-points the seat
       // at whichever account the browser happens to be logged into, which is a
       // change of account, not a refresh.
-      assertWorkspaceOwner(req, 'detect a LinkedIn account');
+      assertCapability(req, 'credentials.manage', 'detect a LinkedIn account');
       const input = linkedinSeatDetectSchema.parse(req.body ?? {});
       // TRV-057: a new seat key is another connected LinkedIn account.
       await assertNewSeatPrecheck(
@@ -6140,7 +6236,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/linkedin/posts/:id/approve',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve a LinkedIn scheduled post');
+      assertCapability(req, 'outreach.approve', 'approve a LinkedIn scheduled post');
       const input = z
         .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
         .strict()
@@ -6342,7 +6438,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/linkedin/manager/seats',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, "change a LinkedIn account's limits");
+      assertCapability(req, 'account_safety.manage', "change a LinkedIn account's limits");
       const input = linkedinManagerSeatCreateSchema.parse(req.body ?? {});
       const ownerUserId =
         input.ownerUserId === undefined
@@ -6370,7 +6466,16 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.patch(
     '/api/linkedin/manager/seats/:seatKey',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, "change a LinkedIn account's limits");
+      // A manager may reassign which teammate a seat belongs to
+      // (`seats.assign`) but not its ceilings, hours or band: a body carrying
+      // `ownerUserId` and nothing else is an assignment, anything more is the
+      // owner-only account-risk decision described at PUT /api/linkedin/seat.
+      const body = req.body && typeof req.body === 'object' ? (req.body as object) : {};
+      const assignmentOnly =
+        'ownerUserId' in body && Object.keys(body).every((key) => key === 'ownerUserId');
+      if (assignmentOnly)
+        assertCapability(req, 'seats.assign', 'assign a LinkedIn account to a teammate');
+      else assertCapability(req, 'account_safety.manage', "change a LinkedIn account's limits");
       const seatKey = linkedinSeatKeySchema.parse(String(req.params.seatKey));
       const input = linkedinSeatSchema.parse(req.body ?? {});
       const ownerUserId =
@@ -6408,7 +6513,11 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.patch(
     '/api/linkedin/manager/seats/:seatKey/capabilities',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, "change a LinkedIn account's InMail capability");
+      assertCapability(
+        req,
+        'account_safety.manage',
+        "change a LinkedIn account's InMail capability"
+      );
       const seatKey = linkedinSeatKeySchema.parse(String(req.params.seatKey));
       const input = z
         .object({
@@ -6441,7 +6550,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.put(
     '/api/linkedin/manager/mailboxes/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'change campaign mailbox limits');
+      assertCapability(req, 'account_safety.manage', 'change campaign mailbox limits');
       const input = z
         .object({
           dailyLimit: z.number().int().min(1).max(1000),
@@ -6570,7 +6679,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
         !workflow ||
         (workflow.scope === 'personal' &&
           workflow.ownerUserId !== req.auth!.userId &&
-          req.auth!.role !== 'owner')
+          !hasCapability(req.auth!.role, 'workflows.manage_workspace'))
       )
         throw new LinkedInApiError('Workflow not found', 404);
       try {
@@ -6637,7 +6746,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/linkedin/manager/action-approvals/:actionId',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve a LinkedIn browser action');
+      assertCapability(req, 'outreach.approve', 'approve a LinkedIn browser action');
       const input = z
         .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
         .strict()
@@ -6675,7 +6784,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/linkedin/manager/campaigns/:id/email-approvals/:actionId',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve an outbound campaign email');
+      assertCapability(req, 'outreach.approve', 'approve an outbound campaign email');
       const campaignId = String(req.params.id);
       const actionId = String(req.params.actionId);
       const input = z
@@ -6704,7 +6813,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
 
   // TRV-039: AI drafts of one lead's queued outreach copy. The model only
-  // proposes text; approval is owner-only, binds the exact payload hash and
+  // proposes text; approval needs `outreach.approve` (owner or manager), binds the exact payload hash and
   // goes through the same per-action approvals as above.
   const aiDraftRoute = (handler: (req: AuthedRequest, res: Response) => Promise<unknown>) =>
     linkedinRoute(async (req, res) => {
@@ -6779,7 +6888,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/linkedin/manager/campaigns/:id/ai-drafts/:draftId/approve',
     aiDraftRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve an AI-drafted message');
+      assertCapability(req, 'outreach.approve', 'approve an AI-drafted message');
       const input = z
         .object({ payloadHash: aiDraftHash })
         .strict()
@@ -6798,7 +6907,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/linkedin/manager/campaigns/:id/ai-drafts/:draftId/reject',
     aiDraftRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'reject an AI-drafted message');
+      assertCapability(req, 'outreach.approve', 'reject an AI-drafted message');
       z.object({})
         .strict()
         .parse(req.body ?? {});
@@ -6813,14 +6922,15 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     })
   );
 
-  // Deleting is destructive cleanup, not a stop control. It is owner-only and
+  // Deleting is destructive cleanup, not a stop control. It needs
+  // `campaigns.manage_all` (owner or manager) and
   // the domain function refuses anything except a stopped or completed row, so
   // a running/paused/draft campaign must go through Cancel/Stop first even if a
   // caller bypasses the browser UI.
   app.delete(
     '/api/linkedin/manager/campaigns/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'delete a managed campaign');
+      assertCapability(req, 'campaigns.manage_all', 'delete a managed campaign');
       try {
         const deleted = await deleteManagedCampaign(
           db,
@@ -6836,6 +6946,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.get(
     '/api/linkedin/manager/campaigns/:id/export.csv',
+    requireCapability('reports.view', 'export campaign stats'),
     linkedinRoute(async (req, res) => {
       const campaignId = String(req.params.id);
       const campaign = await getManagedCampaign(db, req.auth!.workspaceId, campaignId);
@@ -6963,7 +7074,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.patch(
     '/api/linkedin/manager/campaigns/:id/owner',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'transfer campaign ownership');
+      assertCapability(req, 'campaigns.manage_all', 'transfer campaign ownership');
       const campaignId = String(req.params.id);
       const campaign = await getManagedCampaign(db, req.auth!.workspaceId, campaignId);
       if (!campaign) throw new LinkedInApiError('Managed campaign not found', 404);
@@ -7729,6 +7840,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
 
   // Per-rep reporting and the date-range stats exports (TRV-046, TRV-049).
+  app.use('/api/linkedin/manager/reports', requireCapability('reports.view', 'view team reports'));
   registerLinkedInReportRoutes(app, db);
 
   /* Manager configuration CRUD. These writes configure data; they do not create action-ledger rows. */
@@ -7942,13 +8054,13 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
    * beside its write -- a rule enforced in the route is a rule the next caller
    * skips.
    *
-   * Owner-only: this is the delete that removes a workspace's contact data
+   * Needs `lead_lists.manage` (owner or manager): this is the delete that removes a workspace's contact data
    * rather than a row about it.
    */
   app.patch(
     '/api/linkedin/manager/lead-lists/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'rename a lead list');
+      assertCapability(req, 'lead_lists.manage', 'rename a lead list');
       const input = z
         .object({ name: z.string().trim().min(1).max(200) })
         .strict()
@@ -7966,7 +8078,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.delete(
     '/api/linkedin/manager/lead-lists/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'delete a lead list');
+      assertCapability(req, 'lead_lists.manage', 'delete a lead list');
       let deleted;
       try {
         // No existence pre-check: `deleteLeadList` takes the row `FOR UPDATE` so
@@ -8005,14 +8117,14 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     })
   );
 
-  // Owner-only, and MORE destructive than the lead-list delete three routes
+  // `lead_lists.manage` (owner or manager), and MORE destructive than the lead-list delete three routes
   // above which already is: deleting a contact cascades it out of every
   // campaign it is enrolled in and cancels the manual tasks written for it,
   // where deleting a list only drops memberships.
   app.delete(
     '/api/linkedin/manager/contacts/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'delete a lead and its campaign enrolments');
+      assertCapability(req, 'lead_lists.manage', 'delete a lead and its campaign enrolments');
       res.json({
         deleted: await removeLeadContact(db, req.auth!.workspaceId, String(req.params.id))
       });
@@ -8041,8 +8153,11 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     '/api/linkedin/manager/workflows',
     linkedinRoute(async (req, res) => {
       const input = linkedinWorkflowWriteSchema.parse(req.body ?? {});
-      const scope = input.scope ?? (req.auth!.role === 'owner' ? 'workspace' : 'personal');
-      if (scope === 'workspace') assertWorkspaceOwner(req, 'create workspace workflow templates');
+      const scope =
+        input.scope ??
+        (hasCapability(req.auth!.role, 'workflows.manage_workspace') ? 'workspace' : 'personal');
+      if (scope === 'workspace')
+        assertCapability(req, 'workflows.manage_workspace', 'create workspace workflow templates');
       try {
         res.status(201).json({
           workflow: await saveWorkflow(
@@ -8185,7 +8300,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       // is willing to do at all under LinkedIn's User Agreement 8.2, and raising
       // it raises the account's exposure. Reading it stays open, because a
       // teammate whose import stopped has to be able to see why.
-      assertWorkspaceOwner(req, "change this workspace's daily lead ceiling");
+      assertCapability(req, 'account_safety.manage', "change this workspace's daily lead ceiling");
       const input = linkedinDailyLeadCapSchema.parse(req.body ?? {});
       await setDailyLeadCap(db, req.auth!.workspaceId, input.cap, new Date(), input.seatKey);
       res.json(await dailyLeadAllowance(db, req.auth!.workspaceId, new Date(), input.seatKey));
@@ -8308,7 +8423,10 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   /* TRV-036 inbox organization and TRV-037 reply-class confirmation. Every
    * handler scopes by the session's workspace; ids from elsewhere are 404. */
-
+  app.use(
+    '/api/linkedin/inbox/organize',
+    requireCapability('inbox.organize', 'organize the inbox')
+  );
   app.get(
     '/api/linkedin/inbox/organize/tags',
     linkedinRoute(async (req, res) => {
@@ -8707,7 +8825,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/linkedin/withdrawals/approvals/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve a LinkedIn withdrawal');
+      assertCapability(req, 'outreach.approve', 'approve a LinkedIn withdrawal');
       const withdrawalId = String(req.params.id);
       const input = z
         .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
@@ -8993,7 +9111,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.delete(
     '/api/reddit/credentials',
     redditRoute(async (req, res) => {
-      if (req.auth!.role !== 'owner') {
+      if (!hasCapability(req.auth!.role, 'credentials.manage')) {
         throw new RedditApiError(
           'Only the workspace owner can disconnect the stored Reddit account',
           403
@@ -9142,8 +9260,11 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/reddit/comments/:id/approve',
     redditRoute(async (req, res) => {
-      if (req.auth!.role !== 'owner')
-        throw new RedditApiError('Only the workspace owner can approve a Reddit comment.', 403);
+      if (!hasCapability(req.auth!.role, 'outreach.approve'))
+        throw new RedditApiError(
+          `${capabilityRefusal('outreach.approve', 'approve a Reddit comment')}.`,
+          403
+        );
       const contentHash = z
         .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
         .strict()
@@ -9169,8 +9290,11 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.post(
     '/api/reddit/comments/:id/execute',
     redditRoute(async (req, res) => {
-      if (req.auth!.role !== 'owner')
-        throw new RedditApiError('Only the workspace owner can post a Reddit comment.', 403);
+      if (!hasCapability(req.auth!.role, 'outreach.approve'))
+        throw new RedditApiError(
+          `${capabilityRefusal('outreach.approve', 'post a Reddit comment')}.`,
+          403
+        );
       const commentId = String(req.params.id);
       if (!(await getRedditCommentReview(db, req.auth!.workspaceId, commentId)))
         throw new RedditApiError('Comment not found.', 404);
@@ -9438,7 +9562,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.put(
     '/api/workspace/sender-identity',
-    ownerOnly('change the sender identity'),
+    requireCapability('compliance.manage', 'change the sender identity'),
     async (req: AuthedRequest, res, next) => {
       try {
         const senderIdentity = await saveSenderIdentity(
@@ -9477,7 +9601,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.put(
     '/api/compliance/people/:personId/country',
-    ownerOnly('set a person country'),
+    requireCapability('compliance.manage', 'set a person country'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = countryInputSchema.parse(req.body ?? {});
@@ -9503,7 +9627,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.put(
     '/api/compliance/accounts/:accountId/country',
-    ownerOnly('set an account country'),
+    requireCapability('compliance.manage', 'set an account country'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = countryInputSchema.parse(req.body ?? {});
@@ -9529,7 +9653,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.post(
     '/api/compliance/people/:personId/lawful-bases',
-    ownerOnly('record a lawful basis'),
+    requireCapability('compliance.manage', 'record a lawful basis'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = lawfulBasisInputSchema.parse(req.body ?? {});
@@ -10007,30 +10131,6 @@ export function carriesSessionCredential(req: Request): boolean {
   );
 }
 
-/**
- * The owner carve-out, applied to the acts a teammate must not perform alone.
- *
- * ONE MECHANISM, TWO CALL SHAPES, AND NOTHING NEW UNDERNEATH. Both read the
- * same `req.auth!.role` the three original carve-outs read -- adding a
- * teammate, and saving or wiping the stored LinkedIn sign-in -- because a
- * second notion of "privileged" is a second thing to keep in step with
- * better-auth's member roles, and the day the two disagree is the day one of
- * them is wrong. `resolveActiveWorkspace` fails closed to 'member', so a
- * membership that cannot be read is refused here rather than waved through.
- *
- * `ownerOnly` runs BEFORE a plain route's handler, which is where the check
- * belongs when the handler's first act is the privileged one.
- * `assertWorkspaceOwner` throws from INSIDE a `linkedinRoute` handler, because
- * that wrapper is what turns a typed 4xx into a response and a middleware
- * would answer that surface in a different shape than every other refusal on
- * it.
- *
- * WHY EACH ACT IS ON THE LIST is written at the route, not here -- and two
- * that a reader will expect are deliberately NOT on it. See the comments on
- * `POST /api/linkedin/seat/pause` and
- * `POST /api/linkedin/manager/campaigns/:id/pause`: a kill switch only an
- * absent owner can reach is not a kill switch.
- */
 async function assertAssignableAgentSkills(
   db: Db,
   workspaceId: string,
@@ -10047,18 +10147,32 @@ async function assertAssignableAgentSkills(
   }
 }
 
-function ownerOnly(act: string): RequestHandler {
-  return (req, res, next) => {
-    if ((req as AuthedRequest).auth!.role !== 'owner') {
-      return res.status(403).json({ error: `Only the workspace owner can ${act}` });
-    }
-    next();
-  };
-}
-
-function assertWorkspaceOwner(req: AuthedRequest, act: string): void {
-  if (req.auth!.role !== 'owner')
-    throw new LinkedInApiError(`Only the workspace owner can ${act}`, 403);
+/**
+ * The capability gate (TRV-045), applied to the acts a role must not perform.
+ *
+ * ONE MAP, TWO CALL SHAPES. Both read `req.auth!.role` against `CAPABILITIES`
+ * in roles.ts -- never `role === 'owner'` -- because a second notion of
+ * "privileged" is a second thing to keep in step with Better Auth's member
+ * roles, and the day the two disagree is the day one of them is wrong.
+ * `resolveActiveWorkspace` fails closed to 'member', so a membership that
+ * cannot be read is refused here rather than waved through.
+ *
+ * `requireCapability` (roles.ts) runs BEFORE a plain route's handler, which is
+ * where the check belongs when the handler's first act is the privileged one.
+ * `assertCapability` throws from INSIDE a `linkedinRoute` handler, because
+ * that wrapper is what turns a typed 4xx into a response and a middleware
+ * would answer that surface in a different shape than every other refusal on
+ * it.
+ *
+ * WHY EACH ACT IS GATED is written at the route, not here -- and two that a
+ * reader will expect are deliberately NOT gated. See the comments on
+ * `POST /api/linkedin/seat/pause` and
+ * `POST /api/linkedin/manager/campaigns/:id/pause`: a kill switch only an
+ * absent owner can reach is not a kill switch.
+ */
+function assertCapability(req: AuthedRequest, capability: Capability, act: string): void {
+  if (!hasCapability(req.auth!.role, capability))
+    throw new LinkedInApiError(capabilityRefusal(capability, act), 403);
 }
 
 async function resolveWorkspaceMemberUserId(
@@ -10100,7 +10214,7 @@ async function assertCanUseLinkedInSeats(
   seatKeys: readonly string[],
   act: string
 ): Promise<void> {
-  if (req.auth!.role === 'owner') return;
+  if (hasCapability(req.auth!.role, 'campaigns.manage_all')) return;
   for (const seatKey of [...new Set(seatKeys)]) {
     const seat = await getSeat(db, req.auth!.workspaceId, seatKey);
     if (!seat) throw new LinkedInApiError('LinkedIn account not found', 404);
@@ -10120,8 +10234,14 @@ async function assertCanManageManagedCampaign(
 ): Promise<ManagedCampaign> {
   const campaign = await getManagedCampaign(db, req.auth!.workspaceId, campaignId);
   if (!campaign) throw new LinkedInApiError('Managed campaign not found', 404);
-  if (req.auth!.role !== 'owner' && campaign.ownerUserId !== req.auth!.userId)
-    throw new LinkedInApiError(`Only the campaign owner or workspace owner can ${act}`, 403);
+  if (
+    !hasCapability(req.auth!.role, 'campaigns.manage_all') &&
+    campaign.ownerUserId !== req.auth!.userId
+  )
+    throw new LinkedInApiError(
+      `Only the campaign owner or a workspace owner or manager can ${act}`,
+      403
+    );
   return campaign;
 }
 
@@ -10130,9 +10250,12 @@ function assertCanManageWorkflow(
   workflow: LinkedInWorkflow,
   act: string
 ): void {
-  if (req.auth!.role === 'owner') return;
+  if (hasCapability(req.auth!.role, 'workflows.manage_workspace')) return;
   if (workflow.scope !== 'personal' || workflow.ownerUserId !== req.auth!.userId)
-    throw new LinkedInApiError(`Only the workflow owner or workspace owner can ${act}`, 403);
+    throw new LinkedInApiError(
+      `Only the workflow owner or a workspace owner or manager can ${act}`,
+      403
+    );
 }
 
 async function assertCanManageCampaignMember(
@@ -10393,7 +10516,7 @@ async function readSession(
   userId: string;
   workspaceId: string;
   email: string;
-  role: 'owner' | 'member';
+  role: WorkspaceRole;
 } | null> {
   const token = req.cookies?.[SESSION_COOKIE] as string | undefined;
   if (token) {
@@ -10442,11 +10565,12 @@ async function readSession(
  *     session instead of being re-derived on every request.
  *
  * Role comes from the SAME `getActiveMember` call that proves membership, so
- * it can never disagree with which workspace was actually resolved. A member
- * row that is missing entirely (should not happen for a home workspace, whose
- * owner-at-creation invariant this codebase maintains everywhere it creates
- * one) resolves to the least-privileged 'member' rather than throwing --
- * fail-closed, matching this codebase's existing authorization conventions.
+ * it can never disagree with which workspace was actually resolved, and is
+ * read through `parseWorkspaceRole` (roles.ts). A member row that is missing
+ * entirely (should not happen for a home workspace, whose owner-at-creation
+ * invariant this codebase maintains everywhere it creates one) resolves to the
+ * least-privileged 'member' rather than throwing -- fail-closed, matching this
+ * codebase's existing authorization conventions.
  */
 async function resolveActiveWorkspace(
   headers: Request['headers'],
@@ -10456,7 +10580,7 @@ async function resolveActiveWorkspace(
     homeWorkspaceId: string;
     activeOrganizationId: string | null;
   }
-): Promise<{ userId: string; workspaceId: string; email: string; role: 'owner' | 'member' }> {
+): Promise<{ userId: string; workspaceId: string; email: string; role: WorkspaceRole }> {
   const authHeaders = fromNodeHeaders(headers);
 
   if (identity.activeOrganizationId) {
@@ -10466,7 +10590,7 @@ async function resolveActiveWorkspace(
         userId: identity.userId,
         workspaceId: identity.activeOrganizationId,
         email: identity.email,
-        role: member.role === 'owner' ? 'owner' : 'member'
+        role: parseWorkspaceRole(member.role)
       };
     }
   }
@@ -10484,7 +10608,7 @@ async function resolveActiveWorkspace(
     userId: identity.userId,
     workspaceId: identity.homeWorkspaceId,
     email: identity.email,
-    role: homeMember?.role === 'owner' ? 'owner' : 'member'
+    role: homeMember ? parseWorkspaceRole(homeMember.role) : 'member'
   };
 }
 

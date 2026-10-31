@@ -12,9 +12,10 @@ import {
   type EntitlementUsageLine
 } from './entitlements.js';
 import { RENEWAL_NOTICE_DAYS, isAnnualPlan } from './renewal.js';
+import { hasCapability, type WorkspaceRole } from '../roles.js';
 
 type BillingRequest = Request & {
-  auth?: { userId: string; workspaceId: string; role: 'owner' | 'member' };
+  auth?: { userId: string; workspaceId: string; role: WorkspaceRole };
 };
 
 const NONCE = z.string().regex(/^[A-Za-z0-9._:-]{8,128}$/);
@@ -82,7 +83,8 @@ async function overLimitFor(
 
 /**
  * TRV-057 billing API. Reads are open to every member; every call that can
- * change what the workspace pays is owner-only. Plan changes, cancellation and
+ * change what the workspace pays is owner-only (`billing.manage`,
+ * src/server/roles.ts -- a manager gets 403 too). Plan changes, cancellation and
  * resumption are Billing's own operations (upgrade immediate with proration,
  * downgrade and cancel at period end); Trevra never deletes anything when a
  * plan shrinks -- the entitlement gate blocks new expansion instead.
@@ -118,7 +120,7 @@ export function mountBillingRoutes(
         enabled: true,
         // TREVRA_BILLING_ENFORCEMENT: limits block only under `enforce`.
         enforcement: view.enforcement,
-        canManage: req.auth!.role === 'owner',
+        canManage: hasCapability(req.auth!.role, 'billing.manage'),
         customer: snapshot.customer,
         subscription,
         credits: snapshot.credits,

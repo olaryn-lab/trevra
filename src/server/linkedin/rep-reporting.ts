@@ -24,11 +24,11 @@ import { localDateOf, zonedToUtc, type LocalDate } from './pacing.js';
  *   3. `linkedin_campaigns.owner_user_id` -- the member who owns the campaign
  *      that planned it.
  *   4. The approver of the exact payload (`linkedin_action_approvals` /
- *      `linkedin_campaign_email_approvals`.`approved_by`). Approval is
- *      owner-only (app.ts `assertWorkspaceOwner`), so the approver is a
- *      reviewer, not the rep; it ranks below the seat and campaign for that
- *      reason, and above rule 5 so a multi-owner workspace credits the owner
- *      who actually released the work.
+ *      `linkedin_campaign_email_approvals`.`approved_by`). Approval needs
+ *      `outreach.approve` (an owner or manager, src/server/roles.ts), so the
+ *      approver is a reviewer, not the rep; it ranks below the seat and
+ *      campaign for that reason, and above rule 5 so a multi-owner workspace
+ *      credits the owner or manager who actually released the work.
  *   5. The workspace owner -- the earliest Better Auth owner of the
  *      organization, else the workspace's first legacy `users` row.
  *
