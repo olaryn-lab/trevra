@@ -1582,6 +1582,23 @@ export async function runLinkedInLocalBatch(
     }
 
     if (
+      (action.kind === 'company_follow' || action.kind === 'company_like') &&
+      failureKind === 'already_connected'
+    ) {
+      // Follow-company and like-company-post act on ONE configured page for the
+      // seat, yet are planned once per lead. Every lead after the first finds
+      // the page already followed (or its latest post already liked): the
+      // step's goal already holds, which is not a failure of this lead. Retire
+      // the row with no failure kind (skipped rows consume no rolling limit)
+      // and advance the lead, instead of parking it as failed on this node.
+      await store.settleBranchSkipped(action.id, detail.trim(), at);
+      log(
+        `LinkedIn local worker retired action ${action.id}: the seat-level state already holds.${detail}`
+      );
+      continue;
+    }
+
+    if (
       failureKind === 'not_found' ||
       failureKind === 'already_connected' ||
       failureKind === 'already_pending' ||
@@ -1598,6 +1615,7 @@ export async function runLinkedInLocalBatch(
       // no rolling limit/replay claim, but the campaign member stays FAILED on
       // this node until an operator retries or deliberately skips the step.
       await store.settleSkipped(action.id, failureKind, at);
+      log(`LinkedIn local worker skipped action ${action.id} (${failureKind}).${detail}`);
       continue;
     }
 
