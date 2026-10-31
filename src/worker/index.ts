@@ -11,7 +11,11 @@ import { notifyStalledLinkedInCampaigns } from '../server/linkedin/stall-monitor
 import { runAllAutomationCycles } from '../server/automation-service.js';
 import { runReadyPlaybooks } from '../server/playbooks/engine.js';
 import { runDueAgentSchedules } from '../server/agent/schedule.js';
-import { dispatchOutboundWebhookDeliveries } from '../server/outbound-webhooks.js';
+import {
+  dispatchOutboundWebhookDeliveries,
+  expireOutboundWebhookSecrets,
+  pruneOutboundWebhookAttempts
+} from '../server/outbound-webhooks.js';
 import { reapStaleAgentRuns } from '../server/agent/runs.js';
 import { orchestrationMode } from '../server/orchestration/client.js';
 import { validateEnvironment } from '../server/config.js';
@@ -395,12 +399,15 @@ linkedinStallTimer.unref();
 // HTTPS webhooks run independently: an unresponsive customer endpoint must
 // not hold the automation sweep. Without an operator hostname allowlist this
 // pass returns immediately without reserving or sending any external work.
+// The same pass closes rotation overlaps and trims the attempt log.
 let outboundWebhookRunning = false;
 async function outboundWebhookCycle(): Promise<void> {
   if (outboundWebhookRunning || draining) return;
   outboundWebhookRunning = true;
   try {
+    await expireOutboundWebhookSecrets(db);
     await dispatchOutboundWebhookDeliveries(db, { limit: 10 });
+    await pruneOutboundWebhookAttempts(db);
   } catch (error) {
     console.error('Worker outbound webhook cycle failed', error);
   } finally {

@@ -21,11 +21,16 @@ import { DEMO_USER_ID, DEMO_WORKSPACE_ID, id, resetDemoData } from './db.js';
 import { listConnections } from './serializers.js';
 import {
   OUTBOUND_WEBHOOK_EVENTS,
-  OutboundWebhookInputError,
+  OutboundWebhookError,
   createOutboundWebhookSubscription,
   deactivateOutboundWebhookSubscription,
+  getOutboundWebhookStats,
+  listOutboundWebhookAttempts,
   listOutboundWebhookSubscriptions,
-  listOutboundWebhookDeliveries
+  listOutboundWebhookDeliveries,
+  replayOutboundWebhookDeliveries,
+  rotateOutboundWebhookSecret,
+  updateOutboundWebhookSubscription
 } from './outbound-webhooks.js';
 import {
   applyUnsubscribeToken,
@@ -1359,8 +1364,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.use('/api', workspaceLimiter);
 
   // Merchant outbound event notifications. Mutations are owner-only; event
-  // type allowlist and destination host allowlist are also server-enforced.
-  // Signing secret is returned ONLY at initial creation, never on GET.
+  // type allowlist and destination egress policy are server-enforced.
+  // A signing secret is returned ONLY by create and rotate, never on GET.
   app.get(
     '/api/outbound-webhooks',
     ownerOnly('manage outbound webhooks'),
@@ -1439,6 +1444,132 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
         res
           .status(changed ? 200 : 404)
           .json(changed ? { deactivated: true } : { error: 'Subscription not found or inactive' });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.patch(
+    '/api/outbound-webhooks/:id',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const input = z
+          .object({
+            url: z.string().trim().url().max(1500).optional(),
+            eventTypes: z
+              .array(z.enum(OUTBOUND_WEBHOOK_EVENTS))
+              .min(1)
+              .max(OUTBOUND_WEBHOOK_EVENTS.length)
+              .optional(),
+            active: z.boolean().optional()
+          })
+          .strict()
+          .refine(
+            (value) =>
+              value.url !== undefined ||
+              value.eventTypes !== undefined ||
+              value.active !== undefined,
+            'Nothing to update'
+          )
+          .parse(req.body ?? {});
+        const subscription = await updateOutboundWebhookSubscription(db, {
+          workspaceId: req.auth!.workspaceId,
+          subscriptionId,
+          ...input
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        if (!subscription) return res.status(404).json({ error: 'Subscription not found' });
+        res.json({ subscription });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.post(
+    '/api/outbound-webhooks/:id/rotate-secret',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const input = z
+          .object({ overlapHours: z.number().int().min(0).max(168).default(24) })
+          .strict()
+          .parse(req.body ?? {});
+        const result = await rotateOutboundWebhookSecret(db, {
+          workspaceId: req.auth!.workspaceId,
+          subscriptionId,
+          overlapSeconds: input.overlapHours * 3600,
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        if (!result) return res.status(404).json({ error: 'Subscription not found' });
+        res.json(result);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.get(
+    '/api/outbound-webhooks/:id/health',
+    ownerOnly('inspect outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const limit = z.coerce.number().int().min(1).max(100).default(25).parse(req.query.limit);
+        const [stats, attempts] = await Promise.all([
+          getOutboundWebhookStats(db, req.auth!.workspaceId, subscriptionId),
+          listOutboundWebhookAttempts(db, req.auth!.workspaceId, subscriptionId, limit)
+        ]);
+        res.setHeader('Cache-Control', 'no-store');
+        if (!stats || !attempts) return res.status(404).json({ error: 'Subscription not found' });
+        res.json({ stats, attempts });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.post(
+    '/api/outbound-webhooks/:id/replay',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        // Range is checked by the service so a limit past the cap gets its
+        // explicit message rather than a generic schema error.
+        const input = z
+          .object({ limit: z.number().int().optional() })
+          .strict()
+          .parse(req.body ?? {});
+        const result = await replayOutboundWebhookDeliveries(db, {
+          workspaceId: req.auth!.workspaceId,
+          subscriptionId,
+          limit: input.limit,
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(result);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.post(
+    '/api/outbound-webhooks/:id/deliveries/:deliveryId/replay',
+    ownerOnly('manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const deliveryId = z.string().min(1).max(100).parse(req.params.deliveryId);
+        const result = await replayOutboundWebhookDeliveries(db, {
+          workspaceId: req.auth!.workspaceId,
+          subscriptionId,
+          deliveryId,
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(result);
       } catch (error) {
         next(error);
       }
@@ -9082,10 +9213,13 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       error instanceof LeadCaptureError ||
       error instanceof ProviderWebhookError ||
       error instanceof GitHubRepoError ||
-      error instanceof ComplianceError ||
-      error instanceof OutboundWebhookInputError
+      error instanceof ComplianceError
     )
       return res.status(error.status).json({ error: error.message });
+    if (error instanceof OutboundWebhookError)
+      return res
+        .status(error.status)
+        .json({ error: error.message, ...(error.code ? { code: error.code } : {}) });
     if (error instanceof z.ZodError)
       return res.status(400).json({ error: 'Invalid request', issues: error.issues });
     if (error instanceof multer.MulterError) return res.status(400).json({ error: error.message });
