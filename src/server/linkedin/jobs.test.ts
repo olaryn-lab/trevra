@@ -1462,6 +1462,60 @@ describe('runLinkedInPostTick', () => {
     ).toEqual({ status: 'pending' });
   });
 
+  it('never starts a search, Sales Navigator, keyword or third-party post collection, even with sourcing switched on (TRV-021/022/023)', async () => {
+    await upsertSeat(
+      db,
+      WORKSPACE_ID,
+      { label: 'Owner', timezone: 'UTC', profileUrl: 'https://www.linkedin.com/in/connected/' },
+      NOW
+    );
+    // Legacy rows of every unsupported kind, as a pre-TRV-021 queue could hold.
+    const legacy = [
+      { kind: 'search', url: 'https://www.linkedin.com/search/results/people/?keywords=cto' },
+      { kind: 'sales_navigator', url: 'https://www.linkedin.com/sales/search/people?query=x' },
+      { kind: 'content', url: 'https://www.linkedin.com/search/results/content/?keywords=ai' },
+      { kind: 'post', url: 'https://www.linkedin.com/feed/update/urn:li:activity:888/' }
+    ] as const;
+    const ids: string[] = [];
+    for (const [index, entry] of legacy.entries()) {
+      const created = await createLeadSource(
+        db,
+        { workspaceId: WORKSPACE_ID, kind: entry.kind, url: entry.url },
+        new Date(NOW.getTime() + index)
+      );
+      ids.push(created.source.id);
+    }
+    const calls: string[] = [];
+    const spy = (name: string) => async (): Promise<never> => {
+      calls.push(name);
+      throw new Error(`${name} must never run`);
+    };
+    const result = await runLinkedInLeadSources(db, CONFIG, {
+      workspaceId: WORKSPACE_ID,
+      now: new Date(NOW.getTime() + 5_000),
+      page,
+      driver: driverThatReturns({ ok: true, failureKind: null }),
+      accountConfirmed: true,
+      env: { TREVRA_LINKEDIN_LEAD_SOURCING: 'true', TREVRA_DEPLOYMENT_MODE: 'local' },
+      scraper: {
+        scrapePostEngagers: spy('scrapePostEngagers'),
+        scrapeSearchResults: spy('scrapeSearchResults'),
+        scrapeSalesNavigatorResults: spy('scrapeSalesNavigatorResults'),
+        scrapeContentSearch: spy('scrapeContentSearch')
+      }
+    });
+    expect(result).toEqual({ blocked: null, results: [] });
+    expect(calls).toEqual([]);
+    const statuses = await Promise.all(
+      ids.map((sourceId) =>
+        db
+          .prepare('SELECT status FROM linkedin_lead_sources WHERE id=?')
+          .get<{ status: string }>(sourceId)
+      )
+    );
+    expect(statuses).toEqual(ids.map(() => ({ status: 'pending' })));
+  });
+
   it('loads stored post images and hands their bytes to the publisher', async () => {
     await upsertSeat(
       db,

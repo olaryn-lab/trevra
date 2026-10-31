@@ -4,10 +4,14 @@ import {
   autoMatchLeadFieldsWithConfidence,
   normalizeScrapedLead,
   parseLeadCsv,
+  parseProfileUrlPaste,
+  PROFILE_URL_IMPORT_CAP,
   scrubLeadName,
   scrubNameField,
   splitAndScrubName
 } from './lead-import.js';
+import { previewLeadProfileUrls } from './lead-lists.js';
+import { leadCsvHeaderRowIndex } from '../../shared/lead-csv-header.js';
 
 describe('LinkedIn lead CSV import', () => {
   it('automatches common header spellings', () => {
@@ -315,5 +319,182 @@ describe('arbitrary CSV personalization fields', () => {
       icp_tier: '1',
       annual_revenue: '$5M'
     });
+  });
+});
+
+/**
+ * LinkedIn's own Connections.csv ("Get a copy of your data"), shaped as it
+ * really arrives: a "Notes:" preamble -- one line of it a quoted paragraph full
+ * of commas -- above the header, and quoted data fields holding commas too.
+ */
+const CONNECTIONS_CSV = [
+  'Notes:',
+  '"When exporting your connection data, you may notice that some of the email addresses are missing. You will only see email addresses for connections who have allowed their connections to see or download their email address using this setting https://www.linkedin.com/psettings/privacy/email. You can learn more here https://www.linkedin.com/help/linkedin/answer/261"',
+  'Exported by LinkedIn; keep this file private',
+  '',
+  'First Name,Last Name,URL,Email Address,Company,Position,Connected On',
+  'Maya,Chen,https://www.linkedin.com/in/maya-chen,maya@example.com,"Acme, Inc.","VP, Sales",12 Mar 2024',
+  ',Nameless,https://www.linkedin.com/in/nameless,,Widgets,Engineer,01 Jan 2024',
+  'Ravi,Patel,https://linkedin.com/in/ravi-patel/?trk=people,,"Globex, LLC","Head of Growth, EMEA",03 Feb 2023'
+].join('\r\n');
+
+const CONNECTIONS_MAPPING = {
+  firstName: 'First Name',
+  lastName: 'Last Name',
+  company: 'Company',
+  title: 'Position',
+  email: 'Email Address',
+  profileUrl: 'URL'
+};
+
+describe('LinkedIn connections export preset (TRV-021)', () => {
+  it('skips the Notes preamble deterministically and keeps quoted commas inside their fields', () => {
+    const result = parseLeadCsv(CONNECTIONS_CSV, CONNECTIONS_MAPPING);
+    expect(result.headers).toEqual([
+      'First Name',
+      'Last Name',
+      'URL',
+      'Email Address',
+      'Company',
+      'Position',
+      'Connected On'
+    ]);
+    expect(result.accepted).toHaveLength(2);
+    expect(result.accepted[0]).toMatchObject({
+      firstName: 'Maya',
+      lastName: 'Chen',
+      company: 'Acme, Inc.',
+      email: 'maya@example.com',
+      profileUrl: 'https://www.linkedin.com/in/maya-chen/',
+      customFields: { title: 'VP, Sales', connected_on: '12 Mar 2024' }
+    });
+    // The URL goes through the shared normaliser: host, tracking and slash.
+    expect(result.accepted[1]).toMatchObject({
+      company: 'Globex, LLC',
+      profileUrl: 'https://www.linkedin.com/in/ravi-patel/',
+      customFields: { title: 'Head of Growth, EMEA' }
+    });
+    // Row numbers count the real header as row 1, not the file's first line.
+    expect(result.rejected).toEqual([
+      expect.objectContaining({ row: 3, reason: 'Missing required first name.' })
+    ]);
+  });
+
+  it('finds the same header with automatch alone, and the same rows every time', () => {
+    const first = parseLeadCsv(CONNECTIONS_CSV);
+    const again = parseLeadCsv(CONNECTIONS_CSV);
+    expect(first.mapping).toMatchObject({
+      firstName: 'First Name',
+      lastName: 'Last Name',
+      company: 'Company'
+    });
+    expect(first.accepted.map((lead) => lead.dedupeKey)).toEqual(
+      again.accepted.map((lead) => lead.dedupeKey)
+    );
+    // Without the preset, Position is not a title: it stays an ordinary column.
+    expect(first.accepted[0]?.customFields).toMatchObject({ position: 'VP, Sales' });
+    expect(first.accepted[0]?.customFields).not.toHaveProperty('title');
+  });
+
+  it('lets an operator override what the preset chose', () => {
+    const result = parseLeadCsv(CONNECTIONS_CSV, {
+      ...CONNECTIONS_MAPPING,
+      title: 'Connected On'
+    });
+    expect(result.accepted[0]?.customFields).toMatchObject({
+      title: '12 Mar 2024',
+      position: 'VP, Sales'
+    });
+  });
+
+  it('never promotes a data row of an ordinary CSV to its header', () => {
+    expect(
+      leadCsvHeaderRowIndex([
+        ['Name', 'Company'],
+        ['First Name', 'Last Name', 'URL', 'Email Address', 'Company', 'Position', 'Connected On']
+      ])
+    ).toBe(0);
+    const plain = parseLeadCsv(
+      'First Name,Last Name,Company\nMaya,Chen,"Acme, Inc."\nRavi,Patel,Globex\n'
+    );
+    expect(plain.headers).toEqual(['First Name', 'Last Name', 'Company']);
+    expect(plain.accepted.map((lead) => lead.company)).toEqual(['Acme, Inc.', 'Globex']);
+  });
+
+  it('stores a mapped title from a generic export under the stable title key', () => {
+    const result = parseLeadCsv(
+      'Full Name,Company Name,LinkedIn URL,Job Title,Title Notes\nMaya Chen,Acme,https://www.linkedin.com/in/maya-chen,CTO,keep\n',
+      {
+        fullName: 'Full Name',
+        company: 'Company Name',
+        profileUrl: 'LinkedIn URL',
+        title: 'Job Title'
+      }
+    );
+    expect(result.accepted[0]).toMatchObject({
+      firstName: 'Maya',
+      lastName: 'Chen',
+      customFields: { title: 'CTO', title_notes: 'keep' }
+    });
+  });
+});
+
+describe('pasted LinkedIn profile URLs (TRV-021)', () => {
+  it('splits on newlines and commas, normalises, dedupes, and names every rejected line', () => {
+    const paste = parseProfileUrlPaste([
+      'https://www.linkedin.com/in/maya-chen/?trk=feed',
+      'linkedin.com/in/maya-chen, https://linkedin.com/in/ravi-patel',
+      'https://www.linkedin.com/search/results/people/?keywords=cto',
+      'https://www.linkedin.com/company/acme/',
+      'https://www.linkedin.com/posts/someone_activity-7000000000000000000-abcd',
+      'https://www.linkedin.com/sales/lead/ACwAAA',
+      'https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/',
+      'maya',
+      '',
+      'https://example.com/in/maya-chen'
+    ]);
+    expect(paste.profiles).toEqual([
+      {
+        line: 1,
+        value: 'https://www.linkedin.com/in/maya-chen/?trk=feed',
+        profileUrl: 'https://www.linkedin.com/in/maya-chen/'
+      },
+      {
+        line: 2,
+        value: 'https://linkedin.com/in/ravi-patel',
+        profileUrl: 'https://www.linkedin.com/in/ravi-patel/'
+      }
+    ]);
+    expect(paste.duplicates).toBe(1);
+    const reasons = new Map(paste.rejected.map((entry) => [entry.line, entry.reason]));
+    expect(reasons.get(3)).toMatch(/search/i);
+    expect(reasons.get(4)).toMatch(/company/i);
+    expect(reasons.get(5)).toMatch(/post/i);
+    expect(reasons.get(6)).toMatch(/Sales Navigator/);
+    expect(reasons.get(7)).toMatch(/post/i);
+    expect(reasons.get(8)).toMatch(/Not a LinkedIn profile URL/);
+    expect(reasons.get(10)).toBe('Not a LinkedIn URL.');
+    expect(paste.rejected.every((entry) => entry.value.trim() !== '')).toBe(true);
+  });
+
+  it('passes exactly the cap and refuses one more with a clear error, not a truncation', () => {
+    const urls = (count: number) =>
+      Array.from({ length: count }, (_, index) => `https://www.linkedin.com/in/person-${index}/`);
+    const atCap = previewLeadProfileUrls([...urls(PROFILE_URL_IMPORT_CAP), urls(1)[0]!]);
+    expect(atCap.profiles).toHaveLength(10_000);
+    expect(atCap.duplicates).toBe(1);
+    expect(atCap.cap).toBe(10_000);
+    let refusal: unknown;
+    try {
+      previewLeadProfileUrls(urls(PROFILE_URL_IMPORT_CAP + 1));
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toMatchObject({
+      status: 400,
+      message:
+        'This paste holds 10,001 different LinkedIn profiles, and one import takes at most 10,000. Nothing was imported. Split the list and add it in parts.'
+    });
+    expect(parseProfileUrlPaste(urls(PROFILE_URL_IMPORT_CAP + 1)).profiles).toHaveLength(10_001);
   });
 });

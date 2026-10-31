@@ -14,13 +14,17 @@ import {
 // cycle.
 import { LinkedInApiError } from './errors.js';
 import {
-  canonicalProfileUrl,
   leadDedupeKey,
   normalizeLeadRow,
   normalizeScrapedLead,
   parseLeadCsv,
+  parseProfileUrlPaste,
+  profileUrlCapMessage,
+  PROFILE_URL_IMPORT_CAP,
   type LeadFieldMapping,
-  type NormalizedLeadInput
+  type NormalizedLeadInput,
+  type PastedProfile,
+  type ProfileUrlPaste
 } from './lead-import.js';
 import { LEAD_READ_LIMIT, getLeadSource, listLeads, type LeadSourceKind } from './leads.js';
 import { OWNER_SEAT_KEY } from './seats.js';
@@ -794,15 +798,46 @@ export async function ingestLeadSignal(
   return result;
 }
 
+/**
+ * What a paste of profile URLs would import, without writing anything: the
+ * distinct profiles, the repeats folded away, and every rejected entry with its
+ * line and reason. Throws the cap refusal (400) for a paste over
+ * `PROFILE_URL_IMPORT_CAP` distinct profiles, exactly as the import does.
+ */
+export function previewLeadProfileUrls(
+  lines: readonly string[],
+  cap: number = PROFILE_URL_IMPORT_CAP
+): ProfileUrlPaste & { cap: number } {
+  const parsed = parseProfileUrlPaste(lines);
+  if (parsed.profiles.length > cap)
+    throw new LinkedInApiError(profileUrlCapMessage(parsed.profiles.length, cap), 400);
+  return { ...parsed, cap };
+}
+
+/**
+ * Pasted profile URLs into a list, through the same contact writer as a CSV
+ * import (`insertLead`: workspace dedupe, canonical Person, membership).
+ *
+ * `urls` is the paste LINE BY LINE -- an element may still hold several
+ * comma-separated entries -- so every rejection can name its line. The cap is
+ * checked before the first write: a paste over it imports nothing.
+ */
 export async function importLeadProfileUrls(
   db: Db,
-  input: { workspaceId: string; seatKey?: string; listId: string; urls: readonly string[] },
+  input: {
+    workspaceId: string;
+    seatKey?: string;
+    listId: string;
+    urls: readonly string[];
+    /** Tests only; the route always uses `PROFILE_URL_IMPORT_CAP`. */
+    cap?: number;
+  },
   now: Date = new Date()
 ): Promise<{
   inserted: number;
   duplicates: number;
   reused: number;
-  rejected: Array<{ value: string; reason: string }>;
+  rejected: Array<{ line: number; value: string; reason: string }>;
 }> {
   const list = await getLeadList(
     db,
@@ -811,28 +846,17 @@ export async function importLeadProfileUrls(
     input.seatKey ?? OWNER_SEAT_KEY
   );
   if (!list) throw new Error('Lead list not found.');
-  const nonempty = input.urls.map((value) => value.trim()).filter(Boolean);
-  const distinct = [...new Set(nonempty)];
-  const unique = distinct.slice(0, 10_000);
+  const parsed = previewLeadProfileUrls(input.urls, input.cap ?? PROFILE_URL_IMPORT_CAP);
   let inserted = 0;
-  // Only repeated inputs are duplicates. A valid unique item above the per-
-  // request ceiling has not been processed and must be called out as rejected,
-  // never silently counted as a duplicate imported elsewhere.
-  let duplicates = nonempty.length - distinct.length;
+  // Repeats inside the paste are duplicates; so, below, is a profile that is
+  // already a lead (in this list or, as `reused`, another one).
+  let duplicates = parsed.duplicates;
   let reused = 0;
-  const overflow = distinct.slice(10_000).map((value) => ({
-    value,
-    reason: 'Profile URL import accepts at most 10,000 unique items per request; split the upload.'
-  }));
-  const rejected: Array<{ value: string; reason: string }> = [];
+  const rejected = [...parsed.rejected];
   const timestamp = now.toISOString();
-  const valid: Array<{ raw: string; lead: NormalizedLeadInput }> = [];
-  for (const raw of unique) {
-    const profileUrl = canonicalProfileUrl(raw);
-    if (!profileUrl) {
-      rejected.push({ value: raw, reason: 'Not a valid LinkedIn /in/ profile URL.' });
-      continue;
-    }
+  const valid: Array<{ entry: PastedProfile; lead: NormalizedLeadInput }> = [];
+  for (const entry of parsed.profiles) {
+    const profileUrl = entry.profileUrl;
     const lead: NormalizedLeadInput = {
       firstName: '',
       lastName: '',
@@ -846,7 +870,7 @@ export async function importLeadProfileUrls(
       original: { profileUrl, source: 'pasted_profile_url' }
     };
     lead.dedupeKey = leadDedupeKey(lead);
-    valid.push({ raw, lead });
+    valid.push({ entry, lead });
   }
   // Paste imports participate in the same deterministic contact lock order as
   // CSV and harvest imports, regardless of operator-provided URL order.
@@ -856,10 +880,14 @@ export async function importLeadProfileUrls(
     return a < b ? -1 : a > b ? 1 : 0;
   });
   await db.transaction(async (tx) => {
-    for (const { raw, lead } of valid) {
+    for (const { entry, lead } of valid) {
       const outcome = await insertLead(tx, input.workspaceId, input.listId, lead, timestamp);
       if (!outcome.contactId) {
-        rejected.push({ value: raw, reason: 'Could not store this profile.' });
+        rejected.push({
+          line: entry.line,
+          value: entry.value,
+          reason: 'Could not store this profile.'
+        });
         continue;
       }
       if (outcome.inserted) inserted += 1;
@@ -869,7 +897,7 @@ export async function importLeadProfileUrls(
       }
     }
   });
-  rejected.push(...overflow);
+  rejected.sort((left, right) => left.line - right.line);
   return { inserted, duplicates, reused, rejected };
 }
 

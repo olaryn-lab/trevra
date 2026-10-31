@@ -415,7 +415,6 @@ import {
 } from './linkedin/sequence.js';
 import { BRANCH_ON_VALUES } from './linkedin/branching.js';
 import {
-  createLeadSource,
   dailyLeadAllowance,
   getLeadSource,
   listLeadSources,
@@ -456,6 +455,7 @@ import {
 import { DEFAULT_SEQUENCE_TEMPLATE_ID, SEQUENCE_TEMPLATES } from './linkedin/templates.js';
 import { addExclusions, filterExcluded, listExclusions } from './linkedin/exclusions.js';
 import { parseLeadCsv } from './linkedin/lead-import.js';
+import { unsupportedIntakeRefusal } from '../shared/lead-intake.js';
 import {
   LEAD_CONTACT_READ_LIMIT,
   createLeadList,
@@ -464,6 +464,7 @@ import {
   importLeadCsv,
   importLeadProfileUrls,
   importLeadSourceContacts,
+  previewLeadProfileUrls,
   ingestLeadSignal,
   listLeadLists,
   readLeadContactReviewPage,
@@ -7681,16 +7682,31 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     })
   );
 
+  /**
+   * Pasted profile URLs: the check (writes nothing) and the import. Both read
+   * the paste line by line so every rejected entry names its line, and both
+   * refuse a paste over `PROFILE_URL_IMPORT_CAP` distinct profiles outright
+   * rather than importing its head.
+   */
+  app.post(
+    '/api/linkedin/manager/lead-lists/preview-profile-urls',
+    linkedinRoute(async (req, res) => {
+      const input = linkedinProfileUrlPasteSchema.parse(req.body ?? {});
+      const preview = previewLeadProfileUrls(input.urls.split(/\r?\n/));
+      res.json({
+        acceptedCount: preview.profiles.length,
+        duplicates: preview.duplicates,
+        rejected: preview.rejected.slice(0, PROFILE_URL_REJECTIONS_SHOWN),
+        rejectedCount: preview.rejected.length,
+        cap: preview.cap
+      });
+    })
+  );
+
   app.post(
     '/api/linkedin/manager/lead-lists/:id/profile-urls',
     linkedinRoute(async (req, res) => {
-      const input = z
-        .object({
-          urls: z.string().trim().min(1).max(500_000),
-          seatKey: linkedinSeatKeySchema.optional()
-        })
-        .strict()
-        .parse(req.body ?? {});
+      const input = linkedinProfileUrlPasteSchema.parse(req.body ?? {});
       try {
         const result = await importLeadProfileUrls(
           db,
@@ -7698,14 +7714,17 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
             workspaceId: req.auth!.workspaceId,
             listId: String(req.params.id),
             seatKey: input.seatKey,
-            urls: input.urls
-              .split(/[\s,;]+/g)
-              .map((value) => value.trim())
-              .filter(Boolean)
+            urls: input.urls.split(/\r?\n/)
           },
           new Date()
         );
-        res.status(201).json(result);
+        // A paste of junk can hold far more rejected entries than any screen
+        // shows; the list is bounded and the count stays exact.
+        res.status(201).json({
+          ...result,
+          rejected: result.rejected.slice(0, PROFILE_URL_REJECTIONS_SHOWN),
+          rejectedCount: result.rejected.length
+        });
       } catch (error) {
         rethrowLinkedInManagerError(error);
       }
@@ -7954,48 +7973,22 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
 
   /* ---------------------------------------------------------------------
-   * Lead sourcing (030).
+   * Lead sourcing (030), now refused (TRV-021/022/023).
    *
-   * BEHIND ITS OWN OPT-IN, which is not the local worker's. Sending on your
-   * own account on your own machine is what the product is for and defaults
-   * ON for a self-hoster; reading other people's profiles out of search
-   * results is scraping under LinkedIn's User Agreement 8.2 and defaults OFF.
-   * A self-hoster who upgraded must not acquire a crawler they never asked
-   * for.
-   *
-   * THE 409 NAMES WHICH KIND OF OFF, exactly as `linkedInOffReason` does for
-   * the worker: hosted is a decision the deployment made and no environment
-   * variable can undo it; anything else is a switch, and the sentence names
-   * it. Telling an operator to go looking for a setting that does not exist
-   * is the dead end this distinction removes.
+   * Collecting people out of LinkedIn search, Sales Navigator or a post's
+   * likers and commenters is scraping under LinkedIn's User Agreement 8.2 and
+   * puts the operator's account at risk, so no request here creates a walk, on
+   * any deployment or switch. The refusal is a 409 with a STABLE CODE
+   * (`intake_source_unsupported`) and the same product sentence the intake
+   * screen renders, naming the supported paths: CSV import and pasted profile
+   * URLs. Reading sources stored before this stays open below.
    * ------------------------------------------------------------------ */
 
   app.post(
     '/api/linkedin/lead-sources',
     linkedinRoute(async (req, res) => {
       const input = linkedinLeadSourceSchema.parse(req.body ?? {});
-      assertLeadSourcingOn();
-      let created;
-      try {
-        created = await createLeadSource(
-          db,
-          {
-            workspaceId: req.auth!.workspaceId,
-            seatKey: input.seatKey,
-            kind: input.kind,
-            url: input.url
-          },
-          new Date()
-        );
-      } catch (error) {
-        // leads.ts owns the URL rule and its refusal is caller input, not a fault.
-        throw new LinkedInApiError(error instanceof Error ? error.message : String(error), 400);
-      }
-      // 200 rather than 201 for a duplicate: a double-clicked button did not
-      // create anything, and the live row is the honest answer.
-      res
-        .status(created.duplicate ? 200 : 201)
-        .json({ source: created.source, duplicate: created.duplicate });
+      res.status(409).json(unsupportedIntakeRefusal(input.kind));
     })
   );
   app.get(
@@ -10327,19 +10320,12 @@ function linkedinWorkerConfigOrRefuse(): LinkedInLocalWorkerConfig {
 }
 
 /**
- * Production gate for browser-based LinkedIn harvesting. Existing rows remain
- * readable, but creating a new browser walk is always refused.
+ * Why browser-based LinkedIn harvesting is off, for the read route. Existing
+ * rows remain readable; creating a walk is refused with
+ * `unsupportedIntakeRefusal` (TRV-021/022/023).
  */
 const DISABLED_LINKEDIN_LEAD_SOURCING_REASON =
   'Manual browser-based LinkedIn lead sourcing is disabled. Trevra may observe engagement on a post it published only when TREVRA_LINKEDIN_LEAD_SOURCING=true and the existing local/companion gate allows it. Import a CSV, add profiles manually, or use an existing lead list for arbitrary sourcing.';
-
-function assertLeadSourcingOn(): void {
-  // Arbitrary browser harvesting is not exposed as a production action. The
-  // only background exception is engagement on a post Trevra itself published,
-  // with durable provenance and the explicit sourcing/companion gate enforced
-  // by jobs.ts. Existing harvested rows remain readable/importable.
-  throw new LinkedInApiError(DISABLED_LINKEDIN_LEAD_SOURCING_REASON, 409);
-}
 
 type SideTaskScheduleView = {
   startAt: Date;
@@ -10723,10 +10709,29 @@ const linkedinLeadFieldMappingSchema = z
     phone: z.string().min(1).optional(),
     country: z.string().min(1).optional(),
     profileUrl: z.string().min(1).optional(),
-    fullName: z.string().min(1).optional()
+    fullName: z.string().min(1).optional(),
+    title: z.string().min(1).optional()
   })
   .strict();
 
+/**
+ * A pasted list of LinkedIn profile URLs. The character ceiling is sized so
+ * the binding limit is `PROFILE_URL_IMPORT_CAP` profiles (10,000 x 200 chars),
+ * not a string length an operator cannot see. Not trimmed: a leading blank
+ * line still counts, so the line numbers in rejections match the paste.
+ */
+const linkedinProfileUrlPasteSchema = z
+  .object({
+    urls: z
+      .string()
+      .max(2_000_000)
+      .refine((value) => value.trim().length > 0, 'Paste at least one LinkedIn profile URL.'),
+    seatKey: linkedinSeatKeySchema.optional()
+  })
+  .strict();
+
+/** How many rejected entries one profile-URL check lists; the count is always exact. */
+const PROFILE_URL_REJECTIONS_SHOWN = 200;
 const linkedinLeadContactUpdateSchema = z
   .object({
     firstName: z.string().trim().min(1).max(200),

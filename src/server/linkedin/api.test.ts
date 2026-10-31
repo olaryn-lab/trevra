@@ -852,6 +852,16 @@ async function seedApprovedCampaign(
  * and that a refusal says which kind of off it is.
  */
 describe('lead sourcing routes (030)', () => {
+  /** The refusal every unsupported intake source answers with (TRV-021/022/023). */
+  function expectUnsupported(body: unknown, source: string): void {
+    expect(body).toMatchObject({ code: 'intake_source_unsupported', source });
+    const message = (body as { error: string }).error;
+    expect(message).toMatch(/does not (scrape|collect)/);
+    expect(message).toMatch(/LinkedIn’s terms/);
+    expect(message).toMatch(/at risk/);
+    expect(message).toMatch(/profile URLs/);
+    expect(message).toMatch(/import a CSV/i);
+  }
   const SOURCING = 'TREVRA_LINKEDIN_LEAD_SOURCING';
   const MODE = 'TREVRA_DEPLOYMENT_MODE';
   const RELAY = 'TREVRA_COMPANION_RELAY_URL';
@@ -879,7 +889,7 @@ describe('lead sourcing routes (030)', () => {
         url: 'https://www.linkedin.com/search/results/people/?keywords=revops'
       })
       .expect(409);
-    expect((refused.body as { error: string }).error).toContain('Import a CSV');
+    expectUnsupported(refused.body, 'linkedin_search');
 
     const listed = (await as(sessionA).get('/api/linkedin/lead-sources').expect(200)).body as {
       enabled: boolean;
@@ -901,7 +911,7 @@ describe('lead sourcing routes (030)', () => {
         url: 'https://www.linkedin.com/search/results/people/?keywords=hosted-companion'
       })
       .expect(409);
-    expect((refused.body as { error: string }).error).toContain('Import a CSV');
+    expectUnsupported(refused.body, 'linkedin_search');
 
     const listed = (await as(sessionA).get('/api/linkedin/lead-sources').expect(200)).body as {
       enabled: boolean;
@@ -924,7 +934,7 @@ describe('lead sourcing routes (030)', () => {
         url: 'https://www.linkedin.com/search/results/people/?keywords=no-companion'
       })
       .expect(409);
-    expect((refused.body as { error: string }).error).toContain('Import a CSV');
+    expectUnsupported(refused.body, 'linkedin_search');
   });
 
   it('refuses every browser-harvesting write regardless of the old switch', async () => {
@@ -936,7 +946,52 @@ describe('lead sourcing routes (030)', () => {
         url: 'https://www.linkedin.com/search/results/people/?keywords=revops'
       })
       .expect(409);
-    expect((refused.body as { error: string }).error).toContain('Import a CSV');
+    expectUnsupported(refused.body, 'linkedin_search');
+  });
+
+  it('refuses search, Sales Navigator and post-engager collection with a stable code and creates nothing (TRV-021/022/023)', async () => {
+    // Even with the old switch on and a local deployment: no switch enables it.
+    process.env[SOURCING] = 'true';
+    process.env[MODE] = 'local';
+    await seat(WORKSPACE_A, '2026-01-01');
+    const cases = [
+      ['search', 'https://www.linkedin.com/search/results/people/?keywords=cto', 'linkedin_search'],
+      [
+        'sales_navigator',
+        'https://www.linkedin.com/sales/search/people?query=x',
+        'sales_navigator'
+      ],
+      [
+        'post',
+        'https://www.linkedin.com/feed/update/urn:li:activity:7000000000000000000/',
+        'post_engagers'
+      ],
+      ['content', 'https://www.linkedin.com/search/results/content/?keywords=ai', 'post_engagers'],
+      ['company_employees', 'https://www.linkedin.com/company/acme/people/', 'linkedin_search']
+    ] as const;
+    for (const [kind, url, source] of cases) {
+      for (const session of [sessionA, sessionB]) {
+        const refused = await as(session)
+          .post('/api/linkedin/lead-sources')
+          .send({ kind, url })
+          .expect(409);
+        expectUnsupported(refused.body, source);
+      }
+    }
+    const sales = await as(sessionA)
+      .post('/api/linkedin/lead-sources')
+      .send({
+        kind: 'sales_navigator',
+        url: 'https://www.linkedin.com/sales/search/people?query=x'
+      })
+      .expect(409);
+    expect((sales.body as { error: string }).error).toMatch(/Sales Navigator/);
+    for (const workspaceId of [WORKSPACE_A, WORKSPACE_B]) {
+      const row = await db
+        .prepare('SELECT COUNT(*)::int AS total FROM linkedin_lead_sources WHERE workspace_id=?')
+        .get<{ total: number }>(workspaceId);
+      expect(Number(row?.total ?? 0)).toBe(0);
+    }
   });
 
   it('still lists sources when the switch is off, reporting why rather than refusing', async () => {
