@@ -4,6 +4,7 @@ import { id, type Db } from '../db.js';
 import { actionKindSupportsBranch } from './branching.js';
 import type { LinkedInActionKind } from './actions.js';
 import { LinkedInApiError } from './errors.js';
+import { assertWorkflowRichContent } from './rich-content-guard.js';
 
 /**
  * The merge fields a managed-workflow template may use.
@@ -1117,6 +1118,8 @@ export async function saveWorkflow(
   const name = input.name.trim();
   if (!name) throw new Error('Workflow name is required.');
   const steps = workflowStepsSchema.parse(input.steps);
+  // TRV-040: refused here, not in the schema, so stored workflows keep parsing.
+  assertWorkflowRichContent(steps);
   const workflowId = input.id ?? id('liwf');
   const timestamp = now.toISOString();
   const row = await db

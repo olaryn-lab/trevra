@@ -15,6 +15,7 @@ import { communityReplyPayloadSchema, publishCommunityReply } from '../outreach/
 import { crmActivityPayloadSchema, logCrmActivity } from '../crm/activity.js';
 import { bufferDraftPayloadSchema, createBufferDraft } from '../content/buffer.js';
 import { executeCrmContactUpsert } from '../crm/contact-upsert-execute.js';
+import { payloadAttachmentViolation, type RichContentChannel } from '../../shared/rich-content.js';
 /**
  * External execution is intentionally a closed GTM action set.
  *
@@ -46,6 +47,20 @@ export function isRetryableExecutionError(error: unknown): boolean {
   );
 }
 
+/**
+ * TRV-040 send boundary: these channels are text-only in the rich-content
+ * matrix. A payload naming attachments is a definite refusal with the matrix's
+ * code and reason -- never a send with the attachment quietly stripped by a
+ * schema that does not know the key.
+ */
+function refuseRichPayload(channel: RichContentChannel, payload: unknown): void {
+  const violation = payloadAttachmentViolation(channel, payload);
+  if (violation)
+    throw Object.assign(new Error(`${violation.reason} Nothing was sent.`), {
+      code: violation.code,
+      retryable: false
+    });
+}
 const emailPayloadSchema = z.object({
   recipient: z.string().email(),
   subject: z.string().min(1).max(200),
@@ -69,6 +84,7 @@ export async function executePreparedPlaybookAction(
   const actionType = actionTypeSchema.parse(input.actionType);
 
   if (actionType === 'email.send') {
+    refuseRichPayload('email', input.payload);
     const payload = emailPayloadSchema.parse(input.payload);
     const metadata = payload.metadata ?? {};
     const approvedConnectionId = await approvedMailboxConnection(db, input.workspaceId, metadata);
@@ -154,6 +170,7 @@ export async function executePreparedPlaybookAction(
   }
 
   if (actionType === 'community.reply') {
+    refuseRichPayload('community_reply', input.payload);
     const payload = communityReplyPayloadSchema.parse(input.payload);
     const now = new Date();
     const outcome = await publishCommunityReply(
@@ -172,6 +189,7 @@ export async function executePreparedPlaybookAction(
   }
 
   if (actionType === 'buffer.create-draft') {
+    refuseRichPayload('buffer_draft', input.payload);
     const payload = bufferDraftPayloadSchema.parse(input.payload);
     const result = await createBufferDraft(db, input.workspaceId, payload, input.payloadHash);
     return { provider: result.provider, externalRef: result.externalRef, actionType };

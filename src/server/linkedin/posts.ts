@@ -1,11 +1,19 @@
 import type { PostBlock } from '../../shared/linkedin-post-format.js';
+import {
+  checkRichContent,
+  normalizeMimeType,
+  RICH_CONTENT_MATRIX,
+  type RichContentViolation
+} from '../../shared/rich-content.js';
 import { id, type Db } from '../db.js';
 import { OWNER_SEAT_KEY } from './seats.js';
 
 export class LinkedInPostsApiError extends Error {
   constructor(
     message: string,
-    public readonly status = 400
+    public readonly status = 400,
+    public readonly code: string | null = null,
+    public readonly details: Readonly<Record<string, unknown>> | null = null
   ) {
     super(message);
     this.name = 'LinkedInPostsApiError';
@@ -15,8 +23,10 @@ export class LinkedInPostsApiError extends Error {
 export type LinkedInPostStatus =
   'draft' | 'scheduled' | 'publishing' | 'posted' | 'failed' | 'missed' | 'canceled';
 
-export const LINKEDIN_POST_IMAGE_MAX_COUNT = 9;
-export const LINKEDIN_POST_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+/** TRV-040: the post row of the rich-content matrix is the one source for these. */
+export const LINKEDIN_POST_IMAGE_MAX_COUNT = RICH_CONTENT_MATRIX.linkedin_post.maxCount;
+export const LINKEDIN_POST_IMAGE_MAX_BYTES = RICH_CONTENT_MATRIX.linkedin_post.maxBytes;
+/** Kept as a literal tuple for typing; rich-content.test.ts asserts it equals the matrix row. */
 export const LINKEDIN_POST_IMAGE_TYPES = [
   'image/jpeg',
   'image/png',
@@ -262,20 +272,62 @@ function isPostImageMime(value: string): value is LinkedInPostImageMime {
   return (LINKEDIN_POST_IMAGE_TYPES as readonly string[]).includes(value);
 }
 
+function postMediaRefusal(violation: RichContentViolation, status: number): LinkedInPostsApiError {
+  return new LinkedInPostsApiError(violation.reason, status, violation.code, {
+    reason: violation.reason,
+    channel: violation.channel,
+    contentType: violation.contentType,
+    index: violation.index
+  });
+}
+
+/** The ninth-image ceiling as a coded refusal (status 400, as it always was). */
+function postMediaCountRefusal(): LinkedInPostsApiError {
+  return postMediaRefusal(
+    checkRichContent(
+      'linkedin_post',
+      Array.from({ length: LINKEDIN_POST_IMAGE_MAX_COUNT + 1 }, () => ({ mimeType: 'image/png' }))
+    )!,
+    400
+  );
+}
+
 function normalizePostImageInput(input: { name: string; mimeType: string; bytes: Buffer }): {
   name: string;
   mimeType: LinkedInPostImageMime;
   bytes: Buffer;
 } {
-  if (!isPostImageMime(input.mimeType)) {
-    throw new LinkedInPostsApiError('Posts accept JPEG, PNG, WebP or GIF images only.', 415);
+  // The declared Content-Type is what gets stored and served back, so it alone
+  // decides the type here -- a file name cannot talk a body into being a PNG.
+  if (!normalizeMimeType(input.mimeType)) {
+    const reason = 'Posts accept JPEG, PNG, WebP or GIF images; the upload named no content type.';
+    throw new LinkedInPostsApiError(reason, 415, 'content_type_unsupported', {
+      reason,
+      channel: 'linkedin_post',
+      contentType: null,
+      index: 0
+    });
+  }
+  const typeViolation = checkRichContent('linkedin_post', [{ mimeType: input.mimeType }]);
+  if (typeViolation || !isPostImageMime(input.mimeType)) {
+    throw postMediaRefusal(
+      typeViolation ?? {
+        code: 'content_type_unsupported',
+        channel: 'linkedin_post',
+        contentType: 'image',
+        index: 0,
+        reason: 'Posts accept JPEG, PNG, WebP or GIF images only.'
+      },
+      415
+    );
   }
   if (input.bytes.byteLength === 0) {
     throw new LinkedInPostsApiError('That image is empty.');
   }
-  if (input.bytes.byteLength > LINKEDIN_POST_IMAGE_MAX_BYTES) {
-    throw new LinkedInPostsApiError('Each post image must be 10 MB or smaller.', 413);
-  }
+  const sizeViolation = checkRichContent('linkedin_post', [
+    { mimeType: input.mimeType, sizeBytes: input.bytes.byteLength }
+  ]);
+  if (sizeViolation) throw postMediaRefusal(sizeViolation, 413);
   return {
     name: input.name.trim().slice(0, 255) || 'image',
     mimeType: input.mimeType,
@@ -358,9 +410,7 @@ export async function addPostImage(
       .get<{ count: number }>(workspaceId, postId);
     const position = Number(count?.count ?? 0);
     if (position >= LINKEDIN_POST_IMAGE_MAX_COUNT) {
-      throw new LinkedInPostsApiError(
-        `A LinkedIn post can have at most ${LINKEDIN_POST_IMAGE_MAX_COUNT} images.`
-      );
+      throw postMediaCountRefusal();
     }
     await tx
       .prepare(
@@ -418,9 +468,7 @@ export async function ensurePostImage(
       .get<{ count: number }>(workspaceId, postId);
     const position = Number(count?.count ?? 0);
     if (position >= LINKEDIN_POST_IMAGE_MAX_COUNT) {
-      throw new LinkedInPostsApiError(
-        `A LinkedIn post can have at most ${LINKEDIN_POST_IMAGE_MAX_COUNT} images.`
-      );
+      throw postMediaCountRefusal();
     }
     await tx
       .prepare(

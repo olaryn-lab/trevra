@@ -1,6 +1,8 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { id, type Db } from '../db.js';
 import { evaluatePolicy, type PolicyDecision } from '../control-plane/policy.js';
+import { actionAttachmentViolation, type RichContentViolation } from '../../shared/rich-content.js';
+import { richContentError } from './errors.js';
 
 /** The same database snapshot is reviewed, hashed, and checked again at execution. */
 interface ActionRow {
@@ -43,6 +45,12 @@ export interface LinkedInActionReview {
   policy: PolicyDecision;
   /** Non-null when the queued body came from an AI draft: it never auto-sends. */
   aiDraft: AppliedAiDraft | null;
+  /**
+   * TRV-040: non-null when the stored attachment breaks the rich-content
+   * matrix for this kind. Such an action is held at the gate and cannot be
+   * approved until a person removes or replaces the attachment.
+   */
+  richContent: RichContentViolation | null;
 }
 const equal = (left: string, right: string) =>
   /^[a-f0-9]{64}$/.test(left) &&
@@ -163,7 +171,8 @@ export async function reviewLinkedInAction(
     contentHash,
     approved: Boolean(grant && equal(grant.content_hash, contentHash)),
     policy,
-    aiDraft: await appliedAiDraft(db, workspaceId, row.id)
+    aiDraft: await appliedAiDraft(db, workspaceId, row.id),
+    richContent: actionAttachmentViolation(row.kind, row.attachment_json)
   };
 }
 export async function listLinkedInActionReviews(
@@ -196,7 +205,9 @@ export async function listLinkedInActionReviews(
         review.policy.effect === 'deny' ||
         (review.policy.effect === 'require_approval' && !review.approved) ||
         // TRV-039: an AI-drafted body waits for a human even under `allow`.
-        (review.aiDraft && !review.approved)
+        (review.aiDraft && !review.approved) ||
+        // TRV-040: held content is shown with its reason, approved or not.
+        review.richContent
       )
         result.push(review);
       if (result.length === 100) break;
@@ -293,6 +304,7 @@ export async function approveLinkedInAction(
     if (!equal(contentHash, review.contentHash))
       throw new Error('This action changed since review; refresh before approving.');
     if (review.policy.effect === 'deny') throw new Error('Workspace policy denies this action.');
+    if (review.richContent) throw richContentError(review.richContent);
     await tx
       .prepare(
         `INSERT INTO linkedin_action_approvals(workspace_id,action_id,content_hash,approved_by,approved_at)
@@ -353,6 +365,15 @@ export async function linkedinActionPolicyGate(
         'The claimed LinkedIn action changed after it was read; nothing sent.'
       );
   }
+  // TRV-040: content the channel refuses is held whatever policy or approval
+  // says -- an approval of the exact hash approves these bytes, it cannot make
+  // a driver able to send a voice note or attach a file to an invitation.
+  if (review.richContent)
+    return finish(
+      'held',
+      false,
+      `This ${review.kind} is held: ${review.richContent.reason} Nothing was sent; remove or replace the attachment to release it.`
+    );
   if (review.policy.effect === 'deny')
     return finish(
       'denied',

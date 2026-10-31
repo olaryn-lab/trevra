@@ -46,6 +46,7 @@ import {
 } from './driver-inbox.js';
 import { evaluateLinkedInSafety, type LinkedInSafetyVerdict } from './guard.js';
 import { linkedinActionPolicyGate } from './action-policy.js';
+import { actionAttachmentViolation } from '../../shared/rich-content.js';
 import { createLinkedInReplyPreflight } from './reply-preflight.js';
 import { targetRefCandidates } from './inbox.js';
 import {
@@ -1247,6 +1248,29 @@ export async function runLinkedInLocalBatch(
       );
       result.branchSkipped += 1;
       log(`LinkedIn local worker retired stale action ${action.id} before safety evaluation.`);
+      continue;
+    }
+
+    /*
+     * TRV-040: THE ATTACHMENT AGAINST THE RICH-CONTENT MATRIX, BEFORE ANY PAGE.
+     *
+     * Rows planned before the matrix existed can carry content their channel
+     * refuses: an invite or group message whose file the driver used to ignore
+     * (the text went out and the attachment silently did not), a DM with a
+     * voice note. Such a row is HELD, not sent and not stripped: the claim is
+     * released with `content_unsupported` on the row so the campaign card and
+     * the review queue say why, the attachment is left exactly as it was for a
+     * person to remove or replace, and the pass moves on. Checked after the
+     * state read so a stale row is still retired rather than held forever.
+     */
+    const contentRefusal = actionAttachmentViolation(action.kind, action.attachment);
+    if (contentRefusal) {
+      await store.releaseClaim(action.id, 'content_unsupported');
+      deferred.push(action.id);
+      result.blocked += 1;
+      log(
+        `LinkedIn local worker held action ${action.id}: ${contentRefusal.reason} Nothing was opened or sent; remove or replace the attachment to release it.`
+      );
       continue;
     }
 

@@ -402,7 +402,9 @@ import {
   resolveSeatProxy,
   type LinkedInLocalWorkerConfig
 } from './linkedin/local-worker.js';
-import { LinkedInApiError } from './linkedin/errors.js';
+import { LinkedInApiError, richContentRefusalDetails } from './linkedin/errors.js';
+import { richAttachmentListSchema } from './linkedin/rich-content-guard.js';
+import { checkRichContent, workflowRichContentViolation } from '../shared/rich-content.js';
 import {
   ingestOutcome,
   linkedinAnalytics,
@@ -4295,6 +4297,22 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       if (post.status === 'canceled')
         return res.status(409).json({ error: 'A canceled post cannot be sent to Buffer.' });
       const text = renderPostBody(post.blocks).trim();
+      // TRV-040: Buffer drafts are text-only. A post with images is refused
+      // with the matrix's code instead of losing its images on the way.
+      const mediaRefusal = checkRichContent(
+        'buffer_draft',
+        post.media.map((image) => ({
+          name: image.name,
+          mimeType: image.mimeType,
+          sizeBytes: image.size
+        }))
+      );
+      if (mediaRefusal)
+        return res.status(422).json({
+          error: mediaRefusal.reason,
+          code: mediaRefusal.code,
+          ...richContentRefusalDetails(mediaRefusal)
+        });
       if (!text)
         return res
           .status(409)
@@ -6140,7 +6158,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       const action = await editQueuedMessage(db, {
         workspaceId: req.auth!.workspaceId,
         actionId: String(req.params.id),
-        body: input.body
+        body: input.body,
+        ...(input.attachments === undefined ? {} : { attachments: input.attachments })
       });
       res.json({ action });
     })
@@ -6288,7 +6307,37 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   );
   app.post(
     '/api/linkedin/posts/:id/media',
-    express.raw({ type: [...LINKEDIN_POST_IMAGE_TYPES], limit: LINKEDIN_POST_IMAGE_MAX_BYTES }),
+    // TRV-040: an over-limit body is refused with the matrix's stable code.
+    (req: Request, res: Response, next: NextFunction) =>
+      linkedinPostMediaBody(req, res, (error?: unknown) => {
+        if (
+          error &&
+          typeof error === 'object' &&
+          (error as { type?: string }).type === 'entity.too.large'
+        ) {
+          const declared = Number(req.headers['content-length'] ?? 0);
+          const refusal = checkRichContent('linkedin_post', [
+            {
+              mimeType: String(req.headers['content-type'] ?? ''),
+              sizeBytes:
+                Number.isFinite(declared) && declared > LINKEDIN_POST_IMAGE_MAX_BYTES
+                  ? declared
+                  : LINKEDIN_POST_IMAGE_MAX_BYTES + 1
+            }
+          ]);
+          const reason = refusal?.reason ?? 'LinkedIn post attachments must be 10 MB or smaller.';
+          res.status(413).json({
+            error: reason,
+            code: 'attachment_too_large',
+            reason,
+            channel: 'linkedin_post',
+            contentType: refusal?.contentType ?? 'image',
+            index: 0
+          });
+          return;
+        }
+        next(error as Error | undefined);
+      }),
     linkedinRoute(async (req, res) => {
       const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       const mimeType = String(req.headers['content-type'] ?? '')
@@ -6765,6 +6814,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           )
         });
       } catch (error) {
+        // A coded refusal (TRV-040 held content) keeps its code and status.
+        if (error instanceof LinkedInApiError) throw error;
         throw new LinkedInApiError(error instanceof Error ? error.message : 'Approval failed', 409);
       }
     })
@@ -8135,16 +8186,35 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     '/api/linkedin/manager/workflows/validate',
     linkedinRoute(async (req, res) => {
       const parsed = workflowStepsSchema.safeParse((req.body ?? {}).steps);
+      // TRV-040: the rich-content matrix is a save-time rule, so validation
+      // reports it the same way a schema issue is reported.
+      const contentRefusal = parsed.success ? workflowRichContentViolation(parsed.data) : null;
+      const stepIndex = contentRefusal
+        ? parsed.data!.findIndex((step) => step.id === contentRefusal.stepId)
+        : -1;
       res.json(
-        parsed.success
+        parsed.success && !contentRefusal
           ? { valid: true, steps: parsed.data, issues: [] }
-          : {
-              valid: false,
-              issues: parsed.error.issues.map((issue) => ({
-                path: issue.path,
-                message: issue.message
-              }))
-            }
+          : contentRefusal
+            ? {
+                valid: false,
+                issues: [
+                  {
+                    path: [stepIndex, 'config', 'variants'],
+                    message: contentRefusal.reason,
+                    code: contentRefusal.code,
+                    stepId: contentRefusal.stepId,
+                    variantId: contentRefusal.variantId
+                  }
+                ]
+              }
+            : {
+                valid: false,
+                issues: parsed.error!.issues.map((issue) => ({
+                  path: issue.path,
+                  message: issue.message
+                }))
+              }
       );
     })
   );
@@ -8690,6 +8760,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           threadUrn: String(req.params.threadUrn),
           body: input.body,
           ...(input.plannedFor === undefined ? {} : { plannedFor: input.plannedFor }),
+          ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
           queuedByUserId: req.auth!.userId
         },
         new Date()
@@ -10693,7 +10764,10 @@ function linkedinRoute(handler: (req: AuthedRequest, res: Response) => Promise<u
       await handler(req, res);
     } catch (error) {
       if (error instanceof LinkedInApiError || error instanceof LinkedInPostsApiError) {
-        res.status(error.status).json({ error: error.message });
+        res.status(error.status).json({
+          error: error.message,
+          ...(error.code ? { code: error.code, ...(error.details ?? {}) } : {})
+        });
         return;
       }
       next(error);
@@ -11545,7 +11619,16 @@ const linkedinActionFiltersSchema = z.object({
  */
 const linkedinSkipSchema = z.object({}).strict();
 // One field, strict: an edit changes words and nothing else.
-const linkedinEditBodySchema = z.object({ body: z.string().min(1).max(8000) }).strict();
+// Words, plus (TRV-040) an optional attachment list checked against the row
+// kind's rich-content row. Nothing here can move status, slot, target or kind.
+const linkedinEditBodySchema = z
+  .object({ body: z.string().min(1).max(8000), attachments: richAttachmentListSchema.optional() })
+  .strict();
+
+const linkedinPostMediaBody = express.raw({
+  type: [...LINKEDIN_POST_IMAGE_TYPES],
+  limit: LINKEDIN_POST_IMAGE_MAX_BYTES
+});
 
 /**
  * The one sanctioned way an HTTP request reports a send.
@@ -11827,8 +11910,9 @@ const linkedinReplySchema = z
   .object({
     body: z.string().min(1).max(8000),
     plannedFor: z.string().datetime().optional(),
-    /** Which account is replying. See `linkedinInboxSyncSchema`. */
-    seatKey: linkedinSeatKeySchema.default(OWNER_SEAT_KEY)
+    seatKey: linkedinSeatKeySchema.default(OWNER_SEAT_KEY),
+    /** TRV-040: refused by the matrix with its code; replies are text-only. */
+    attachments: richAttachmentListSchema.optional()
   })
   .strict();
 

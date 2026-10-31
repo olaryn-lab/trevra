@@ -3,6 +3,12 @@ import { id, type Db } from '../db.js';
 import { clearLinkedInConversationProjection, projectLinkedInThread } from '../conversations.js';
 import { recordAction } from './actions.js';
 import { LinkedInApiError } from './errors.js';
+import { richContentChannelForActionKind } from '../../shared/rich-content.js';
+import {
+  assertRichContent,
+  storedAttachmentOf,
+  type RichAttachmentRequest
+} from './rich-content-guard.js';
 import {
   getAction,
   ingestOutcome,
@@ -1211,6 +1217,12 @@ export interface ReplyRequest {
   body: string;
   /** ISO-8601 slot the reply is paced into. Defaults to now. */
   plannedFor?: string;
+  /**
+   * TRV-040: attachments the composer asked to send. A LinkedIn thread reply
+   * is typed as text, so the matrix refuses every one with its reason -- the
+   * field exists so the refusal is explicit rather than an unknown key.
+   */
+  attachments?: readonly RichAttachmentRequest[];
   /** The Trevra user whose live request queued this reply -- see `LinkedInActionRecord.queuedByUserId`. */
   queuedByUserId?: string | null;
   /**
@@ -1371,6 +1383,7 @@ export async function enqueueReply(db: Db, input: ReplyRequest, now: Date): Prom
       400
     );
   }
+  assertRichContent('linkedin_reply', input.attachments ?? []);
 
   // PER SEAT, AND THIS ARGUMENT IS LOAD-BEARING. `threadByUrn` defaults its
   // last parameter to the owner seat, and omitting it here meant a reply
@@ -1573,6 +1586,12 @@ export interface QueuedMessageEdit {
   actionId: string;
   /** The new approved bytes. Trimmed-empty is refused, exactly as it is at queue time. */
   body: string;
+  /**
+   * TRV-040: replace the row's attachment. Omitted leaves `attachment_json` as
+   * it is; `[]` removes it (how an operator releases a message held for
+   * content its channel refuses). Checked against the row kind's matrix row.
+   */
+  attachments?: readonly RichAttachmentRequest[];
 }
 
 const EDITABLE_KINDS = ['reply', 'dm'];
@@ -1609,6 +1628,10 @@ export async function editQueuedMessage(
       400
     );
   }
+  if (input.attachments !== undefined) {
+    // EDITABLE_KINDS are reply and dm, both of which have a matrix row.
+    assertRichContent(richContentChannelForActionKind(existing.kind)!, input.attachments);
+  }
   if (existing.source !== 'manual') {
     throw new LinkedInApiError(
       "This message was queued by a campaign, so its words are that campaign's approved copy. Change it in the campaign, or cancel this one and write a new message here.",
@@ -1635,15 +1658,30 @@ export async function editQueuedMessage(
     throw new LinkedInApiError(PRESENTED_HANDOFF_EDIT_REFUSAL, 409);
   }
 
+  const replaceAttachment = input.attachments !== undefined;
+  const attachment = replaceAttachment ? storedAttachmentOf(input.attachments!) : null;
   const written = await db
     .prepare(
       `
-    UPDATE linkedin_actions SET body=?
+    UPDATE linkedin_actions
+    SET body=?,
+        attachment_json=CASE WHEN ?::boolean THEN ?::jsonb ELSE attachment_json END,
+        -- The worker's content hold (TRV-040) is about the old attachment; a
+        -- replaced one is judged afresh at the next claim.
+        failure_kind=CASE WHEN ?::boolean AND failure_kind='content_unsupported'
+                          THEN NULL ELSE failure_kind END
     WHERE id=? AND workspace_id=? AND status='planned' AND claimed_at IS NULL AND source='manual'
       AND kind IN ('reply','dm') AND handoff_presented_at IS NULL
   `
     )
-    .run(body, input.actionId, input.workspaceId);
+    .run(
+      body,
+      replaceAttachment,
+      attachment ? JSON.stringify(attachment) : null,
+      replaceAttachment,
+      input.actionId,
+      input.workspaceId
+    );
   if (written.changes === 0) {
     // Today presenting it between the read and the write is the one race with
     // its own answer; it is a different instruction to the founder.

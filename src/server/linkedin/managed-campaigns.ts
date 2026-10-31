@@ -42,6 +42,7 @@ import {
   type WorkflowVariableCoverage
 } from './workflows.js';
 import { getBookingUrl } from '../meetings/booking-link.js';
+import { assertWorkflowRichContent } from './rich-content-guard.js';
 
 /**
  * AN ALIAS, NOT A SECOND UNION.
@@ -824,6 +825,9 @@ export async function createManagedCampaign(
   if (missingSeat) throw new Error(`LinkedIn account '${missingSeat}' is not configured.`);
   if (!list) throw new Error('Lead list not found.');
   if (!workflow) throw new Error('Workflow not found.');
+  // TRV-040: a workflow stored before the matrix may carry content it refuses;
+  // a new campaign must not snapshot it.
+  assertWorkflowRichContent(workflow.steps);
   const timestamp = now.toISOString();
   const campaignId = id('licmp');
   let enrolled = 0;
@@ -3110,6 +3114,7 @@ export async function updateCampaignSequence(
   if (campaign.status === 'stopped' || campaign.status === 'completed')
     throw new Error(`A ${campaign.status} campaign cannot have its steps changed.`);
   const parsed = workflowStepsSchema.parse(steps);
+  assertWorkflowRichContent(parsed);
   const snapshot = JSON.stringify({
     manager: true,
     workflowId: campaign.workflowId,
@@ -3153,6 +3158,7 @@ export async function applyLatestWorkflowToPendingMembers(
     throw new Error(`A ${campaign.status} campaign cannot be upgraded.`);
   const workflow = await getWorkflow(db, workspaceId, campaign.workflowId);
   if (!workflow) throw new Error('Campaign workflow no longer exists.');
+  assertWorkflowRichContent(workflow.steps);
   const snapshot = JSON.stringify({
     manager: true,
     workflowId: workflow.id,

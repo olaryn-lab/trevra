@@ -40,6 +40,7 @@ import {
   type WorkflowStep
 } from './workflows.js';
 import { getBookingUrl } from '../meetings/booking-link.js';
+import { variantRichContentViolation } from '../../shared/rich-content.js';
 
 /**
  * The managed-campaign RUNTIME: the tick that turns a workflow into ledger rows.
@@ -1675,6 +1676,36 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
               branchStatePatch(`blocked:${step.id}`, {
                 reason: `missing_variable:${missingVariables[0]}`,
                 missingVariables,
+                at: nowIso
+              })
+            )
+          );
+          result.membersBlocked += 1;
+          continue;
+        }
+
+        // TRV-040: the selected arm's attachment against the rich-content
+        // matrix for this step's channel. A snapshot saved before the matrix
+        // existed can carry content its channel refuses -- an invitation, group
+        // message or campaign email whose file used to be silently left behind
+        // while the text went out. HELD on this step with the matrix's reason:
+        // nothing is planned, nothing is sent, and the attachment is not
+        // stripped from the snapshot.
+        const contentRefusal = selectedVariant
+          ? variantRichContentViolation(step.action, selectedVariant)
+          : null;
+        if (contentRefusal) {
+          memberWrites.set(
+            member.id,
+            stayOnStep(
+              stepIndex,
+              step.id,
+              completedStepIds,
+              new Date(now.getTime() + 3_600_000),
+              now,
+              branchStatePatch(`blocked:${step.id}`, {
+                reason: contentRefusal.reason,
+                code: contentRefusal.code,
                 at: nowIso
               })
             )
