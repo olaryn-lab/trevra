@@ -579,7 +579,7 @@ export function OutreachAnalytics({ setToast }: { setToast: (message: string) =>
           )}
 
           <details className="li-method-note">
-            <summary>How these numbers are counted</summary>
+            <summary className="ui-disclosure-summary">How these numbers are counted</summary>
             <div>
               <p>
                 <b>Whose number it is.</b> Each action counts for one person: the first of (1) the

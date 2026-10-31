@@ -1,6 +1,13 @@
 /* /outreach/analytics (TRV-046, TRV-049). Composition only: controls,
    tables, pills and the stat row keep their shared skins. */
 
+/* The panel is a grid item of .page-stack. Without this its min-width is the
+   widest table's, which widens the whole screen (and the section nav) instead
+   of letting the table scroll inside .li-table-scroll. */
+.li-reports {
+  min-width: 0;
+}
+
 .li-reports-filters {
   --ui-field-row-cols: repeat(auto-fit, minmax(180px, 1fr));
   margin-bottom: 12px;
