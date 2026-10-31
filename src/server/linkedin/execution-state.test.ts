@@ -32,7 +32,12 @@ beforeEach(async () => {
       'INSERT INTO workspaces (id,name,created_at) VALUES (?,?,?) ON CONFLICT (id) DO NOTHING'
     )
     .run(WORKSPACE, 'Execution State Test', NOW.toISOString());
-  for (const table of ['linkedin_actions', 'linkedin_campaigns', 'linkedin_seats'])
+  for (const table of [
+    'linkedin_actions',
+    'linkedin_campaigns',
+    'linkedin_seats',
+    'workspace_policies'
+  ])
     await db.prepare(`DELETE FROM ${table} WHERE workspace_id=?`).run(WORKSPACE);
   // Activated in January and read in August: an established seat, so the
   // account warm-up ramp is finished and cannot be what binds below.
@@ -94,6 +99,26 @@ describe('campaign execution state', () => {
 
     await upsertSeat(db, WORKSPACE, { sendMode: 'human' }, NOW, SEAT);
     expect((await campaignExecutionState(db, WORKSPACE, CAMPAIGN, NOW)).humanSendNext).toBe(true);
+  });
+
+  it('does not say a person is next when workspace policy denies the due row, and says policy is why', async () => {
+    await insertAction({ id: 'lact_exec_denied', kind: 'invite', handle: 'human-denied' });
+    await upsertSeat(db, WORKSPACE, { sendMode: 'human' }, NOW, SEAT);
+    expect(await campaignExecutionState(db, WORKSPACE, CAMPAIGN, NOW)).toMatchObject({
+      humanSendNext: true,
+      policyDenied: false
+    });
+    await db
+      .prepare(
+        `INSERT INTO workspace_policies
+           (id,workspace_id,name,priority,action_pattern,effect,conditions_json,enabled,created_at,updated_at)
+         VALUES ('pol_exec_deny',?,'deny invites',100,'action:linkedin.invite','deny','{}'::jsonb,TRUE,?::timestamptz,?::timestamptz)`
+      )
+      .run(WORKSPACE, NOW.toISOString(), NOW.toISOString());
+    expect(await campaignExecutionState(db, WORKSPACE, CAMPAIGN, NOW)).toMatchObject({
+      humanSendNext: false,
+      policyDenied: true
+    });
   });
 
   it('does not say a person is next when the due row is a passive kind on a human seat', async () => {

@@ -70,7 +70,8 @@ export type CampaignExecutionBlockerKind =
   | 'safety-gate'
   | 'awaiting-outcome-resolution'
   | 'unclaimed'
-  | 'human-send';
+  | 'human-send'
+  | 'policy-denied';
 
 /**
  * WHETHER A PERSON CAN DO ANYTHING ABOUT IT, which is a different question
@@ -258,6 +259,17 @@ export function campaignExecutionBlocker(
   const seatAttention = companionStatus?.attention.find((attention) =>
     input.senderKeys.includes(attention.seatKey)
   );
+
+  // (0) WORKSPACE POLICY DENIES THE NEXT ROW. Nobody sends it -- no browser,
+  // and not the founder by hand (Today never presents a denied row) -- so no
+  // rung below can be the reason, and promising a handoff would be false.
+  if (execution?.policyDenied && due > 0)
+    return {
+      kind: 'policy-denied',
+      severity: 'attention',
+      title: 'Workspace policy blocks the next action',
+      detail: `${plural(due, 'planned action')} ${are(due)} due, but your workspace policy denies the next ${noun(execution.gate?.kind ?? null)}, so Trevra will not send it, by browser or by hand. Change the policy to let it go.`
+    };
 
   // (0) HUMAN-SEND. The next due row is an invite or message the founder sends
   // by hand, so no browser, companion or worker is involved and none of the

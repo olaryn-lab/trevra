@@ -1,4 +1,5 @@
 import type { Db } from '../db.js';
+import { reviewLinkedInAction } from './action-policy.js';
 import {
   evaluateLinkedInSafety,
   type LinkedInCheckName,
@@ -103,10 +104,17 @@ export interface LinkedInCampaignExecution {
   /** Null when nothing is claimable, or when the gate itself could not be read. */
   gate: LinkedInCampaignExecutionGate | null;
   /**
-   * The next due row is an invite or message on a human-send seat: nothing is
-   * broken, the founder sends it by hand from Today.
+   * The next due row is an invite or message on a human-send seat that
+   * workspace policy does not deny: nothing is broken, the founder sends it by
+   * hand from Today.
    */
   humanSendNext: boolean;
+  /**
+   * Workspace policy DENIES the next due row's action kind (the same review
+   * the worker's policy gate and Today's handoff list read). Nobody sends it,
+   * by browser or by hand, until the policy changes.
+   */
+  policyDenied: boolean;
 }
 
 export interface NextDueRow {
@@ -206,10 +214,14 @@ export async function campaignExecutionState(
         .get<{ seat_key: string }>(workspaceId, campaignId);
   const seatKey = dueRow?.seat_key ?? campaignSeat?.seat_key ?? OWNER_SEAT_KEY;
 
-  const [seat, restingUntil] = await Promise.all([
+  const [seat, restingUntil, review] = await Promise.all([
     getSeat(db, workspaceId, seatKey).catch(() => undefined),
-    seatRestingUntil(db, workspaceId, seatKey)
+    seatRestingUntil(db, workspaceId, seatKey),
+    // Read-only: the review records no policy decision. An unreadable policy is
+    // an honest absence here, like every other read on this screen.
+    dueRow ? reviewLinkedInAction(db, workspaceId, dueRow.id).catch(() => null) : null
   ]);
+  const policyDenied = review?.policy.effect === 'deny';
 
   return {
     seatKey,
@@ -224,7 +236,12 @@ export async function campaignExecutionState(
     restingUntil:
       restingUntil && restingUntil.getTime() > now.getTime() ? restingUntil.toISOString() : null,
     gate: dueRow ? await gateVerdict(db, workspaceId, dueRow, now) : null,
-    humanSendNext: seat?.sendMode === 'human' && Boolean(dueRow) && isHumanSendKind(dueRow!.kind)
+    humanSendNext:
+      seat?.sendMode === 'human' &&
+      Boolean(dueRow) &&
+      isHumanSendKind(dueRow!.kind) &&
+      !policyDenied,
+    policyDenied
   };
 }
 

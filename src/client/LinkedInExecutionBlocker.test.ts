@@ -55,6 +55,7 @@ function execution(patch: Partial<LinkedInCampaignExecution> = {}): LinkedInCamp
         "Previous business day carried 0 profile_view(s), so today's ceiling is 1 (+35%); 1 used so far."
     },
     humanSendNext: false,
+    policyDenied: false,
     ...patch
   };
 }
@@ -366,6 +367,21 @@ describe('campaign execution blocker', () => {
     expect(result?.severity).toBe('attention');
     expect(result?.title).toBe('Waiting for you to send on LinkedIn');
     expect(result?.detail).toContain('next invite');
+  });
+
+  it('names a workspace policy deny instead of promising a handoff or blaming a browser', () => {
+    const result = blocker({
+      companionStatus: companion({ devices: [] }),
+      execution: execution({
+        humanSendNext: false,
+        policyDenied: true,
+        restingUntil: null,
+        gate: { kind: 'invite', allowed: true, check: null, detail: null }
+      })
+    });
+    expect(result?.kind).toBe('policy-denied');
+    expect(result?.title).toBe('Workspace policy blocks the next action');
+    expect(result?.detail).toContain('denies the next invite');
   });
 
   it('still names a refusing gate on a human-send seat', () => {
