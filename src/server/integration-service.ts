@@ -105,15 +105,15 @@ export type CanonicalRecord = z.infer<typeof canonicalRecordSchema>;
  * written to the database. Trevra stores only the connection reference returned on the auth webhook.
  * `mode: 'import'` has no live connection and uses its own key as an identifier.
  *
- * CRM integrations (HubSpot, Attio) are READ / sync only, deliberately.
+ * CRM integrations (HubSpot, Attio) sync READ-only here, deliberately.
  * Creating or updating a record in someone else's CRM is an `external-write` side effect, and every
- * external write in Trevra must go through prepareAction -> approveAction -> executeAction in
- * action-service.ts, where the exact approved payload is hashed and a drifted payload is rejected.
- * Wiring that up needs a new prepared-action type plus its schema, approval UI, and policy surface,
- * NOTE: CRM write-back now exists, but deliberately NOT here. It lives in
- * `crm/activity.ts` behind the `crm.log-activity` action type, because it
- * writes ACTIVITY rather than records and must never share a code path with
- * the record-owning providers below. `executeConnectedAction` still has no
+ * external write in Trevra goes through a prepared action whose exact payload is hashed and
+ * approved before execution; a drifted payload is rejected.
+ * NOTE: CRM write-back exists, but deliberately NOT here. Activity lives in
+ * `crm/activity.ts` behind `crm.log-activity`; contact records live in
+ * `crm/contact-upsert*.ts` behind `crm.upsert-contact` (TRV-051), which only
+ * creates a contact or fills empty fields after approval. Neither shares a
+ * code path with the sync below. `executeConnectedAction` still has no
  * hubspot/attio branch and falls through
  * to `throw new Error(\`Provider ${provider} cannot execute ${actionType}\`)`, so no ungated write
  * path exists. Do not add one without routing it through the approval gate first.
@@ -187,7 +187,7 @@ const catalog = [
     name: 'HubSpot',
     category: 'crm',
     description:
-      'Read your contacts, companies, and deals. Trevra adds a note when you approve work — it never creates or edits records.',
+      'Read your contacts, companies, and deals. With your approval, Trevra adds notes and creates contacts or fills their empty fields — it never overwrites a value.',
     mode: 'oauth',
     env: 'NANGO_HUBSPOT_INTEGRATION',
     fallback: 'trevra-hubspot'
@@ -198,7 +198,7 @@ const catalog = [
     name: 'Attio',
     category: 'crm',
     description:
-      'Read your people, companies, and deals. Trevra adds a note when you approve work — it never creates or edits records.',
+      'Read your people, companies, and deals. With your approval, Trevra adds notes and creates people or fills their empty fields — it never overwrites a value.',
     mode: 'oauth',
     env: 'NANGO_ATTIO_INTEGRATION',
     fallback: 'trevra-attio'

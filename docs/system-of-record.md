@@ -84,12 +84,23 @@ VALUES ('pol_no_crm_write', 'YOUR_WS', 'No CRM writes', 100, 'action:crm.log-act
 
 ### Current scopes
 
-| CRM     | Scopes                                                 | Intentionally absent         |
-| ------- | ------------------------------------------------------ | ---------------------------- |
-| HubSpot | `crm.objects.contacts.read`, `crm.objects.notes.write` | `crm.objects.contacts.write` |
-| Attio   | record read, note write                                | record write                 |
+| CRM     | Scopes                                                 | Used only by             |
+| ------- | ------------------------------------------------------ | ------------------------ |
+| HubSpot | `crm.objects.contacts.read`, `crm.objects.notes.write` | `crm.log-activity`, sync |
+| HubSpot | `crm.objects.contacts.write`                           | `crm.upsert-contact`     |
+| Attio   | record read, note write                                | `crm.log-activity`, sync |
+| Attio   | record write (`record_permission:read-write`)          | `crm.upsert-contact`     |
 
-If Trevra later needs broader CRM mutation, that requires an explicit design for authority, field ownership, conflicts, scopes, approvals, and reconciliation. It must not arrive as an incidental connector expansion.
+Company, deal, owner and stage properties remain unwritten. Any broader CRM mutation still requires an explicit design for authority, field ownership, conflicts, scopes, approvals, and reconciliation. It must not arrive as an incidental connector expansion.
+
+### Contact upsert (`crm.upsert-contact`, TRV-051)
+
+The one record write, designed under the rule above:
+
+- **Authority:** the CRM stays authoritative. Matched contacts get fill-empty-only updates: a non-empty CRM value is never overwritten, email is never written to an existing contact, and every difference is recorded as a conflict for the approver.
+- **Matching:** deterministic, in order: the stored `crm_contact_links` record, LinkedIn URL, exact email, exact first + last name + company. More than one match in a tier blocks the upsert (`blocked_ambiguous`) and writes nothing.
+- **Approval:** the exact payload and its hash are prepared into `crm_contact_upserts`; policy key `action:crm.upsert-contact` defaults to `require_approval`.
+- **Reconciliation:** execution re-reads the CRM and refuses with `stale_prepare` if anything it planned moved. A confirmed write records the CRM record id in `crm_contact_links`.
 
 ---
 

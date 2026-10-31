@@ -118,6 +118,7 @@ Current prepared execution action types are:
 - `community.reply` — publish a governed reply through a supported GTM community channel.
 - `crm.log-activity` — append a GTM activity to a connected CRM record.
 - `buffer.create-draft` — create an unscheduled Buffer draft only after exact-payload founder approval. The mutation always uses Buffer's draft mode and never supplies a publish time.
+- `crm.upsert-contact` — create a HubSpot contact or Attio person, or fill empty fields on a matched one, for one lead (TRV-051). See [CRM contact upsert](#crm-contact-upsert-crmupsert-contact).
 
 There is no generic remote-action adapter and no arbitrary webhook action. A new external write requires a named GTM action, a bounded payload schema, policy/approval semantics, a dedicated adapter, and tests.
 
@@ -202,7 +203,40 @@ An owner creates a Cal.com endpoint on `/setup/capture`. Trevra shows the subscr
 
 ## CRM integrations
 
-HubSpot and Attio may observe GTM records. CRM activity write-back is a dedicated `crm.log-activity` action behind Trevra's approval/execution boundary. Do not add ungated record mutation to the sync path.
+HubSpot and Attio may observe GTM records. CRM activity write-back is a dedicated `crm.log-activity` action behind Trevra's approval/execution boundary. Contact records are written only by `crm.upsert-contact`, below. Do not add ungated record mutation to the sync path.
+
+### CRM contact upsert (`crm.upsert-contact`)
+
+Code: `src/server/crm/contact-*.ts`. Reads and writes go through the Nango proxy on the workspace's HubSpot or Attio connection. Pipedrive and Salesforce have no Nango integration in Trevra and are not supported. Any other provider, a demo connection, a disconnected connection, or a server without Nango configured answers an explicit error (`crm_provider_unsupported` 422, `crm_not_connected` 409, `crm_not_configured` 503) instead of doing nothing.
+
+**Scopes:** HubSpot `crm.objects.contacts.read` + `crm.objects.contacts.write`; Attio `record_permission:read-write` + `object_configuration:read`. A connection without write access gets a terminal 401/403 that asks for a reconnect.
+
+**Field map** (`CRM_CONTACT_FIELD_MAP`, the only place property names live):
+
+| Trevra field | HubSpot property  | Attio attribute                         |
+| ------------ | ----------------- | --------------------------------------- |
+| firstName    | `firstname`       | `name.first_name`                       |
+| lastName     | `lastname`        | `name.last_name`                        |
+| email        | `email`           | `email_addresses`                       |
+| company      | `company`         | `company` (record reference; read only) |
+| title        | `jobtitle`        | `job_title`                             |
+| linkedinUrl  | `hs_linkedin_url` | `linkedin`                              |
+| phone        | `phone`           | `phone_numbers` (written only as E.164) |
+
+**Prepare** (`POST /api/crm/contact-upserts` `{leadContactId, connectionId?}`; bulk `POST /api/crm/contact-upserts/bulk` `{leadContactIds, connectionId?}`, at most 100 leads, 400 past that). Deterministic and read-only against the CRM:
+
+1. the stored `crm_contact_links` record for the lead or its Person, re-read by id (a deleted or merged record falls through);
+2. normalized LinkedIn profile URL, then exact normalized email, then exact normalized first + last name + company. The provider query is only a candidate filter; every hit is re-checked against the normalized key. The first tier with a match wins.
+
+More than one record in a tier stores `blocked_ambiguous` with the candidate ids and writes nothing. One record plans a fill-empty-only update: non-empty CRM values are never overwritten, email is never written to an existing record, and differences are listed as conflicts. No record plans a create. A match with nothing empty to fill is `up_to_date`. The exact payload and its canonical hash are stored in `crm_contact_upserts`, and the prepared-only playbook `gtm.crm-upsert-contact` waits for approval. Policy key: `action:crm.upsert-contact` (default `require_approval`; a `deny` rule blocks prepare and execution).
+
+**Execute** (after approval of the exact payload hash):
+
+- Idempotency key: `sha256(workspace, provider, connection, match tier + key, payload hash)`. The ledger row is claimed under an advisory lock plus `FOR UPDATE` and leased while `executing`. An already-succeeded key returns its stored record id without calling the CRM.
+- The CRM record is re-read just before the write. A deleted or merged record, a record that no longer matches its key, a planned field that is no longer empty, or a match appearing for a planned create all refuse with `stale_prepare` and write nothing.
+- Neither provider takes an idempotency key on create, and their upsert endpoints overwrite values. A create is therefore search-before-create inside the claimed execution. The provider's unique email turns a lost-response retry into a conflict, which is reconciled against `write_attempted_at` rather than creating a duplicate.
+- 429 and 5xx are retryable through the playbook step's retry policy (3 attempts, 60 s apart). Other 4xx are terminal and record `crm_http_<status>[:<provider code>]`. Errors carry codes only, never provider messages or contact values.
+- Success writes `crm_contact_links` (unique per workspace + connection + lead) with `matched_by` and `last_synced_at`. Later prepares match by this stored id first.
 
 ## GitHub repository traction (proxy reads)
 

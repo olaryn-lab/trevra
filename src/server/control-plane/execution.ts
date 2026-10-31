@@ -14,6 +14,7 @@ import { projectPreparedConversationEmail } from '../conversations.js';
 import { communityReplyPayloadSchema, publishCommunityReply } from '../outreach/publish.js';
 import { crmActivityPayloadSchema, logCrmActivity } from '../crm/activity.js';
 import { bufferDraftPayloadSchema, createBufferDraft } from '../content/buffer.js';
+import { executeCrmContactUpsert } from '../crm/contact-upsert-execute.js';
 /**
  * External execution is intentionally a closed GTM action set.
  *
@@ -25,10 +26,25 @@ export const EXECUTION_ACTION_TYPES = [
   'email.send',
   'community.reply',
   'crm.log-activity',
-  'buffer.create-draft'
+  'buffer.create-draft',
+  'crm.upsert-contact'
 ] as const;
 export type ExecutionActionType = (typeof EXECUTION_ACTION_TYPES)[number];
 const actionTypeSchema = z.enum(EXECUTION_ACTION_TYPES);
+
+/**
+ * An adapter marks a definite refusal with `retryable: false` (a 4xx, a stale
+ * prepare, a payload-hash mismatch). The playbook engine then fails the step
+ * instead of re-running a write that cannot succeed with the same payload.
+ * Errors without the flag keep the engine's existing retry behavior.
+ */
+export function isRetryableExecutionError(error: unknown): boolean {
+  return !(
+    error &&
+    typeof error === 'object' &&
+    (error as { retryable?: unknown }).retryable === false
+  );
+}
 
 const emailPayloadSchema = z.object({
   recipient: z.string().email(),
@@ -158,6 +174,15 @@ export async function executePreparedPlaybookAction(
   if (actionType === 'buffer.create-draft') {
     const payload = bufferDraftPayloadSchema.parse(input.payload);
     const result = await createBufferDraft(db, input.workspaceId, payload, input.payloadHash);
+    return { provider: result.provider, externalRef: result.externalRef, actionType };
+  }
+
+  if (actionType === 'crm.upsert-contact') {
+    const result = await executeCrmContactUpsert(db, {
+      workspaceId: input.workspaceId,
+      payload: input.payload,
+      payloadHash: input.payloadHash
+    });
     return { provider: result.provider, externalRef: result.externalRef, actionType };
   }
 

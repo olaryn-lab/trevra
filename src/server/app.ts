@@ -177,6 +177,14 @@ import { listContentFormatTemplates } from './content/format-templates.js';
 import { contentPerformanceReport } from './content/performance.js';
 import { ContentChannelVariantError, contentChannelVariants } from './content/channel-variants.js';
 import { BufferDraftError, listBufferChannels } from './content/buffer.js';
+import { CrmUpsertError } from './crm/contact-providers.js';
+import {
+  CRM_UPSERT_BULK_MAX,
+  prepareCrmContactUpsert,
+  prepareCrmContactUpserts,
+  prepareCrmUpsertBulkSchema,
+  prepareCrmUpsertSchema
+} from './crm/contact-upsert.js';
 import {
   PublicReportError,
   listPublicContentReportPerformance,
@@ -4285,6 +4293,49 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     } catch (error) {
       if (error instanceof BufferDraftError)
         return res.status(error.status).json({ error: error.message });
+      next(error);
+    }
+  });
+
+  // TRV-051: prepare a `crm.upsert-contact` behind founder approval. Nothing is
+  // written to the CRM here; the approval run at `/ledger/run/:id` executes it.
+  app.post('/api/crm/contact-upserts', async (req: AuthedRequest, res, next) => {
+    try {
+      const input = prepareCrmUpsertSchema.parse(req.body ?? {});
+      const result = await prepareCrmContactUpsert(db, req.auth!.workspaceId, {
+        ...input,
+        actorType: 'user',
+        actorId: req.auth!.userId
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(result.created ? 201 : 200).json({ upsert: result.upsert, run: result.run });
+    } catch (error) {
+      if (error instanceof CrmUpsertError)
+        return res.status(error.status).json({ error: error.message, code: error.code });
+      next(error);
+    }
+  });
+
+  app.post('/api/crm/contact-upserts/bulk', async (req: AuthedRequest, res, next) => {
+    try {
+      const ids = (req.body ?? {}).leadContactIds;
+      if (Array.isArray(ids) && ids.length > CRM_UPSERT_BULK_MAX)
+        return res.status(400).json({
+          error: `A bulk CRM sync prepares at most ${CRM_UPSERT_BULK_MAX} leads at a time; ${ids.length} were sent.`,
+          code: 'bulk_limit',
+          max: CRM_UPSERT_BULK_MAX
+        });
+      const input = prepareCrmUpsertBulkSchema.parse(req.body ?? {});
+      const result = await prepareCrmContactUpserts(db, req.auth!.workspaceId, {
+        ...input,
+        actorType: 'user',
+        actorId: req.auth!.userId
+      });
+      res.setHeader('Cache-Control', 'no-store');
+      res.json(result);
+    } catch (error) {
+      if (error instanceof CrmUpsertError)
+        return res.status(error.status).json({ error: error.message, code: error.code });
       next(error);
     }
   });

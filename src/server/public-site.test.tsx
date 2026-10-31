@@ -103,7 +103,7 @@ describe('public claims and actual execution capabilities', () => {
 
   it('lists exactly the actual named execution adapters in the README', () => {
     for (const kind of EXECUTION_ACTION_TYPES) expect(readme).toContain(`\`${kind}\``);
-    expect(EXECUTION_ACTION_TYPES).toHaveLength(4);
+    expect(EXECUTION_ACTION_TYPES).toHaveLength(5);
   });
 });
 

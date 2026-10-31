@@ -8,7 +8,8 @@ describe('GTM prepared-action boundary', () => {
       'email.send',
       'community.reply',
       'crm.log-activity',
-      'buffer.create-draft'
+      'buffer.create-draft',
+      'crm.upsert-contact'
     ]);
   });
   it('validates the GTM email payload before touching a connection', async () => {

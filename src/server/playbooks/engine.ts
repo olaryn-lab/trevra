@@ -9,7 +9,10 @@ import {
 } from '../control-plane/policy.js';
 import { canonicalPayloadHash } from '../control-plane/payload.js';
 import { emailLawfulBasisAttributes } from '../compliance/lawful-basis.js';
-import { executePreparedPlaybookAction } from '../control-plane/execution.js';
+import {
+  executePreparedPlaybookAction,
+  isRetryableExecutionError
+} from '../control-plane/execution.js';
 import { executeWorkspaceSkill, getWorkspaceSkillManifest } from '../skill-api.js';
 import { notifyTemporalPlaybook, orchestrationMode } from '../orchestration/client.js';
 import { getPlaybook, listWorkspacePlaybooks } from './registry.js';
@@ -648,7 +651,7 @@ async function runActionStep(
     const error = cause instanceof Error ? cause.message : String(cause);
     const attempt = Number(stepRun.attempt);
     const maxAttempts = Math.max(1, step.retry?.maxAttempts ?? 3);
-    if (attempt < maxAttempts) {
+    if (attempt < maxAttempts && isRetryableExecutionError(cause)) {
       const delaySeconds = Math.max(0, step.retry?.delaySeconds ?? 30);
       const availableAt = new Date(Date.now() + delaySeconds * 1000).toISOString();
       const failedAt = new Date().toISOString();

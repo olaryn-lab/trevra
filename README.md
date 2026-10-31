@@ -28,14 +28,14 @@ Trevra is **PostgreSQL-only**. There is no SQLite dependency, fallback, database
 - LinkedIn accounts, lead lists, reusable workflows, managed campaigns and inbox handling;
 - Gmail and Microsoft 365 GTM message sync/delivery through Nango-managed connections;
 - public-community research and governed reply workflows;
-- CRM reads plus bounded `crm.log-activity` write-back;
+- CRM reads plus bounded `crm.log-activity` write-back and approved, fill-empty-only `crm.upsert-contact`;
 - minimal opportunity state and evidence-backed stale-proposal follow-up;
 - durable playbooks, agent/skill run ledgers, exact-payload approvals and workspace policies;
 - workspace-scoped audit/export/erasure controls.
 
 ### Integration boundary
 
-Providers either **observe GTM state** or **execute a named GTM action**. The current prepared execution registry is deliberately closed to `email.send`, `community.reply`, `crm.log-activity`, and `buffer.create-draft`.
+Providers either **observe GTM state** or **execute a named GTM action**. The current prepared execution registry is deliberately closed to `email.send`, `community.reply`, `crm.log-activity`, `buffer.create-draft`, and `crm.upsert-contact`.
 
 There is no customer Stripe payment webhook, accounting-provider execution, generic `/api/events` ingestion endpoint, generic remote-action adapter, or arbitrary webhook step in campaign workflows. Website lead capture is designed as a GTM-specific source contract, not as general application telemetry. See [`docs/integration-contracts.md`](docs/integration-contracts.md).
 
