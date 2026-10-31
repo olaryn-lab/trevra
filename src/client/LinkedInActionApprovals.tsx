@@ -109,10 +109,17 @@ export function LinkedInActionApprovals() {
                   <p>Reply thread: {row.threadUrn}</p>
                 </details>
               )}
-              {row.hasAttachments && (
-                <p className="li-review-warning">
-                  Attachment included. Review the original queued action before approving.
+              {row.richContent ? (
+                <p className="li-review-warning" role="status">
+                  Held: {row.richContent.reason} Nothing will be sent until the attachment is
+                  removed or replaced.
                 </p>
+              ) : (
+                row.hasAttachments && (
+                  <p className="li-review-warning">
+                    Attachment included. Review the original queued action before approving.
+                  </p>
+                )
               )}
               <div className="li-review-footer">
                 <p>
@@ -137,7 +144,7 @@ export function LinkedInActionApprovals() {
                 {owner && row.policy.effect !== 'deny' && needsApproval && !panelOpen && (
                   <Button
                     variant="primary"
-                    disabled={busy !== '' || row.hasAttachments}
+                    disabled={busy !== '' || row.hasAttachments || row.richContent !== null}
                     onClick={async () => {
                       setBusy(row.actionId);
                       try {

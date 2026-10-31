@@ -7113,6 +7113,50 @@ button:disabled {
   letter-spacing: var(--t-track-caps);
 }
 
+/* TRV-040: the rich-content matrix as help (generated from
+   src/shared/rich-content.ts), and the attach control a text-only channel
+   shows disabled. Composition only; the table, button and hint keep their
+   shared skins. */
+.rich-content-help summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--t-tap);
+}
+.rich-content-help tr.is-current {
+  background: var(--t-green-50);
+}
+.rich-content-help td[data-support='supported'] {
+  color: var(--green);
+}
+.rich-content-help td[data-support='link_only'] {
+  color: var(--t-amber-ink);
+}
+.rich-content-help td[data-support='unsupported'] {
+  color: var(--t-muted);
+}
+.rich-content-reasons {
+  display: grid;
+  gap: 4px;
+  max-width: var(--t-measure);
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--t-muted);
+  font-size: var(--t-text-xs);
+  line-height: 1.45;
+}
+.rich-content-attach,
+.rich-content-remove {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.rich-content-attach .li-hint,
+.rich-content-remove .li-merge-warn {
+  flex: 1 1 220px;
+  margin: 0;
+}
+
 /* Empty: what a workflow IS, then three of them one click away. */
 .li-wf-empty {
   padding: 30px 20px 26px;

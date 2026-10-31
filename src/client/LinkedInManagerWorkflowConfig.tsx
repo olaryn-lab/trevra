@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   ArrowDown,
   ArrowUp,
@@ -28,7 +28,19 @@ import type { ManagedCampaign } from '../server/linkedin/managed-campaigns';
 import type { LinkedInWorkflow, WorkflowDelay, WorkflowStep } from '../server/linkedin/workflows';
 import { errorMessage } from './LinkedInSafety';
 import { useWorkspaceCan } from './auth-client';
-import { Select } from './ui/primitives';
+import { Button, Input, Select } from './ui/primitives';
+import {
+  RICH_CONTENT_MATRIX,
+  RICH_CONTENT_SUPPORT_LABELS,
+  RICH_CONTENT_TYPE_LABELS,
+  checkRichContent,
+  richContentLimitsSummary,
+  variantAttachments,
+  variantRichContentViolation,
+  type RichContentChannel,
+  type RichContentType
+} from '../shared/rich-content';
+import { RichContentAttachNote, RichContentHelp } from './RichContentHelp';
 import { ADDITIONAL_WORKFLOW_STARTERS } from './workflow-starter-recipes';
 /* ---------------------------------------------------------------------------
  * The reusable workflow builder.
@@ -429,6 +441,20 @@ function templatesOf(step: WorkflowStep): string[] {
   return [];
 }
 
+/** The A/B variants a step sends, for the steps whose variants can carry media. */
+function variantsOf(step: WorkflowStep): readonly Variant[] {
+  if (step.action === 'connection_request') return step.config.variants ?? [];
+  if (
+    step.action === 'message' ||
+    step.action === 'inmail' ||
+    step.action === 'email' ||
+    step.action === 'group_message' ||
+    step.action === 'event_message'
+  )
+    return step.config.variants;
+  return [];
+}
+
 /**
  * Mirrors `unsupportedVariables` in workflows.ts, character for character in
  * the pattern.
@@ -469,7 +495,11 @@ function renderSample(template: string): string {
  * ORDER: the server rejects a withdraw that no connection request precedes,
  * and reordering is the thing that breaks it.
  */
-function stepProblems(step: WorkflowStep, index: number, steps: readonly WorkflowStep[]): string[] {
+export function stepProblems(
+  step: WorkflowStep,
+  index: number,
+  steps: readonly WorkflowStep[]
+): string[] {
   const problems: string[] = [];
   const { amount } = step.delayBefore;
   if (!Number.isInteger(amount) || amount < 0 || amount > DELAY_MAX) {
@@ -530,19 +560,6 @@ function stepProblems(step: WorkflowStep, index: number, steps: readonly Workflo
       if (!Number.isInteger(variant.weight) || variant.weight < 1 || variant.weight > 100) {
         problems.push(`Variant ${variant.id.toUpperCase()} needs a weight between 1 and 100.`);
       }
-      if (variant.attachmentUrl) {
-        try {
-          const media = new URL(variant.attachmentUrl);
-          if (media.protocol !== 'https:')
-            problems.push(`Variant ${variant.id.toUpperCase()} attachment must use HTTPS.`);
-        } catch {
-          problems.push(`Variant ${variant.id.toUpperCase()} attachment URL is invalid.`);
-        }
-      }
-      if (variant.mediaKind === 'voice')
-        problems.push(
-          'Native LinkedIn voice notes are not available in the verified desktop composer; use a manual checkpoint instead.'
-        );
     }
   }
 
@@ -569,21 +586,6 @@ function stepProblems(step: WorkflowStep, index: number, steps: readonly Workflo
       step.config.variants.every((variant) => !variant.body.trim())
     )
       problems.push(`${step.action === 'email' ? 'Email' : 'InMail'} needs message copy.`);
-    for (const variant of step.config.variants) {
-      if (variant.attachmentUrl) {
-        try {
-          const media = new URL(variant.attachmentUrl);
-          if (media.protocol !== 'https:')
-            problems.push(`Variant ${variant.id.toUpperCase()} attachment must use HTTPS.`);
-        } catch {
-          problems.push(`Variant ${variant.id.toUpperCase()} attachment URL is invalid.`);
-        }
-      }
-      if (variant.mediaKind === 'voice')
-        problems.push(
-          'Native LinkedIn voice notes are not available in the verified desktop composer; use a manual checkpoint instead.'
-        );
-    }
   }
   if (step.action === 'condition' || step.action === 'monitor') {
     if (!step.config.yesStepId || step.config.yesStepId.startsWith('__'))
@@ -600,6 +602,23 @@ function stepProblems(step: WorkflowStep, index: number, steps: readonly Workflo
   }
   if ((step.action === 'add_tag' || step.action === 'remove_tag') && !step.config.tag.trim())
     problems.push('Tag cannot be empty.');
+
+  // TRV-040: every variant attachment against its channel's row of the
+  // rich-content matrix -- the same check the save route runs, so a step the
+  // server would refuse is flagged here first.
+  for (const variant of variantsOf(step)) {
+    const label = `Variant ${variant.id.toUpperCase()}`;
+    if (variant.attachmentUrl) {
+      try {
+        if (new URL(variant.attachmentUrl).protocol !== 'https:')
+          problems.push(`${label} attachment must use HTTPS.`);
+      } catch {
+        problems.push(`${label} attachment URL is invalid.`);
+      }
+    }
+    const refusal = variantRichContentViolation(step.action, variant);
+    if (refusal) problems.push(`${label}: ${refusal.reason}`);
+  }
 
   for (const template of templatesOf(step)) {
     const bad = unsupportedVariables(template);
@@ -2366,6 +2385,11 @@ function WorkflowStepCard({
           <div className="li-span-2">
             <CompactVariants
               variants={step.config.variants}
+              channel={
+                step.action === 'group_message'
+                  ? 'linkedin_group_message'
+                  : 'linkedin_event_message'
+              }
               bodyMax={8000}
               bind={(key, element) => {
                 fields.current[key] = element;
@@ -2437,6 +2461,7 @@ function WorkflowStepCard({
               <>
                 <CompactVariants
                   variants={step.config.variants}
+                  channel="linkedin_invite_note"
                   bodyMax={INVITE_NOTE_MAX}
                   emptyLabel="Empty note is valid"
                   bind={(key, element) => {
@@ -2487,6 +2512,8 @@ function WorkflowStepCard({
                   }
                 />
                 <TemplatePreview value={step.config.message ?? ''} />
+                <RichContentAttachNote channel="linkedin_invite_note" />
+                <RichContentHelp current="linkedin_invite_note" />
                 <div className="li-wf-split">
                   <button
                     className="li-mini-button"
@@ -2905,6 +2932,7 @@ function WorkflowStepCard({
             />
             <CompactVariants
               variants={step.config.variants}
+              channel={step.action === 'email' ? 'email' : 'linkedin_inmail'}
               bodyMax={BODY_MAX}
               bind={(key, element) => {
                 fields.current[key] = element;
@@ -3077,57 +3105,127 @@ function WorkflowStepCard({
  * A/B variants.
  * ------------------------------------------------------------------------ */
 
-function VariantMediaFields({
+type MediaChoice = 'none' | 'file' | 'gif' | 'video' | 'voice';
+
+/**
+ * What the attach select shows. Read from `mediaKind` first, so choosing
+ * "Image or document" reveals the URL field before a URL exists (deriving it
+ * from the URL alone snapped the select straight back to "No attachment").
+ */
+function mediaChoiceOf(variant: Variant): MediaChoice {
+  if (variant.mediaKind === 'voice') return 'voice';
+  if (variant.mediaKind === 'gif') return 'gif';
+  if (variant.mediaKind === 'file' || variant.attachmentUrl) return 'file';
+  return 'none';
+}
+
+/**
+ * TRV-040: one variant's attachment, shaped by its channel's row of the
+ * rich-content matrix. A channel that takes attachments offers what the row
+ * supports; video and voice stay in the list, disabled, with the row's reason
+ * beside them. A text-only channel renders nothing here (its step shows one
+ * disabled attach control) unless an older variant still carries an
+ * attachment, which is then explained and offered for removal -- never
+ * silently dropped.
+ */
+export function VariantMediaFields({
   variant,
+  channel,
   onPatch
 }: {
   variant: Variant;
+  channel: RichContentChannel;
   onPatch: (changes: Partial<Variant>) => void;
 }) {
-  const mediaKind = variant.attachmentUrl ? (variant.mediaKind === 'gif' ? 'gif' : 'file') : 'none';
+  const hintId = useId();
+  const spec = RICH_CONTENT_MATRIX[channel];
+  const choice = mediaChoiceOf(variant);
+  const refusal = checkRichContent(channel, variantAttachments(variant));
+  const clear = () => onPatch({ attachmentUrl: null, attachmentName: null, mediaKind: null });
+  const removal = refusal && (
+    <div className="rich-content-remove li-span-2">
+      <small className="li-merge-warn">{refusal.reason}</small>
+      <Button onClick={clear}>
+        <Trash2 size={14} aria-hidden="true" /> Remove attachment
+      </Button>
+    </div>
+  );
+  if (spec.maxCount === 0)
+    return removal ? <div className="li-wf-media-fields">{removal}</div> : null;
+
+  const { cells } = spec;
+  const refusedTag = (type: RichContentType) =>
+    cells[type].support === 'supported'
+      ? ''
+      : ` (${RICH_CONTENT_SUPPORT_LABELS[cells[type].support].toLowerCase()})`;
+  const refusedTypes = (['video', 'voice'] as const).filter(
+    (type) => cells[type].support !== 'supported'
+  );
   return (
     <div className="li-form-grid li-wf-media-fields">
       <label>
         Attachment
         <Select
-          value={mediaKind}
+          value={choice}
+          aria-describedby={hintId}
           onChange={(event) => {
-            const next = event.target.value as 'none' | 'file' | 'gif';
-            if (next === 'none')
-              onPatch({ attachmentUrl: null, attachmentName: null, mediaKind: null });
-            else onPatch({ mediaKind: next });
+            const next = event.target.value as MediaChoice;
+            if (next === 'none') clear();
+            else
+              onPatch({ mediaKind: next === 'gif' ? 'gif' : next === 'voice' ? 'voice' : 'file' });
           }}
         >
           <option value="none">No attachment</option>
-          <option value="file">File / image</option>
-          <option value="gif">GIF</option>
+          <option
+            value="file"
+            disabled={cells.image.support !== 'supported' && cells.document.support !== 'supported'}
+          >
+            Image or document
+          </option>
+          <option value="gif" disabled={cells.gif.support !== 'supported'}>
+            {`GIF${refusedTag('gif')}`}
+          </option>
+          <option value="video" disabled={cells.video.support !== 'supported'}>
+            {`Video${refusedTag('video')}`}
+          </option>
+          <option value="voice" disabled={cells.voice.support !== 'supported'}>
+            {`Voice note${refusedTag('voice')}`}
+          </option>
         </Select>
       </label>
-      {mediaKind !== 'none' && (
+      <p className="li-hint" id={hintId}>
+        {`${spec.label}: ${richContentLimitsSummary(channel)}.`}{' '}
+        {refusedTypes
+          .map((type) => `${RICH_CONTENT_TYPE_LABELS[type]}: ${cells[type].reason}`)
+          .join(' ')}
+      </p>
+      {(choice === 'file' || choice === 'gif') && (
         <>
           <label>
             HTTPS file URL
-            <input
+            <Input
               type="url"
               value={variant.attachmentUrl ?? ''}
-              placeholder="https://…/deck.pdf"
-              onChange={(event) => onPatch({ attachmentUrl: event.target.value, mediaKind })}
+              placeholder={choice === 'gif' ? 'https://…/demo.gif' : 'https://…/deck.pdf'}
+              onChange={(event) =>
+                onPatch({ attachmentUrl: event.target.value || null, mediaKind: choice })
+              }
             />
           </label>
           <label>
             File name (optional)
-            <input
+            <Input
               value={variant.attachmentName ?? ''}
-              placeholder={mediaKind === 'gif' ? 'demo.gif' : 'deck.pdf'}
+              placeholder={choice === 'gif' ? 'demo.gif' : 'deck.pdf'}
               onChange={(event) => onPatch({ attachmentName: event.target.value || null })}
             />
           </label>
           <p className="li-hint li-span-2">
-            Trevra downloads at execution time (HTTPS, max 10 MB), uploads into LinkedIn, and sends
-            only after the composer shows an attachment preview. A failed upload leaves the text
-            unsent.
+            Trevra downloads the file when the step runs, checks it against these limits again,
+            uploads it into LinkedIn, and sends only after the composer shows an attachment preview.
+            A refused or failed upload leaves the text unsent.
           </p>
-          {variant.attachmentUrl && (
+          {variant.attachmentUrl && !refusal && (
             <p className="li-wf-preview li-span-2">
               <span className="li-wf-preview-label">Attachment preview</span>
               <a href={variant.attachmentUrl} target="_blank" rel="noreferrer noopener">
@@ -3137,6 +3235,7 @@ function VariantMediaFields({
           )}
         </>
       )}
+      {removal}
     </div>
   );
 }
@@ -3145,6 +3244,7 @@ function CompactVariants({
   variants,
   bodyMax,
   emptyLabel,
+  channel,
   bind,
   insert,
   onChange
@@ -3152,6 +3252,7 @@ function CompactVariants({
   variants: Variant[];
   bodyMax: number;
   emptyLabel?: string;
+  channel: RichContentChannel;
   bind: (key: string, element: HTMLTextAreaElement | null) => void;
   insert: (key: string, value: string, token: string, commit: (next: string) => void) => void;
   onChange: (variants: Variant[]) => void;
@@ -3222,7 +3323,11 @@ function CompactVariants({
               trailing={<CharCount length={variant.body.length} max={bodyMax} />}
             />
             <TemplatePreview value={variant.body} />
-            <VariantMediaFields variant={variant} onPatch={(changes) => patch(at, changes)} />
+            <VariantMediaFields
+              variant={variant}
+              channel={channel}
+              onPatch={(changes) => patch(at, changes)}
+            />
           </div>
         );
       })}
@@ -3244,6 +3349,8 @@ function CompactVariants({
           <Plus size={12} /> Add variant {minted.toUpperCase()}
         </button>
       )}
+      {RICH_CONTENT_MATRIX[channel].maxCount === 0 && <RichContentAttachNote channel={channel} />}
+      <RichContentHelp current={channel} />
     </div>
   );
 }
@@ -3357,7 +3464,11 @@ function MessageVariants({
               trailing={<CharCount length={variant.body.length} max={BODY_MAX} />}
             />
             <TemplatePreview value={variant.body} />
-            <VariantMediaFields variant={variant} onPatch={(changes) => patch(at, changes)} />
+            <VariantMediaFields
+              variant={variant}
+              channel="linkedin_message"
+              onPatch={(changes) => patch(at, changes)}
+            />
           </div>
         );
       })}
@@ -3405,6 +3516,7 @@ function MessageVariants({
           {VARIANT_MAX} versions is the most one step can test. Remove one to try different wording.
         </span>
       )}
+      <RichContentHelp current="linkedin_message" />
     </div>
   );
 }

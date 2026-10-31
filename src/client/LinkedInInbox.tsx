@@ -55,6 +55,7 @@ import {
   nextInboxMessageLimit
 } from './inboxMessageWindow';
 import { ConfidenceTag } from './LinkedInViz';
+import { RichContentAttachNote, RichContentHelp } from './RichContentHelp';
 import {
   InboxBulkBar,
   ReplyClassPanel,
@@ -1756,6 +1757,8 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                   />
                 </label>
                 {scheduleRow}
+                <RichContentAttachNote channel="linkedin_reply" />
+                <RichContentHelp current="linkedin_reply" />
                 <p className="li-hint">
                   {openTask.suggestedBody?.trim()
                     ? 'This draft came from the campaign step. Change as much of it as you like — nothing goes anywhere until you queue it.'
@@ -2075,6 +2078,8 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                   />
                 </label>
                 {scheduleRow}
+                <RichContentAttachNote channel="linkedin_reply" />
+                <RichContentHelp current="linkedin_reply" />
 
                 {/* Verbatim, and headed neutrally for the same reason as the
                     task composer: "held back to keep the account safe" is the

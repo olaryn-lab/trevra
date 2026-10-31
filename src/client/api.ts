@@ -1,4 +1,5 @@
 import type { GtmMilestoneKind } from '../shared/milestones';
+import type { RichContentViolation } from '../shared/rich-content';
 import type { WorkspaceRole as ResolvedWorkspaceRole } from '../server/roles';
 import type {
   AgentBudget,
@@ -3211,6 +3212,8 @@ export interface LinkedInActionReview {
   body: string | null;
   threadUrn: string | null;
   hasAttachments: boolean;
+  /** TRV-040: set when the attachment breaks the rich-content matrix; the row is held. */
+  richContent: RichContentViolation | null;
   contentHash: string;
   approved: boolean;
   policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
