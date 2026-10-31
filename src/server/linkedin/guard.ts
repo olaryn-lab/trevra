@@ -298,8 +298,32 @@ function automationOfLinkedIn(): Pick<
 /** How much history the day-over-day seed and the 30-day window need. */
 const HISTORY_DAYS = 30;
 
+/** A managed campaign's own days and hours (`schedule_*`), read in the seat's timezone. */
+interface CampaignScheduleWindow {
+  /** JS weekdays the campaign runs on; null = the seat's own days. */
+  days: number[] | null;
+  startMinute: number | null;
+  endMinute: number | null;
+}
+
+function campaignScheduleDays(value: unknown): number[] | null {
+  let raw = value;
+  if (typeof raw === 'string') {
+    try {
+      raw = JSON.parse(raw) as unknown;
+    } catch {
+      return null;
+    }
+  }
+  if (!Array.isArray(raw)) return null;
+  // Same reading as runner.ts `scheduleDays`: an array with no valid day is
+  // "no days", not "unset".
+  return raw.filter((day): day is number => Number.isInteger(day) && day >= 0 && day <= 6);
+}
+
 /**
- * The campaign's ramp clock, or undefined when there is nothing to ramp.
+ * The campaign's ramp clock and its own schedule, or undefined when there is
+ * nothing to ramp.
  *
  * A campaign qualifies only when it has BOTH a `started_at` and a
  * `workflow_id` -- that pair is what makes it a managed campaign this
@@ -311,12 +335,28 @@ async function managedCampaignRamp(
   db: Db,
   workspaceId: string,
   campaignId: string
-): Promise<{ startedAt: string } | undefined> {
+): Promise<{ startedAt: string; schedule: CampaignScheduleWindow } | undefined> {
   const row = await db
-    .prepare('SELECT started_at, workflow_id FROM linkedin_campaigns WHERE workspace_id=? AND id=?')
-    .get<{ started_at: string | null; workflow_id: string | null }>(workspaceId, campaignId);
+    .prepare(
+      `SELECT started_at, workflow_id, schedule_days_json, schedule_start_minute, schedule_end_minute
+       FROM linkedin_campaigns WHERE workspace_id=? AND id=?`
+    )
+    .get<{
+      started_at: string | null;
+      workflow_id: string | null;
+      schedule_days_json: unknown;
+      schedule_start_minute: number | null;
+      schedule_end_minute: number | null;
+    }>(workspaceId, campaignId);
   if (!row || row.started_at === null || row.workflow_id === null) return undefined;
-  return { startedAt: row.started_at };
+  return {
+    startedAt: row.started_at,
+    schedule: {
+      days: campaignScheduleDays(row.schedule_days_json),
+      startMinute: row.schedule_start_minute === null ? null : Number(row.schedule_start_minute),
+      endMinute: row.schedule_end_minute === null ? null : Number(row.schedule_end_minute)
+    }
+  };
 }
 
 /**
@@ -1007,17 +1047,33 @@ export async function evaluateLinkedInSafety(
   const outsideHoursBecause = humanInitiated
     ? 'an action a person asked for at the moment they asked for it'
     : 'a reply to somebody who wrote first';
+  // THE CAMPAIGN'S OWN SCHEDULE NARROWS THE SEAT'S WINDOW. The planner places
+  // slots inside the intersection (runner.ts `campaignSeatWindow`), but a row
+  // that resume restores after a paused schedule edit keeps its old slot, and
+  // the worker never re-reads the campaign. Checked here, on the instant being
+  // judged, so such a row waits for the edited schedule instead of firing at
+  // the time the operator just removed. Same seat timezone the planner uses.
+  const campaignSchedule = campaign?.schedule ?? null;
+  const insideCampaignSchedule =
+    campaignSchedule === null ||
+    (weekday !== null &&
+      minuteOfDay !== null &&
+      (campaignSchedule.days === null || campaignSchedule.days.includes(weekday)) &&
+      (campaignSchedule.startMinute === null || minuteOfDay >= campaignSchedule.startMinute) &&
+      (campaignSchedule.endMinute === null || minuteOfDay < campaignSchedule.endMinute));
   checks.push({
     check: 'business-hours',
-    passed: insideConfiguredWindow || outsideHoursIsFine,
+    passed: (insideConfiguredWindow && insideCampaignSchedule) || outsideHoursIsFine,
     detail:
       local === null
         ? `'${input.plannedFor}' is not a parseable instant, so it cannot be placed inside a working-hours window.`
-        : !insideConfiguredWindow && outsideHoursIsFine
+        : !(insideConfiguredWindow && insideCampaignSchedule) && outsideHoursIsFine
           ? `Scheduled for ${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')} in ${timezone}, outside this account's working window -- and that does not refuse ${outsideHoursBecause}. The window paces what this account does by itself; a person uses LinkedIn when they are at it. Every other check still runs.`
           : plannedShape.resting
             ? `This policy marks that day closed, so autonomous LinkedIn work is not permitted then.`
-            : `Scheduled for ${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')} in ${timezone}; this account works on weekday(s) ${window.days.join(',') || 'none'} between ${formatMinuteOfDay(window.startMinute)} and ${formatMinuteOfDay(window.endMinute)}, and today between ${formatMinuteOfDay(plannedShape.startMinute)} and ${formatMinuteOfDay(plannedShape.endMinute)}.`
+            : insideConfiguredWindow && !insideCampaignSchedule && campaignSchedule !== null
+              ? `Scheduled for ${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')} on weekday ${weekday} in ${timezone}, outside this campaign schedule: it runs on weekday(s) ${campaignSchedule.days === null ? window.days.join(',') || 'none' : campaignSchedule.days.join(',') || 'none'} between ${formatMinuteOfDay(campaignSchedule.startMinute ?? window.startMinute)} and ${formatMinuteOfDay(campaignSchedule.endMinute ?? window.endMinute)}. The action waits for the schedule; nothing is dropped.`
+              : `Scheduled for ${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')} in ${timezone}; this account works on weekday(s) ${window.days.join(',') || 'none'} between ${formatMinuteOfDay(window.startMinute)} and ${formatMinuteOfDay(window.endMinute)}, and today between ${formatMinuteOfDay(plannedShape.startMinute)} and ${formatMinuteOfDay(plannedShape.endMinute)}.`
   });
   const onWeekend = weekday !== null && isWeekend(weekday);
   const configuredDay = weekday !== null && window.days.includes(weekday);
