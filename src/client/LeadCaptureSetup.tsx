@@ -23,6 +23,7 @@ import { Button, Field, Input, Select } from './ui/primitives';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import { ProviderWebhookSetup } from './ProviderWebhookSetup';
+import { OutboundWebhookSetup } from './OutboundWebhookSetup';
 import { MeetingsSetup } from './MeetingsSetup';
 import './lead-capture.css';
 
@@ -407,6 +408,7 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
         )}
       </section>
       {isOwner && <ProviderWebhookSetup setToast={setToast} />}
+      {isOwner && <OutboundWebhookSetup setToast={setToast} />}
       {role === 'member' && (
         <section className="page-panel" id="stripe-payments">
           <div className="section-heading">

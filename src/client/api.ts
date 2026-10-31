@@ -4055,6 +4055,149 @@ export async function removeProviderWebhook(id: string): Promise<void> {
   await request<void>(`/api/setup/webhooks/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
 
+export const OUTBOUND_WEBHOOK_EVENTS = [
+  'linkedin_campaign.started',
+  'linkedin_campaign.stopped',
+  'linkedin_campaign.paused',
+  'playbook.run.completed',
+  'playbook.run.failed'
+] as const;
+export type OutboundWebhookEventType = (typeof OUTBOUND_WEBHOOK_EVENTS)[number];
+
+/** Owner-only. Never carries a signing secret; create and rotate return one exactly once. */
+export interface OutboundWebhookSubscription {
+  id: string;
+  workspaceId: string;
+  url: string;
+  eventTypes: string[];
+  active: boolean;
+  createdAt: string;
+  disabledReason: 'owner' | 'consecutive_failures' | null;
+  disabledAt: string | null;
+  secretRotatedAt: string | null;
+  previousSecretExpiresAt: string | null;
+  consecutiveFailures: number;
+  lastFailureCode: string | null;
+  lastFailureAt: string | null;
+  lastSuccessAt: string | null;
+}
+
+export interface OutboundWebhookDelivery {
+  id: string;
+  eventId: string;
+  status: 'pending' | 'leased' | 'delivered' | 'dead';
+  attempts: number;
+  attemptSeries: number;
+  lastHttpStatus: number | null;
+  lastError: string | null;
+  lastReasonCode: string | null;
+  createdAt: string;
+  deliveredAt: string | null;
+  deadAt: string | null;
+  replayedAt: string | null;
+}
+
+export interface OutboundWebhookWindowStats {
+  delivered: number;
+  failed: number;
+  pending: number;
+  dead: number;
+}
+
+export interface OutboundWebhookHealth {
+  stats: {
+    last24h: OutboundWebhookWindowStats;
+    last7d: OutboundWebhookWindowStats;
+    consecutiveFailures: number;
+    lastFailureCode: string | null;
+    lastFailureAt: string | null;
+    lastSuccessAt: string | null;
+  };
+  /** Status, HTTP code, latency and reason only: response bodies are never stored. */
+  attempts: Array<{
+    id: string;
+    deliveryId: string;
+    eventId: string;
+    attemptSeries: number;
+    attemptNumber: number;
+    outcome: 'delivered' | 'failed' | 'blocked';
+    httpStatus: number | null;
+    latencyMs: number | null;
+    reasonCode: string | null;
+    attemptedAt: string;
+  }>;
+}
+
+const outboundWebhookPath = (id: string, suffix = '') =>
+  `/api/outbound-webhooks/${encodeURIComponent(id)}${suffix}`;
+
+export async function getOutboundWebhooks(): Promise<OutboundWebhookSubscription[]> {
+  const result = await request<{ subscriptions: OutboundWebhookSubscription[] }>(
+    '/api/outbound-webhooks'
+  );
+  return result.subscriptions;
+}
+
+export async function createOutboundWebhook(input: {
+  url: string;
+  eventTypes: OutboundWebhookEventType[];
+}): Promise<{ subscription: OutboundWebhookSubscription; signingSecret: string }> {
+  return request('/api/outbound-webhooks', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function updateOutboundWebhook(
+  id: string,
+  input: { url?: string; eventTypes?: OutboundWebhookEventType[]; active?: boolean }
+): Promise<OutboundWebhookSubscription> {
+  const result = await request<{ subscription: OutboundWebhookSubscription }>(
+    outboundWebhookPath(id),
+    { method: 'PATCH', body: JSON.stringify(input) }
+  );
+  return result.subscription;
+}
+
+export async function rotateOutboundWebhookSecret(
+  id: string,
+  overlapHours: number
+): Promise<{ subscription: OutboundWebhookSubscription; signingSecret: string }> {
+  return request(outboundWebhookPath(id, '/rotate-secret'), {
+    method: 'POST',
+    body: JSON.stringify({ overlapHours })
+  });
+}
+
+export async function getOutboundWebhookHealth(id: string): Promise<OutboundWebhookHealth> {
+  return request(outboundWebhookPath(id, '/health'));
+}
+
+export async function getOutboundWebhookDeliveries(id: string): Promise<OutboundWebhookDelivery[]> {
+  const result = await request<{ deliveries: OutboundWebhookDelivery[] }>(
+    outboundWebhookPath(id, '/deliveries')
+  );
+  return result.deliveries;
+}
+
+/** Bulk replay of dead-lettered deliveries; past 500 the server requires an explicit `limit`. */
+export async function replayOutboundWebhookDeliveries(
+  id: string,
+  limit?: number
+): Promise<{ replayed: number; deliveryIds: string[] }> {
+  return request(outboundWebhookPath(id, '/replay'), {
+    method: 'POST',
+    body: JSON.stringify(limit === undefined ? {} : { limit })
+  });
+}
+
+export async function replayOutboundWebhookDelivery(
+  id: string,
+  deliveryId: string
+): Promise<{ replayed: number; deliveryIds: string[] }> {
+  return request(outboundWebhookPath(id, `/deliveries/${encodeURIComponent(deliveryId)}/replay`), {
+    method: 'POST',
+    body: '{}'
+  });
+}
+
 /** Workspace-visible and content-free; Cal.com endpoints themselves are owner-only. */
 export interface MeetingsSetupState {
   bookingUrl: string | null;
