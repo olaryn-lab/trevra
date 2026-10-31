@@ -17,10 +17,10 @@ import { openDatabase, type Db } from '../db.js';
 import { runManagedCampaigns } from './runner.js';
 import { postgresLocalWorkerStore, runLinkedInLocalBatch } from './local-worker.js';
 import { linkedinActionPolicyGate } from './action-policy.js';
-import { evaluateLinkedInSafety } from './guard.js';
+import { evaluateLinkedInSafety, linkedInDailyAllowance } from './guard.js';
 import { FLAT_DAY_SHAPE } from './pacing.js';
 import { recordAction } from './actions.js';
-import { setSeatCapabilities, upsertSeat } from './seats.js';
+import { getSeat, setSeatCapabilities, upsertSeat } from './seats.js';
 import { runWithdrawalBatch } from './withdraw.js';
 import type { LinkedInDriver, LinkedInDriverResult, LinkedInPage } from './driver.js';
 import type { LinkedInWithdrawDriver, LinkedInListPage } from './driver-withdraw.js';
@@ -537,33 +537,50 @@ describe('TRV-012 LinkedIn actions: planned -> claimed -> recorded outcome', () 
       ]),
       [{ id: 'invite', action: 'connection_request', config: { message: 'Hi {{first_name}}' } }]
     );
+    // What the send gate admits today: today's draw of the 4/day ceiling.
+    const today = await linkedInDailyAllowance(
+      db,
+      { workspaceId: workspace, seatKey: 'owner' },
+      await getSeat(db, workspace, 'owner'),
+      'invite',
+      at(0)
+    );
+    expect(today.remaining).toBeGreaterThan(1);
+    expect(today.remaining).toBeLessThanOrEqual(4);
     await runManagedCampaigns(db, workspace, at(0));
-    // Planner boundary: exactly the ceiling is planned, the fifth lead waits.
-    expect((await rows(campaign)).filter((row) => row.status === 'planned')).toHaveLength(4);
+    // Planner boundary: exactly the allowance is planned, the other leads wait.
+    expect((await rows(campaign)).filter((row) => row.status === 'planned')).toHaveLength(
+      today.remaining
+    );
     await approveAll();
 
-    // The operator tightens the ceiling to 3 after the queue was planned.
-    await upsertSeat(db, workspace, { dailyInviteLimit: 3 }, new Date());
+    // The operator tightens the ceiling by one after the queue was planned.
+    // (This worker's gate judges the undrawn ceiling, FLAT_DAY_SHAPE.)
+    const tightened = today.remaining - 1;
+    await upsertSeat(db, workspace, { dailyInviteLimit: tightened }, new Date());
     const calls: Call[] = [];
     const when = await dueBy(at(0));
     const pass = await work(fakeDriver(calls), when);
-    expect(pass).toMatchObject({ executed: 3, blocked: 1 });
-    expect(calls).toHaveLength(3);
+    expect(pass).toMatchObject({ executed: tightened, blocked: 1 });
+    expect(calls).toHaveLength(tightened);
     const settled = await rows(campaign);
-    expect(settled.filter((row) => row.status === 'sent')).toHaveLength(3);
+    expect(settled.filter((row) => row.status === 'sent')).toHaveLength(tightened);
     const refused = settled.filter((row) => row.status === 'planned');
     expect(refused).toHaveLength(1);
     // Released, not consumed: unclaimed, unrecorded, ready for tomorrow.
     expect(refused[0]).toMatchObject({ claimed: false, held: false, recorded_at: null });
     // The refusal names the number that bound, not just the check.
     expect(
-      logs.some((line) => line.includes(refused[0].id) && line.includes('3 of 3 invites used'))
+      logs.some(
+        (line) =>
+          line.includes(refused[0].id) && line.includes(`${tightened} of ${tightened} invites used`)
+      )
     ).toBe(true);
 
     // A day later the same row goes through; nothing was double-sent.
     const tomorrow = new Date(when.getTime() + 24 * HOUR + 60_000);
     expect((await work(fakeDriver(calls), tomorrow)).executed).toBe(1);
-    expect(new Set(calls.map((call) => call.args[0])).size).toBe(4);
+    expect(new Set(calls.map((call) => call.args[0])).size).toBe(today.remaining);
   });
 
   it('respects the weekly invite band at the boundary and refuses one past it', async () => {
@@ -601,12 +618,32 @@ describe('TRV-012 LinkedIn actions: planned -> claimed -> recorded outcome', () 
       [{ id: 'invite', action: 'connection_request', config: { message: 'Hi {{first_name}}' } }]
     );
     await runManagedCampaigns(db, workspace, at(0));
-    expect((await rows(campaign)).filter((row) => row.status === 'planned')).toHaveLength(2);
+    // Planner boundary: the week's last invite is planned, the second lead waits.
+    expect((await rows(campaign)).filter((row) => row.status === 'planned')).toHaveLength(1);
     await approveAll();
     const calls: Call[] = [];
-    const pass = await work(fakeDriver(calls), await dueBy(at(0)));
-    expect(pass).toMatchObject({ executed: 1, blocked: 1 });
+    const when = await dueBy(at(0));
+    const pass = await work(fakeDriver(calls), when);
+    expect(pass).toMatchObject({ executed: 1, blocked: 0 });
     expect(calls).toHaveLength(1);
-    expect(logs.some((line) => line.includes('rolling-7d') && line.includes('90'))).toBe(true);
+    // One past: the gate refuses the next invite on the rolling week.
+    const past = await evaluateLinkedInSafety(
+      db,
+      {
+        workspaceId: workspace,
+        seatKey: 'owner',
+        kind: 'invite',
+        targetRef: 'https://www.linkedin.com/in/trv012-weekly-g/',
+        plannedFor: when.toISOString()
+      },
+      when,
+      { dayShape: FLAT_DAY_SHAPE }
+    );
+    const week = past.checks.find((check) => check.check === 'rolling-7d');
+    expect(week).toMatchObject({ passed: false });
+    expect(week?.detail).toContain('90 of 90');
+    // The planner does not plan it either.
+    await runManagedCampaigns(db, workspace, new Date(when.getTime() + 60_000));
+    expect((await rows(campaign)).filter((row) => row.status === 'planned')).toHaveLength(0);
   });
 });

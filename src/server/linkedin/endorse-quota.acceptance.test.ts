@@ -18,9 +18,8 @@ import { openDatabase, type Db } from '../db.js';
 import { runManagedCampaigns } from './runner.js';
 import { postgresLocalWorkerStore, runLinkedInLocalBatch } from './local-worker.js';
 import { linkedinActionPolicyGate } from './action-policy.js';
-import { evaluateLinkedInSafety } from './guard.js';
-import { FLAT_DAY_SHAPE } from './pacing.js';
-import { upsertSeat } from './seats.js';
+import { evaluateLinkedInSafety, linkedInDailyAllowance } from './guard.js';
+import { getSeat, upsertSeat } from './seats.js';
 import type { LinkedInDriver, LinkedInPage } from './driver.js';
 import type { PacedKind } from './limits.js';
 
@@ -128,7 +127,9 @@ const gate = (action: {
       ...(action.replayScope ? { replayScope: action.replayScope } : {})
     },
     action.at,
-    { excludeActionId: action.id, dayShape: FLAT_DAY_SHAPE }
+    // The production day shape: the planner sizes the seat from the same
+    // gate arithmetic, so a flat test draw would let the two disagree.
+    { excludeActionId: action.id }
   );
 
 function work(endorsed: Array<{ target: string; maxSkills: unknown }>, when: Date) {
@@ -270,21 +271,33 @@ describe('TRV-013 skill endorsements', () => {
   it('charges one quota unit per endorse action however many skills it clicks', async () => {
     const handles = Array.from({ length: 9 }, (_, index) => `trv013-q${index}`);
     const campaign = await startCampaign('Quota', handles, 10);
+    // Today's draw of the 8/day steady band, as the send gate prices it.
+    const today = await linkedInDailyAllowance(
+      db,
+      { workspaceId: workspace, seatKey: 'owner' },
+      await getSeat(db, workspace, 'owner'),
+      'endorse',
+      T0
+    );
+    expect(today.ceiling).toBeGreaterThanOrEqual(Math.floor(8 * 0.85));
+    expect(today.ceiling).toBeLessThanOrEqual(8);
     await runManagedCampaigns(db, workspace, T0);
-    // Planner boundary: the 8/day steady band admits and plans exactly 8
-    // ten-skill actions. Per-click accounting would have planned none.
-    expect((await endorseRows(campaign)).filter((row) => row.status === 'planned')).toHaveLength(8);
+    // Planner boundary: the gate's allowance admits and plans exactly that
+    // many ten-skill actions. Per-click accounting would have planned none.
+    expect((await endorseRows(campaign)).filter((row) => row.status === 'planned')).toHaveLength(
+      today.remaining
+    );
     await approveAll();
     const endorsed: Array<{ target: string; maxSkills: unknown }> = [];
     const when = await latestDue(T0);
     const pass = await work(endorsed, when);
-    // Gate boundary: the 8th ten-skill action is still allowed at send time.
-    expect(pass).toMatchObject({ executed: 8, blocked: 0 });
-    expect(endorsed).toHaveLength(8);
+    // Gate boundary: the last ten-skill action is still allowed at send time.
+    expect(pass).toMatchObject({ executed: today.remaining, blocked: 0 });
+    expect(endorsed).toHaveLength(today.remaining);
     expect(endorsed.every((call) => call.maxSkills === 10)).toBe(true);
 
-    // One past: a ninth endorse inside the same 24h is refused by the gate,
-    // which counts 8 actions (not 80 skills) against the 8/day ceiling.
+    // One past: the next endorse inside the same 24h is refused by the gate,
+    // which counts actions (not ten times as many skills) against the ceiling.
     const verdict = await gate({
       id: 'lact_not_yet_written',
       seatKey: 'owner',
@@ -297,13 +310,13 @@ describe('TRV-013 skill endorsements', () => {
     expect(verdict.allowed).toBe(false);
     const ceiling = verdict.checks.find((check) => check.check === 'rolling-24h');
     expect(ceiling).toMatchObject({ passed: false });
-    expect(ceiling?.detail).toContain('8 of 8 endorses');
+    expect(ceiling?.detail).toContain(`${today.ceiling} of ${today.ceiling} endorses`);
 
-    // The ninth lead is planned and endorsed once the window rolls over.
+    // The remaining leads are planned and endorsed once the window rolls over.
     const tomorrow = new Date(when.getTime() + 25 * HOUR);
     await runManagedCampaigns(db, workspace, tomorrow);
     await approveAll();
-    expect((await work(endorsed, await latestDue(tomorrow))).executed).toBe(1);
+    expect((await work(endorsed, await latestDue(tomorrow))).executed).toBe(9 - today.remaining);
     expect(new Set(endorsed.map((call) => call.target)).size).toBe(9);
   });
 });

@@ -127,7 +127,10 @@ async function workspace(label: string): Promise<Ws> {
       timezone: 'UTC',
       workingDays: [0, 1, 2, 3, 4, 5, 6],
       workStartMinute: 0,
-      workEndMinute: 1440
+      workEndMinute: 1440,
+      // An established account: enrolment, not the cold-account ramp (one
+      // action on day one), is what these cases exercise.
+      warmupOverride: true
     },
     new Date()
   );

@@ -513,6 +513,9 @@ describe('first customer L3–L6 acceptance with provider doubles and isolated P
   });
 
   it('records unsubscribe and hard bounce and retires already planned LinkedIn follow-ups', async () => {
+    // Established account: the planner sizes the seat from the send gate's
+    // allowance, and a cold ledger admits one invite a day, not both.
+    await upsertSeat(db, workspace, { warmupOverride: true }, new Date());
     const now = new Date();
     const csv = [
       'First Name,Last Name,Company,Email,LinkedIn URL',

@@ -611,7 +611,10 @@ async function campaignFor(ws: string, slug: string) {
       timezone: 'UTC',
       workingDays: [1, 2, 3, 4, 5],
       workStartMinute: 480,
-      workEndMinute: 1080
+      workEndMinute: 1080,
+      // Established: the planner sizes the seat from the gate's allowance, and
+      // a cold ledger admits one invite a day.
+      warmupOverride: true
     },
     new Date('2026-01-01T09:00:00.000Z')
   );

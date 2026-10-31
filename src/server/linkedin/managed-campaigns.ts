@@ -234,12 +234,13 @@ export interface CampaignQueueSummary {
   /** Actions already allocated inside the campaign's current 24h ramp day, by the four headline safety buckets. */
   allocatedCampaignDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
   /**
-   * What the PLANNER has already spent of this campaign's sender seat
-   * (`seatKey`), by every campaign and route on it: the planner's own window
-   * (planned_for within 24h either side of now) and budget buckets
-   * (`runner.ts` `budgetKindForLedgerKind`). A seat's daily ceiling minus this
-   * is the room left for ANY campaign on it; ceiling minus
-   * `allocatedCampaignDay` showed the same room on every campaign sharing a seat.
+   * What is already allocated on this campaign's sender seat (`seatKey`) by
+   * every campaign and route on it: rows (any status but skipped) planned for
+   * the 24h either side of now, in the planner's budget buckets (`runner.ts`
+   * `budgetKindForLedgerKind`). A seat's daily ceiling minus this is the room
+   * the card shows for ANY campaign on it; ceiling minus `allocatedCampaignDay`
+   * showed the same room on every campaign sharing a seat. The planner itself
+   * sizes the seat from the gate's allowance minus every row still queued.
    */
   allocatedSeatDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
   /**
@@ -2838,8 +2839,8 @@ export async function campaignQueueSummary(
       dayStart,
       dayEnd
     );
-  // The planner's seat-used query (`runner.ts` `runManagedCampaigns`), bucketed
-  // the planner's way: reply and InMail are budgeted apart from `dm` there.
+  // Bucketed the planner's way (`runner.ts` `budgetKindForLedgerKind`): reply
+  // and InMail are budgeted apart from `dm` there.
   const seatAllocations = await db
     .prepare(
       `SELECT

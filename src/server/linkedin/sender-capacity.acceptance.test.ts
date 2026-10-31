@@ -21,6 +21,7 @@ import {
 } from './action-policy.js';
 import type { LinkedInDriver, LinkedInPage } from './driver.js';
 import { evaluateLinkedInSafety } from './guard.js';
+import { resolveLinkedInHandoff } from './handoff.js';
 import { createLeadList, importLeadCsv } from './lead-lists.js';
 import {
   bandForSeat,
@@ -280,8 +281,34 @@ async function profileViewWorkflow(): Promise<string> {
   ).id;
 }
 
-async function runningCampaign(name: string, leads: number, workflowId: string): Promise<string> {
-  const list = await createLeadList(db, { workspaceId: WS, name }, NOW);
+async function inviteWorkflow(): Promise<string> {
+  return (
+    await saveWorkflow(
+      db,
+      {
+        workspaceId: WS,
+        name: 'Invite',
+        steps: [
+          {
+            id: 'invite',
+            action: 'connection_request',
+            delayBefore: { amount: 0, unit: 'hours' },
+            config: {}
+          }
+        ]
+      },
+      NOW
+    )
+  ).id;
+}
+
+async function runningCampaign(
+  name: string,
+  leads: number,
+  workflowId: string,
+  createdAt: Date = NOW
+): Promise<string> {
+  const list = await createLeadList(db, { workspaceId: WS, name }, createdAt);
   const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-');
   const csv = [
     'First Name,Last Name,Company,Email,LinkedIn URL',
@@ -291,15 +318,15 @@ async function runningCampaign(name: string, leads: number, workflowId: string):
         `Lead${index},${name},Acme,${slug}-${index}@test.test,https://www.linkedin.com/in/${slug}-${index}`
     )
   ].join('\n');
-  expect((await importLeadCsv(db, { workspaceId: WS, listId: list.id, csv }, NOW)).inserted).toBe(
-    leads
-  );
+  expect(
+    (await importLeadCsv(db, { workspaceId: WS, listId: list.id, csv }, createdAt)).inserted
+  ).toBe(leads);
   const made = await createManagedCampaign(
     db,
     { workspaceId: WS, name, leadListId: list.id, workflowId },
-    NOW
+    createdAt
   );
-  await startManagedCampaign(db, WS, made.campaign.id, NOW);
+  await startManagedCampaign(db, WS, made.campaign.id, createdAt);
   return made.campaign.id;
 }
 
@@ -343,10 +370,11 @@ describe('TRV-020 sender capacity: screens, planner and worker agree', () => {
     );
 
     const before = row(await limitsAt(NOW), 'profile_view');
-    // The structural number the planner budgets with...
+    // The structural number...
     expect(before.ceiling).toBe(20);
     // ...and what the send-time gate admits today: the seeded day draw takes
-    // 85-100% of it. The screen quotes this one as "effective today".
+    // 85-100% of it. The screen quotes this one as "effective today", and the
+    // planner budgets with it.
     const today = before.today!;
     expect(today.ceiling).toBeGreaterThanOrEqual(Math.floor(20 * 0.85));
     expect(today.ceiling).toBeLessThanOrEqual(20);
@@ -605,40 +633,42 @@ describe('TRV-020 sender capacity: screens, planner and worker agree', () => {
     const first = await runningCampaign('Alpha', 6, workflowId);
     const second = await runningCampaign('Beta', 6, workflowId);
 
+    // What the gate admits today: the planner's whole budget for the seat.
+    const today = row(await limitsAt(NOW), 'profile_view').today!;
     await runManagedCampaigns(db, WS, NOW);
     const planned = await plannedByCampaign('profile_view');
-    expect(sum(planned)).toBe(6);
+    expect(sum(planned)).toBe(today.remaining);
     expect(planned[first]).toBeGreaterThan(0);
     expect(planned[second]).toBeGreaterThan(0);
     // A second tick does not find the seat's budget again.
     await runManagedCampaigns(db, WS, new Date(NOW.getTime() + MINUTE));
-    expect(sum(await plannedByCampaign('profile_view'))).toBe(6);
+    expect(sum(await plannedByCampaign('profile_view'))).toBe(today.remaining);
 
     const seatCeiling = row(await limitsAt(NOW), 'profile_view').ceiling;
     expect(seatCeiling).toBe(6);
     const alpha = await operations(first, NOW);
     const beta = await operations(second, NOW);
     expect(alpha.allocatedCampaignDay.profile_view + beta.allocatedCampaignDay.profile_view).toBe(
-      6
+      today.remaining
     );
-    // Both cards price the SEAT: 6 allocated, 0 remaining -- not 6 remaining twice.
-    expect(alpha.allocatedSeatDay.profile_view).toBe(6);
-    expect(beta.allocatedSeatDay.profile_view).toBe(6);
-    expect(Math.max(0, seatCeiling - alpha.allocatedSeatDay.profile_view)).toBe(0);
-    expect(Math.max(0, seatCeiling - beta.allocatedSeatDay.profile_view)).toBe(0);
+    // Both cards price the SEAT: all of today's allowance allocated, none left
+    // -- not the whole allowance left twice.
+    expect(alpha.allocatedSeatDay.profile_view).toBe(today.remaining);
+    expect(beta.allocatedSeatDay.profile_view).toBe(today.remaining);
+    expect(Math.max(0, today.remaining - alpha.allocatedSeatDay.profile_view)).toBe(0);
+    expect(Math.max(0, today.remaining - beta.allocatedSeatDay.profile_view)).toBe(0);
 
-    // Bring every planned row due now; the worker sends exactly what the
-    // screen says the gate admits today, and never past the seat ceiling.
+    // Bring every planned row due now; the worker sends every one of them,
+    // which is exactly what the gate admits today, and never past the seat ceiling.
     await db
       .prepare(
         `UPDATE linkedin_actions SET planned_for=?::timestamptz WHERE workspace_id=? AND status='planned'`
       )
       .run(new Date(NOW.getTime() - MINUTE).toISOString(), WS);
-    const today = row(await limitsAt(NOW), 'profile_view').today!;
     const { result } = await work(NOW);
     expect(result.executed).toBe(today.remaining);
     expect(result.executed).toBeLessThanOrEqual(seatCeiling);
-    expect(result.blocked).toBe(6 - today.remaining);
+    expect(result.blocked).toBe(0);
     expect(failed(await nextVerdict('profile_view', NOW))).toContain('rolling-24h');
   });
 
@@ -652,8 +682,9 @@ describe('TRV-020 sender capacity: screens, planner and worker agree', () => {
     const workflowId = await profileViewWorkflow();
     for (const name of ['One', 'Two', 'Three']) await runningCampaign(name, 4, workflowId);
 
+    const allowance = row(await limitsAt(NOW), 'profile_view').today!.remaining;
     await Promise.all([0, 1, 2, 3].map(() => runManagedCampaigns(db, WS, NOW)));
-    expect(sum(await plannedByCampaign('profile_view'))).toBe(6);
+    expect(sum(await plannedByCampaign('profile_view'))).toBe(allowance);
 
     const lease = (workerId: string, at: Date) =>
       claimSeatLease(
@@ -691,5 +722,246 @@ describe('TRV-020 sender capacity: screens, planner and worker agree', () => {
       .get<{ total: number }>(WS);
     expect(Number(sent?.total)).toBe(today.remaining);
     expect(Number(sent?.total)).toBeLessThanOrEqual(6);
+  });
+});
+
+/** Every unexecuted row of `kind` on the seat, whichever route queued it. */
+async function plannedOnSeat(kind: string, seatKey = 'owner'): Promise<number> {
+  const found = await db
+    .prepare(
+      `SELECT COUNT(*)::int AS total FROM linkedin_actions
+       WHERE workspace_id=? AND seat_key=? AND kind=? AND status='planned'`
+    )
+    .get<{ total: number }>(WS, seatKey, kind);
+  return Number(found?.total ?? 0);
+}
+
+/** Every planned row due a minute before `at`, so one worker pass can reach all of them. */
+async function bringDue(at: Date): Promise<void> {
+  await db
+    .prepare(
+      `UPDATE linkedin_actions SET planned_for=?::timestamptz WHERE workspace_id=? AND status='planned'`
+    )
+    .run(new Date(at.getTime() - MINUTE).toISOString(), WS);
+}
+
+describe('TRV-020 the planner sizes each seat from the send gate allowance', () => {
+  it('warming seat: the planner plans exactly what the gate admits today, not the structural ceiling, and one more tick plans nothing', async () => {
+    await upsertSeat(db, WS, UTC_WEEKDAYS, new Date(NOW.getTime() - 3 * DAY));
+    const workflowId = await profileViewWorkflow();
+    const campaign = await runningCampaign('Warm', 8, workflowId);
+
+    const before = row(await limitsAt(NOW), 'profile_view');
+    const today = before.today!;
+    // A cold seat with no history: the gate's day-over-day ramp binds far
+    // below the structural number the planner used to budget with.
+    expect(today).toMatchObject({ remaining: dayOverDayCeiling(0), boundBy: 'day-over-day-delta' });
+    expect(before.ceiling).toBeGreaterThan(8);
+
+    await runManagedCampaigns(db, WS, NOW);
+    expect(await plannedByCampaign('profile_view')).toEqual({ [campaign]: today.remaining });
+    // At the boundary a second tick finds no room.
+    await runManagedCampaigns(db, WS, new Date(NOW.getTime() + MINUTE));
+    expect(await plannedOnSeat('profile_view')).toBe(today.remaining);
+
+    // Everything planned goes out; nothing is left for the gate to refuse.
+    await bringDue(NOW);
+    const { result } = await work(NOW);
+    expect(result).toMatchObject({ executed: today.remaining, blocked: 0 });
+
+    // One past: the gate refuses the next one and the planner does not plan it.
+    expect(failed(await nextVerdict('profile_view', NOW))).toContain('day-over-day-delta');
+    await runManagedCampaigns(db, WS, new Date(NOW.getTime() + 2 * MINUTE));
+    expect(await plannedOnSeat('profile_view')).toBe(0);
+  });
+
+  it('partly-used seat: sends the gate counts and rows other routes queued come off the plan, one below the boundary, at it and one past', async () => {
+    await upsertSeat(
+      db,
+      WS,
+      {
+        ...UTC_WEEKDAYS,
+        dailyProfileViewLimit: 10,
+        safetyBandOverride: true,
+        warmupOverride: true
+      },
+      new Date('2026-01-01T09:00:00.000Z')
+    );
+    // Three views another route planned yesterday morning and the worker sent
+    // two hours ago: the gate counts them by `recorded_at`, inside its rolling
+    // 24 hours, although they were planned outside it.
+    for (let index = 0; index < 3; index += 1) {
+      sequence += 1;
+      await db
+        .prepare(
+          `INSERT INTO linkedin_actions
+             (id,workspace_id,seat_key,kind,target_ref,status,planned_for,recorded_at,source,replay_scope,created_at)
+           VALUES (?,?,?,?,?,'sent',?::timestamptz,?::timestamptz,'plan','legacy',?::timestamptz)`
+        )
+        .run(
+          `lact_trv020_${sequence}`,
+          WS,
+          'owner',
+          'profile_view',
+          `https://www.linkedin.com/in/trv020-${sequence}/`,
+          new Date(NOW.getTime() - 30 * HOUR).toISOString(),
+          new Date(NOW.getTime() - 2 * HOUR).toISOString(),
+          new Date(NOW.getTime() - 30 * HOUR).toISOString()
+        );
+    }
+    const today = row(await limitsAt(NOW), 'profile_view').today!;
+    expect(today.used).toBe(3);
+    expect(today.remaining).toBeGreaterThan(1);
+    // Another route's queue, one short of the allowance, due later today.
+    await plant('profile_view', today.remaining - 1, new Date(NOW.getTime() + 30 * MINUTE));
+
+    const workflowId = await profileViewWorkflow();
+    const campaign = await runningCampaign('Partly', 8, workflowId);
+    await runManagedCampaigns(db, WS, NOW);
+    // One below the boundary: exactly one more row.
+    expect((await plannedByCampaign('profile_view'))[campaign]).toBe(1);
+    expect(await plannedOnSeat('profile_view')).toBe(today.remaining);
+    // At the boundary: nothing more.
+    await runManagedCampaigns(db, WS, new Date(NOW.getTime() + MINUTE));
+    expect(await plannedOnSeat('profile_view')).toBe(today.remaining);
+
+    await bringDue(NOW);
+    const { result } = await work(NOW);
+    expect(result).toMatchObject({ executed: today.remaining, blocked: 0 });
+    // One past.
+    expect(failed(await nextVerdict('profile_view', NOW))).toContain('rolling-24h');
+  });
+
+  it('weekly band: a seat near its rolling 7-day invite band plans only what the week has left', async () => {
+    await upsertSeat(
+      db,
+      WS,
+      { ...UTC_WEEKDAYS, warmupOverride: true },
+      new Date('2026-01-01T09:00:00.000Z')
+    );
+    const seat = await getSeat(db, WS, 'owner');
+    const perWeek = bandForSeat('invite', 'steady', seat).perWeek!;
+    // Two short of the week, decided over the last 2-4 days.
+    for (let index = 0; index < perWeek - 2; index += 1) {
+      await recorded(
+        'invite',
+        1,
+        new Date(NOW.getTime() - 36 * HOUR - index * 30 * MINUTE),
+        'accepted'
+      );
+    }
+    const today = row(await limitsAt(NOW), 'invite').today!;
+    expect(today).toMatchObject({ remaining: 2, boundBy: 'weekly-band' });
+
+    const campaign = await runningCampaign('Weekly', 6, await inviteWorkflow());
+    await runManagedCampaigns(db, WS, NOW);
+    expect(await plannedByCampaign('invite')).toEqual({ [campaign]: 2 });
+    await runManagedCampaigns(db, WS, new Date(NOW.getTime() + MINUTE));
+    expect(await plannedOnSeat('invite')).toBe(2);
+
+    await bringDue(NOW);
+    await approvePlanned('invite');
+    const { result } = await work(NOW);
+    expect(result).toMatchObject({ executed: 2, blocked: 0 });
+    expect(failed(await nextVerdict('invite', NOW))).toEqual(['rolling-7d']);
+  });
+
+  it('a hand send recorded late on a cancelled hand-off comes off the plan exactly as the gate counts it', async () => {
+    await upsertSeat(
+      db,
+      WS,
+      {
+        ...UTC_WEEKDAYS,
+        sendMode: 'human',
+        dailyInviteLimit: 5,
+        safetyBandOverride: true,
+        warmupOverride: true
+      },
+      new Date('2026-01-01T09:00:00.000Z')
+    );
+    // A hand-off Today presented 30 hours ago that a bulk path then cancelled
+    // before the founder answered it (TRV-043): skipped, counted nowhere.
+    sequence += 1;
+    const handoffId = `lact_trv020_${sequence}`;
+    const presentedAt = new Date(NOW.getTime() - 30 * HOUR).toISOString();
+    await db
+      .prepare(
+        `INSERT INTO linkedin_actions
+           (id,workspace_id,seat_key,kind,target_ref,status,planned_for,handoff_presented_at,source,replay_scope,created_at)
+         VALUES (?,?,?,?,?,'skipped',?::timestamptz,?::timestamptz,'plan','legacy',?::timestamptz)`
+      )
+      .run(
+        handoffId,
+        WS,
+        'owner',
+        'invite',
+        `https://www.linkedin.com/in/trv020-late-${sequence}/`,
+        presentedAt,
+        presentedAt,
+        presentedAt
+      );
+    const before = row(await limitsAt(NOW), 'invite').today!;
+    expect(before.remaining).toBeGreaterThan(1);
+
+    // The founder now reports it went out 20 hours ago: `recorded_at` is
+    // back-dated into the gate's rolling day, far from its `planned_for`.
+    await resolveLinkedInHandoff(
+      db,
+      {
+        workspaceId: WS,
+        actionId: handoffId,
+        resolution: 'sent',
+        sentAt: new Date(NOW.getTime() - 20 * HOUR).toISOString(),
+        actorUserId: null
+      },
+      NOW
+    );
+    const today = row(await limitsAt(NOW), 'invite').today!;
+    expect(today.used).toBe(before.used + 1);
+    expect(today.remaining).toBe(before.remaining - 1);
+
+    const campaign = await runningCampaign('Late', 8, await inviteWorkflow());
+    await runManagedCampaigns(db, WS, NOW);
+    expect(await plannedByCampaign('invite')).toEqual({ [campaign]: today.remaining });
+  });
+
+  it("shared seat scarcer than its campaigns: the gate's allowance rotates deterministically, none starves and nothing piles up", async () => {
+    await upsertSeat(
+      db,
+      WS,
+      { ...UTC_WEEKDAYS, dailyProfileViewLimit: 2, safetyBandOverride: true, warmupOverride: true },
+      new Date('2026-01-01T09:00:00.000Z')
+    );
+    const workflowId = await profileViewWorkflow();
+    // Created an hour apart: oldest first is the order nobody has planned yet.
+    const order: string[] = [];
+    for (const [index, name] of ['Ash', 'Birch', 'Cedar'].entries()) {
+      order.push(
+        await runningCampaign(name, 3, workflowId, new Date(NOW.getTime() - (3 - index) * HOUR))
+      );
+    }
+    // Wednesday, Thursday, Friday and Monday: working days, each past the
+    // previous send's rolling 24 hours.
+    const days = [
+      NOW,
+      new Date(NOW.getTime() + DAY + HOUR),
+      new Date(NOW.getTime() + 2 * DAY + 2 * HOUR),
+      new Date(NOW.getTime() + 5 * DAY + 3 * HOUR)
+    ];
+    const winners: string[] = [];
+    for (const at of days) {
+      // floor(2 x a draw below 1): the gate admits one a day, fewer than campaigns.
+      const today = row(await limitsAt(at), 'profile_view').today!;
+      expect(today.remaining).toBe(1);
+      await runManagedCampaigns(db, WS, at);
+      const planned = await plannedByCampaign('profile_view');
+      expect(sum(planned)).toBe(today.remaining);
+      winners.push(...Object.keys(planned));
+      await bringDue(at);
+      const { result } = await work(at);
+      expect(result).toMatchObject({ executed: today.remaining, blocked: 0 });
+      expect(await plannedOnSeat('profile_view')).toBe(0);
+    }
+    expect(winners).toEqual([order[0], order[1], order[2], order[0]]);
   });
 });

@@ -1504,7 +1504,7 @@ function AccountPanel({
           {LIMIT_FIELDS.map((limit) => {
             const configured = account[limit.field];
             // TODAY'S number from the send-time check (draw and cold-account
-            // ramp applied), not the structural ceiling the planner budgets with.
+            // ramp applied), not the structural ceiling.
             const dayRow = safety?.limits.find(
               (entry) => entry.kind === limit.kind && entry.window === 'day'
             );

@@ -1041,9 +1041,10 @@ export async function evaluateLinkedInSafety(
    * Keyed to the instant the action is about to happen, in the seat's own
    * timezone, so it is the same number for every other action this seat
    * attempts today, whichever route queued it. Production `dayShapeFor` draws
-   * DAILY_DRAW.min-1.0 of the ceiling; the planner deliberately does not
-   * pre-apply that draw (`runner.ts` `seatDailyCeilingFor`), so this gate is
-   * where it binds. A manual action is judged against the undrawn ceiling.
+   * DAILY_DRAW.min-1.0 of the ceiling. The managed-campaign planner sizes
+   * each seat from `linkedInDailyAllowance`, which applies the same draw for
+   * the planning instant; this gate is where it binds for the instant the
+   * action runs. A manual action is judged against the undrawn ceiling.
    */
   const shapeDay = options.dayShape ?? dayShapeFor;
   const todayLocal = localDateOf(now, timezone);

@@ -26,7 +26,8 @@ import {
 } from './runner.js';
 import { postgresLocalWorkerStore } from './local-worker.js';
 import { addExclusions } from './exclusions.js';
-import { upsertSeat } from './seats.js';
+import { linkedInDailyAllowance } from './guard.js';
+import { getSeat, upsertSeat } from './seats.js';
 import { BOOKING_LINK_MISSING_MESSAGE, getWorkflow, saveWorkflow } from './workflows.js';
 import { setBookingUrl } from '../meetings/booking-link.js';
 
@@ -65,7 +66,10 @@ beforeEach(async () => {
       timezone: 'UTC',
       workingDays: [1, 2, 3, 4, 5],
       workStartMinute: 480,
-      workEndMinute: 1080
+      workEndMinute: 1080,
+      // An established account: the planner sizes each seat from the send
+      // gate's allowance, and a cold ledger would admit one action a day.
+      warmupOverride: true
     },
     new Date('2026-01-01T09:00:00.000Z')
   );
@@ -320,8 +324,18 @@ describe('managed campaign runner', () => {
     const tick = await runManagedCampaigns(db, WORKSPACE, NOW);
     const plannedInvites = (await actions()).filter((action) => action.kind === 'invite');
 
-    expect(tick.actionsPlanned).toBe(2);
-    expect(plannedInvites).toHaveLength(2);
+    // What the send gate admits on this cold seat today: small, never zero.
+    const allowance = await linkedInDailyAllowance(
+      db,
+      { workspaceId: WORKSPACE, seatKey: 'owner' },
+      await getSeat(db, WORKSPACE, 'owner'),
+      'invite',
+      NOW
+    );
+    expect(allowance.remaining).toBeGreaterThan(0);
+    expect(allowance.remaining).toBeLessThan(2);
+    expect(tick.actionsPlanned).toBe(allowance.remaining);
+    expect(plannedInvites).toHaveLength(allowance.remaining);
     expect(plannedInvites[0]?.status).toBe('planned');
   });
 
@@ -526,8 +540,19 @@ describe('managed campaign runner', () => {
       campaignIds.push(await runningCampaign(listId, workflow.id, `Fair ${index}`));
     }
 
+    // The seat's room is what the send gate admits after the eight sends:
+    // fewer than the three campaigns asking for it.
+    const allowance = await linkedInDailyAllowance(
+      db,
+      { workspaceId: WORKSPACE, seatKey: 'owner' },
+      await getSeat(db, WORKSPACE, 'owner'),
+      'profile_view',
+      NOW
+    );
+    expect(allowance.remaining).toBeGreaterThan(0);
+    expect(allowance.remaining).toBeLessThan(3);
     const tick = await runManagedCampaigns(db, WORKSPACE, NOW);
-    expect(tick.actionsPlanned).toBe(2);
+    expect(tick.actionsPlanned).toBe(allowance.remaining);
     const planned = await db
       .prepare(
         `SELECT campaign_id,COUNT(*)::int AS total FROM linkedin_actions
@@ -535,7 +560,7 @@ describe('managed campaign runner', () => {
          GROUP BY campaign_id ORDER BY campaign_id`
       )
       .all<{ campaign_id: string; total: number }>(WORKSPACE);
-    expect(planned).toHaveLength(2);
+    expect(planned).toHaveLength(allowance.remaining);
     expect(planned.every((row) => row.total === 1)).toBe(true);
     const rotation = await db
       .prepare(
@@ -543,8 +568,8 @@ describe('managed campaign runner', () => {
          WHERE workspace_id=? AND id = ANY(?::text[]) ORDER BY id`
       )
       .all<{ id: string; served: boolean }>(WORKSPACE, campaignIds);
-    expect(rotation.filter((row) => row.served)).toHaveLength(2);
-    expect(rotation.filter((row) => !row.served)).toHaveLength(1);
+    expect(rotation.filter((row) => row.served)).toHaveLength(allowance.remaining);
+    expect(rotation.filter((row) => !row.served)).toHaveLength(3 - allowance.remaining);
   });
   it('plans every company, event and group workflow action with a distinct ledger kind and destination metadata', async () => {
     const listId = await seededList('Community actions', [

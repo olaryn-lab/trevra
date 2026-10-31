@@ -12295,8 +12295,8 @@ interface LinkedInCeiling {
    * ending now (`guard.ts` `linkedInDailyAllowance`): `ceiling` above after
    * today's draw and the cold-account day-over-day ramp, and `remaining` after
    * the operator pool, the rolling 7- and 30-day bands, the InMail quota and
-   * the outstanding-invite backlog. `ceiling` above
-   * stays the structural number the planner budgets with.
+   * the outstanding-invite backlog -- the number the managed-campaign planner
+   * budgets with (`runner.ts`). `ceiling` above stays the structural number.
    */
   today?: {
     ceiling: number;
@@ -12422,8 +12422,9 @@ async function effectiveLinkedInLimits(
     const kindMultiplier = warmupOverride ? 1 : warmupMultiplierFor(kind, warmupWeek);
     // No acceptance throttle: low acceptance is advisory since the simplified
     // dispatch (docs/release/2026-10-27-linkedin-simplified-dispatch.md), and
-    // neither the gate nor the planner halves for it. This is the planner's
-    // `seatDailyCeilingFor`; `today` below is what the gate admits today.
+    // neither the gate nor the planner halves for it. This is the structural
+    // ceiling; `today` below is what the gate admits today, and what the
+    // managed-campaign planner budgets with (`runner.ts`).
     const afterWarmup = Math.floor(dailyCeiling * kindMultiplier);
 
     const poolNote = MESSAGE_POOL_KINDS.includes(kind as (typeof MESSAGE_POOL_KINDS)[number])

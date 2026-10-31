@@ -10,14 +10,8 @@ import {
   type AdmissionKind,
   type AdmissionPolicy
 } from './admission.js';
-import {
-  ACTION_GAP_SECONDS,
-  INMAIL_MONTHLY_QUOTA,
-  bandForSeat,
-  effectiveDailyCeiling,
-  seatOperatorLimit,
-  warmupMultiplierFor
-} from './limits.js';
+import { linkedInDailyAllowance } from './guard.js';
+import { ACTION_GAP_SECONDS, INMAIL_MONTHLY_QUOTA } from './limits.js';
 import {
   admitPendingCampaignMembers,
   campaignActionLimit,
@@ -27,7 +21,7 @@ import {
   retireSuppressedCampaignMembers
 } from './managed-campaigns.js';
 import { addLocalDays, localDateOf, weekdayOf, zonedToUtc } from './pacing.js';
-import { effectivePosture, getSeat, warmupWeekOf, type LinkedInSeat } from './seats.js';
+import { effectivePosture, getSeat, type LinkedInSeat } from './seats.js';
 import { enqueueWithdrawals, selectWithdrawalCandidates } from './withdraw.js';
 import {
   BOOKING_LINK_MISSING_MESSAGE,
@@ -59,8 +53,9 @@ import { variantRichContentViolation } from '../../shared/rich-content.js';
  * ledger decides WHETHER, and neither is allowed to be a browser call.
  *
  * THREE CEILINGS BIND HERE, in this order:
- *   1. the campaign warm-up ramp (20/40/60/80/100% of the seat's daily limit
- *      over the campaign's first five days) -- per campaign, per ledger kind;
+ *   1. what the send gate admits on the seat today (`linkedInDailyAllowance`)
+ *      less every row still queued on it, fair-shared between the campaigns
+ *      that use the seat -- per seat, per budget bucket;
  *   2. the seat's own working days and hours, in the seat's timezone;
  *   3. a fixed conservative `ACTION_GAP_SECONDS.max` gap between consecutive
  *      slots for one seat, counted across every campaign this run touches AND
@@ -198,30 +193,6 @@ interface InviteRow {
   status: string;
   sent_at: string | null;
 }
-/**
- * This must include the seat warm-up multiplier because the send-time gate does.
- * Without it, the planner can allocate more active outreach than the same seat
- * may execute during its account ramp, creating rows the worker then refuses at
- * send time. The planner and gate must therefore price the same account ceiling.
- *
- * The worker additionally applies its deterministic day-shape draw at execution
- * time. That draw is intentionally not pre-applied here because rows may be
- * scheduled onto a later local day; the seat warm-up week, however, is an
- * invariant ceiling for the planning instant and must never be omitted.
- */
-function seatDailyCeilingFor(seat: LinkedInSeat, kind: BudgetedKind, now: Date): number {
-  const posture = effectivePosture(seat, now);
-  const band = bandForSeat(kind, posture === 'steady' ? 'steady' : 'warmup', seat);
-  const dailyCeiling = effectiveDailyCeiling(
-    band.perDay,
-    seatOperatorLimit(seat, kind),
-    seat.safetyBandOverride
-  );
-  const warmupWeek = warmupWeekOf(seat.activatedAt, now);
-  const multiplier = seat.warmupOverride ? 1 : warmupMultiplierFor(kind, warmupWeek);
-  return Math.floor(dailyCeiling * multiplier);
-}
-
 /** The exact ledger kind a step writes. */
 function ledgerKindForStep(step: WorkflowStep): LinkedInActionKind | null {
   switch (step.action) {
@@ -1143,25 +1114,51 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
     cachedUsableSenders.set(campaign.id, usable);
   }
 
+  /*
+   * EACH SEAT'S ROOM IS WHAT THE SEND GATE WILL ADMIT, NOT A STRUCTURAL CEILING.
+   *
+   * The budget used to be the band/operator ceiling x warm-up week, minus rows
+   * planned within 24 hours either side of now. The gate also applies today's
+   * draw, the cold-account day-over-day ramp, the operator pool, the rolling
+   * 7- and 30-day bands and the invite backlog, and it counts sends by
+   * `recorded_at` on every seat confirmed as the same member. So a warming or
+   * partly-used seat was planned rows the worker then refused: they piled up
+   * as `planned`, inflated the campaign card's allocation, and took fair shares
+   * other campaigns on the seat could have used.
+   *
+   * `linkedInDailyAllowance` is the gate's own ledger statement and arithmetic
+   * (`guard.ts` `seatDayCeilings`), in the seat's timezone day. From its
+   * `remaining` the planner takes every row still `planned` on the seat, from
+   * any campaign or route, whenever it is due: each one spends the same
+   * allowance when it runs, and a row that never runs must not justify
+   * planning more on top of it. The gate stays authoritative at send time.
+   * Planning passes for one workspace are serialised by the runner lease.
+   */
+  const kindsInDemand = new Map<string, Set<BudgetedKind>>();
+  for (const mapKey of demanders.keys()) {
+    const split = mapKey.indexOf('\u0000');
+    const seatKey = mapKey.slice(0, split);
+    const kinds = kindsInDemand.get(seatKey) ?? new Set<BudgetedKind>();
+    kinds.add(mapKey.slice(split + 1) as BudgetedKind);
+    kindsInDemand.set(seatKey, kinds);
+  }
   const sharedRemaining = new Map<string, Map<BudgetedKind, number>>();
+  const seatDayCeiling = new Map<string, Map<BudgetedKind, number>>();
   const paidInmailSeatRemaining = new Map<string, number>();
   for (const seatKey of seatsInDemand) {
     const seat = await loadSeat(seatKey);
     if (!seat) continue;
-    const used = await db
+    const queued = await db
       .prepare(
         `SELECT kind,COUNT(*)::int AS total FROM linkedin_actions
-         WHERE workspace_id=? AND seat_key=? AND status<>'skipped'
-           AND planned_for IS NOT NULL AND planned_for>=?::timestamptz AND planned_for<=?::timestamptz
+         WHERE workspace_id=? AND seat_key=? AND status='planned'
            AND kind = ANY(?::text[]) GROUP BY kind`
       )
-      .all<{ kind: string; total: number }>(workspaceId, seatKey, windowStart, windowEnd, [
-        ...MANAGED_LEDGER_KINDS
-      ]);
-    const usedByKind = new Map<BudgetedKind, number>();
-    for (const row of used) {
+      .all<{ kind: string; total: number }>(workspaceId, seatKey, [...MANAGED_LEDGER_KINDS]);
+    const queuedByKind = new Map<BudgetedKind, number>();
+    for (const row of queued) {
       const bucket = budgetKindForLedgerKind(row.kind as LinkedInActionKind);
-      if (bucket) usedByKind.set(bucket, (usedByKind.get(bucket) ?? 0) + Number(row.total));
+      if (bucket) queuedByKind.set(bucket, (queuedByKind.get(bucket) ?? 0) + Number(row.total));
     }
     const inmailUsage = await db
       .prepare(
@@ -1176,11 +1173,14 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
         new Date(now.getTime() - 30 * 86_400_000).toISOString()
       );
     const byKind = new Map<BudgetedKind, number>();
+    const ceilings = new Map<BudgetedKind, number>();
+    const demanded = kindsInDemand.get(seatKey) ?? new Set<BudgetedKind>();
     for (const kind of BUDGETED_KINDS) {
-      let remaining = Math.max(
-        0,
-        seatDailyCeilingFor(seat, kind, now) - (usedByKind.get(kind) ?? 0)
-      );
+      if (!demanded.has(kind)) continue;
+      // The bucket is the gate's family for this kind (`seatLedgerFacts`).
+      const allowance = await linkedInDailyAllowance(db, { workspaceId, seatKey }, seat, kind, now);
+      ceilings.set(kind, allowance.ceiling);
+      let remaining = Math.max(0, allowance.remaining - (queuedByKind.get(kind) ?? 0));
       if (kind === 'inmail') {
         const monthlyLimit = seat.inmailMonthlyBudget ?? INMAIL_MONTHLY_QUOTA;
         remaining = Math.min(
@@ -1191,6 +1191,7 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
       byKind.set(kind, remaining);
     }
     sharedRemaining.set(seatKey, byKind);
+    seatDayCeiling.set(seatKey, ceilings);
     paidInmailSeatRemaining.set(
       seatKey,
       Math.max(0, (seat.inmailPaidCreditCap ?? 0) - Number(inmailUsage?.paid ?? 0))
@@ -1339,8 +1340,10 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
       const budget = new Map<BudgetedKind, number>();
       for (const kind of BUDGETED_KINDS) {
         const fairShare = fairQuota.get(fairQuotaKey(campaign.id, sender.key, kind)) ?? 0;
+        // The gate's daily ceiling for this seat today; a kind no campaign
+        // demands on it has no fair share either.
         const campaignLimit = campaignActionLimit(
-          seatDailyCeilingFor(sender.seat, kind, now),
+          seatDayCeiling.get(sender.key)?.get(kind) ?? 0,
           campaign.started_at,
           now
         );
