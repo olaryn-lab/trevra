@@ -10384,6 +10384,38 @@ label.inbox-row-select {
 .mgr-settings-block > h4 {
   margin: 0;
 }
+.mgr-auto-enrol-rules {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mgr-auto-enrol-rules > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--t-tap);
+  border-bottom: 1px solid var(--t-line-soft);
+}
+.mgr-auto-enrol-rules > li > span {
+  display: grid;
+  min-width: 0;
+}
+.mgr-auto-enrol-rules small {
+  color: var(--muted);
+  font-size: var(--t-text-xs);
+}
+.mgr-auto-enrol-rules strong {
+  overflow-wrap: anywhere;
+}
+.mgr-auto-enrol-add {
+  margin-bottom: 0;
+}
+.mgr-auto-enrol-add > .ui-field {
+  flex: 1 1 240px;
+}
 @media (max-width: 640px) {
   .mgr-campaign-section-list {
     grid-template-columns: minmax(0, 1fr);

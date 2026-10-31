@@ -92,6 +92,7 @@ import {
 import { NOT_ENOUGH_DATA, RATE_MIN_SAMPLE, ratePercent } from './analytics';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
 import { useWorkspaceCan } from './auth-client';
+import { CampaignAutoEnrolRules } from './CampaignAutoEnrolRules';
 import { CampaignEmailApprovals } from './CampaignEmailApprovals';
 import { LinkedInActionApprovals } from './LinkedInActionApprovals';
 import { LinkedInWithdrawalApprovals } from './LinkedInWithdrawalApprovals';
@@ -3882,6 +3883,7 @@ export function OutreachManagerRead({
                         busy={busy !== ''}
                         onSave={(policy) => saveCampaignExclusions(campaign, policy)}
                       />
+                      <CampaignAutoEnrolRules campaign={campaign} lists={lists} />
                     </div>
                   )}
 

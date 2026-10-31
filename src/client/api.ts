@@ -131,6 +131,7 @@ import type {
   ManualTaskView
 } from '../server/linkedin/managed-campaigns';
 import type { LinkedInCampaignExecution } from '../server/linkedin/execution-state';
+import type { AutoEnrolRule, AutoEnrolSourceKind } from '../server/linkedin/auto-enrol';
 import type {
   Account,
   AccountImportResult,
@@ -3074,6 +3075,40 @@ export async function moveLinkedInManagedCampaignMembers(
   );
 }
 
+export type { AutoEnrolRule, AutoEnrolSourceKind };
+
+/** TRV-029: the capture sources and lead lists that enrol their new leads into a campaign. */
+export async function getManagedCampaignAutoEnrolRules(
+  campaignId: string
+): Promise<AutoEnrolRule[]> {
+  return (
+    await request<{ rules: AutoEnrolRule[] }>(
+      `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/auto-enrol-rules`
+    )
+  ).rules;
+}
+
+export async function createManagedCampaignAutoEnrolRule(
+  campaignId: string,
+  input: { sourceKind: AutoEnrolSourceKind; sourceId: string }
+): Promise<AutoEnrolRule> {
+  return (
+    await request<{ rule: AutoEnrolRule }>(
+      `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/auto-enrol-rules`,
+      { method: 'POST', body: JSON.stringify(input) }
+    )
+  ).rule;
+}
+
+export async function disableManagedCampaignAutoEnrolRule(ruleId: string): Promise<AutoEnrolRule> {
+  return (
+    await request<{ rule: AutoEnrolRule }>(
+      `/api/linkedin/manager/auto-enrol-rules/${encodeURIComponent(ruleId)}/disable`,
+      { method: 'POST', body: JSON.stringify({}) }
+    )
+  ).rule;
+}
+
 export async function duplicateLinkedInManagedCampaign(
   id: string,
   name?: string
@@ -4315,6 +4350,8 @@ export async function importAccounts(input: {
     role?: string;
     sourcePath?: string;
   }>;
+  /** Also place the imported People in this lead list (TRV-029). */
+  leadListId?: string;
 }): Promise<AccountImportResult> {
   return request('/api/accounts/import', { method: 'POST', body: JSON.stringify(input) });
 }
