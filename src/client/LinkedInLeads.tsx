@@ -748,7 +748,7 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
                           disabled={!enabled}
                           onChange={(event) => setCapDraft(event.target.value)}
                         />
-                        <small className="li-hint">0–1000. Set 0 to collect nobody at all.</small>
+                        <small className="li-hint">0–100. Set 0 to collect nobody at all.</small>
                       </label>
                       {/* NOT ZERO WHEN IT IS UNKNOWN. A failed read of the allowance used
                         to print "Still allowed 0", which reads as a hard block that

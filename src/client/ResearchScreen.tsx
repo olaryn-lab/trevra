@@ -244,6 +244,7 @@ export function ResearchScreen({
               <input
                 type="number"
                 min={15}
+                max={10080}
                 value={form.pollIntervalMinutes}
                 onChange={(e) => setForm({ ...form, pollIntervalMinutes: Number(e.target.value) })}
               />
