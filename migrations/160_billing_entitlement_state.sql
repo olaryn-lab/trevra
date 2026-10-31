@@ -15,9 +15,11 @@ CREATE TABLE IF NOT EXISTS billing_workspace_state (
   fetched_at TIMESTAMPTZ NOT NULL,
   last_attempt_at TIMESTAMPTZ,
   last_error TEXT,
-  -- Metered usage is reported only for work that happened after this point,
-  -- so turning Billing on never back-bills history.
-  metering_started_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  -- Metered usage is reported only for work that happened after this point.
+  -- NULL = not metered: stamped by the first billing worker pass running with
+  -- TREVRA_BILLING_ENFORCEMENT=enforce, cleared by an observe/off pass, so
+  -- neither enabling Billing nor switching to enforce back-bills history.
+  metering_started_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

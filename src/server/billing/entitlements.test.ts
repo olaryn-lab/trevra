@@ -3,9 +3,13 @@ import { openDatabase, type Db } from '../db.js';
 import { getBillingClient, resetBillingClientForTests } from '../billing-client.js';
 import {
   BILLING_GRACE_MS,
+  EntitlementDeniedError,
   accountBlock,
+  applyDecision,
+  billingEnforcementMode,
   can,
   loadEntitlements,
+  type BillingEnforcementMode,
   type EntitlementView,
   type StoredBillingSnapshot
 } from './entitlements.js';
@@ -28,7 +32,12 @@ function snapshot(
   };
 }
 
-function metered(snap: StoredBillingSnapshot, fetchedAt = NOW, now = NOW): EntitlementView {
+function metered(
+  snap: StoredBillingSnapshot,
+  fetchedAt = NOW,
+  now = NOW,
+  enforcement: BillingEnforcementMode = 'enforce'
+): EntitlementView {
   const graceEndsAt = new Date(fetchedAt.getTime() + BILLING_GRACE_MS);
   return {
     mode: 'metered',
@@ -37,8 +46,19 @@ function metered(snap: StoredBillingSnapshot, fetchedAt = NOW, now = NOW): Entit
     stale: false,
     withinGrace: now <= graceEndsAt,
     graceEndsAt,
-    now
+    now,
+    enforcement
   };
+}
+
+async function wouldDenyEvents(workspaceId: string) {
+  const rows = await db
+    .prepare(
+      `SELECT payload_json FROM domain_events
+       WHERE workspace_id=? AND event_type='billing.entitlement.would_deny' ORDER BY position`
+    )
+    .all<{ payload_json: Record<string, unknown> }>(workspaceId);
+  return rows.map((row) => row.payload_json);
 }
 
 beforeEach(async () => {
@@ -118,6 +138,82 @@ describe('can()', () => {
     const decision = can(ended, 'campaigns', 1);
     expect(decision).toMatchObject({ allowed: false, code: 'trial_expired' });
     expect(decision.allowed ? '' : decision.reason).toMatch(/data and running work are kept/);
+  });
+});
+
+describe('rollout mode (TREVRA_BILLING_ENFORCEMENT)', () => {
+  it('defaults to observe when unset or invalid', () => {
+    expect(billingEnforcementMode({})).toBe('observe');
+    expect(billingEnforcementMode({ TREVRA_BILLING_ENFORCEMENT: '' })).toBe('observe');
+    expect(billingEnforcementMode({ TREVRA_BILLING_ENFORCEMENT: 'enforced' })).toBe('observe');
+    expect(billingEnforcementMode({ TREVRA_BILLING_ENFORCEMENT: 'true' })).toBe('observe');
+    expect(billingEnforcementMode({ TREVRA_BILLING_ENFORCEMENT: 'observe' })).toBe('observe');
+    expect(billingEnforcementMode({ TREVRA_BILLING_ENFORCEMENT: ' Enforce ' })).toBe('enforce');
+    expect(billingEnforcementMode({ TREVRA_BILLING_ENFORCEMENT: 'off' })).toBe('off');
+  });
+
+  it('observe records one would-deny per workspace, entitlement and hour, and never throws', async () => {
+    const view = metered(snapshot({}, { campaigns: { limit: 1 } }), NOW, NOW, 'observe');
+    const denied = can(view, 'campaigns', 2);
+    await applyDecision(db, view, A, denied, 1);
+    await applyDecision(db, view, A, can(view, 'campaigns', 3), 2);
+    await applyDecision(db, view, A, can(view, 'credits', 50), null);
+    await applyDecision(db, view, B, denied, 1);
+    expect(await wouldDenyEvents(A)).toEqual([
+      { entitlement: 'campaigns', reason: 'limit_reached', limit: 1, used: 1, requested: 2 },
+      {
+        entitlement: 'credits',
+        reason: 'insufficient_credits',
+        limit: 10,
+        used: null,
+        requested: 50
+      }
+    ]);
+    const nextHour = new Date(NOW.getTime() + 60 * 60_000);
+    const later = metered(snapshot({}, { campaigns: { limit: 1 } }), nextHour, nextHour, 'observe');
+    await applyDecision(db, later, A, can(later, 'campaigns', 2), 1);
+    expect(await wouldDenyEvents(A)).toHaveLength(3);
+    expect(await wouldDenyEvents(B)).toHaveLength(1);
+    // Allowed decisions record nothing.
+    await applyDecision(db, view, A, can(view, 'campaigns', 1), 0);
+    expect(await wouldDenyEvents(A)).toHaveLength(3);
+  });
+
+  it('enforce throws without recording; off neither throws nor records', async () => {
+    const enforce = metered(snapshot({}, { campaigns: { limit: 1 } }));
+    await expect(
+      applyDecision(db, enforce, A, can(enforce, 'campaigns', 2), 1)
+    ).rejects.toBeInstanceOf(EntitlementDeniedError);
+    const off = metered(snapshot({}, { campaigns: { limit: 1 } }), NOW, NOW, 'off');
+    await applyDecision(db, off, A, can(off, 'campaigns', 2), 1);
+    expect(await wouldDenyEvents(A)).toEqual([]);
+  });
+
+  it('off answers write-path checks unmetered without asking Billing; reads still load', async () => {
+    const fake = new FakeBilling({
+      planCode: 'growth_monthly_usd',
+      status: 'active',
+      features: {},
+      available: 0,
+      usage: 0,
+      periodEnd: null,
+      cancelAtPeriodEnd: false,
+      scheduledPlanCode: null
+    });
+    expect(await loadEntitlements(db, A, { client: fake, now: NOW, enforcement: 'off' })).toEqual({
+      mode: 'unmetered'
+    });
+    expect(fake.calls).toHaveLength(0);
+    const read = await loadEntitlements(db, A, {
+      client: fake,
+      now: NOW,
+      enforcement: 'off',
+      purpose: 'read'
+    });
+    expect(read).toMatchObject({ mode: 'metered', enforcement: 'off' });
+    expect(
+      await loadEntitlements(db, A, { client: fake, now: NOW, enforcement: 'observe' })
+    ).toMatchObject({ mode: 'metered', enforcement: 'observe' });
   });
 });
 

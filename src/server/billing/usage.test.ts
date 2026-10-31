@@ -76,7 +76,29 @@ async function outbox(workspaceId: string) {
     }>(workspaceId);
 }
 
+const ENFORCEMENT_ENV = 'TREVRA_BILLING_ENFORCEMENT';
+const previousEnforcement = process.env[ENFORCEMENT_ENV];
+
+async function meteringStartedAt(workspaceId: string): Promise<string | null> {
+  const row = await db
+    .prepare('SELECT metering_started_at FROM billing_workspace_state WHERE workspace_id=?')
+    .get<{ metering_started_at: string | Date | null }>(workspaceId);
+  return row?.metering_started_at ? new Date(row.metering_started_at).toISOString() : null;
+}
+
+// Scoped to the fixture workspaces: the test database is shared with other files.
+function billingWrites() {
+  return fake.calls.filter(
+    (call) =>
+      (call.method === 'reserveCredits' || call.method === 'settleReservation') &&
+      (call.workspaceId === A || call.workspaceId === B)
+  );
+}
+
 beforeEach(async () => {
+  // Reporting only happens under `enforce`; the rollout-mode block below
+  // passes the mode explicitly.
+  process.env[ENFORCEMENT_ENV] = 'enforce';
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   for (const ws of [A, B]) {
     await db.prepare('DELETE FROM workspaces WHERE id=?').run(ws);
@@ -102,6 +124,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  if (previousEnforcement === undefined) delete process.env[ENFORCEMENT_ENV];
+  else process.env[ENFORCEMENT_ENV] = previousEnforcement;
   await db.close();
 });
 
@@ -237,5 +261,75 @@ describe('runBillingMaintenance', () => {
     const result = await runBillingMaintenance(db, { client: fake, now: NOW });
     expect(result).toMatchObject({ enabled: true, enqueued: 1, reported: 1, errors: [] });
     expect(fake.settledCredits(A)).toBe(1);
+  });
+});
+
+describe('rollout mode', () => {
+  it('observe enqueues nothing, sends no reservation or settle, and clears the metering stamp', async () => {
+    await action(A, 'act_observe');
+    await executed(A, 'evt_observe');
+    const result = await runBillingMaintenance(db, {
+      client: fake,
+      now: NOW,
+      enforcement: 'observe'
+    });
+    expect(result).toMatchObject({ enforcement: 'observe', enqueued: 0, reported: 0 });
+    expect(await outbox(A)).toEqual([]);
+    expect(fake.calls.some((call) => call.method === 'reserveCredits')).toBe(false);
+    expect(fake.calls.some((call) => call.method === 'settleReservation')).toBe(false);
+    expect(await meteringStartedAt(A)).toBeNull();
+    // The building blocks refuse on their own outside enforce, even if called directly.
+    expect(await enqueueBillableUsage(db, { now: NOW, mode: 'observe' })).toBe(0);
+    await db
+      .prepare('UPDATE billing_workspace_state SET metering_started_at=? WHERE workspace_id=?')
+      .run(new Date(NOW.getTime() - 3_600_000).toISOString(), A);
+    await enqueueBillableUsage(db, { now: NOW, mode: 'enforce' });
+    expect((await outbox(A)).map((row) => row.status)).toEqual(['pending', 'pending']);
+    expect(await reportPendingUsage(db, { client: fake, now: NOW, mode: 'observe' })).toMatchObject(
+      { claimed: 0, reported: 0 }
+    );
+    expect(fake.calls.some((call) => call.method === 'reserveCredits')).toBe(false);
+    expect((await outbox(A)).map((row) => row.attempts)).toEqual([0, 0]);
+  });
+
+  it('off meters nothing either', async () => {
+    await action(A, 'act_off');
+    const result = await runBillingMaintenance(db, { client: fake, now: NOW, enforcement: 'off' });
+    expect(result).toMatchObject({ enforcement: 'off', enqueued: 0, reported: 0 });
+    expect(await outbox(A)).toEqual([]);
+    expect(fake.calls.some((call) => call.method === 'reserveCredits')).toBe(false);
+    expect(await meteringStartedAt(A)).toBeNull();
+  });
+
+  it('switching observe -> enforce sends no backlog, and neither does a later return to enforce', async () => {
+    const at = (minutes: number) => new Date(NOW.getTime() + minutes * 60_000);
+    const pass = (minutes: number, enforcement: 'observe' | 'enforce') =>
+      runBillingMaintenance(db, { client: fake, now: at(minutes), enforcement });
+    // Work done while observing (A's stamp from the fixture is cleared by the pass).
+    await action(A, 'act_before', { at: at(-1) });
+    await executed(A, 'evt_before', at(-1));
+    await pass(0, 'observe');
+    expect(await meteringStartedAt(A)).toBeNull();
+
+    // First enforce pass: metering starts now; nothing earlier is sent.
+    await pass(5, 'enforce');
+    expect(await meteringStartedAt(A)).toBe(at(5).toISOString());
+    expect(await outbox(A)).toEqual([]);
+    expect(billingWrites()).toEqual([]);
+
+    // Work after the switch is billed exactly once.
+    await action(A, 'act_enforced', { at: at(6) });
+    await pass(10, 'enforce');
+    expect(fake.settledCredits(A)).toBe(1);
+
+    // Back to observe, work happens, then enforce again: the gap is not billed.
+    await pass(15, 'observe');
+    expect(await meteringStartedAt(A)).toBeNull();
+    await action(A, 'act_observed_again', { at: at(16) });
+    await pass(20, 'enforce');
+    await pass(25, 'enforce');
+    expect(await meteringStartedAt(A)).toBe(at(20).toISOString());
+    expect(fake.settledCredits(A)).toBe(1);
+    expect((await outbox(A)).map((row) => row.source_id)).toEqual(['act_enforced']);
   });
 });

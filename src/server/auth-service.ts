@@ -494,8 +494,12 @@ function requireProvisioningDb(): Db {
  * `createInvitation`; these hooks run on other connections, so they check
  * without the lock (taking it here would wait on that route's transaction).
  * Direct calls to Better Auth's endpoints are therefore checked, but two of
- * them racing at the limit are not serialized. No-op when Billing is not
- * configured.
+ * them racing at the limit are not serialized: Better Auth 1.7 runs
+ * `beforeCreateInvitation` and the invitation insert outside any transaction
+ * a hook can join, so there is no transaction to hold the lock in (known gap).
+ * Follows TREVRA_BILLING_ENFORCEMENT like every other boundary: only
+ * `enforce` refuses; `observe` records a would-deny. No-op when Billing is
+ * not configured.
  */
 async function enforceTeamEntitlement(
   organizationId: string,

@@ -69,7 +69,7 @@ import {
 } from './integration-service.js';
 import { getSiteConfig, recordMarketingEvent, registerPublicSiteRoutes } from './public-site.js';
 import { mountBillingRoutes } from './billing/routes.js';
-import { EntitlementDeniedError, loadEntitlements } from './billing/entitlements.js';
+import { EntitlementDeniedError, denialsBlock, loadEntitlements } from './billing/entitlements.js';
 import {
   assertCampaignActivation,
   assertNewSeatPrecheck,
@@ -2173,16 +2173,20 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           body: { email: input.email, organizationId: workspaceId, role: input.role }
         });
       // TRV-057: members + pending invitations must fit the plan's team limit.
-      // The entitlement lock is held until the invitation is committed, so two
-      // concurrent invites at the limit cannot both pass the count.
+      // Under TREVRA_BILLING_ENFORCEMENT=enforce the entitlement lock is held
+      // until the invitation is committed, so two concurrent invites at the
+      // limit cannot both pass the count. In observe mode nothing blocks, so
+      // there is nothing to serialize: Better Auth's beforeCreateInvitation
+      // hook records the would-deny on its own connection (recording it here,
+      // inside a transaction that waits on that hook, would deadlock on the
+      // dedupe claim).
       const entitlements = await loadEntitlements(db, workspaceId);
-      const invitation =
-        entitlements.mode === 'unmetered'
-          ? await invite()
-          : await db.transaction(async (tx) => {
-              await assertTeamInvite(tx, entitlements, workspaceId, { lock: true });
-              return invite();
-            });
+      const invitation = denialsBlock(entitlements)
+        ? await db.transaction(async (tx) => {
+            await assertTeamInvite(tx, entitlements, workspaceId, { lock: true });
+            return invite();
+          })
+        : await invite();
       res.status(201).json({ status: 'invited', invitation });
     } catch (error) {
       if (error instanceof APIError)

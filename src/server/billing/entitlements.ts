@@ -1,4 +1,5 @@
 import type { Db } from '../db.js';
+import { appendDomainEvent } from '../control-plane/events.js';
 import {
   getBillingClient,
   type BillingApi,
@@ -41,7 +42,36 @@ import {
  *
  * Billing not configured (self-host, dev, tests without a fake): the view is
  * `unmetered` and every check is allowed -- exactly the pre-TRV-057 behavior.
+ *
+ * ROLLOUT MODE. Blocking customers and charging them are owner decisions, so
+ * with Billing configured the gate still only blocks when
+ * TREVRA_BILLING_ENFORCEMENT=enforce. `observe` (the default, also for an
+ * unset or invalid value) computes every decision, never blocks, and records
+ * each would-deny as a deduped `billing.entitlement.would_deny` domain event;
+ * `off` skips the gate entirely. See docs/ops/billing-enforcement.md.
  */
+
+export type BillingEnforcementMode = 'off' | 'observe' | 'enforce';
+export const BILLING_ENFORCEMENT_ENV = 'TREVRA_BILLING_ENFORCEMENT';
+export const WOULD_DENY_EVENT = 'billing.entitlement.would_deny';
+const WOULD_DENY_STREAM = 'billing_entitlement';
+
+let warnedInvalidEnforcement = false;
+
+/** The deployment's rollout mode. Unset or unrecognized means `observe`. */
+export function billingEnforcementMode(
+  env: NodeJS.ProcessEnv = process.env
+): BillingEnforcementMode {
+  const raw = env[BILLING_ENFORCEMENT_ENV]?.trim().toLowerCase() ?? '';
+  if (raw === 'off' || raw === 'observe' || raw === 'enforce') return raw;
+  if (raw && !warnedInvalidEnforcement) {
+    warnedInvalidEnforcement = true;
+    console.warn(
+      `${BILLING_ENFORCEMENT_ENV}=${JSON.stringify(raw.slice(0, 32))} is not off, observe or enforce; using observe.`
+    );
+  }
+  return 'observe';
+}
 
 /** A cached snapshot younger than this is used without asking Billing again. */
 export const BILLING_FRESH_MS = 60_000;
@@ -114,7 +144,19 @@ export type EntitlementView =
       withinGrace: boolean;
       graceEndsAt: Date | null;
       now: Date;
+      /** Whether a denial blocks (`enforce`) or is only recorded (`observe`). */
+      enforcement: BillingEnforcementMode;
     };
+
+/** Whether write paths must evaluate the gate at all for this view. */
+export function gateActive(view: EntitlementView): boolean {
+  return view.mode === 'metered' && view.enforcement !== 'off';
+}
+
+/** Whether a denial refuses the write (`enforce`) rather than being recorded. */
+export function denialsBlock(view: EntitlementView): boolean {
+  return view.mode === 'metered' && view.enforcement === 'enforce';
+}
 
 export type EntitlementDenialCode =
   | 'billing_unavailable'
@@ -328,10 +370,11 @@ async function readState(db: Db, workspaceId: string): Promise<StateRow | undefi
     .get<StateRow>(workspaceId);
 }
 
-function meteredView(
+function meteredViewFor(
   row: { snapshot: StoredBillingSnapshot; fetchedAt: Date } | null,
   stale: boolean,
-  now: Date
+  now: Date,
+  enforcement: BillingEnforcementMode
 ): EntitlementView {
   if (!row)
     return {
@@ -341,7 +384,8 @@ function meteredView(
       stale,
       withinGrace: false,
       graceEndsAt: null,
-      now
+      now,
+      enforcement
     };
   const graceEndsAt = new Date(row.fetchedAt.getTime() + BILLING_GRACE_MS);
   return {
@@ -351,7 +395,8 @@ function meteredView(
     stale,
     withinGrace: now.getTime() <= graceEndsAt.getTime(),
     graceEndsAt,
-    now
+    now,
+    enforcement
   };
 }
 
@@ -371,15 +416,32 @@ function safeBillingError(error: unknown): string {
  * otherwise asks Billing and caches the answer; when Billing fails, falls back
  * to the cache and marks it stale. Never call this inside a transaction: it
  * may perform network I/O.
+ *
+ * `purpose: 'gate'` (the default) is a write path asking whether to allow an
+ * expansion: with enforcement `off` it is answered `unmetered` without asking
+ * Billing. `purpose: 'read'` (billing screen, worker upkeep) always loads.
  */
 export async function loadEntitlements(
   db: Db,
   workspaceId: string,
-  options: { now?: Date; client?: BillingApi | null; refresh?: 'auto' | 'force' } = {}
+  options: {
+    now?: Date;
+    client?: BillingApi | null;
+    refresh?: 'auto' | 'force';
+    purpose?: 'gate' | 'read';
+    enforcement?: BillingEnforcementMode;
+  } = {}
 ): Promise<EntitlementView> {
   const client = options.client === undefined ? getBillingClient() : options.client;
   if (!client) return { mode: 'unmetered' };
+  const enforcement = options.enforcement ?? billingEnforcementMode();
+  if (enforcement === 'off' && (options.purpose ?? 'gate') === 'gate') return { mode: 'unmetered' };
   const now = options.now ?? new Date();
+  const meteredView = (
+    row: { snapshot: StoredBillingSnapshot; fetchedAt: Date } | null,
+    stale: boolean,
+    at: Date
+  ) => meteredViewFor(row, stale, at, enforcement);
   const row = await readState(db, workspaceId);
   const cached = fromRow(row);
   if (options.refresh !== 'force' && cached) {
@@ -520,6 +582,67 @@ export async function lockEntitlement(
 }
 
 /**
+ * Records an observe-mode denial: one `billing.entitlement.would_deny` event
+ * per workspace, entitlement and UTC hour. The hour's event stream row is the
+ * dedupe claim: a concurrent writer of the same claim waits on the primary key
+ * and then skips. The payload carries counts only, never content. Volume is
+ * bounded (at most one per entitlement per workspace-hour, only while
+ * observing); the events live with the workspace's append-only ledger and go
+ * with it (ON DELETE CASCADE).
+ */
+export async function recordWouldDeny(
+  db: Db,
+  workspaceId: string,
+  decision: DeniedEntitlementDecision,
+  used: number | null,
+  now: Date
+): Promise<boolean> {
+  const streamId = `${decision.key}:${now.toISOString().slice(0, 13)}`;
+  return db.transactionOrInline(async (tx) => {
+    const claimed = await tx
+      .prepare(
+        `INSERT INTO event_streams (workspace_id,stream_type,stream_id,current_version,updated_at)
+         VALUES (?,?,?,0,?) ON CONFLICT DO NOTHING RETURNING stream_id`
+      )
+      .get<{ stream_id: string }>(workspaceId, WOULD_DENY_STREAM, streamId, now.toISOString());
+    if (!claimed) return false;
+    await appendDomainEvent(tx, {
+      workspaceId,
+      streamType: WOULD_DENY_STREAM,
+      streamId,
+      eventType: WOULD_DENY_EVENT,
+      actorType: 'system',
+      payload: {
+        entitlement: decision.key,
+        reason: decision.code,
+        limit: decision.limit,
+        used,
+        requested: decision.quantity
+      },
+      occurredAt: now
+    });
+    return true;
+  });
+}
+
+/**
+ * Applies a gate decision under the rollout mode: `enforce` throws the 402
+ * denial, `observe` records it and lets the write proceed, `off` and
+ * unmetered views do nothing.
+ */
+export async function applyDecision(
+  db: Db,
+  view: EntitlementView,
+  workspaceId: string,
+  decision: EntitlementDecision,
+  used: number | null
+): Promise<void> {
+  if (decision.allowed || view.mode !== 'metered' || view.enforcement === 'off') return;
+  if (view.enforcement === 'enforce') throw new EntitlementDeniedError(decision, used);
+  await recordWouldDeny(db, workspaceId, decision, used, view.now);
+}
+
+/**
  * Count-under-lock check for adding `adding` units of `key`. Pass `lock:false`
  * only where the caller already holds the lock or cannot hold one (Better
  * Auth hooks, which run on another connection).
@@ -531,19 +654,23 @@ export async function assertEntitlement(
   key: CountedEntitlementKey,
   options: { adding: number; lock?: boolean; pendingInvitations?: boolean }
 ): Promise<void> {
-  if (view.mode === 'unmetered') return;
+  if (view.mode !== 'metered' || !gateActive(view)) return;
   if (options.lock !== false) await lockEntitlement(tx, workspaceId, key);
   const used = await countEntitlementUsage(tx, workspaceId, key, {
     pendingInvitations: options.pendingInvitations,
     now: view.now
   });
-  const decision = can(view, key, used + options.adding);
-  if (!decision.allowed) throw new EntitlementDeniedError(decision, used);
+  await applyDecision(tx, view, workspaceId, can(view, key, used + options.adding), used);
 }
 
-export function assertCredits(view: EntitlementView, amount: number): void {
-  const decision = can(view, 'credits', amount);
-  if (!decision.allowed) throw new EntitlementDeniedError(decision, null);
+export async function assertCredits(
+  db: Db,
+  view: EntitlementView,
+  workspaceId: string,
+  amount: number
+): Promise<void> {
+  if (!gateActive(view)) return;
+  await applyDecision(db, view, workspaceId, can(view, 'credits', amount), null);
 }
 
 export type EntitlementUsageLine = {

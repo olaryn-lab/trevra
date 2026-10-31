@@ -1,10 +1,11 @@
 import type { Db } from '../db.js';
 import {
+  applyDecision,
   assertCredits,
   assertEntitlement,
   can,
   countEntitlementUsage,
-  EntitlementDeniedError,
+  gateActive,
   lockEntitlement,
   type EntitlementView
 } from './entitlements.js';
@@ -20,16 +21,26 @@ import {
  * LinkedIn account, raising an account's daily volume, adding a teammate.
  * Pausing, stopping, editing, reading and already-approved work never pass
  * through here.
+ *
+ * Whether a denial blocks follows the rollout mode (see `applyDecision`):
+ * only `enforce` throws; `observe` records it and the write proceeds.
  */
 
-/** A campaign is about to move into `running` from draft or paused. */
+/**
+ * A campaign is about to move into `running` from draft or paused. The limit
+ * is on campaigns RUNNING at once and a paused campaign is not running, so
+ * resuming is judged exactly like any start: it fits when the running count
+ * plus this one is within the limit. Pausing frees the slot; resuming retakes
+ * it unless another campaign was started into it meanwhile. Re-starting a
+ * campaign that is already running never reaches this check.
+ */
 export async function assertCampaignActivation(
   tx: Db,
   view: EntitlementView,
   workspaceId: string
 ): Promise<void> {
-  if (view.mode === 'unmetered') return;
-  assertCredits(view, 1);
+  if (!gateActive(view)) return;
+  await assertCredits(tx, view, workspaceId, 1);
   await assertEntitlement(tx, view, workspaceId, 'campaigns', { adding: 1 });
 }
 
@@ -57,7 +68,7 @@ export async function assertSeatWrite(
   seatKey: string,
   patch: SeatVolumePatch
 ): Promise<void> {
-  if (view.mode === 'unmetered') return;
+  if (!gateActive(view)) return;
   await lockEntitlement(tx, workspaceId, 'outreach_prepare');
   const existing = await tx
     .prepare(
@@ -67,8 +78,7 @@ export async function assertSeatWrite(
     .get<Record<(typeof SEAT_VOLUME_FIELDS)[number][1], number>>(workspaceId, seatKey);
   const seats = await countEntitlementUsage(tx, workspaceId, 'outreach_prepare');
   if (!existing) {
-    const decision = can(view, 'outreach_prepare', seats + 1);
-    if (!decision.allowed) throw new EntitlementDeniedError(decision, seats);
+    await applyDecision(tx, view, workspaceId, can(view, 'outreach_prepare', seats + 1), seats);
     return;
   }
   const raises = SEAT_VOLUME_FIELDS.some(([field, column]) => {
@@ -76,9 +86,8 @@ export async function assertSeatWrite(
     return typeof next === 'number' && next > Number(existing[column]);
   });
   if (!raises) return;
-  const decision = can(view, 'outreach_prepare', seats);
-  if (!decision.allowed) throw new EntitlementDeniedError(decision, seats);
-  assertCredits(view, 1);
+  await applyDecision(tx, view, workspaceId, can(view, 'outreach_prepare', seats), seats);
+  await assertCredits(tx, view, workspaceId, 1);
 }
 
 /**
@@ -94,20 +103,24 @@ export async function assertNewSeatPrecheck(
   workspaceId: string,
   seatKey: string
 ): Promise<void> {
-  if (view.mode === 'unmetered') return;
+  if (!gateActive(view)) return;
   const existing = await db
     .prepare('SELECT 1 AS present FROM linkedin_seats WHERE workspace_id=? AND seat_key=?')
     .get<{ present: number }>(workspaceId, seatKey);
   if (existing) return;
   const seats = await countEntitlementUsage(db, workspaceId, 'outreach_prepare');
-  const decision = can(view, 'outreach_prepare', seats + 1);
-  if (!decision.allowed) throw new EntitlementDeniedError(decision, seats);
+  await applyDecision(db, view, workspaceId, can(view, 'outreach_prepare', seats + 1), seats);
 }
 
 /**
  * A new invitation. Members plus unexpired pending invitations plus this one
  * must fit the `team` limit. `lock:false` is for the Better Auth hook, which
  * runs on its own connection; Trevra's own route takes the lock.
+ *
+ * Known gap: Better Auth 1.7 calls `beforeCreateInvitation` and then inserts
+ * the invitation outside any transaction the hook can join, so two direct
+ * Better Auth invites racing at the limit are not serialized. Trevra's own
+ * POST /api/team/members holds the lock across the insert.
  */
 export async function assertTeamInvite(
   db: Db,

@@ -253,6 +253,8 @@ export type BillingSnapshot =
   | { enabled: false }
   | {
       enabled: true;
+      /** Rollout mode (TREVRA_BILLING_ENFORCEMENT): limits block only under `enforce`. */
+      enforcement: 'off' | 'observe' | 'enforce';
       canManage: boolean;
       customer: {
         plan_code: string | null;

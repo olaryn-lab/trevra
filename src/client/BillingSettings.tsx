@@ -161,6 +161,7 @@ export function BillingSettings() {
   const hasSubscription = !['none', 'canceled', 'incomplete_expired'].includes(subscriptionStatus);
   const renewal = snapshot.renewal;
   const overLines = snapshot.usage.filter((line) => line.over);
+  const enforced = snapshot.enforcement === 'enforce';
   const query = new URLSearchParams(window.location.search);
   const checkoutState = query.get('checkout');
   const requestedPlan = query.get('plan');
@@ -276,11 +277,23 @@ export function BillingSettings() {
             limits keep applying from it until {day(snapshot.state.graceEndsAt)}.
           </p>
         )}
-        {snapshot.expansionBlock && (
-          <p className="billing-notice billing-notice-blocked" role="status">
-            {snapshot.expansionBlock.reason}
+        {!enforced && (
+          <p className="panel-note" role="status">
+            {snapshot.enforcement === 'off'
+              ? 'Plan limits are not enforced on this deployment: nothing is blocked and no usage is charged.'
+              : 'Plan limits are observed, not enforced yet: nothing is blocked and no usage is charged. Expansions past the plan are recorded for review.'}
           </p>
         )}
+        {snapshot.expansionBlock &&
+          (enforced ? (
+            <p className="billing-notice billing-notice-blocked" role="status">
+              {snapshot.expansionBlock.reason}
+            </p>
+          ) : (
+            <p className="billing-notice" role="status">
+              Would block once limits are enforced: {snapshot.expansionBlock.reason}
+            </p>
+          ))}
         {snapshot.trial?.active && (
           <p className="billing-notice" role="status">
             Trial active until {day(snapshot.trial.endsAt)}. Choose a plan before then to keep
@@ -409,10 +422,12 @@ export function BillingSettings() {
           </table>
         </div>
         {overLines.length > 0 && (
-          <p className="billing-notice billing-notice-blocked" role="status">
+          <p className={`billing-notice${enforced ? ' billing-notice-blocked' : ''}`} role="status">
             Over the current plan: {overLines.map((line) => line.label.toLowerCase()).join(', ')}.
-            Nothing has been deleted. Adding more is blocked until usage is back within the plan or
-            the plan is upgraded.
+            Nothing has been deleted.{' '}
+            {enforced
+              ? 'Adding more is blocked until usage is back within the plan or the plan is upgraded.'
+              : 'Nothing is blocked while limits are not enforced; once they are, adding more needs usage back within the plan or an upgrade.'}
           </p>
         )}
       </Panel>
@@ -560,8 +575,9 @@ export function BillingSettings() {
                 <>
                   <p>
                     This workspace already uses more than {pending.plan.name} allows. Nothing will
-                    be deleted and running work continues, but adding more is blocked until usage is
-                    back within the plan:
+                    be deleted and running work continues, but adding more{' '}
+                    {enforced ? 'is blocked' : 'will be blocked once limits are enforced'} until
+                    usage is back within the plan:
                   </p>
                   <OverLimitList lines={pending.preview.overLimit} />
                 </>

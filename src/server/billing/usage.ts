@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from '../db.js';
 import { BillingServiceError, type BillingApi } from '../billing-client.js';
+import { billingEnforcementMode, type BillingEnforcementMode } from './entitlements.js';
 
 /**
  * TRV-057 metered usage, reported to Olaryn Billing idempotently.
@@ -29,6 +30,13 @@ import { BillingServiceError, type BillingApi } from '../billing-client.js';
  *     settled reservation is a no-op in Billing.
  *  3. Only an EXPIRED reservation (never settled, so never counted) gets a
  *     new generation key.
+ *
+ * WHEN IT CHARGES. Only under TREVRA_BILLING_ENFORCEMENT=enforce. A
+ * workspace's `metering_started_at` is stamped the first time an enforce pass
+ * sees it and cleared by any observe/off pass, and only source events after
+ * the stamp are enqueued, so switching to enforce never sends a backlog of
+ * work done while observing. In observe/off nothing is enqueued and nothing
+ * is reserved or settled.
  */
 
 export const USAGE_METER = 'credits';
@@ -65,14 +73,46 @@ const SQL_EVENT_ID = (workspace: string, sourceType: string, sourceId: string) =
   `encode(sha256(convert_to(${workspace} || '|${USAGE_METER}|${sourceType}|' || ${sourceId}, 'UTF8')), 'hex')`;
 
 /**
+ * Starts metering for every workspace with a Billing snapshot that is not
+ * metered yet, at `now`. Called by the enforce pass before it enqueues.
+ */
+export async function armUsageMetering(db: Db, now: Date): Promise<number> {
+  const result = await db
+    .prepare(
+      'UPDATE billing_workspace_state SET metering_started_at=?,updated_at=? WHERE metering_started_at IS NULL'
+    )
+    .run(now.toISOString(), now.toISOString());
+  return result.changes;
+}
+
+/**
+ * Stops metering: an observe/off pass clears every stamp, so returning to
+ * enforce restarts metering at that moment instead of billing the gap.
+ * Already-enqueued pending rows (work done under enforce) wait in the outbox.
+ */
+export async function disarmUsageMetering(db: Db, now: Date): Promise<number> {
+  const result = await db
+    .prepare(
+      'UPDATE billing_workspace_state SET metering_started_at=NULL,updated_at=? WHERE metering_started_at IS NOT NULL'
+    )
+    .run(now.toISOString());
+  return result.changes;
+}
+
+/**
  * Copies billable ledger rows into the outbox. Only workspaces with a Billing
- * snapshot are metered, and only work recorded after metering started for
- * them, so enabling Billing never back-bills history.
+ * snapshot and a metering stamp are metered, and only work recorded after the
+ * stamp, so neither enabling Billing nor switching to enforce back-bills.
+ * Does nothing unless the mode is `enforce`.
  * lc-debt: per-workspace range scans of linkedin_actions/domain_events without
  * a (workspace_id, recorded_at|occurred_at) index; add those indexes
  * CONCURRENTLY or a per-workspace cursor if ledger volume makes the sweep slow.
  */
-export async function enqueueBillableUsage(db: Db, options: { now?: Date } = {}): Promise<number> {
+export async function enqueueBillableUsage(
+  db: Db,
+  options: { now?: Date; mode?: BillingEnforcementMode } = {}
+): Promise<number> {
+  if ((options.mode ?? billingEnforcementMode()) !== 'enforce') return 0;
   const now = options.now ?? new Date();
   const cutoff = new Date(now.getTime() - USAGE_LOOKBACK_MS).toISOString();
   const until = now.toISOString();
@@ -85,7 +125,8 @@ export async function enqueueBillableUsage(db: Db, options: { now?: Date } = {})
               ?::timestamptz
        FROM billing_workspace_state s
        JOIN linkedin_actions a ON a.workspace_id=s.workspace_id
-       WHERE a.recorded_at >= GREATEST(?::timestamptz, s.metering_started_at)
+       WHERE s.metering_started_at IS NOT NULL
+         AND a.recorded_at >= GREATEST(?::timestamptz, s.metering_started_at)
          AND a.recorded_at <= ?::timestamptz
          AND a.status IN ('sent','accepted','replied','declined','withdrawn')
          AND a.source NOT IN ('manual','export')
@@ -101,7 +142,8 @@ export async function enqueueBillableUsage(db: Db, options: { now?: Date } = {})
               ?::timestamptz
        FROM billing_workspace_state s
        JOIN domain_events e ON e.workspace_id=s.workspace_id
-       WHERE e.event_type='action.executed'
+       WHERE s.metering_started_at IS NOT NULL
+         AND e.event_type='action.executed'
          AND e.occurred_at >= GREATEST(?::timestamptz, s.metering_started_at)
          AND e.occurred_at <= ?::timestamptz
        ON CONFLICT DO NOTHING`
@@ -147,8 +189,11 @@ function shortError(error: unknown): string {
  */
 export async function reportPendingUsage(
   db: Db,
-  options: { client: BillingApi; now?: Date; limit?: number }
+  options: { client: BillingApi; now?: Date; limit?: number; mode?: BillingEnforcementMode }
 ): Promise<UsageReportResult> {
+  // No reservation or settle leaves Trevra outside enforce mode.
+  if ((options.mode ?? billingEnforcementMode()) !== 'enforce')
+    return { claimed: 0, reported: 0, rejected: 0, retried: 0, dead: 0 };
   const now = options.now ?? new Date();
   const token = randomUUID();
   const rows = await db

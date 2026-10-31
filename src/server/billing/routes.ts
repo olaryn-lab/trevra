@@ -100,7 +100,7 @@ export function mountBillingRoutes(
       const workspaceId = req.auth!.workspaceId;
       if (!(await workspaceRow(db, workspaceId)))
         return res.status(404).json({ error: 'Workspace not found' });
-      const view = await loadEntitlements(db, workspaceId, { client });
+      const view = await loadEntitlements(db, workspaceId, { client, purpose: 'read' });
       if (view.mode !== 'metered' || !view.snapshot)
         return res.status(503).json({ error: 'Billing service unavailable' });
       const snapshot = view.snapshot;
@@ -116,6 +116,8 @@ export function mountBillingRoutes(
         !subscription.cancel_at_period_end;
       res.json({
         enabled: true,
+        // TREVRA_BILLING_ENFORCEMENT: limits block only under `enforce`.
+        enforcement: view.enforcement,
         canManage: req.auth!.role === 'owner',
         customer: snapshot.customer,
         subscription,
@@ -252,7 +254,7 @@ export function mountBillingRoutes(
           )
         });
         const overLimit = await overLimitFor(db, client, workspace.id, parsed.data.planCode);
-        await loadEntitlements(db, workspace.id, { client, refresh: 'force' });
+        await loadEntitlements(db, workspace.id, { client, refresh: 'force', purpose: 'read' });
         res.json({ result, overLimit });
       } catch (error) {
         sendBillingError(res, next, error);
@@ -282,7 +284,7 @@ export function mountBillingRoutes(
             action === 'cancel'
               ? await client.cancelSubscription({ workspaceId, idempotencyKey })
               : await client.resumeSubscription({ workspaceId, idempotencyKey });
-          await loadEntitlements(db, workspaceId, { client, refresh: 'force' });
+          await loadEntitlements(db, workspaceId, { client, refresh: 'force', purpose: 'read' });
           res.json({ result });
         } catch (error) {
           sendBillingError(res, next, error);
