@@ -22,6 +22,9 @@ export function LinkedInActionApprovals() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [drafting, setDrafting] = useState('');
+  // Closing the AI panel brings back that row's "Draft with AI" button; focus
+  // returns to it instead of falling to the page.
+  const returnFocus = useRef('');
   const latestRead = useRef(0);
   const load = useCallback(async () => {
     const requestId = ++latestRead.current;
@@ -102,7 +105,7 @@ export function LinkedInActionApprovals() {
               {row.body && <pre className="li-review-message">{row.body}</pre>}
               {row.threadUrn && (
                 <details className="li-review-details">
-                  <summary>Technical details</summary>
+                  <summary className="ui-disclosure-summary">Technical details</summary>
                   <p>Reply thread: {row.threadUrn}</p>
                 </details>
               )}
@@ -118,7 +121,16 @@ export function LinkedInActionApprovals() {
                     : 'Waiting for a workspace owner or manager to approve.'}
                 </p>
                 {canDraft && !panelOpen && (
-                  <Button disabled={busy !== ''} onClick={() => setDrafting(row.actionId)}>
+                  <Button
+                    ref={(node) => {
+                      if (node && returnFocus.current === row.actionId) {
+                        returnFocus.current = '';
+                        node.focus();
+                      }
+                    }}
+                    disabled={busy !== ''}
+                    onClick={() => setDrafting(row.actionId)}
+                  >
                     Draft with AI
                   </Button>
                 )}
@@ -153,7 +165,10 @@ export function LinkedInActionApprovals() {
                   stepId={row.workflowStepId}
                   actionId={row.actionId}
                   owner={owner}
-                  onClose={() => setDrafting('')}
+                  onClose={() => {
+                    returnFocus.current = row.actionId;
+                    setDrafting('');
+                  }}
                   onApproved={async () => {
                     setDrafting('');
                     await load();

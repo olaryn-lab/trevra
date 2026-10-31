@@ -53,8 +53,12 @@ export function AiDraftPanel({
   const [error, setError] = useState('');
   const [note, setNote] = useState('');
   const live = useRef(true);
+  const panelRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     live.current = true;
+    // The "Draft with AI" button that opened this panel is gone once it
+    // renders; move focus here so keyboard users do not land on the page.
+    panelRef.current?.focus();
     return () => {
       live.current = false;
     };
@@ -146,7 +150,13 @@ export function AiDraftPanel({
   };
 
   return (
-    <section className="ai-draft-panel" aria-label="AI draft review" aria-busy={working}>
+    <section
+      ref={panelRef}
+      tabIndex={-1}
+      className="ai-draft-panel"
+      aria-label="AI draft review"
+      aria-busy={working}
+    >
       <div className="ai-draft-heading">
         <strong>AI draft</strong>
         {draft && <span className="ai-draft-badge">{ORIGIN_LABEL[draft.origin]}</span>}
@@ -206,12 +216,14 @@ export function AiDraftPanel({
           </p>
           {draft.fallbackReason && (
             <details className="li-review-details">
-              <summary>Why the template was proposed</summary>
+              <summary className="ui-disclosure-summary">Why the template was proposed</summary>
               <p className="ai-draft-reason">{draft.fallbackReason}</p>
             </details>
           )}
           <details className="li-review-details">
-            <summary>Evidence used ({draft.evidenceFacts.length})</summary>
+            <summary className="ui-disclosure-summary">
+              Evidence used ({draft.evidenceFacts.length})
+            </summary>
             <dl className="ai-draft-evidence">
               {draft.evidenceFacts.map((fact, index) => (
                 <div key={`${fact.label}-${index}`}>

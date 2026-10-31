@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   approveCampaignEmailReview,
   getCampaignEmailReviews,
@@ -24,6 +24,9 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
   const [failure, setFailure] = useState('');
   const [busy, setBusy] = useState('');
   const [drafting, setDrafting] = useState('');
+  // Closing the AI panel brings back that row's "Draft with AI" button; focus
+  // returns to it instead of falling to the page.
+  const returnFocus = useRef('');
   const load = useCallback(async () => {
     try {
       const rows = await getCampaignEmailReviews(campaignId);
@@ -70,7 +73,7 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
                 without approval of this exact text.
               </p>
             )}
-            <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
+            <pre className="li-review-message">
               {row.body}
               {'\n\n'}
               {row.footer}
@@ -90,7 +93,16 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
                 : 'Waiting for a workspace owner or manager to approve.'}
             </p>
             {row.policy.effect !== 'deny' && drafting !== row.actionId && (
-              <Button disabled={busy !== ''} onClick={() => setDrafting(row.actionId)}>
+              <Button
+                ref={(node) => {
+                  if (node && returnFocus.current === row.actionId) {
+                    returnFocus.current = '';
+                    node.focus();
+                  }
+                }}
+                disabled={busy !== ''}
+                onClick={() => setDrafting(row.actionId)}
+              >
                 Draft with AI
               </Button>
             )}
@@ -98,8 +110,8 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
               row.policy.effect !== 'deny' &&
               needsApproval(row) &&
               drafting !== row.actionId && (
-                <button
-                  type="button"
+                <Button
+                  variant="primary"
                   disabled={busy !== '' || !row.sender}
                   onClick={async () => {
                     setBusy(row.actionId);
@@ -118,7 +130,7 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
                   }}
                 >
                   {busy === row.actionId ? 'Approving…' : 'Approve this exact email'}
-                </button>
+                </Button>
               )}
             {drafting === row.actionId && (
               <AiDraftPanel
@@ -127,7 +139,10 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
                 stepId={row.workflowStepId}
                 actionId={row.actionId}
                 owner={owner}
-                onClose={() => setDrafting('')}
+                onClose={() => {
+                  returnFocus.current = row.actionId;
+                  setDrafting('');
+                }}
                 onApproved={async () => {
                   setDrafting('');
                   await load();
@@ -136,9 +151,9 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
             )}
           </article>
         ))}
-      <button type="button" className="ghost-button" onClick={() => void load()}>
+      <Button variant="ghost" onClick={() => void load()}>
         Refresh email reviews
-      </button>
+      </Button>
     </section>
   );
 }
