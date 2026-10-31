@@ -555,6 +555,7 @@ import {
   updateManagedCampaignControls,
   type ManagedCampaign
 } from './linkedin/managed-campaigns.js';
+import { registerLinkedInReportRoutes } from './linkedin/rep-reporting-routes.js';
 // three modules and this file are written against; nothing here reaches past
 // the functions below into the store's own SQL.
 import {
@@ -7566,6 +7567,9 @@ export function createApp(db: Db) {
       res.json(await managedAnalytics(db, req.auth!.workspaceId, filters));
     })
   );
+
+  // Per-rep reporting and the date-range stats exports (TRV-046, TRV-049).
+  registerLinkedInReportRoutes(app, db);
 
   /* Manager configuration CRUD. These writes configure data; they do not create action-ledger rows. */
   app.post(
