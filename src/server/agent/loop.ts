@@ -206,7 +206,9 @@ export async function runHostedAgent(db: Db, input: HostedAgentRunInput): Promis
   // as an error rather than as an output that happens to mention one.
   const toolErrors = new Map<string, string>();
 
-  const definitions = await listAgentTools(db, input.workspaceId, agent.id);
+  // Offered with the same scope filter MCP tools/list uses, so the model is
+  // never shown a tool `callAgentTool` would refuse.
+  const definitions = await listAgentTools(db, input.workspaceId, agent.id, HOSTED_AGENT_SCOPES);
   const tools = Object.fromEntries(
     definitions.map((definition) => [
       definition.name,
