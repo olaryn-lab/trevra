@@ -969,8 +969,10 @@ const PROFILE_KEY_LATERAL_SQL = `CROSS JOIN LATERAL (
 /**
  * THE workspace-suppression predicate for a campaign member (aliases `m`, `c`,
  * `pk`): an unlifted all/LinkedIn suppression matching the lead's Person, email
- * or LinkedIn profile. Eligibility and the runner's planning boundary share
- * this one expression so they cannot disagree about who is suppressed.
+ * (the lead's own or its linked Person's) or LinkedIn profile. Eligibility and
+ * the runner's planning boundary share this one expression so they cannot
+ * disagree about who is suppressed; the send-time guard (`seatLedgerFacts`)
+ * asks the same question from the action's target profile.
  */
 const WORKSPACE_SUPPRESSION_SQL = `EXISTS (
                 SELECT 1 FROM suppressions s
@@ -980,6 +982,10 @@ const WORKSPACE_SUPPRESSION_SQL = `EXISTS (
                     (s.person_id IS NOT NULL AND s.person_id=c.person_id)
                     OR (s.email_normalized IS NOT NULL AND c.email IS NOT NULL
                         AND s.email_normalized=LOWER(BTRIM(c.email)))
+                    OR (s.email_normalized IS NOT NULL AND c.person_id IS NOT NULL
+                        AND EXISTS (SELECT 1 FROM contacts sp
+                                    WHERE sp.workspace_id=m.workspace_id AND sp.id=c.person_id
+                                      AND sp.email_normalized=s.email_normalized))
                     OR (s.linkedin_url IS NOT NULL AND pk.profile_key IS NOT NULL
                         AND LOWER(RTRIM(SPLIT_PART(SPLIT_PART(s.linkedin_url, chr(63),1),'#',1),'/'))=pk.profile_key)
                   )

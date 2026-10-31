@@ -476,6 +476,10 @@ async function seatLedgerFacts(
         'http://linkedin.com'
       ].map((host) => host + path)
     : ['', '', '', ''];
+  // The same equivalents as stored keys, with and without the trailing slash, so
+  // the suppression lookup can use the (workspace_id, LOWER(profile_url)) and
+  // (workspace_id, linkedin_url_normalized) indexes. Empty for a non-profile target.
+  const profileKeys = path ? profileVariants.flatMap((url) => [url, `${url}/`]) : [];
   const at = (days: number) => new Date(now.getTime() - days * 86_400_000).toISOString();
   const since24 = new Date(now.getTime() - 24 * 3_600_000).toISOString();
   const since7d = new Date(now.getTime() - 24 * 7 * 3_600_000).toISOString();
@@ -553,7 +557,21 @@ async function seatLedgerFacts(
         EXISTS (SELECT 1 FROM linkedin_actions
            WHERE workspace_id=? AND seat_key=? AND kind=? AND target_ref=? AND replay_scope=?
              AND status <> 'skipped' AND id IS DISTINCT FROM ?::text) AS duplicate,
-        (SELECT s.reason
+        (WITH target_leads AS (
+           -- The workspace's lead rows at this profile: their emails and Person links.
+           SELECT l.person_id, LOWER(BTRIM(l.email)) AS email
+             FROM linkedin_lead_contacts l
+            WHERE l.workspace_id=? AND l.profile_url IS NOT NULL
+              AND LOWER(l.profile_url) = ANY(?::text[])
+         ), target_people AS (
+           -- The canonical People those leads link to, or who carry this profile.
+           SELECT p.id, p.email_normalized
+             FROM contacts p
+            WHERE p.workspace_id=?
+              AND (p.id IN (SELECT person_id FROM target_leads WHERE person_id IS NOT NULL)
+                   OR p.linkedin_url_normalized = ANY(?::text[]))
+         )
+         SELECT s.reason
            FROM suppressions s
            LEFT JOIN contacts p ON p.workspace_id=s.workspace_id AND p.id=s.person_id
           WHERE s.workspace_id=? AND s.lifted_at IS NULL AND s.channel IN ('all','linkedin')
@@ -565,6 +583,13 @@ async function seatLedgerFacts(
               (p.linkedin_url_normalized IS NOT NULL AND
                LOWER(RTRIM(p.linkedin_url_normalized,'/')) =
                LOWER(RTRIM(SPLIT_PART(SPLIT_PART(?::text, chr(63),1),'#',1),'/')))
+              OR
+              (s.person_id IS NOT NULL AND s.person_id IN (SELECT id FROM target_people))
+              OR
+              (s.email_normalized IS NOT NULL AND (
+                 s.email_normalized IN (SELECT email FROM target_leads WHERE email IS NOT NULL)
+                 OR s.email_normalized IN (SELECT email_normalized FROM target_people
+                                            WHERE email_normalized IS NOT NULL)))
             )
           ORDER BY CASE WHEN s.channel='linkedin' THEN 0 ELSE 1 END, s.created_at DESC
           LIMIT 1) AS suppression_reason,
@@ -626,6 +651,10 @@ async function seatLedgerFacts(
       input.targetRef,
       input.replayScope,
       input.excludeActionId,
+      seat.workspaceId,
+      profileKeys,
+      seat.workspaceId,
+      profileKeys,
       seat.workspaceId,
       input.targetRef,
       input.targetRef,
