@@ -233,6 +233,15 @@ export interface CampaignQueueSummary {
   /** Actions already allocated inside the campaign's current 24h ramp day, by the four headline safety buckets. */
   allocatedCampaignDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
   /**
+   * What the PLANNER has already spent of this campaign's sender seat
+   * (`seatKey`), by every campaign and route on it: the planner's own window
+   * (planned_for within 24h either side of now) and budget buckets
+   * (`runner.ts` `budgetKindForLedgerKind`). A seat's daily ceiling minus this
+   * is the room left for ANY campaign on it; ceiling minus
+   * `allocatedCampaignDay` showed the same room on every campaign sharing a seat.
+   */
+  allocatedSeatDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
+  /**
    * WHAT EACH WORKFLOW STEP IS ACTUALLY WAITING FOR, one row per step.
    *
    * `count` used to be the whole answer and the card printed it as "N
@@ -2811,7 +2820,7 @@ export async function campaignQueueSummary(
   const allocations = await db
     .prepare(
       `SELECT
-       COUNT(*) FILTER (WHERE kind IN ('invite','group_invite','event_invite','company_invite'))::int AS invite,
+       COUNT(*) FILTER (WHERE kind IN ('invite','group_invite','event_invite','company_invite_follow'))::int AS invite,
        COUNT(*) FILTER (WHERE kind IN ('dm','reply','inmail','group_message','event_message'))::int AS dm,
        COUNT(*) FILTER (WHERE kind='profile_view')::int AS profile_view,
        COUNT(*) FILTER (WHERE kind IN ('follow','unfollow','disconnect','company_follow'))::int AS follow
@@ -2824,6 +2833,25 @@ export async function campaignQueueSummary(
       campaignId,
       dayStart,
       dayEnd
+    );
+  // The planner's seat-used query (`runner.ts` `runManagedCampaigns`), bucketed
+  // the planner's way: reply and InMail are budgeted apart from `dm` there.
+  const seatAllocations = await db
+    .prepare(
+      `SELECT
+       COUNT(*) FILTER (WHERE kind IN ('invite','company_invite_follow','event_invite','group_invite'))::int AS invite,
+       COUNT(*) FILTER (WHERE kind IN ('dm','group_message','event_message'))::int AS dm,
+       COUNT(*) FILTER (WHERE kind='profile_view')::int AS profile_view,
+       COUNT(*) FILTER (WHERE kind IN ('follow','unfollow','disconnect','company_follow'))::int AS follow
+     FROM linkedin_actions
+     WHERE workspace_id=? AND seat_key=? AND status<>'skipped'
+       AND planned_for IS NOT NULL AND planned_for>=?::timestamptz AND planned_for<=?::timestamptz`
+    )
+    .get<Record<'invite' | 'dm' | 'profile_view' | 'follow', number>>(
+      workspaceId,
+      campaign.seatKey,
+      new Date(now.getTime() - 86_400_000).toISOString(),
+      new Date(now.getTime() + 86_400_000).toISOString()
     );
   const blocked =
     (
@@ -2854,6 +2882,12 @@ export async function campaignQueueSummary(
       dm: Number(allocations?.dm ?? 0),
       profile_view: Number(allocations?.profile_view ?? 0),
       follow: Number(allocations?.follow ?? 0)
+    },
+    allocatedSeatDay: {
+      invite: Number(seatAllocations?.invite ?? 0),
+      dm: Number(seatAllocations?.dm ?? 0),
+      profile_view: Number(seatAllocations?.profile_view ?? 0),
+      follow: Number(seatAllocations?.follow ?? 0)
     },
     backlogByStep: [...backlog.entries()].map(([index, value]) => ({
       stepId: campaign.steps[index]?.id ?? `step-${index + 1}`,

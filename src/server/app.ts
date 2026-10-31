@@ -317,7 +317,6 @@ import {
   type RedditLocalWorkerConfig
 } from './reddit/local-worker.js';
 import {
-  ACCEPTANCE_THROTTLE_FACTOR,
   ACCEPTANCE_WINDOW_DAYS,
   ACTION_GAP_SECONDS,
   BUSINESS_HOURS,
@@ -360,6 +359,7 @@ import {
   warmupWeekOf,
   type SeatPatch
 } from './linkedin/seats.js';
+import { linkedInDailyAllowance, type LinkedInAllowanceBound } from './linkedin/guard.js';
 import {
   SIDE_TASK_NAMES,
   availabilityCatchUpPending,
@@ -12120,6 +12120,21 @@ interface LinkedInCeiling {
   /** The same fact in a sentence a founder can read. */
   rule: string;
   /**
+   * DAY ROWS ONLY. What the send-time gate admits of this kind in the 24 hours
+   * ending now (`guard.ts` `linkedInDailyAllowance`): `ceiling` above after
+   * today's draw and the cold-account day-over-day ramp, and `remaining` after
+   * the operator pool, the rolling 7- and 30-day bands, the InMail quota and
+   * the outstanding-invite backlog. `ceiling` above
+   * stays the structural number the planner budgets with.
+   */
+  today?: {
+    ceiling: number;
+    used: number;
+    remaining: number;
+    boundBy: LinkedInAllowanceBound;
+    rule: string;
+  };
+  /**
    * The provenance of `bandCeiling` -- of the RESEARCH, not of the number that
    * ended up binding. An operator's own setting has no confidence tag and is
    * not given one here: `ceilingSource` says when it is what bound, and
@@ -12129,8 +12144,6 @@ interface LinkedInCeiling {
   confidence: LinkedInLimitConfidence;
   source: string;
 }
-
-const LINKEDIN_WINDOW_HOURS = { day: 24, week: 24 * 7, month: 24 * 30 } as const;
 
 /** The three kinds that share ONE operator setting. `guard.ts` counts them together. */
 const MESSAGE_POOL_KINDS = ['dm', 'reply', 'inmail', 'group_message', 'event_message'] as const;
@@ -12200,11 +12213,14 @@ async function effectiveLinkedInLimits(
   for (const kind of PACED_KINDS) {
     const bandLimits = bandForSeat(kind, band, seat);
     bands[kind] = bandLimits;
-    const [usedDay, usedWeek, usedMonth] = await Promise.all([
-      countActionsInWindow(db, seatRef, kind, LINKEDIN_WINDOW_HOURS.day, now),
-      countActionsInWindow(db, seatRef, kind, LINKEDIN_WINDOW_HOURS.week, now),
-      countActionsInWindow(db, seatRef, kind, LINKEDIN_WINDOW_HOURS.month, now)
-    ]);
+    // COUNTED THE GATE'S WAY, by the gate's own ledger statement: this kind's
+    // family (an event invite spends the invite week), on this seat and every
+    // seat confirmed as the same member. Single-kind counts showed weekly room
+    // the gate then refused.
+    const today = await linkedInDailyAllowance(db, seatRef, seat, kind, now);
+    const usedDay = today.used;
+    const usedWeek = today.used7d;
+    const usedMonth = today.used30d;
 
     /**
      * THE CEILING THE PACER AND THE GATE WILL ACTUALLY APPLY, through the same
@@ -12233,18 +12249,17 @@ async function effectiveLinkedInLimits(
     // `warmupMultiplier` here reported zero profile views in week 1 for a seat
     // the gate would have let view all fifteen.
     const kindMultiplier = warmupOverride ? 1 : warmupMultiplierFor(kind, warmupWeek);
+    // No acceptance throttle: low acceptance is advisory since the simplified
+    // dispatch (docs/release/2026-10-27-linkedin-simplified-dispatch.md), and
+    // neither the gate nor the planner halves for it. This is the planner's
+    // `seatDailyCeilingFor`; `today` below is what the gate admits today.
     const afterWarmup = Math.floor(dailyCeiling * kindMultiplier);
-    // Halves, never zeroes -- a seat cut to zero can never produce the outcomes
-    // that would clear the throttle, so "halve it" would become "end it".
-    const afterThrottle = throttled
-      ? Math.max(afterWarmup > 0 ? 1 : 0, Math.floor(afterWarmup * ACCEPTANCE_THROTTLE_FACTOR))
-      : afterWarmup;
 
     const poolNote = MESSAGE_POOL_KINDS.includes(kind as (typeof MESSAGE_POOL_KINDS)[number])
       ? ' That setting is one pool over DMs, replies and InMails together, not a number for this kind alone.'
       : '';
 
-    let ceiling = afterThrottle;
+    let ceiling = afterWarmup;
     let boundBy = ceilingSource === 'band' ? 'band-ceiling' : 'operator-daily-limit';
     let rule =
       ceilingSource === 'operator'
@@ -12264,9 +12279,6 @@ async function effectiveLinkedInLimits(
       ceiling = 0;
       boundBy = 'seat-paused';
       rule = `Seat '${seat.label}' is paused${seat.pausedReason ? `: ${seat.pausedReason}` : ''}. Nothing is scheduled while it is paused.`;
-    } else if (throttled && afterThrottle < afterWarmup && acceptance.rate !== null) {
-      boundBy = 'acceptance-rate';
-      rule = `${ACCEPTANCE_WINDOW_DAYS}-day invite acceptance is ${(acceptance.rate * 100).toFixed(0)}% (${acceptance.accepted} of ${acceptance.decided} decided), below the ${(MIN_ACCEPTANCE_RATE * 100).toFixed(0)}% floor, so volume is halved until it recovers.`;
     } else if (kindMultiplier < 1) {
       boundBy = 'warmup-multiplier';
       // The ramp is a percentage OF the binding ceiling, not of the band, which
@@ -12289,6 +12301,13 @@ async function effectiveLinkedInLimits(
       remaining: Math.max(0, ceiling - usedDay),
       boundBy,
       rule,
+      today: {
+        ceiling: today.ceiling,
+        used: today.used,
+        remaining: today.remaining,
+        boundBy: today.boundBy,
+        rule: today.rule
+      },
       confidence: 'REPORTED',
       source: `${LINKEDIN_PLAN_DOC} 1.4`
     });
@@ -12377,9 +12396,10 @@ async function effectiveLinkedInLimits(
         accepted: acceptance.accepted,
         rate: acceptance.rate,
         floor: MIN_ACCEPTANCE_RATE,
-        throttleFactor: ACCEPTANCE_THROTTLE_FACTOR,
+        // 1: nothing is reduced for low acceptance any more. Kept for API shape.
+        throttleFactor: 1,
         throttled,
-        rule: `Sustained invite acceptance below ${(MIN_ACCEPTANCE_RATE * 100).toFixed(0)}% over ${ACCEPTANCE_WINDOW_DAYS} days reads as spam and halves volume. The denominator is DECIDED invites, never sent ones: an unanswered invite is not a refusal.`,
+        rule: `Sustained invite acceptance below ${(MIN_ACCEPTANCE_RATE * 100).toFixed(0)}% over ${ACCEPTANCE_WINDOW_DAYS} days reads as spam, so it is flagged as an advisory to review targeting; it does not reduce volume. The denominator is DECIDED invites, never sent ones: an unanswered invite is not a refusal.`,
         confidence: 'REPORTED' as LinkedInLimitConfidence,
         source: `${LINKEDIN_PLAN_DOC} 1.3`
       },

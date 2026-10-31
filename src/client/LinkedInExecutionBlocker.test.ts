@@ -31,6 +31,7 @@ function queues(patch: Partial<CampaignQueueSummary> = {}): CampaignQueueSummary
     blocked: 0,
     failed: 0,
     allocatedCampaignDay: { invite: 0, dm: 0, profile_view: 1, follow: 0 },
+    allocatedSeatDay: { invite: 0, dm: 0, profile_view: 1, follow: 0 },
     backlogByStep: [],
     ...patch
   };

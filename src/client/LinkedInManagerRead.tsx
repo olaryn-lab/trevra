@@ -580,22 +580,30 @@ const CAPACITY_LABEL: Record<ManagedKind, string> = {
   follow: 'Relationship actions'
 };
 
+/**
+ * ONE SEAT, ONE BUDGET. `remaining` is the seat's ceiling minus what EVERY
+ * campaign on the seat has been allocated (`allocatedSeatDay`), so two
+ * campaigns sharing an account show the same remaining room rather than
+ * each showing it in full.
+ */
 function CapacityBreakdown({
   ceilings,
-  allocated
+  queues
 }: {
   ceilings: Record<ManagedKind, EnforcedCeiling>;
-  allocated: CampaignQueueSummary['allocatedCampaignDay'];
+  queues: Pick<CampaignQueueSummary, 'allocatedCampaignDay' | 'allocatedSeatDay'>;
 }) {
   return (
     <div className="mgr-summary">
       {(['profile_view', 'invite', 'dm', 'follow'] as const).map((kind) => {
         const limit = ceilings[kind].today;
-        const used = allocated[kind];
-        const remaining = Math.max(0, limit - used);
+        const onSeat = queues.allocatedSeatDay[kind];
+        const mine = queues.allocatedCampaignDay[kind];
+        const remaining = Math.max(0, limit - onSeat);
         return (
           <span key={kind}>
-            <b>{CAPACITY_LABEL[kind]}</b>: limit {limit} · {used} allocated · {remaining} remaining
+            <b>{CAPACITY_LABEL[kind]}</b>: limit {limit} · {onSeat} allocated on this account (
+            {mine} by this campaign) · {remaining} remaining
           </span>
         );
       })}
@@ -687,7 +695,7 @@ function campaignBlockers({
       const kind = capacityKindForStep(step);
       if (!kind || seen.has(kind)) continue;
       seen.add(kind);
-      const allocated = operations.queues.allocatedCampaignDay[kind];
+      const allocated = operations.queues.allocatedSeatDay[kind];
       const limit = ceilings[kind].today;
       if (allocated >= limit) {
         const dayLimit = report?.limits.find(
@@ -710,7 +718,7 @@ function campaignBlockers({
                 title: `${CAPACITY_LABEL[kind]} capacity fully allocated`,
                 // Today's allowance is spent. Tomorrow's arrives by itself.
                 severity: 'waiting' as const,
-                detail: `${plural(backlog.due, 'lead')} ${are(backlog.due)} sequence-eligible at this step, but this campaign's current ramp limit is ${limit} and ${allocated} are already allocated. Remaining planner capacity is 0.`
+                detail: `${plural(backlog.due, 'lead')} ${are(backlog.due)} sequence-eligible at this step, but this account's limit is ${limit} and ${allocated} are already allocated across its campaigns. Remaining planner capacity is 0.`
               }
         );
       }
@@ -2896,7 +2904,7 @@ export function OutreachManagerRead({
         ? enforcedCeilings(report, warmup?.fraction ?? rampFractionForDay(report, 1) ?? 1)
         : null,
       rampDays: rampFractions(report)?.length ?? null,
-      allocated: operationsByCampaign[starting.id]?.queues.allocatedCampaignDay ?? null
+      allocated: operationsByCampaign[starting.id]?.queues.allocatedSeatDay ?? null
     };
   })();
   return (
@@ -3823,10 +3831,7 @@ export function OutreachManagerRead({
                             </Hint>
                           </p>
                           {operations && (
-                            <CapacityBreakdown
-                              ceilings={ceilings}
-                              allocated={operations.queues.allocatedCampaignDay}
-                            />
+                            <CapacityBreakdown ceilings={ceilings} queues={operations.queues} />
                           )}
                         </>
                       ) : (

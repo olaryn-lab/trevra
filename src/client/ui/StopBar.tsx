@@ -409,9 +409,7 @@ export function StopBar({ controls }: { controls: StopControls }) {
             pending === 'seat' ? (
               <>
                 <p>{SEAT_STOP_COPY.running}</p>
-                {/* The throttle factor is the server's, not this file's: the
-                sentence used to say "halves" whatever the payload said. */}
-                <p>{SEAT_STOP_COPY.onlyAHumanZeroesASeat(seat.throttleFactor)}</p>
+                <p>{SEAT_STOP_COPY.onlyAHumanZeroesASeat}</p>
                 <p>{SEAT_STOP_COPY.reasonRequired}</p>
               </>
             ) : pending === 'agent' ? (

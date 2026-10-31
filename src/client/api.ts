@@ -1833,7 +1833,11 @@ export type LinkedInCeilingSource = 'band' | 'operator' | 'operator-override';
 export interface LinkedInCeiling {
   kind: PacedKind;
   window: 'day' | 'week' | 'month';
-  /** What applies right now, after warm-up, throttle, posture and the account's own setting. */
+  /**
+   * The structural daily number the planner budgets with: band or the
+   * account's own setting, warm-up and posture. Not what today admits -- see
+   * `today`.
+   */
   ceiling: number;
   /** The band's own number, before any of that. */
   bandCeiling: number;
@@ -1850,6 +1854,20 @@ export interface LinkedInCeiling {
   /** Which rule produced `ceiling`. */
   boundBy: string;
   rule: string;
+  /**
+   * DAY ROWS ONLY. What the send-time safety check admits of this kind in the
+   * 24 hours ending now: `ceiling` after today's draw and the cold-account
+   * day-over-day ramp; `remaining` also after the account's message pool, the
+   * rolling 7- and 30-day limits, the InMail quota and the outstanding-invite
+   * backlog. This is the "effective today" number.
+   */
+  today?: {
+    ceiling: number;
+    used: number;
+    remaining: number;
+    boundBy: string;
+    rule: string;
+  };
   /**
    * The provenance of `bandCeiling`, i.e. of the RESEARCH -- never of an
    * operator's own setting, which has no confidence tag and is not given one.

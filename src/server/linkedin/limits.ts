@@ -328,16 +328,6 @@ export const MIN_ACCEPTANCE_RATE = 0.3;
 export const ACCEPTANCE_WINDOW_DAYS = 7;
 
 /**
- * What a failing acceptance rate multiplies volume by. Plan 4-phase-2 step 4.
- *
- * A throttle, not a stop: halving never takes a day that was allowed at least
- * one action down to zero (see pacing.ts). A seat cut to zero can never
- * generate the outcomes that would clear the throttle, so "halve it" would
- * become "end it" -- which is a decision for a human, not for a multiplier.
- */
-export const ACCEPTANCE_THROTTLE_FACTOR = 0.5;
-
-/**
  * The spread window, in the SEAT's local hours. REPORTED (1.4): "spread across
  * 08:00-18:00 recipient/user local". `end` is exclusive.
  */
