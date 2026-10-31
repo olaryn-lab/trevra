@@ -444,6 +444,13 @@ export interface DueLinkedInAction {
   manual?: boolean;
   channelMetadata?: Record<string, unknown>;
   attachment?: Record<string, unknown> | null;
+  /**
+   * TRV-040: the `attachment_json` column as stored (parsed when it parses,
+   * the raw string when it does not). The rich-content check reads this, not
+   * `attachment`, so an array or unreadable value is refused and held rather
+   * than narrowed to null and sent as text alone. Absent on hand-built rows.
+   */
+  attachmentStored?: unknown;
 }
 
 export type BatchStatus = 'completed' | 'halted';
@@ -1263,7 +1270,10 @@ export async function runLinkedInLocalBatch(
      * person to remove or replace, and the pass moves on. Checked after the
      * state read so a stale row is still retired rather than held forever.
      */
-    const contentRefusal = actionAttachmentViolation(action.kind, action.attachment);
+    const contentRefusal = actionAttachmentViolation(
+      action.kind,
+      action.attachmentStored !== undefined ? action.attachmentStored : action.attachment
+    );
     if (contentRefusal) {
       await store.releaseClaim(action.id, 'content_unsupported');
       deferred.push(action.id);
@@ -2344,6 +2354,14 @@ export function postgresLocalWorkerStore(
             ? (raw as Record<string, unknown>)
             : {};
         })(),
+        attachmentStored: (() => {
+          if (typeof row.attachment_json !== 'string') return row.attachment_json ?? null;
+          try {
+            return JSON.parse(row.attachment_json) as unknown;
+          } catch {
+            return row.attachment_json;
+          }
+        })(),
         attachment: (() => {
           const raw =
             typeof row.attachment_json === 'string'
@@ -2355,8 +2373,11 @@ export function postgresLocalWorkerStore(
                   }
                 })()
               : row.attachment_json;
-          return raw && typeof raw === 'object' && !Array.isArray(raw)
-            ? (raw as Record<string, unknown>)
+          // A one-element array is the same single attachment; anything wider
+          // is refused by the rich-content check before it gets this far.
+          const single = Array.isArray(raw) && raw.length === 1 ? (raw[0] as unknown) : raw;
+          return single && typeof single === 'object' && !Array.isArray(single)
+            ? (single as Record<string, unknown>)
             : null;
         })()
       };
