@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import request from 'supertest';
 import { createApp } from '../app.js';
 import { auth as betterAuth, closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
+import { listDomainEvents } from '../control-plane/events.js';
 import { openDatabase, type Db } from '../db.js';
 import type { WorkspaceRole } from '../roles.js';
 import { putLinkedInCredentials, readLinkedInCredentials } from '../secrets/linkedin.js';
@@ -842,6 +843,178 @@ describe.skipIf(!databaseUrl)('TRV-044 seat ownership over HTTP (TRV-045 roles)'
     // Unassigning is a real write, not a 200 that keeps the old owner.
     expect((await assign(manager, null).expect(200)).body.seat.ownerUserId).toBeNull();
     expect((await getSeat(db, workspaceId, 'sales'))?.ownerUserId).toBeNull();
+  });
+
+  it('records every seat assignment, reassignment and unassignment as an append-only event', async () => {
+    const { owner, manager, member, teammate, workspaceId } = await team();
+    const stranger = await signUp('stranger');
+    await owner.agent
+      .post('/api/linkedin/manager/seats')
+      .send({ seatKey: 'sales', label: 'Sales', timezone: 'UTC', ownerUserId: member.auth.userId })
+      .expect(201);
+    const assign = (person: Person, ownerUserId: string | null) =>
+      person.agent.patch('/api/linkedin/manager/seats/sales').send({ ownerUserId });
+
+    await assign(manager, teammate.auth.userId).expect(200);
+    // The same owner again is not a change, so it is not an event.
+    await assign(manager, teammate.auth.userId).expect(200);
+    // Refused writes leave no trace.
+    await assign(member, member.auth.userId).expect(403);
+    await assign(owner, stranger.auth.userId).expect(400);
+    // An edit that does not touch the owner is not an assignment.
+    await owner.agent
+      .patch('/api/linkedin/manager/seats/sales')
+      .send({ label: 'Sales (renamed)' })
+      .expect(200);
+    await assign(owner, null).expect(200);
+    // The owner-only settings PUT assigns too, and is recorded the same way.
+    await owner.agent
+      .put('/api/linkedin/seat')
+      .send({ seatKey: 'sales', ownerUserId: member.auth.userId })
+      .expect(200);
+
+    const events = await listDomainEvents(db, workspaceId, {
+      streamType: 'linkedin_seat',
+      streamId: 'sales'
+    });
+    const change = (actorId: string, from: string | null, to: string | null) => ({
+      type: 'linkedin_seat.owner_changed',
+      actorType: 'user',
+      actorId,
+      payload: { seatKey: 'sales', previousOwnerUserId: from, ownerUserId: to }
+    });
+    expect(
+      events.map((event) => ({
+        type: event.eventType,
+        actorType: event.actorType,
+        actorId: event.actorId,
+        payload: event.payload
+      }))
+    ).toEqual([
+      change(owner.auth.userId, null, member.auth.userId),
+      change(manager.auth.userId, member.auth.userId, teammate.auth.userId),
+      change(owner.auth.userId, teammate.auth.userId, null),
+      change(owner.auth.userId, null, member.auth.userId)
+    ]);
+    expect(events.map((event) => event.streamVersion)).toEqual([1, 2, 3, 4]);
+    expect((await getSeat(db, workspaceId, 'sales'))?.ownerUserId).toBe(member.auth.userId);
+  });
+
+  it('assigns a seat only to a current member of this workspace, on every assignment route', async () => {
+    const { owner, manager, member, teammate, workspaceId } = await team();
+    const otherOwner = await signUp('other-owner');
+    const leaver = await signUp('leaver');
+    await join(leaver, workspaceId, 'member');
+    await owner.agent
+      .post('/api/linkedin/manager/seats')
+      .send({ seatKey: 'sales', label: 'Sales', timezone: 'UTC', ownerUserId: member.auth.userId })
+      .expect(201);
+    // The leaver was a member a moment ago; removal must end their eligibility.
+    await owner.agent
+      .post('/api/auth/organization/remove-member')
+      .send({ memberIdOrEmail: leaver.email, organizationId: workspaceId })
+      .expect(200);
+
+    const put = (person: Person, ownerUserId: string | null) =>
+      person.agent.put('/api/linkedin/seat').send({ seatKey: 'sales', ownerUserId });
+    for (const outsider of [otherOwner, leaver]) {
+      await put(owner, outsider.auth.userId).expect(400);
+      await put(owner, outsider.authUserId).expect(400);
+      await owner.agent
+        .patch('/api/linkedin/manager/seats/sales')
+        .send({ ownerUserId: outsider.auth.userId })
+        .expect(400);
+      await owner.agent
+        .post('/api/linkedin/manager/seats')
+        .send({
+          seatKey: 'sales',
+          label: 'Sales',
+          timezone: 'UTC',
+          ownerUserId: outsider.auth.userId
+        })
+        .expect(400);
+    }
+    await put(owner, 'usr_does_not_exist').expect(400);
+    expect((await getSeat(db, workspaceId, 'sales'))?.ownerUserId).toBe(member.auth.userId);
+
+    // The PUT keeps its owner-only rule; a manager assigns through the PATCH.
+    await put(manager, teammate.auth.userId).expect(403);
+    await put(member, member.auth.userId).expect(403);
+    // A current member is accepted, by either id, and unassigning stays possible.
+    expect((await put(owner, teammate.authUserId).expect(200)).body.seat.ownerUserId).toBe(
+      teammate.auth.userId
+    );
+    expect((await put(owner, null).expect(200)).body.seat.ownerUserId).toBeNull();
+  });
+
+  it('binds a lead list, and imports into it, only on a seat in this workspace the caller may use', async () => {
+    const { owner, manager, member, teammate, workspaceId } = await team();
+    const otherOwner = await signUp('other-owner');
+    const otherWorkspace = otherOwner.auth.workspaceId;
+    await otherOwner.agent
+      .post('/api/linkedin/manager/seats')
+      .send({ seatKey: 'growth', label: 'Other growth', timezone: 'UTC' })
+      .expect(201);
+    for (const [seatKey, ownerUserId] of [
+      ['sales', member.auth.userId],
+      ['gone', owner.auth.userId]
+    ] as const) {
+      await owner.agent
+        .post('/api/linkedin/manager/seats')
+        .send({ seatKey, label: seatKey, timezone: 'UTC', ownerUserId })
+        .expect(201);
+    }
+    const create = (person: Person, seatKey: string) =>
+      person.agent
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ seatKey, name: `${person.email} on ${seatKey}`, sourceKind: 'csv' });
+    // A list made while 'gone' was connected outlives the disconnect.
+    const goneList = (await create(owner, 'gone').expect(201)).body.list as { id: string };
+    await owner.agent.delete('/api/linkedin/seat').query({ seatKey: 'gone' }).expect(200);
+
+    // Another workspace's seat and a disconnected one answer exactly like a
+    // seat that never existed, for every role: no existence leaks.
+    const missing = (await create(owner, 'never-existed').expect(404)).body;
+    for (const person of [owner, manager, member]) {
+      expect((await create(person, 'growth').expect(404)).body).toEqual(missing);
+      expect((await create(person, 'gone').expect(404)).body).toEqual(missing);
+    }
+    // A teammate who does not hold the seat cannot bind a list to it.
+    await create(teammate, 'sales').expect(403);
+    const list = (await create(member, 'sales').expect(201)).body.list as { id: string };
+    await create(manager, 'sales').expect(201);
+
+    const csv = Buffer.from('first_name,last_name,company\nAda,Lovelace,Analytical\n');
+    const importCsv = (person: Person, listId: string, seatKey: string) =>
+      person.agent
+        .post(`/api/linkedin/manager/lead-lists/${listId}/import`)
+        .field('seatKey', seatKey)
+        .attach('file', csv, { filename: 'leads.csv', contentType: 'text/csv' });
+    const paste = (person: Person, listId: string, seatKey: string) =>
+      person.agent
+        .post(`/api/linkedin/manager/lead-lists/${listId}/profile-urls`)
+        .send({ seatKey, urls: 'https://www.linkedin.com/in/trv044-grace/' });
+    for (const send of [importCsv, paste]) {
+      await send(teammate, list.id, 'sales').expect(403);
+      expect((await send(owner, goneList.id, 'gone').expect(404)).body).toEqual(missing);
+    }
+    const members = async () =>
+      (
+        await db
+          .prepare(
+            'SELECT COUNT(*)::int AS total FROM linkedin_lead_list_members m JOIN linkedin_lead_lists l ON l.id=m.list_id WHERE l.workspace_id=?'
+          )
+          .get<{ total: number }>(workspaceId)
+      )?.total ?? 0;
+    expect(await members()).toBe(0);
+
+    await importCsv(member, list.id, 'sales').expect(201);
+    await paste(member, list.id, 'sales').expect(201);
+    expect(await members()).toBe(2);
+    const otherLists = await db
+      .prepare('SELECT COUNT(*)::int AS total FROM linkedin_lead_lists WHERE workspace_id=?')
+      .get<{ total: number }>(otherWorkspace);
+    expect(otherLists?.total).toBe(0);
   });
 
   it("cannot address another workspace's seat, even under the same seat key", async () => {

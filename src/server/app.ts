@@ -148,7 +148,7 @@ import {
   startPlaybookRun,
   updatePlaybookApprovalBody
 } from './playbooks/engine.js';
-import { listDomainEvents } from './control-plane/events.js';
+import { appendDomainEvent, listDomainEvents } from './control-plane/events.js';
 import { listWorkspacePolicies } from './control-plane/policy.js';
 import {
   createModulePublisher,
@@ -5468,20 +5468,45 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // TRV-057: when `expansion` is passed, the plan's LinkedIn-account cap (new
   // seat) or credit position (raised daily ceiling) is checked in the same
   // transaction, under the entitlement lock, before the write.
-  async function writeSeatGuardingSwitch<T>(
+  //
+  // TRV-044: a write that changes the seat's owner (assign, reassign, unassign,
+  // or a new seat's first owner) appends `linkedin_seat.owner_changed` in the
+  // same transaction, naming the actor and both owners. The advisory lock makes
+  // the previous owner exact even when two writers create the same seat.
+  async function writeSeatGuardingSwitch<T extends { ownerUserId: string | null }>(
     workspaceId: string,
     seatKey: string,
     sendMode: string | undefined,
     now: Date,
     write: (tx: Db) => Promise<T>,
-    expansion?: { patch: SeatVolumePatch }
+    expansion: { patch: SeatVolumePatch } | undefined,
+    actorUserId: string
   ): Promise<T> {
     const entitlements = expansion ? await loadEntitlements(db, workspaceId) : null;
     return db.transaction(async (tx) => {
+      await tx
+        .prepare('SELECT pg_advisory_xact_lock(hashtext(?),hashtext(?))')
+        .get(`trevra:linkedin-seat-owner:${workspaceId}`, seatKey);
       await guardSeatSendModeChange(tx, workspaceId, seatKey, sendMode, now);
       if (entitlements && expansion)
         await assertSeatWrite(tx, entitlements, workspaceId, seatKey, expansion.patch);
-      return write(tx);
+      const before = await tx
+        .prepare('SELECT owner_user_id FROM linkedin_seats WHERE workspace_id=? AND seat_key=?')
+        .get<{ owner_user_id: string | null }>(workspaceId, seatKey);
+      const previousOwnerUserId = before?.owner_user_id ?? null;
+      const seat = await write(tx);
+      if (seat.ownerUserId !== previousOwnerUserId)
+        await appendDomainEvent(tx, {
+          workspaceId,
+          streamType: 'linkedin_seat',
+          streamId: seatKey,
+          eventType: 'linkedin_seat.owner_changed',
+          actorType: 'user',
+          actorId: actorUserId,
+          occurredAt: now,
+          payload: { seatKey, previousOwnerUserId, ownerUserId: seat.ownerUserId }
+        });
+      return seat;
     });
   }
 
@@ -5497,6 +5522,12 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     linkedinRoute(async (req, res) => {
       assertCapability(req, 'account_safety.manage', "change a LinkedIn account's limits");
       const { seatKey = OWNER_SEAT_KEY, ...input } = linkedinSeatSchema.parse(req.body ?? {});
+      // An owner named here must be a current member of this workspace, the
+      // same rule the manager routes apply; null still unassigns.
+      const ownerUserId =
+        input.ownerUserId === undefined
+          ? undefined
+          : await resolveWorkspaceMemberUserId(db, req, input.ownerUserId);
       assertSeatProxyUsable(req.auth!.workspaceId, seatKey, input.proxyUrl);
       const now = new Date();
       let seat;
@@ -5506,8 +5537,16 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           seatKey,
           input.sendMode,
           now,
-          (tx) => upsertSeat(tx, req.auth!.workspaceId, input as SeatPatch, now, seatKey),
-          { patch: input }
+          (tx) =>
+            upsertSeat(
+              tx,
+              req.auth!.workspaceId,
+              { ...input, ...(ownerUserId !== undefined ? { ownerUserId } : {}) } as SeatPatch,
+              now,
+              seatKey
+            ),
+          { patch: input },
+          req.auth!.userId
         );
       } catch (error) {
         // seats.ts owns the label/timezone/date rules and its refusals are
@@ -6503,7 +6542,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           now,
           (tx) =>
             upsertSeat(tx, req.auth!.workspaceId, { ...input, ownerUserId }, now, input.seatKey),
-          { patch: input }
+          { patch: input },
+          req.auth!.userId
         );
         res.status(201).json({ seat });
       } catch (error) {
@@ -6550,7 +6590,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
                 now,
                 seatKey
               ),
-            { patch: input }
+            { patch: input },
+            req.auth!.userId
           )
         });
       } catch (error) {
@@ -7958,6 +7999,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
         const seatKey = linkedinSeatKeySchema.parse(
           typeof req.body?.seatKey === 'string' ? req.body.seatKey : OWNER_SEAT_KEY
         );
+        await assertCanUseLeadListSeat(db, req, seatKey, 'import leads');
         const result = await importLeadCsv(
           db,
           {
@@ -7980,6 +8022,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     '/api/linkedin/manager/lead-lists',
     linkedinRoute(async (req, res) => {
       const input = linkedinLeadListCreateSchema.parse(req.body ?? {});
+      await assertCanUseLeadListSeat(db, req, input.seatKey, 'create a lead list');
       try {
         const list = await createLeadList(
           db,
@@ -8024,6 +8067,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     '/api/linkedin/manager/lead-lists/:id/profile-urls',
     linkedinRoute(async (req, res) => {
       const input = linkedinProfileUrlPasteSchema.parse(req.body ?? {});
+      await assertCanUseLeadListSeat(db, req, input.seatKey ?? OWNER_SEAT_KEY, 'import leads');
       try {
         const result = await importLeadProfileUrls(
           db,
@@ -8399,6 +8443,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     '/api/linkedin/lead-sources/:id/import',
     linkedinRoute(async (req, res) => {
       const input = linkedinLeadSourceImportSchema.parse(req.body ?? {});
+      await assertCanUseLeadListSeat(db, req, input.seatKey, 'import leads');
       try {
         res
           .status(201)
@@ -10299,6 +10344,22 @@ async function assertCanUseLinkedInSeats(
         403
       );
   }
+}
+
+/**
+ * A lead list belongs to one seat, so creating or importing into one needs a
+ * seat that exists in THIS workspace (still connected) and that the caller may
+ * use. Another workspace's seat answers exactly like one that never existed.
+ */
+async function assertCanUseLeadListSeat(
+  db: Db,
+  req: AuthedRequest,
+  seatKey: string,
+  act: string
+): Promise<void> {
+  if (!(await getSeat(db, req.auth!.workspaceId, seatKey)))
+    throw new LinkedInApiError('LinkedIn account not found', 404);
+  await assertCanUseLinkedInSeats(db, req, [seatKey], act);
 }
 
 async function assertCanManageManagedCampaign(

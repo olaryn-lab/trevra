@@ -1368,6 +1368,11 @@ describe('Trevra API on PostgreSQL', () => {
    */
   it('returns the lead-list total and page bound alongside the page of contacts', async () => {
     const agent = await agentWithSession();
+    // A lead list binds to a connected LinkedIn account (TRV-044).
+    await agent
+      .post('/api/linkedin/manager/seats')
+      .send({ seatKey: 'owner', label: 'Founder', timezone: 'UTC' })
+      .expect(201);
     const list = await agent
       .post('/api/linkedin/manager/lead-lists')
       .send({ name: 'Series A CTOs' })
