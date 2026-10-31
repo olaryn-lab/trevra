@@ -2417,7 +2417,8 @@ export interface LinkedInLeadCsvPreview {
       | 'phone'
       | 'country'
       | 'profileUrl'
-      | 'fullName',
+      | 'fullName'
+      | 'title',
       string
     >
   >;
@@ -2431,7 +2432,8 @@ export interface LinkedInLeadCsvPreview {
       | 'phone'
       | 'country'
       | 'profileUrl'
-      | 'fullName',
+      | 'fullName'
+      | 'title',
       'exact' | 'guessed'
     >
   >;
@@ -2469,6 +2471,27 @@ export async function previewLinkedInManagerLeadCsv(
   return response.json();
 }
 
+/** One pasted entry that is not a LinkedIn profile, with the paste line it came from. */
+export interface PastedProfileRejection {
+  line: number;
+  value: string;
+  reason: string;
+}
+
+/** Checks a paste of profile URLs and writes nothing. A paste over `cap` profiles is a 400. */
+export async function previewLinkedInManagerProfileUrls(urls: string): Promise<{
+  acceptedCount: number;
+  duplicates: number;
+  rejected: PastedProfileRejection[];
+  rejectedCount: number;
+  cap: number;
+}> {
+  return request('/api/linkedin/manager/lead-lists/preview-profile-urls', {
+    method: 'POST',
+    body: JSON.stringify({ urls })
+  });
+}
+
 export async function importLinkedInManagerProfileUrls(
   listId: string,
   urls: string,
@@ -2477,7 +2500,9 @@ export async function importLinkedInManagerProfileUrls(
   inserted: number;
   duplicates: number;
   reused: number;
-  rejected: Array<{ value: string; reason: string }>;
+  /** The first rejected entries; `rejectedCount` is the exact total. */
+  rejected: PastedProfileRejection[];
+  rejectedCount: number;
 }> {
   return request(`/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}/profile-urls`, {
     method: 'POST',
@@ -3306,28 +3331,9 @@ interface LinkedInLeadSourceList {
   offReason: string | null;
 }
 
-/** 201 for a new source, 200 with `duplicate` when this URL is already live. */
-export async function createLinkedInLeadSource(input: {
-  kind: LeadSourceKind;
-  url: string;
-  seatKey?: string;
-}): Promise<{
-  source: LinkedInLeadSource;
-  duplicate: boolean;
-}> {
-  const result = await request<{ source: LinkedInLeadSource; duplicate?: boolean }>(
-    '/api/linkedin/lead-sources',
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        kind: input.kind,
-        url: input.url,
-        ...(input.seatKey ? { seatKey: input.seatKey } : {})
-      })
-    }
-  );
-  return { source: result.source, duplicate: result.duplicate ?? false };
-}
+// No client call queues a lead source: Trevra does not collect from LinkedIn
+// search, Sales Navigator or post engagers, and POST /api/linkedin/lead-sources
+// answers 409 `intake_source_unsupported` (TRV-021/022/023).
 
 export async function getLinkedInLeadSources(
   limit?: number,

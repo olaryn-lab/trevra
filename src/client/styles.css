@@ -10921,6 +10921,25 @@ button:disabled {
   justify-self: start;
 }
 
+/* The sources Trevra does not support (TRV-021/022/023): the same definition
+   list, with room for the "Not supported" chip beside each name, and the source
+   a deep link asked about marked so its answer is found first. */
+.lead-kinds dd p {
+  margin: 0;
+}
+.lead-kinds dd p + p {
+  margin-top: 4px;
+}
+.lead-kinds dl > div.is-requested {
+  border-left: 3px solid var(--t-amber-line);
+  padding-left: 10px;
+}
+@media (min-width: 641px) {
+  .lead-intake-unsupported .lead-kinds dl > div {
+    grid-template-columns: minmax(0, 30ch) minmax(0, 1fr);
+  }
+}
+
 /* A row number is 1-4 characters; the reason beside it is the sentence worth
    reading, so the number keeps a column its own width and no more. */
 .lead-rejects th:first-child,
