@@ -75,7 +75,7 @@ import { ConfirmDrawer } from './ui/dialog';
 import { Hint } from './ui/hint';
 import { Select } from './ui/primitives';
 import { are, plural } from './ui/plural';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import { useWorkspaceMembers } from './TeamScreen';
 
 /**
@@ -222,7 +222,7 @@ export function LinkedInAccounts({
   startAdding?: boolean;
   onClose?: () => void;
 }) {
-  const isWorkspaceOwner = useIsWorkspaceOwner();
+  const canAssignSeats = useWorkspaceCan('seats.assign');
   const { members: workspaceMembers } = useWorkspaceMembers();
   const [activeKey, setActiveKey] = useActiveSeatKey();
   const [accounts, setAccounts] = useState<LinkedInSeat[] | null>(null);
@@ -431,7 +431,7 @@ export function LinkedInAccounts({
             safety={safety}
             companion={Boolean(worker?.companionBrowser)}
             setToast={setToast}
-            canAssignOwner={isWorkspaceOwner}
+            canAssignOwner={canAssignSeats}
             workspaceMembers={workspaceMembers}
             onAssignOwner={assignAccountOwner}
             onChanged={load}
@@ -642,7 +642,7 @@ export function LinkedInAccounts({
               safety={safety}
               companion={Boolean(worker?.companionBrowser)}
               setToast={setToast}
-              canAssignOwner={isWorkspaceOwner}
+              canAssignOwner={canAssignSeats}
               workspaceMembers={workspaceMembers}
               onAssignOwner={assignAccountOwner}
               onChanged={load}

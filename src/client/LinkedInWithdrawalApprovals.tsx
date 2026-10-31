@@ -4,13 +4,14 @@ import {
   getLinkedInWithdrawalReviews,
   type LinkedInWithdrawalReview
 } from './api';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import { useOutreachRefresh } from './LinkedInSafety';
 import { Panel } from './ui/layout';
 import { Button } from './ui/primitives';
 
 export function LinkedInWithdrawalApprovals() {
-  const owner = useIsWorkspaceOwner();
+  // Owner or manager (`outreach.approve`, src/server/roles.ts).
+  const owner = useWorkspaceCan('outreach.approve');
   const [rows, setRows] = useState<LinkedInWithdrawalReview[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
@@ -61,7 +62,7 @@ export function LinkedInWithdrawalApprovals() {
               <p>
                 {row.policy.effect === 'deny'
                   ? `Blocked by workspace policy: ${row.policy.policyName}`
-                  : 'Waiting for workspace owner approval.'}
+                  : 'Waiting for a workspace owner or manager to approve.'}
               </p>
               {owner && row.policy.effect === 'require_approval' && (
                 <Button

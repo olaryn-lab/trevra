@@ -27,7 +27,7 @@ import {
 import type { ManagedCampaign } from '../server/linkedin/managed-campaigns';
 import type { LinkedInWorkflow, WorkflowDelay, WorkflowStep } from '../server/linkedin/workflows';
 import { errorMessage } from './LinkedInSafety';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import { Select } from './ui/primitives';
 import { ADDITIONAL_WORKFLOW_STARTERS } from './workflow-starter-recipes';
 /* ---------------------------------------------------------------------------
@@ -1214,7 +1214,7 @@ export function LinkedInManagerWorkflowConfig({
   /** Campaign mode only: fires with the campaign after its steps are saved. */
   onCampaignSaved?: (campaign: ManagedCampaign) => void;
 }) {
-  const isOwner = useIsWorkspaceOwner();
+  const canFileWorkspace = useWorkspaceCan('workflows.manage_workspace');
   const [library, setLibrary] = useState<LinkedInWorkflow[]>([]);
   const [starterQuery, setStarterQuery] = useState('');
   const visibleStarters = STARTERS.filter((starter) =>
@@ -1223,7 +1223,7 @@ export function LinkedInManagerWorkflowConfig({
   const [id, setId] = useState<string | null>(null);
   const [name, setName] = useState('');
   const [scope, setScope] = useState<'workspace' | 'personal'>(() =>
-    isOwner ? 'workspace' : 'personal'
+    canFileWorkspace ? 'workspace' : 'personal'
   );
   const [steps, setSteps] = useState<WorkflowStep[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1282,7 +1282,7 @@ export function LinkedInManagerWorkflowConfig({
       const mint = () => `step-${nextId++}`;
       const workflow = await createLinkedInManagerWorkflow({
         name: starter.label,
-        scope: isOwner ? 'workspace' : 'personal',
+        scope: canFileWorkspace ? 'workspace' : 'personal',
         steps: serializeSteps(starter.build(mint))
       });
       setToast(`Workflow “${workflow.name}” saved. This stored configuration and queued nothing.`);
@@ -1520,7 +1520,7 @@ export function LinkedInManagerWorkflowConfig({
   const reset = () => {
     setId(null);
     setName('');
-    setScope(isOwner ? 'workspace' : 'personal');
+    setScope(canFileWorkspace ? 'workspace' : 'personal');
     setSteps([]);
     setError('');
   };
@@ -1822,7 +1822,7 @@ export function LinkedInManagerWorkflowConfig({
       {(!campaign || copying) && (
         <label className="li-block-label">
           Template library
-          {isOwner ? (
+          {canFileWorkspace ? (
             <Select
               value={scope}
               disabled={Boolean(id)}

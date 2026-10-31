@@ -5,7 +5,7 @@ import {
   type CampaignEmailReview
 } from './api';
 import { AiDraftPanel } from './AiDraftPanel';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import { useOutreachRefresh } from './LinkedInSafety';
 import { Button } from './ui/primitives';
 
@@ -18,7 +18,8 @@ const needsApproval = (row: CampaignEmailReview) =>
  * approval for future generated drafts. Changing content invalidates its hash.
  */
 export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
-  const owner = useIsWorkspaceOwner();
+  // Owner or manager (`outreach.approve`, src/server/roles.ts).
+  const owner = useWorkspaceCan('outreach.approve');
   const [reviews, setReviews] = useState<CampaignEmailReview[]>([]);
   const [failure, setFailure] = useState('');
   const [busy, setBusy] = useState('');
@@ -86,7 +87,7 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
             <p>
               {row.policy.effect === 'deny'
                 ? `Blocked by workspace policy: ${row.policy.policyName}`
-                : 'Waiting for workspace owner approval.'}
+                : 'Waiting for a workspace owner or manager to approve.'}
             </p>
             {row.policy.effect !== 'deny' && drafting !== row.actionId && (
               <Button disabled={busy !== ''} onClick={() => setDrafting(row.actionId)}>

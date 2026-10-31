@@ -1,4 +1,5 @@
 import type { GtmMilestoneKind } from '../shared/milestones';
+import type { WorkspaceRole as ResolvedWorkspaceRole } from '../server/roles';
 import type {
   AgentBudget,
   AgentPrincipal,
@@ -895,9 +896,10 @@ export async function prepareOutreach(input: {
  * wrapper, and NOT declared here. This one route exists because `organization.
  * createInvitation` is server-only in better-auth's own plugin (see
  * auth-client.ts's comment) and needs this request's own session as the
- * inviter -- there is no client-callable equivalent. Owner-only; the server
- * 403s a member and this simply surfaces that ApiError like every other
- * gated call.
+ * inviter -- there is no client-callable equivalent. Owners and managers may
+ * invite; only an owner may invite a manager or owner (TRV-045,
+ * src/server/roles.ts). The server 403s anyone else and this simply surfaces
+ * that ApiError like every other gated call.
  */
 interface TeamMemberInvited {
   status: 'invited';
@@ -914,9 +916,25 @@ interface TeamMemberInvited {
 
 export async function addTeamMember(input: {
   email: string;
-  role?: 'owner' | 'member';
+  role?: ResolvedWorkspaceRole;
 }): Promise<TeamMemberInvited> {
   return request('/api/team/members', { method: 'POST', body: JSON.stringify(input) });
+}
+
+/**
+ * TRV-045: owner-only role change. The second bespoke team call, because
+ * better-auth's own `update-member-role` endpoint is refused unless it runs
+ * through this route, which is what lets every change record a domain event
+ * naming who made it. The server refuses demoting the last owner.
+ */
+export async function updateTeamMemberRole(
+  memberId: string,
+  role: ResolvedWorkspaceRole
+): Promise<{ member: { id: string; userId: string; role: string }; changed: boolean }> {
+  return request(`/api/team/members/${encodeURIComponent(memberId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role })
+  });
 }
 
 export async function getIntegrations(): Promise<{

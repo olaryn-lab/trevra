@@ -6,7 +6,7 @@ import {
   rotateCaptureSourceSecret,
   type CitationSourceSummary
 } from '../api';
-import { useWorkspaceRole } from '../auth-client';
+import { lacksOwnerRole, useWorkspaceRole } from '../auth-client';
 import { errorMessage } from '../LinkedInSafety';
 import { OwnerOnlyNote } from '../ui/forms';
 import { Button, Field, Input, Textarea } from '../ui/primitives';
@@ -178,7 +178,7 @@ export function CitationSourceSetup({
             )}
           </div>
         </div>
-      ) : role === 'member' ? (
+      ) : lacksOwnerRole(role) ? (
         <OwnerOnlyNote>connect a citation source</OwnerOnlyNote>
       ) : null}
       {source && (

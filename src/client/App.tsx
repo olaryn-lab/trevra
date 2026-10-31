@@ -78,7 +78,7 @@ import {
   workspaceExportDownloadPath,
   type WorkspaceErasurePreview
 } from './api';
-import { authClient, useIsWorkspaceOwner, useWorkspaceRole } from './auth-client';
+import { authClient, lacksOwnerRole, useIsWorkspaceOwner, useWorkspaceRole } from './auth-client';
 import { loginAuthError } from './auth-errors';
 import {
   INTERACTION_EXPIRED_MESSAGE,
@@ -2054,7 +2054,7 @@ function HostedAgentPanel({
         <FormGrid>{agentField('Selected Agent')}</FormGrid>
       </FormSection>
 
-      {role === 'member' && (
+      {lacksOwnerRole(role) && (
         <FormSection
           title="Model access"
           description="How hosted runs reach a model, and what they may spend."
@@ -2340,7 +2340,7 @@ function HostedAgentPanel({
         </FormSection>
       )}
 
-      {role === 'member' && (
+      {lacksOwnerRole(role) && (
         <FormSection
           title="Autopilot"
           description="Run this Agent automatically on a cadence with one standing GTM job."

@@ -91,7 +91,7 @@ import {
 } from './LinkedInManagerProgress';
 import { NOT_ENOUGH_DATA, RATE_MIN_SAMPLE, ratePercent } from './analytics';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import { CampaignEmailApprovals } from './CampaignEmailApprovals';
 import { LinkedInActionApprovals } from './LinkedInActionApprovals';
 import { LinkedInWithdrawalApprovals } from './LinkedInWithdrawalApprovals';
@@ -2163,7 +2163,7 @@ export function OutreachManagerRead({
    * a surprise nobody asked for.
    */
   const [activeSeatKey, setActiveSeatKey] = useActiveSeatKey();
-  const isWorkspaceOwner = useIsWorkspaceOwner();
+  const canManageAllCampaigns = useWorkspaceCan('campaigns.manage_all');
   const { members: workspaceMembers } = useWorkspaceMembers();
   const [seats, setSeats] = useState<LinkedInSeat[]>([]);
   const [lists, setLists] = useState<LinkedInLeadList[]>([]);
@@ -3181,7 +3181,7 @@ export function OutreachManagerRead({
                       </span>
                       <span>
                         Owned by <b>{campaign.ownerName ?? 'workspace owner'}</b>
-                        {isWorkspaceOwner && workspaceMembers.length > 0 && (
+                        {canManageAllCampaigns && workspaceMembers.length > 0 && (
                           <ChoiceMenu
                             label={`Change owner for ${campaign.name}`}
                             title="Choose campaign owner"

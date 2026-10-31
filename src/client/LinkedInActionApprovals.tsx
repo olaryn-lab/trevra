@@ -5,7 +5,7 @@ import {
   type LinkedInActionReview
 } from './api';
 import { AiDraftPanel } from './AiDraftPanel';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import { useOutreachRefresh } from './LinkedInSafety';
 import { Panel } from './ui/layout';
 import { Button } from './ui/primitives';
@@ -16,7 +16,8 @@ const AI_DRAFTABLE_KINDS = new Set(['invite', 'dm', 'inmail']);
 /** Holds and reviews exact queued LinkedIn writes before the Companion worker
  * acts. This is a workspace-wide queue, including non-campaign inbox replies. */
 export function LinkedInActionApprovals() {
-  const owner = useIsWorkspaceOwner();
+  // Owner or manager (`outreach.approve`, src/server/roles.ts).
+  const owner = useWorkspaceCan('outreach.approve');
   const [rows, setRows] = useState<LinkedInActionReview[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
@@ -114,7 +115,7 @@ export function LinkedInActionApprovals() {
                 <p>
                   {row.policy.effect === 'deny'
                     ? `Blocked by workspace policy: ${row.policy.policyName}`
-                    : 'Waiting for workspace owner approval.'}
+                    : 'Waiting for a workspace owner or manager to approve.'}
                 </p>
                 {canDraft && !panelOpen && (
                   <Button disabled={busy !== ''} onClick={() => setDrafting(row.actionId)}>

@@ -1,6 +1,11 @@
 import { createAuthClient } from 'better-auth/react';
 import { magicLinkClient, organizationClient } from 'better-auth/client/plugins';
-
+import {
+  hasCapability,
+  parseWorkspaceRole,
+  type Capability,
+  type WorkspaceRole as ResolvedWorkspaceRole
+} from '../server/roles';
 /**
  * The `organization` plugin (docs/superpowers/specs/2026-08-13-team-
  * workspace-access-design.md): unlocks `authClient.organization.*` --
@@ -28,18 +33,19 @@ export const authClient = createAuthClient({
  * an owner on a hard reload must not see "Only the workspace owner can ..."
  * flash on, and a member must not see an owner control flash on.
  */
-export type WorkspaceRole = 'pending' | 'owner' | 'member';
+export type WorkspaceRole = 'pending' | ResolvedWorkspaceRole;
 
 /**
- * The one role signal every owner-only control in the app reads.
- * `activeMember?.role === 'owner'` is the one place that decides who is an
- * owner once the reads have resolved; everyone else is a member.
+ * The one role signal every role-gated control in the app reads. The server's
+ * `parseWorkspaceRole` (src/server/roles.ts) decides owner / manager / member
+ * from the Better Auth member row, so the browser and the API agree on it.
+ * The server stays the source of truth: this only hides controls.
  */
 export function useWorkspaceRole(): WorkspaceRole {
   const { isPending: orgPending } = authClient.useActiveOrganization();
   const { data: activeMember, isPending: memberPending } = authClient.useActiveMember();
   if (orgPending || memberPending) return 'pending';
-  return activeMember?.role === 'owner' ? 'owner' : 'member';
+  return parseWorkspaceRole(activeMember?.role);
 }
 
 /**
@@ -48,4 +54,21 @@ export function useWorkspaceRole(): WorkspaceRole {
  */
 export function useIsWorkspaceOwner(): boolean {
   return useWorkspaceRole() === 'owner';
+}
+
+/**
+ * Whether the signed-in role holds one capability of the central map in
+ * src/server/roles.ts. False while the role is pending.
+ */
+export function useWorkspaceCan(capability: Capability): boolean {
+  const role = useWorkspaceRole();
+  return role !== 'pending' && hasCapability(role, capability);
+}
+
+/**
+ * The resolved non-owner case for panels that show a read-only line instead
+ * of an owner control: a manager reads the same line a member does.
+ */
+export function lacksOwnerRole(role: WorkspaceRole): boolean {
+  return role === 'member' || role === 'manager';
 }

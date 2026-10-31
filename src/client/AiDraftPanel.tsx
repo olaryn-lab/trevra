@@ -26,7 +26,7 @@ function messageOf(cause: unknown, fallback: string): string {
 /**
  * TRV-039 review panel for one queued message. The model only proposes text
  * from stored evidence; a person may edit it (which creates a new proposal
- * with a new hash) and an owner approves the exact text shown here. Nothing in
+ * with a new hash) and an owner or manager approves the exact text shown here. Nothing in
  * this panel can send.
  */
 export function AiDraftPanel({
@@ -257,7 +257,7 @@ export function AiDraftPanel({
                 {busy === 'approving' ? 'Approving…' : 'Approve this exact draft'}
               </Button>
             ) : (
-              <p className="ai-draft-meta">A workspace owner approves drafts.</p>
+              <p className="ai-draft-meta">A workspace owner or manager approves drafts.</p>
             )}
             {dirty ? (
               <Button variant="ghost" disabled={working} onClick={() => setText(draft.text)}>

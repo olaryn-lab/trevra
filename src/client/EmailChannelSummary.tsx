@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import type { EmailChannelStatus, StoredDeliverability } from '../server/email/types';
-import type { WorkspaceRole } from './auth-client';
+import { lacksOwnerRole, type WorkspaceRole } from './auth-client';
 import { ConfirmDrawer } from './ui/dialog';
 import { OwnerOnlyNote } from './ui/forms';
 import { Button, Field, Input } from './ui/primitives';
@@ -201,7 +201,7 @@ export function EmailChannelSummary({
             )}
           </>
         )}
-        {role === 'member' && (
+        {lacksOwnerRole(role) && (
           <OwnerOnlyNote>choose the inbound mailbox or set a DKIM selector</OwnerOnlyNote>
         )}
       </div>

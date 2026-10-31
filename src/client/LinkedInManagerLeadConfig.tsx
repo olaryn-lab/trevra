@@ -33,7 +33,7 @@ import type {
 } from '../server/linkedin/lead-lists';
 import { LEAD_CSV_PREAMBLE_SCAN_ROWS, leadCsvHeaderRowIndex } from '../shared/lead-csv-header';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import {
   LEAD_CSV_PRESETS,
   detectLeadCsvPreset,
@@ -257,7 +257,7 @@ export function LinkedInManagerLeadConfig({
   intakeRequest?: LeadIntakeRequest | null;
 }) {
   const [activeSeatKey] = useActiveSeatKey();
-  const isOwner = useIsWorkspaceOwner();
+  const canManageLists = useWorkspaceCan('lead_lists.manage');
   const [lists, setLists] = useState<LinkedInLeadList[]>([]);
   const [listsLoading, setListsLoading] = useState(true);
 
@@ -1452,7 +1452,7 @@ export function LinkedInManagerLeadConfig({
                 {openMeta && (
                   <span className="li-chip">From {SOURCE_LABELS[openMeta.sourceKind]}</span>
                 )}
-                {openMeta && isOwner && !renamingList && (
+                {openMeta && canManageLists && !renamingList && (
                   <button
                     type="button"
                     className="secondary-button"

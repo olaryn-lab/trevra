@@ -5,7 +5,7 @@ import type {
   GitHubRepoWatch,
   GitHubReposState
 } from './api';
-import type { WorkspaceRole } from './auth-client';
+import { lacksOwnerRole, type WorkspaceRole } from './auth-client';
 import { OwnerOnlyNote } from './ui/forms';
 import { EmptyState, Panel } from './ui/layout';
 import { plural } from './ui/plural';
@@ -224,7 +224,7 @@ export function GitHubReposView({
           </Button>
         </form>
       ) : null}
-      {role === 'member' && state ? (
+      {lacksOwnerRole(role) && state ? (
         <OwnerOnlyNote>choose which repositories to watch</OwnerOnlyNote>
       ) : null}
     </Panel>

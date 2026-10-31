@@ -1,8 +1,8 @@
-import type { WorkspaceRole } from '../auth-client';
+import { lacksOwnerRole, type WorkspaceRole } from '../auth-client';
 import { usd } from './format';
 
 export interface HostedRunBlockerInput {
-  /** Only `member` gets "the workspace owner has to ..." wording; owner and pending read as owner copy. */
+  /** A member or manager gets "the workspace owner has to ..." wording; owner and pending read as owner copy. */
   role: WorkspaceRole;
   dirtyCap: boolean;
   modelAccessDirty: boolean;
@@ -17,7 +17,7 @@ export interface HostedRunBlockerInput {
 
 /** Why "Run now" is off, or null. Members are told to ask the owner for what only the owner can change. */
 export function hostedRunBlocker(input: HostedRunBlockerInput): string | null {
-  const member = input.role === 'member';
+  const member = lacksOwnerRole(input.role);
   if (input.dirtyCap)
     return 'Save the spending limit first — a run uses what is stored, not what is typed.';
   if (input.modelAccessDirty)
