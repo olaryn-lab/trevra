@@ -22,6 +22,9 @@ import {
   smtpConfigured
 } from './email.js';
 import { recordMarketingEvent } from './public-site.js';
+import { getBillingClient } from './billing-client.js';
+import { EntitlementDeniedError, loadEntitlements } from './billing/entitlements.js';
+import { assertTeamInvite, assertTeamJoin } from './billing/boundaries.js';
 import { exchangeAuthwardCode } from './authward-token.js';
 
 const { Pool } = pg;
@@ -486,6 +489,32 @@ function requireProvisioningDb(): Db {
 }
 
 /**
+ * TRV-057 team limit for Better Auth's own invitation and membership routes.
+ * Trevra's POST /api/team/members already holds the entitlement lock around
+ * `createInvitation`; these hooks run on other connections, so they check
+ * without the lock (taking it here would wait on that route's transaction).
+ * Direct calls to Better Auth's endpoints are therefore checked, but two of
+ * them racing at the limit are not serialized. No-op when Billing is not
+ * configured.
+ */
+async function enforceTeamEntitlement(
+  organizationId: string,
+  mode: 'invite' | 'join'
+): Promise<void> {
+  if (!getBillingClient()) return;
+  const db = requireProvisioningDb();
+  try {
+    const view = await loadEntitlements(db, organizationId);
+    if (mode === 'invite') await assertTeamInvite(db, view, organizationId, { lock: false });
+    else await assertTeamJoin(db, view, organizationId);
+  } catch (error) {
+    if (error instanceof EntitlementDeniedError)
+      throw new APIError('FORBIDDEN', { message: error.message });
+    throw error;
+  }
+}
+
+/**
  * True when `role` (a possibly comma-joined string, e.g. `'owner,admin'`)
  * includes the workspace owner role. Comma-joining is better-auth's own
  * representation for multi-role members (`parseRoles` in the plugin); this
@@ -718,6 +747,20 @@ export const auth = betterAuth({
         // own auto-mounted `/organization/remove-member` and
         // `/organization/update-member-role` from day one -- see the doc comment
         // on `assertOwnerChangeAllowed`.
+        // TRV-057 plan team limit. Creating the organization adds its creator
+        // through beforeAddMember before any member exists; that is never gated.
+        beforeAddMember: async ({ organization }) => {
+          if (!getBillingClient()) return;
+          const members = await listOrganizationMembers(organization.id);
+          if (members.length === 0) return;
+          await enforceTeamEntitlement(organization.id, 'join');
+        },
+        beforeCreateInvitation: async ({ organization }) => {
+          await enforceTeamEntitlement(organization.id, 'invite');
+        },
+        beforeAcceptInvitation: async ({ organization }) => {
+          await enforceTeamEntitlement(organization.id, 'join');
+        },
         afterAcceptInvitation: async ({ invitation, user, organization }) => {
           if (!smtpConfigured()) return;
           try {

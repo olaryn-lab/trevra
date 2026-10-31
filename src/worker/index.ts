@@ -45,6 +45,7 @@ import { hostedExecutionMode, hostedSeatFilter } from '../server/linkedin/hosted
 import { runDueResearchSources } from '../server/research/service.js';
 import { runDueBrandWatches } from '../server/watch/service.js';
 import { runQueuedEnrichmentRuns } from '../server/enrichment/runs.js';
+import { runBillingMaintenance } from '../server/billing/maintenance.js';
 import { pruneCitationSamples } from '../server/watch/citations.js';
 import { prunePublicApiRateWindows } from '../server/public-api/rate-limit.js';
 import { refreshDueEmailDeliverability } from '../server/email/sender-deliverability.js';
@@ -462,6 +463,27 @@ async function enrichmentCycle(): Promise<void> {
 void enrichmentCycle();
 const enrichmentTimer = setInterval(() => void enrichmentCycle(), runtime.automationIntervalMs);
 enrichmentTimer.unref();
+// TRV-057 billing upkeep (snapshot refresh, usage outbox, annual renewal
+// notices) waits on Billing's network calls, so it gets its own loop rather
+// than holding the automation sweep. A no-op when Billing is not configured.
+const BILLING_MAINTENANCE_MS = 5 * 60_000;
+let billingRunning = false;
+async function billingCycle(): Promise<void> {
+  if (billingRunning || draining) return;
+  billingRunning = true;
+  try {
+    const result = await runBillingMaintenance(db, { shouldStop: () => draining });
+    if (result.errors.length > 0)
+      console.error('Worker billing maintenance step failed', result.errors);
+  } catch (error) {
+    console.error('Worker billing maintenance cycle failed', error);
+  } finally {
+    billingRunning = false;
+  }
+}
+void billingCycle();
+const billingTimer = setInterval(() => void billingCycle(), BILLING_MAINTENANCE_MS);
+billingTimer.unref();
 
 async function shutdown(signal: string) {
   if (draining) return;
@@ -475,13 +497,15 @@ async function shutdown(signal: string) {
   clearInterval(linkedinStallTimer);
   clearInterval(emailDeliverabilityTimer);
   clearInterval(enrichmentTimer);
+  clearInterval(billingTimer);
   const deadline = Date.now() + DRAIN_TIMEOUT_MS;
   while (
     (running ||
       Object.values(linkedinCycleHealth.snapshot()).some((state) => state.running) ||
       companionPresenceRunning ||
       emailDeliverabilityRunning ||
-      enrichmentRunning) &&
+      enrichmentRunning ||
+      billingRunning) &&
     Date.now() < deadline
   )
     await new Promise((resolve) => setTimeout(resolve, 200));

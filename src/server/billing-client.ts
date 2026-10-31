@@ -17,6 +17,14 @@ export type BillingSubscription = {
   current_period_start?: string | null;
   current_period_end?: string | null;
   cancel_at_period_end?: boolean;
+  latest_invoice_id?: string | null;
+  current_period_paid?: boolean;
+  current_period_payment_status?: string;
+  verified_paid_invoice_id?: string | null;
+  paid_through?: string | null;
+  billing_source?: string;
+  external_reference?: string | null;
+  ends_at?: string | null;
 };
 
 export type BillingCredits = {
@@ -51,6 +59,39 @@ export type BillingCheckout = {
   message?: string | null;
 };
 
+/** `POST .../subscription/preview` (Billing `PlanPreviewView`). Read-only; nothing is charged. */
+export type BillingPlanPreview = {
+  change_type: string;
+  apply_immediately: boolean;
+  amount_due: number;
+  currency: string;
+  current_plan_code: string | null;
+  new_plan_code: string;
+  credits_current: string | number;
+  credits_new: string | number;
+  credits_prorated_to_grant: string | number;
+  current_period_end?: string | null;
+  unused_value_old_cents?: number;
+  prorated_charge_new_cents?: number;
+};
+
+/**
+ * `POST .../subscription/change|cancel|resume`. Billing returns a free-form
+ * dict (`scheduled`, `updated`, `payment_pending`, `noop`, or a checkout
+ * response when there is no paid subscription yet); only `status` is stable.
+ */
+export type BillingLifecycleResult = { status?: string; [key: string]: unknown };
+
+/** `POST .../reservations` and `.../settle` (Billing `ReservationView`). */
+export type BillingReservation = {
+  id: string;
+  amount: string | number;
+  settled_amount: string | number | null;
+  operation: string;
+  idempotency_key: string;
+  status: string;
+};
+
 export type TrevraBillingSnapshot = {
   enabled: true;
   customer: BillingCustomer;
@@ -58,6 +99,61 @@ export type TrevraBillingSnapshot = {
   credits: BillingCredits;
   entitlements: BillingEntitlements;
 };
+
+/**
+ * Every Billing call Trevra makes, as an interface so tests can substitute a
+ * fake. Each method maps to exactly one existing Olaryn Billing route under
+ * `/v1/trevra/...`; nothing here is a Trevra invention.
+ */
+export interface BillingApi {
+  plans(): Promise<BillingPlan[]>;
+  startPlan(input: {
+    workspaceId: string;
+    planCode: string;
+    successUrl: string;
+    cancelUrl: string;
+    idempotencyKey: string;
+  }): Promise<BillingCheckout>;
+  ensureWorkspaceCustomer(input: {
+    workspaceId: string;
+    name: string;
+    currency?: string;
+  }): Promise<BillingCustomer>;
+  workspaceSnapshot(input: {
+    workspaceId: string;
+    name: string;
+    currency?: string;
+  }): Promise<TrevraBillingSnapshot>;
+  previewPlanChange(input: { workspaceId: string; planCode: string }): Promise<BillingPlanPreview>;
+  changePlan(input: {
+    workspaceId: string;
+    planCode: string;
+    successUrl: string;
+    cancelUrl: string;
+    idempotencyKey: string;
+  }): Promise<BillingLifecycleResult>;
+  cancelSubscription(input: {
+    workspaceId: string;
+    idempotencyKey: string;
+  }): Promise<BillingLifecycleResult>;
+  resumeSubscription(input: {
+    workspaceId: string;
+    idempotencyKey: string;
+  }): Promise<BillingLifecycleResult>;
+  reserveCredits(input: {
+    workspaceId: string;
+    amount: string;
+    operation: string;
+    idempotencyKey: string;
+    ttlSeconds: number;
+    resourceType: string;
+    resourceId: string;
+  }): Promise<BillingReservation>;
+  settleReservation(input: {
+    workspaceId: string;
+    reservationId: string;
+  }): Promise<BillingReservation>;
+}
 
 type FetchLike = typeof fetch;
 
@@ -102,7 +198,7 @@ export function billingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return configuredBilling(env) !== null;
 }
 
-export class TrevraBillingClient {
+export class TrevraBillingClient implements BillingApi {
   private tokenEndpoint: string | null = null;
   private token: CachedToken | null = null;
 
@@ -257,11 +353,97 @@ export class TrevraBillingClient {
     ]);
     return { enabled: true, customer, subscription, credits, entitlements };
   }
+
+  async previewPlanChange(input: {
+    workspaceId: string;
+    planCode: string;
+  }): Promise<BillingPlanPreview> {
+    return this.request<BillingPlanPreview>(
+      `${this.customerPath(input.workspaceId)}/subscription/preview`,
+      { method: 'POST', body: JSON.stringify({ plan_code: input.planCode }) }
+    );
+  }
+
+  async changePlan(input: {
+    workspaceId: string;
+    planCode: string;
+    successUrl: string;
+    cancelUrl: string;
+    idempotencyKey: string;
+  }): Promise<BillingLifecycleResult> {
+    return this.request<BillingLifecycleResult>(
+      `${this.customerPath(input.workspaceId)}/subscription/change`,
+      {
+        method: 'POST',
+        headers: { 'Idempotency-Key': input.idempotencyKey },
+        body: JSON.stringify({
+          plan_code: input.planCode,
+          success_url: input.successUrl,
+          cancel_url: input.cancelUrl
+        })
+      }
+    );
+  }
+
+  async cancelSubscription(input: {
+    workspaceId: string;
+    idempotencyKey: string;
+  }): Promise<BillingLifecycleResult> {
+    return this.request<BillingLifecycleResult>(
+      `${this.customerPath(input.workspaceId)}/subscription/cancel`,
+      { method: 'POST', headers: { 'Idempotency-Key': input.idempotencyKey } }
+    );
+  }
+
+  async resumeSubscription(input: {
+    workspaceId: string;
+    idempotencyKey: string;
+  }): Promise<BillingLifecycleResult> {
+    return this.request<BillingLifecycleResult>(
+      `${this.customerPath(input.workspaceId)}/subscription/resume`,
+      { method: 'POST', headers: { 'Idempotency-Key': input.idempotencyKey } }
+    );
+  }
+
+  async reserveCredits(input: {
+    workspaceId: string;
+    amount: string;
+    operation: string;
+    idempotencyKey: string;
+    ttlSeconds: number;
+    resourceType: string;
+    resourceId: string;
+  }): Promise<BillingReservation> {
+    return this.request<BillingReservation>(
+      `${this.customerPath(input.workspaceId)}/reservations`,
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          amount: input.amount,
+          operation: input.operation,
+          idempotency_key: input.idempotencyKey,
+          ttl_seconds: input.ttlSeconds,
+          resource_type: input.resourceType,
+          resource_id: input.resourceId
+        })
+      }
+    );
+  }
+
+  async settleReservation(input: {
+    workspaceId: string;
+    reservationId: string;
+  }): Promise<BillingReservation> {
+    return this.request<BillingReservation>(
+      `${this.customerPath(input.workspaceId)}/reservations/${encodeURIComponent(input.reservationId)}/settle`,
+      { method: 'POST', body: JSON.stringify({}) }
+    );
+  }
 }
 
-let singleton: TrevraBillingClient | null | undefined;
+let singleton: BillingApi | null | undefined;
 
-export function getBillingClient(env: NodeJS.ProcessEnv = process.env): TrevraBillingClient | null {
+export function getBillingClient(env: NodeJS.ProcessEnv = process.env): BillingApi | null {
   if (env !== process.env) {
     const config = configuredBilling(env);
     return config ? new TrevraBillingClient(config) : null;
@@ -274,4 +456,9 @@ export function getBillingClient(env: NodeJS.ProcessEnv = process.env): TrevraBi
 
 export function resetBillingClientForTests(): void {
   singleton = undefined;
+}
+
+/** Tests only: substitute a fake Billing (or `null` for an unconfigured deployment). */
+export function setBillingClientForTests(client: BillingApi | null): void {
+  singleton = client;
 }

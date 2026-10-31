@@ -1556,7 +1556,15 @@ export async function startManagedCampaign(
   db: Db,
   workspaceId: string,
   campaignId: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  options: {
+    /**
+     * Runs inside the activation transaction, after the campaign row is
+     * locked, and only when the campaign is not already running -- the TRV-057
+     * entitlement gate's count-under-lock hook. Throwing aborts the start.
+     */
+    beforeActivate?: (tx: Db) => Promise<void>;
+  } = {}
 ): Promise<ManagedCampaign> {
   const campaign = await getManagedCampaign(db, workspaceId, campaignId);
   if (!campaign) throw new Error('Campaign not found.');
@@ -1577,6 +1585,12 @@ export async function startManagedCampaign(
   // sequence already chosen for pending leads, and admitted leads carry their
   // own immutable snapshot from wave admission.
   await db.transaction(async (tx) => {
+    if (options.beforeActivate) {
+      const current = await tx
+        .prepare('SELECT status FROM linkedin_campaigns WHERE workspace_id=? AND id=? FOR UPDATE')
+        .get<{ status: string }>(workspaceId, campaignId);
+      if (current && current.status !== 'running') await options.beforeActivate(tx);
+    }
     await tx
       .prepare(
         `UPDATE linkedin_campaigns SET status='running',started_at=COALESCE(started_at,?),paused_at=NULL,updated_at=? WHERE workspace_id=? AND id=?`

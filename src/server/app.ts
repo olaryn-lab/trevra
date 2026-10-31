@@ -68,7 +68,15 @@ import {
   triggerConnectionSync
 } from './integration-service.js';
 import { getSiteConfig, recordMarketingEvent, registerPublicSiteRoutes } from './public-site.js';
-import { BillingServiceError, getBillingClient } from './billing-client.js';
+import { mountBillingRoutes } from './billing/routes.js';
+import { EntitlementDeniedError, loadEntitlements } from './billing/entitlements.js';
+import {
+  assertCampaignActivation,
+  assertNewSeatPrecheck,
+  assertSeatWrite,
+  assertTeamInvite,
+  type SeatVolumePatch
+} from './billing/boundaries.js';
 import {
   listResearchRuns,
   listResearchSources,
@@ -1618,102 +1626,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     }
   );
 
-  app.get('/api/billing', async (req: AuthedRequest, res, next) => {
-    try {
-      const billing = getBillingClient();
-      if (!billing) {
-        res.setHeader('Cache-Control', 'no-store');
-        res.json({ enabled: false });
-        return;
-      }
-      const workspace = await db
-        .prepare('SELECT id,name FROM workspaces WHERE id=?')
-        .get<{ id: string; name: string }>(req.auth!.workspaceId);
-      if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
-      const snapshot = await billing.workspaceSnapshot({
-        workspaceId: workspace.id,
-        name: workspace.name,
-        currency: 'USD'
-      });
-      res.setHeader('Cache-Control', 'no-store');
-      res.json(snapshot);
-    } catch (error) {
-      if (error instanceof BillingServiceError) {
-        res.status(503).json({ error: 'Billing service unavailable' });
-        return;
-      }
-      next(error);
-    }
-  });
-
-  app.get('/api/billing/plans', async (_req: AuthedRequest, res, next) => {
-    try {
-      const billing = getBillingClient();
-      res.setHeader('Cache-Control', 'no-store');
-      if (!billing) return res.json({ enabled: false, plans: [] });
-      res.json({ enabled: true, plans: await billing.plans() });
-    } catch (error) {
-      if (error instanceof BillingServiceError) {
-        res.status(503).json({ error: 'Billing service unavailable' });
-        return;
-      }
-      next(error);
-    }
-  });
-
-  app.post(
-    '/api/billing/checkout',
-    ownerOnly('change the workspace billing plan'),
-    async (req: AuthedRequest, res, next) => {
-      try {
-        const parsed = z
-          .object({
-            planCode: z.string().trim().min(3).max(128),
-            idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{8,255}$/)
-          })
-          .strict()
-          .safeParse(req.body);
-        if (!parsed.success) return res.status(400).json({ error: 'A valid planCode is required' });
-
-        const billing = getBillingClient();
-        if (!billing) return res.status(503).json({ error: 'Billing is not configured' });
-
-        const workspace = await db
-          .prepare('SELECT id,name FROM workspaces WHERE id=?')
-          .get<{ id: string; name: string }>(req.auth!.workspaceId);
-        if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
-
-        await billing.ensureWorkspaceCustomer({
-          workspaceId: workspace.id,
-          name: workspace.name,
-          currency: 'USD'
-        });
-        const origin =
-          process.env.BETTER_AUTH_URL?.trim().replace(/\/$/, '') ||
-          `${req.protocol}://${req.get('host')}`;
-        const checkout = await billing.startPlan({
-          workspaceId: workspace.id,
-          planCode: parsed.data.planCode,
-          successUrl: `${origin}/setup/billing?checkout=success`,
-          cancelUrl: `${origin}/setup/billing?checkout=cancelled`,
-          idempotencyKey: parsed.data.idempotencyKey
-        });
-        res.setHeader('Cache-Control', 'no-store');
-        res.json(checkout);
-      } catch (error) {
-        if (error instanceof BillingServiceError) {
-          res.status(error.status && error.status >= 400 && error.status < 500 ? 400 : 503).json({
-            error:
-              error.status && error.status >= 400 && error.status < 500
-                ? error.message
-                : 'Billing service unavailable'
-          });
-          return;
-        }
-        next(error);
-      }
-    }
-  );
+  mountBillingRoutes(app, db, ownerOnly);
 
   app.get('/api/skills', async (req: AuthedRequest, res, next) => {
     try {
@@ -2254,10 +2167,22 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       // so it is the one call in this route that needs headers rather than
       // the userId system-action shortcut the rest of this route's callers
       // (e.g. the backfill) use elsewhere in this codebase.
-      const invitation = await betterAuth.api.createInvitation({
-        headers: fromNodeHeaders(req.headers),
-        body: { email: input.email, organizationId: workspaceId, role: input.role }
-      });
+      const invite = () =>
+        betterAuth.api.createInvitation({
+          headers: fromNodeHeaders(req.headers),
+          body: { email: input.email, organizationId: workspaceId, role: input.role }
+        });
+      // TRV-057: members + pending invitations must fit the plan's team limit.
+      // The entitlement lock is held until the invitation is committed, so two
+      // concurrent invites at the limit cannot both pass the count.
+      const entitlements = await loadEntitlements(db, workspaceId);
+      const invitation =
+        entitlements.mode === 'unmetered'
+          ? await invite()
+          : await db.transaction(async (tx) => {
+              await assertTeamInvite(tx, entitlements, workspaceId, { lock: true });
+              return invite();
+            });
       res.status(201).json({ status: 'invited', invitation });
     } catch (error) {
       if (error instanceof APIError)
@@ -5429,15 +5354,23 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   // handoff is still open (see guardSeatSendModeChange). The seat row lock, the
   // check and the seat write share ONE transaction, so a handoff cannot be
   // presented between the check and the write.
+  //
+  // TRV-057: when `expansion` is passed, the plan's LinkedIn-account cap (new
+  // seat) or credit position (raised daily ceiling) is checked in the same
+  // transaction, under the entitlement lock, before the write.
   async function writeSeatGuardingSwitch<T>(
     workspaceId: string,
     seatKey: string,
     sendMode: string | undefined,
     now: Date,
-    write: (tx: Db) => Promise<T>
+    write: (tx: Db) => Promise<T>,
+    expansion?: { patch: SeatVolumePatch }
   ): Promise<T> {
+    const entitlements = expansion ? await loadEntitlements(db, workspaceId) : null;
     return db.transaction(async (tx) => {
       await guardSeatSendModeChange(tx, workspaceId, seatKey, sendMode, now);
+      if (entitlements && expansion)
+        await assertSeatWrite(tx, entitlements, workspaceId, seatKey, expansion.patch);
       return write(tx);
     });
   }
@@ -5463,7 +5396,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           seatKey,
           input.sendMode,
           now,
-          (tx) => upsertSeat(tx, req.auth!.workspaceId, input as SeatPatch, now, seatKey)
+          (tx) => upsertSeat(tx, req.auth!.workspaceId, input as SeatPatch, now, seatKey),
+          { patch: input }
         );
       } catch (error) {
         // seats.ts owns the label/timezone/date rules and its refusals are
@@ -5689,6 +5623,14 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           403
         );
       }
+      // TRV-057: credentials for a new seat key are the first step of
+      // connecting another LinkedIn account; refuse before any sign-in.
+      await assertNewSeatPrecheck(
+        db,
+        await loadEntitlements(db, workspaceId),
+        workspaceId,
+        seatKey
+      );
 
       // THE HOSTED GATE, READ FROM THE ONE DEFINITION OF IT -- and it is no
       // longer unconditional, which is the whole of what hosted execution
@@ -5949,6 +5891,13 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       // change of account, not a refresh.
       assertWorkspaceOwner(req, 'detect a LinkedIn account');
       const input = linkedinSeatDetectSchema.parse(req.body ?? {});
+      // TRV-057: a new seat key is another connected LinkedIn account.
+      await assertNewSeatPrecheck(
+        db,
+        await loadEntitlements(db, req.auth!.workspaceId),
+        req.auth!.workspaceId,
+        input.seatKey
+      );
 
       let config: LinkedInLocalWorkerConfig;
       try {
@@ -6404,7 +6353,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           input.sendMode,
           now,
           (tx) =>
-            upsertSeat(tx, req.auth!.workspaceId, { ...input, ownerUserId }, now, input.seatKey)
+            upsertSeat(tx, req.auth!.workspaceId, { ...input, ownerUserId }, now, input.seatKey),
+          { patch: input }
         );
         res.status(201).json({ seat });
       } catch (error) {
@@ -6441,7 +6391,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
                 { ...input, ...(ownerUserId !== undefined ? { ownerUserId } : {}) },
                 now,
                 seatKey
-              )
+              ),
+            { patch: input }
           )
         });
       } catch (error) {
@@ -7173,7 +7124,12 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
         .parse(req.body ?? {});
       try {
         const now = new Date();
-        const started = await startManagedCampaign(db, req.auth!.workspaceId, campaignId, now);
+        // TRV-057: the plan's running-campaign cap and credit balance are
+        // checked inside the activation transaction, under the entitlement lock.
+        const entitlements = await loadEntitlements(db, req.auth!.workspaceId);
+        const started = await startManagedCampaign(db, req.auth!.workspaceId, campaignId, now, {
+          beforeActivate: (tx) => assertCampaignActivation(tx, entitlements, req.auth!.workspaceId)
+        });
         await recordManagedCampaignAudit(
           db,
           {
@@ -9619,6 +9575,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
 
   app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (error instanceof AgentBudgetError) return res.status(409).json({ error: error.message });
+    if (error instanceof EntitlementDeniedError) return res.status(402).json(error.body());
     if (
       error instanceof SkillApiError ||
       error instanceof PlaybookError ||
@@ -10614,7 +10571,12 @@ function linkedinRoute(handler: (req: AuthedRequest, res: Response) => Promise<u
 
 /** Turn only EXPECTED manager-domain failures into 4xx; database faults still surface as 500. */
 function rethrowLinkedInManagerError(error: unknown): never {
-  if (error instanceof LinkedInApiError || error instanceof z.ZodError) throw error;
+  if (
+    error instanceof LinkedInApiError ||
+    error instanceof z.ZodError ||
+    error instanceof EntitlementDeniedError
+  )
+    throw error;
   const code =
     typeof error === 'object' && error !== null && 'code' in error
       ? String((error as { code?: unknown }).code ?? '')

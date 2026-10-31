@@ -287,6 +287,54 @@ export async function notifyLinkedInCampaignStalled(
   return true;
 }
 
+/**
+ * TRV-057 annual renewal notice. Carries the plan name and renewal date only:
+ * no amounts, invoice numbers or payment details (Billing owns those, and
+ * the Billing page links to its portal).
+ * Returns false when nothing could be sent, so the caller releases its claim.
+ */
+export async function notifyAnnualRenewalUpcoming(
+  db: Db,
+  input: {
+    workspaceId: string;
+    planLabel: string;
+    renewalOn: string;
+    daysBefore: number;
+  }
+): Promise<boolean> {
+  if (!smtpConfigured()) return false;
+  const owners = await workspaceOwners(db, input.workspaceId);
+  if (owners.length === 0) return false;
+  const name = await workspaceName(db, input.workspaceId);
+  const billingUrl = appBaseUrl() + '/setup/billing';
+  const clean = (s: string) =>
+    s.replace(
+      /[&<>"']/g,
+      (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c] ?? c
+    );
+  await deliverOwners(owners, (owner) =>
+    sendTransactionalEmail({
+      to: owner.email,
+      subject: 'Your annual Trevra plan renews on ' + input.renewalOn,
+      text: [
+        `Your annual Trevra plan renews in about ${input.daysBefore} days.`,
+        'Workspace: ' + name,
+        'Plan: ' + input.planLabel,
+        'Renews on: ' + input.renewalOn,
+        '',
+        'No action is needed to keep your plan. To change or cancel it before the renewal, open Billing:',
+        billingUrl
+      ].join('\n'),
+      html: `<p>Your annual Trevra plan for <strong>${clean(name)}</strong> renews in about ${input.daysBefore} days.</p>
+        <p>Plan: ${clean(input.planLabel)}<br />
+        Renews on: ${clean(input.renewalOn)}</p>
+        <p>No action is needed to keep your plan. To change or cancel it before the renewal,
+        <a href="${clean(billingUrl)}">open Billing</a>.</p>`
+    })
+  );
+  return true;
+}
+
 export async function notifyIntegrationNeedsReauth(
   db: Db,
   input: {
