@@ -19,8 +19,9 @@ export default defineConfig({
     maxWorkers: Number(process.env.VITEST_MAX_WORKERS ?? 4),
     hookTimeout: 120_000,
     testTimeout: 60_000,
-    // Exclude stale Claude worktrees that duplicate src/ test files and cause
-    // shared-database collisions during parallel runs.
-    exclude: ['.claude/**', '**/node_modules/**']
+    // Exclude stale Claude worktrees and nested task worktrees (.worktrees/)
+    // that duplicate src/ test files and cause shared-database collisions
+    // during parallel runs.
+    exclude: ['.claude/**', '.worktrees/**', '**/node_modules/**']
   }
 });
