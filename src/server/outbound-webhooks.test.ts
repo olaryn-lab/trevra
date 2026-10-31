@@ -80,6 +80,10 @@ async function rowsFor(workspaceId: string) {
 
 beforeEach(async () => {
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
+  // The dispatcher under test claims due deliveries across ALL workspaces (it
+  // is the worker), so leftovers from an earlier file on this worker's database
+  // would be claimed here. Files on one worker run sequentially.
+  await db.prepare('DELETE FROM outbound_webhook_deliveries').run();
   for (const workspaceId of [WS_A, WS_B]) {
     await db
       .prepare(
