@@ -11256,6 +11256,11 @@ label.inbox-row-select {
 .lead-rejects td:first-child {
   width: 7ch;
 }
+/* A rejected entry is often a long URL with no break point. It wraps, so the
+   reason beside it stays on a phone screen instead of three widths off it. */
+.lead-rejects td {
+  overflow-wrap: anywhere;
+}
 
 /* Seven columns are not squeezed into a phone: the table keeps a readable
    width and scrolls sideways inside .li-table-scroll, which is why the wrapper
@@ -15158,6 +15163,7 @@ label.inbox-row-select {
   display: inline-flex;
   align-items: center;
   min-height: var(--t-tap);
+  color: var(--t-green-600);
   font-weight: var(--t-w-strong);
 }
 
