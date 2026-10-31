@@ -444,6 +444,28 @@ import {
   threadByUrn
 } from './linkedin/inbox.js';
 import {
+  addNote,
+  bulkOrganizeThreads,
+  confirmReplyClassification,
+  createTag,
+  deleteNote,
+  deleteTag,
+  editNote,
+  INBOX_BULK_ACTIONS,
+  INBOX_TAG_COLORS,
+  listAssignableMembers,
+  listNoteRevisions,
+  listNotes,
+  listTags,
+  listThreadClassifications,
+  tagThread,
+  THREAD_NOTE_BODY_MAX,
+  untagThread,
+  updateTag,
+  updateThreadOrganization
+} from './linkedin/inbox-organization.js';
+import { REPLY_CLASSES } from './linkedin/reply-classification.js';
+import {
   countPendingInvites,
   listWithdrawals,
   selectWithdrawalCandidates,
@@ -8283,8 +8305,19 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
   app.get(
     '/api/linkedin/inbox/threads',
     linkedinRoute(async (req, res) => {
-      const filters = linkedinInboxFiltersSchema.parse(req.query);
-      res.json({ threads: await listThreads(db, req.auth!.workspaceId, filters) });
+      const { assignee, ...filters } = linkedinInboxFiltersSchema.parse(req.query);
+      res.json({
+        threads: await listThreads(db, req.auth!.workspaceId, {
+          ...filters,
+          // 'me' and 'unassigned' are resolved here, where the session is known.
+          ...(assignee === undefined
+            ? {}
+            : {
+                assigneeUserId:
+                  assignee === 'unassigned' ? null : assignee === 'me' ? req.auth!.userId : assignee
+              })
+        })
+      });
     })
   );
 
@@ -8299,7 +8332,221 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
         seatKey
       );
       if (!conversation) throw new LinkedInApiError('LinkedIn conversation not found', 404);
-      res.json(conversation);
+      res.json({
+        ...conversation,
+        // TRV-037: stored suggestions, plus unsaved previews for inbound
+        // messages synced before classification existed. Advisory only.
+        replyClassifications: await listThreadClassifications(
+          db,
+          req.auth!.workspaceId,
+          conversation.thread.id,
+          conversation.messages
+        )
+      });
+    })
+  );
+
+  /* TRV-036 inbox organization and TRV-037 reply-class confirmation. Every
+   * handler scopes by the session's workspace; ids from elsewhere are 404. */
+
+  app.get(
+    '/api/linkedin/inbox/organize/tags',
+    linkedinRoute(async (req, res) => {
+      res.json({ tags: await listTags(db, req.auth!.workspaceId) });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/tags',
+    linkedinRoute(async (req, res) => {
+      const input = inboxTagCreateSchema.parse(req.body ?? {});
+      const tag = await createTag(
+        db,
+        { workspaceId: req.auth!.workspaceId, actorUserId: req.auth!.userId, ...input },
+        new Date()
+      );
+      res.status(201).json({ tag });
+    })
+  );
+
+  app.patch(
+    '/api/linkedin/inbox/organize/tags/:tagId',
+    linkedinRoute(async (req, res) => {
+      const input = inboxTagUpdateSchema.parse(req.body ?? {});
+      const tag = await updateTag(
+        db,
+        { workspaceId: req.auth!.workspaceId, tagId: String(req.params.tagId), ...input },
+        new Date()
+      );
+      res.json({ tag });
+    })
+  );
+
+  app.delete(
+    '/api/linkedin/inbox/organize/tags/:tagId',
+    linkedinRoute(async (req, res) => {
+      res.json(await deleteTag(db, req.auth!.workspaceId, String(req.params.tagId)));
+    })
+  );
+
+  app.get(
+    '/api/linkedin/inbox/organize/assignees',
+    linkedinRoute(async (req, res) => {
+      res.json({
+        assignees: await listAssignableMembers(db, req.auth!.workspaceId, req.auth!.userId)
+      });
+    })
+  );
+
+  app.patch(
+    '/api/linkedin/inbox/organize/threads/:threadId',
+    linkedinRoute(async (req, res) => {
+      const input = inboxThreadOrganizeSchema.parse(req.body ?? {});
+      await updateThreadOrganization(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          threadId: String(req.params.threadId),
+          actorUserId: req.auth!.userId,
+          ...input
+        },
+        new Date()
+      );
+      res.json({ ok: true });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/threads/:threadId/tags',
+    linkedinRoute(async (req, res) => {
+      const { tagId } = inboxThreadTagSchema.parse(req.body ?? {});
+      await tagThread(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          threadId: String(req.params.threadId),
+          tagId,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.json({ ok: true });
+    })
+  );
+
+  app.delete(
+    '/api/linkedin/inbox/organize/threads/:threadId/tags/:tagId',
+    linkedinRoute(async (req, res) => {
+      await untagThread(db, {
+        workspaceId: req.auth!.workspaceId,
+        threadId: String(req.params.threadId),
+        tagId: String(req.params.tagId)
+      });
+      res.json({ ok: true });
+    })
+  );
+
+  app.get(
+    '/api/linkedin/inbox/organize/threads/:threadId/notes',
+    linkedinRoute(async (req, res) => {
+      res.json({
+        notes: await listNotes(db, req.auth!.workspaceId, String(req.params.threadId))
+      });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/threads/:threadId/notes',
+    linkedinRoute(async (req, res) => {
+      const { body } = inboxNoteSchema.parse(req.body ?? {});
+      const note = await addNote(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          threadId: String(req.params.threadId),
+          body,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.status(201).json({ note });
+    })
+  );
+
+  app.patch(
+    '/api/linkedin/inbox/organize/notes/:noteId',
+    linkedinRoute(async (req, res) => {
+      const { body } = inboxNoteSchema.parse(req.body ?? {});
+      const note = await editNote(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          noteId: String(req.params.noteId),
+          body,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.json({ note });
+    })
+  );
+
+  app.delete(
+    '/api/linkedin/inbox/organize/notes/:noteId',
+    linkedinRoute(async (req, res) => {
+      res.json(
+        await deleteNote(
+          db,
+          {
+            workspaceId: req.auth!.workspaceId,
+            noteId: String(req.params.noteId),
+            actorUserId: req.auth!.userId
+          },
+          new Date()
+        )
+      );
+    })
+  );
+
+  app.get(
+    '/api/linkedin/inbox/organize/notes/:noteId/revisions',
+    linkedinRoute(async (req, res) => {
+      res.json({
+        revisions: await listNoteRevisions(db, req.auth!.workspaceId, String(req.params.noteId))
+      });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/messages/:messageId/classification',
+    linkedinRoute(async (req, res) => {
+      const input = inboxClassificationConfirmSchema.parse(req.body ?? {});
+      const classification = await confirmReplyClassification(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          messageId: String(req.params.messageId),
+          confirmedClass: input.confirmedClass,
+          endMembership: input.endMembership,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.json({ classification });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/bulk',
+    linkedinRoute(async (req, res) => {
+      const input = inboxBulkSchema.parse(req.body ?? {});
+      res.json(
+        await bulkOrganizeThreads(
+          db,
+          { workspaceId: req.auth!.workspaceId, actorUserId: req.auth!.userId, ...input },
+          new Date()
+        )
+      );
     })
   );
 
@@ -11400,7 +11647,53 @@ const linkedinInboxFiltersSchema = z.object({
   seatKey: z.string().trim().min(1).max(64).optional(),
   search: z.string().trim().max(120).optional(),
   offset: z.coerce.number().int().min(0).max(100000).default(0),
-  limit: z.coerce.number().int().min(1).max(500).default(100)
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  // TRV-036 organization filters.
+  tagId: z.string().trim().min(1).max(120).optional(),
+  /** 'me', 'unassigned', or a Trevra user id. */
+  assignee: z.string().trim().min(1).max(120).optional(),
+  starred: queryBoolean.optional(),
+  archived: z
+    .enum(['true', 'false', 'any'])
+    .transform((value) => (value === 'any' ? ('any' as const) : value === 'true'))
+    .optional(),
+  lastFrom: z.enum(['lead', 'sender']).optional()
+});
+
+const inboxTagColorSchema = z.enum(INBOX_TAG_COLORS);
+const inboxTagCreateSchema = z.object({
+  name: z.string().trim().min(1).max(40),
+  color: inboxTagColorSchema.optional()
+});
+const inboxTagUpdateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(40).optional(),
+    color: inboxTagColorSchema.optional()
+  })
+  .refine((value) => value.name !== undefined || value.color !== undefined, {
+    message: 'Change the name or the colour'
+  });
+const inboxThreadOrganizeSchema = z
+  .object({
+    starred: z.boolean().optional(),
+    archived: z.boolean().optional(),
+    unread: z.boolean().optional(),
+    assigneeUserId: z.string().trim().min(1).max(120).nullable().optional()
+  })
+  .strict();
+const inboxThreadTagSchema = z.object({ tagId: z.string().trim().min(1).max(120) });
+const inboxNoteSchema = z.object({ body: z.string().trim().min(1).max(THREAD_NOTE_BODY_MAX) });
+const inboxClassificationConfirmSchema = z.object({
+  confirmedClass: z.enum(REPLY_CLASSES),
+  endMembership: z.boolean().optional()
+});
+// The id list is bounded well above INBOX_BULK_MAX so the domain function, not
+// the parser, answers an over-cap selection with its clear message.
+const inboxBulkSchema = z.object({
+  threadIds: z.array(z.string().trim().min(1).max(120)).min(1).max(5000),
+  action: z.enum(INBOX_BULK_ACTIONS),
+  tagId: z.string().trim().min(1).max(120).optional(),
+  assigneeUserId: z.string().trim().min(1).max(120).optional()
 });
 
 /**

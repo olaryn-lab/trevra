@@ -96,6 +96,16 @@ import type {
   LinkedInThreadRecord
 } from '../server/linkedin/inbox';
 import type {
+  AssignableMember,
+  InboxBulkAction,
+  InboxTag,
+  InboxTagColor,
+  ReplyClassificationView,
+  ThreadNote,
+  ThreadNoteRevision
+} from '../server/linkedin/inbox-organization';
+import type { ReplyClass } from '../server/linkedin/reply-classification';
+import type {
   LeadSourceKind,
   LeadSourceStatus,
   LinkedInLead,
@@ -1647,6 +1657,14 @@ export type {
   LinkedInSeat,
   LinkedInSequence,
   LinkedInThreadRecord,
+  AssignableMember,
+  InboxBulkAction,
+  InboxTag,
+  InboxTagColor,
+  ReplyClass,
+  ReplyClassificationView,
+  ThreadNote,
+  ThreadNoteRevision,
   PacedKind,
   PacingPlan,
   SeatPosture,
@@ -3595,13 +3613,10 @@ interface LinkedInQueuedReply {
 /**
  * The inbox list.
  *
- * `unread` AND `hasReply` ARE ON-OR-ABSENT, never `false`, and that is not a
- * simplification. The route parses them with `z.coerce.boolean()`, and
- * `Boolean('false')` is `true` -- so `?hasReply=false`, which the store layer
- * would read as "the ones still silent", arrives at the handler as `true` and
- * asks for the exact opposite. Until that schema takes a literal enum, the
- * only two states this filter can honestly express are on and off, so a
- * `false` here is dropped rather than sent as its own opposite.
+ * Booleans are sent as literal 'true'/'false': the route parses them with a
+ * strict enum, so `hasReply=false` asks for the conversations still silent.
+ * `archived` defaults to hidden on the server; 'any' includes archived ones.
+ * `assignee` is 'me', 'unassigned', or a user id from `getInboxAssignees`.
  */
 export async function getLinkedInThreads(
   filters: {
@@ -3612,16 +3627,26 @@ export async function getLinkedInThreads(
     limit?: number;
     search?: string;
     offset?: number;
+    tagId?: string;
+    assignee?: string;
+    starred?: boolean;
+    archived?: boolean | 'any';
+    lastFrom?: 'lead' | 'sender';
   } = {}
 ): Promise<LinkedInThreadRecord[]> {
   const query = new URLSearchParams();
   if (filters.unread === true) query.set('unread', 'true');
-  if (filters.hasReply === true) query.set('hasReply', 'true');
+  if (filters.hasReply !== undefined) query.set('hasReply', String(filters.hasReply));
   if (filters.campaignId) query.set('campaignId', filters.campaignId);
   if (filters.seatKey) query.set('seatKey', filters.seatKey);
   if (filters.limit !== undefined) query.set('limit', String(filters.limit));
   if (filters.search?.trim()) query.set('search', filters.search.trim());
   if (filters.offset !== undefined) query.set('offset', String(filters.offset));
+  if (filters.tagId) query.set('tagId', filters.tagId);
+  if (filters.assignee) query.set('assignee', filters.assignee);
+  if (filters.starred === true) query.set('starred', 'true');
+  if (filters.archived !== undefined) query.set('archived', String(filters.archived));
+  if (filters.lastFrom) query.set('lastFrom', filters.lastFrom);
   const result = await request<{ threads?: LinkedInThreadRecord[] }>(
     `/api/linkedin/inbox/threads${query.size ? `?${query}` : ''}`
   );
@@ -3639,14 +3664,141 @@ export async function getLinkedInThreads(
 export async function getLinkedInThread(
   threadUrn: string,
   seatKey?: string
-): Promise<LinkedInConversation> {
+): Promise<LinkedInConversation & { replyClassifications: ReplyClassificationView[] }> {
   const result = await request<{
     thread: LinkedInThreadRecord;
     messages?: LinkedInMessageRecord[];
+    replyClassifications?: ReplyClassificationView[];
   }>(
     `/api/linkedin/inbox/threads/${encodeURIComponent(threadUrn)}${seatKey ? `?seatKey=${encodeURIComponent(seatKey)}` : ''}`
   );
-  return { thread: result.thread, messages: Array.isArray(result.messages) ? result.messages : [] };
+  return {
+    thread: result.thread,
+    messages: Array.isArray(result.messages) ? result.messages : [],
+    replyClassifications: Array.isArray(result.replyClassifications)
+      ? result.replyClassifications
+      : []
+  };
+}
+
+/* TRV-036 inbox organization and TRV-037 reply-class confirmation. */
+
+const ORGANIZE = '/api/linkedin/inbox/organize';
+
+export async function getInboxTags(): Promise<InboxTag[]> {
+  const result = await request<{ tags?: InboxTag[] }>(`${ORGANIZE}/tags`);
+  return Array.isArray(result.tags) ? result.tags : [];
+}
+
+export async function createInboxTag(input: {
+  name: string;
+  color?: InboxTagColor;
+}): Promise<InboxTag> {
+  const result = await request<{ tag: InboxTag }>(`${ORGANIZE}/tags`, {
+    method: 'POST',
+    body: JSON.stringify(input)
+  });
+  return result.tag;
+}
+
+export async function updateInboxTag(
+  tagId: string,
+  input: { name?: string; color?: InboxTagColor }
+): Promise<InboxTag> {
+  const result = await request<{ tag: InboxTag }>(`${ORGANIZE}/tags/${encodeURIComponent(tagId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input)
+  });
+  return result.tag;
+}
+
+export async function deleteInboxTag(
+  tagId: string
+): Promise<{ deleted: true; removedAssociations: number }> {
+  return request(`${ORGANIZE}/tags/${encodeURIComponent(tagId)}`, { method: 'DELETE' });
+}
+
+export async function getInboxAssignees(): Promise<AssignableMember[]> {
+  const result = await request<{ assignees?: AssignableMember[] }>(`${ORGANIZE}/assignees`);
+  return Array.isArray(result.assignees) ? result.assignees : [];
+}
+
+export async function organizeInboxThread(
+  threadId: string,
+  input: { starred?: boolean; archived?: boolean; unread?: boolean; assigneeUserId?: string | null }
+): Promise<void> {
+  await request(`${ORGANIZE}/threads/${encodeURIComponent(threadId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input)
+  });
+}
+
+export async function tagInboxThread(threadId: string, tagId: string): Promise<void> {
+  await request(`${ORGANIZE}/threads/${encodeURIComponent(threadId)}/tags`, {
+    method: 'POST',
+    body: JSON.stringify({ tagId })
+  });
+}
+
+export async function untagInboxThread(threadId: string, tagId: string): Promise<void> {
+  await request(
+    `${ORGANIZE}/threads/${encodeURIComponent(threadId)}/tags/${encodeURIComponent(tagId)}`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function getInboxThreadNotes(threadId: string): Promise<ThreadNote[]> {
+  const result = await request<{ notes?: ThreadNote[] }>(
+    `${ORGANIZE}/threads/${encodeURIComponent(threadId)}/notes`
+  );
+  return Array.isArray(result.notes) ? result.notes : [];
+}
+
+export async function addInboxThreadNote(threadId: string, body: string): Promise<ThreadNote> {
+  const result = await request<{ note: ThreadNote }>(
+    `${ORGANIZE}/threads/${encodeURIComponent(threadId)}/notes`,
+    { method: 'POST', body: JSON.stringify({ body }) }
+  );
+  return result.note;
+}
+
+export async function editInboxThreadNote(noteId: string, body: string): Promise<ThreadNote> {
+  const result = await request<{ note: ThreadNote }>(
+    `${ORGANIZE}/notes/${encodeURIComponent(noteId)}`,
+    { method: 'PATCH', body: JSON.stringify({ body }) }
+  );
+  return result.note;
+}
+
+export async function deleteInboxThreadNote(noteId: string): Promise<void> {
+  await request(`${ORGANIZE}/notes/${encodeURIComponent(noteId)}`, { method: 'DELETE' });
+}
+
+export async function getInboxNoteRevisions(noteId: string): Promise<ThreadNoteRevision[]> {
+  const result = await request<{ revisions?: ThreadNoteRevision[] }>(
+    `${ORGANIZE}/notes/${encodeURIComponent(noteId)}/revisions`
+  );
+  return Array.isArray(result.revisions) ? result.revisions : [];
+}
+
+export async function confirmInboxReplyClass(
+  messageId: string,
+  input: { confirmedClass: ReplyClass; endMembership?: boolean }
+): Promise<ReplyClassificationView> {
+  const result = await request<{ classification: ReplyClassificationView }>(
+    `${ORGANIZE}/messages/${encodeURIComponent(messageId)}/classification`,
+    { method: 'POST', body: JSON.stringify(input) }
+  );
+  return result.classification;
+}
+
+export async function bulkOrganizeInbox(input: {
+  threadIds: string[];
+  action: InboxBulkAction;
+  tagId?: string;
+  assigneeUserId?: string;
+}): Promise<{ action: InboxBulkAction; selected: number; changed: number }> {
+  return request(`${ORGANIZE}/bulk`, { method: 'POST', body: JSON.stringify(input) });
 }
 
 /** Walks the conversation rail in a real browser. 409 where this process cannot open one. */

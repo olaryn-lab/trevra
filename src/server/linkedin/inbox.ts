@@ -13,6 +13,7 @@ import { profileUrlFor } from './driver.js';
 import type { LinkedInInboxMessage, LinkedInThreadSummary } from './driver-inbox.js';
 import { filterExcluded } from './exclusions.js';
 import { evaluateLinkedInSafety, type LinkedInSafetyVerdict } from './guard.js';
+import { storeReplySuggestions } from './reply-classification.js';
 import { OWNER_SEAT_KEY } from './seats.js';
 
 /**
@@ -93,6 +94,24 @@ export interface LinkedInThreadRecord {
   messageCount: number;
   /** Whether they have written at least once. The whole point of the inbox. */
   hasReply: boolean;
+  /** TRV-036 organization (migration 152). Untouched conversations read as defaults. */
+  starred: boolean;
+  archived: boolean;
+  assignee: { userId: string; name: string; email: string } | null;
+  tags: Array<{ id: string; name: string; color: string }>;
+  /** Who wrote the latest stored message: the lead ('in') or this seat ('out'). */
+  lastFrom: 'lead' | 'sender' | null;
+  /** TRV-037: the latest inbound message's stored classification, if any. */
+  replySuggestion: {
+    id: string;
+    messageId: string;
+    suggestedClass: string;
+    source: string;
+    confidence: number;
+    status: 'suggested' | 'confirmed';
+    confirmedClass: string | null;
+    confirmedAt: string | null;
+  } | null;
 }
 
 export interface LinkedInMessageRecord {
@@ -131,6 +150,10 @@ interface ThreadRow {
   created_at: string;
   message_count: number;
   has_reply: boolean;
+  organization: unknown;
+  tags: unknown;
+  last_direction: string | null;
+  reply_suggestion: unknown;
 }
 
 interface MessageRow {
@@ -169,8 +192,44 @@ const THREAD_COLUMNS = `
   -- the same row, and the dedupe index is keyed on the pair -- so naming it
   -- here narrows nothing and turns the count into an index probe.
   (SELECT COUNT(*) FROM linkedin_messages m WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.id)::int AS message_count,
-  EXISTS (SELECT 1 FROM linkedin_messages m WHERE m.thread_id = t.id AND m.direction = 'in') AS has_reply
+  EXISTS (SELECT 1 FROM linkedin_messages m WHERE m.thread_id = t.id AND m.direction = 'in') AS has_reply,
+  -- TRV-036 organization: one PK probe per row, absent row = defaults.
+  (SELECT jsonb_build_object(
+      'starred', o.starred, 'archived', o.archived,
+      'assignee', CASE WHEN u.id IS NULL THEN NULL ELSE jsonb_build_object(
+        'userId', u.id, 'name', COALESCE(NULLIF(BTRIM(u.name), ''), u.email), 'email', u.email) END)
+    FROM linkedin_thread_organization o LEFT JOIN users u ON u.id = o.assignee_user_id
+    WHERE o.thread_id = t.id AND o.workspace_id = t.workspace_id) AS organization,
+  (SELECT jsonb_agg(jsonb_build_object('id', g.id, 'name', g.name, 'color', g.color) ORDER BY LOWER(g.name), g.id)
+    FROM linkedin_thread_tags tt
+    JOIN linkedin_inbox_tags g ON g.workspace_id = tt.workspace_id AND g.id = tt.tag_id
+    WHERE tt.thread_id = t.id AND tt.workspace_id = t.workspace_id) AS tags,
+  (SELECT m.direction FROM linkedin_messages m
+    WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.id
+    ORDER BY m.position DESC LIMIT 1) AS last_direction,
+  -- TRV-037: the classification of the latest classified inbound message.
+  (SELECT jsonb_build_object(
+      'id', c.id, 'messageId', c.message_id, 'suggestedClass', c.suggested_class,
+      'source', c.suggested_source, 'confidence', c.suggested_confidence, 'status', c.status,
+      'confirmedClass', c.confirmed_class,
+      'confirmedAt', TO_CHAR(c.confirmed_at AT TIME ZONE 'UTC', ${UTC_ISO}))
+    FROM linkedin_reply_classifications c
+    JOIN linkedin_messages m ON m.id = c.message_id
+    WHERE c.thread_id = t.id AND c.workspace_id = t.workspace_id
+    ORDER BY m.position DESC LIMIT 1) AS reply_suggestion
 `;
+
+function jsonValue<T>(value: unknown): T | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return null;
+    }
+  }
+  return value as T;
+}
 
 const MESSAGE_COLUMNS = `
   id, thread_id, direction, body,
@@ -195,7 +254,34 @@ function toThread(row: ThreadRow): LinkedInThreadRecord {
     syncedAt: row.synced_at,
     createdAt: row.created_at,
     messageCount: row.message_count,
-    hasReply: row.has_reply
+    hasReply: row.has_reply,
+    ...organizationFields(row)
+  };
+}
+
+function organizationFields(
+  row: ThreadRow
+): Pick<
+  LinkedInThreadRecord,
+  'starred' | 'archived' | 'assignee' | 'tags' | 'lastFrom' | 'replySuggestion'
+> {
+  const organization = jsonValue<{
+    starred?: boolean;
+    archived?: boolean;
+    assignee?: LinkedInThreadRecord['assignee'];
+  }>(row.organization);
+  const suggestion = jsonValue<NonNullable<LinkedInThreadRecord['replySuggestion']>>(
+    row.reply_suggestion
+  );
+  return {
+    starred: organization?.starred === true,
+    archived: organization?.archived === true,
+    assignee: organization?.assignee ?? null,
+    tags: jsonValue<LinkedInThreadRecord['tags']>(row.tags) ?? [],
+    lastFrom: row.last_direction === 'in' ? 'lead' : row.last_direction === 'out' ? 'sender' : null,
+    replySuggestion: suggestion
+      ? { ...suggestion, confidence: Number(suggestion.confidence) }
+      : null
   };
 }
 
@@ -727,6 +813,7 @@ export async function syncThreadMessages(
   let duplicates = 0;
   let inbound = 0;
   let latestInboundAt: string | null = null;
+  const insertedInbound: Array<{ id: string; body: string }> = [];
 
   for (const message of input.messages) {
     if (!message.body?.trim()) continue;
@@ -762,6 +849,7 @@ export async function syncThreadMessages(
     if (message.direction === 'in') {
       inbound += 1;
       latestInboundAt = message.at ?? latestInboundAt;
+      insertedInbound.push({ id: row.id, body: message.body });
     }
   }
 
@@ -784,6 +872,20 @@ export async function syncThreadMessages(
   }
 
   if (inbound === 0) return result;
+
+  // TRV-036: a new reply un-archives its conversation, so archiving never hides one.
+  await db
+    .prepare(
+      'UPDATE linkedin_thread_organization SET archived=FALSE, archived_at=NULL WHERE workspace_id=? AND thread_id=? AND archived'
+    )
+    .run(input.workspaceId, thread.id);
+  // TRV-037: advisory suggestions only -- they change no state, so a classifier
+  // problem must not block the reply from reaching the ledger below.
+  try {
+    await storeReplySuggestions(db, input.workspaceId, thread.id, insertedInbound, now);
+  } catch {
+    /* a missing suggestion is previewed on read and stored on confirmation */
+  }
 
   if (!thread.profileUrl) {
     result.linkage =
@@ -940,6 +1042,15 @@ export interface ThreadFilters {
   /** Search all stored threads before pagination, never the first 500 only. */
   search?: string;
   offset?: number;
+  /** TRV-036: conversations carrying this tag. */
+  tagId?: string;
+  /** A Trevra user id, or null for conversations nobody is assigned to. */
+  assigneeUserId?: string | null;
+  starred?: boolean;
+  /** Archived conversations are hidden unless this is true or 'any'. */
+  archived?: boolean | 'any';
+  /** Who wrote the latest stored message. */
+  lastFrom?: 'lead' | 'sender';
 }
 
 /**
@@ -973,6 +1084,42 @@ export async function listThreads(
     clauses.push(
       `${filters.hasReply ? 'EXISTS' : 'NOT EXISTS'} (SELECT 1 FROM linkedin_messages m WHERE m.thread_id = t.id AND m.direction = 'in')`
     );
+  }
+  // TRV-036 filters. Each is an index probe correlated on the thread: the
+  // organization PK, the thread-tag PK, and (workspace_id, thread_id, position)
+  // on messages. All compose with the filters above and with LIMIT/OFFSET.
+  if (filters.tagId) {
+    clauses.push(
+      'EXISTS (SELECT 1 FROM linkedin_thread_tags tt WHERE tt.thread_id = t.id AND tt.workspace_id = t.workspace_id AND tt.tag_id = ?)'
+    );
+    params.push(filters.tagId);
+  }
+  if (filters.assigneeUserId === null) {
+    clauses.push(
+      'NOT EXISTS (SELECT 1 FROM linkedin_thread_organization o WHERE o.thread_id = t.id AND o.workspace_id = t.workspace_id AND o.assignee_user_id IS NOT NULL)'
+    );
+  } else if (filters.assigneeUserId !== undefined) {
+    clauses.push(
+      'EXISTS (SELECT 1 FROM linkedin_thread_organization o WHERE o.thread_id = t.id AND o.workspace_id = t.workspace_id AND o.assignee_user_id = ?)'
+    );
+    params.push(filters.assigneeUserId);
+  }
+  if (filters.starred !== undefined) {
+    clauses.push(
+      `${filters.starred ? 'EXISTS' : 'NOT EXISTS'} (SELECT 1 FROM linkedin_thread_organization o WHERE o.thread_id = t.id AND o.workspace_id = t.workspace_id AND o.starred)`
+    );
+  }
+  const archived = filters.archived ?? false;
+  if (archived !== 'any') {
+    clauses.push(
+      `${archived ? 'EXISTS' : 'NOT EXISTS'} (SELECT 1 FROM linkedin_thread_organization o WHERE o.thread_id = t.id AND o.workspace_id = t.workspace_id AND o.archived)`
+    );
+  }
+  if (filters.lastFrom) {
+    clauses.push(
+      '(SELECT m.direction FROM linkedin_messages m WHERE m.workspace_id = t.workspace_id AND m.thread_id = t.id ORDER BY m.position DESC LIMIT 1) = ?'
+    );
+    params.push(filters.lastFrom === 'lead' ? 'in' : 'out');
   }
   const search = filters.search?.trim().slice(0, 120) ?? '';
   if (search) {

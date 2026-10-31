@@ -3194,7 +3194,9 @@ export async function endManagedCampaignMember(
 ): Promise<boolean> {
   const timestamp = now.toISOString();
   let changed = 0;
-  await db.transaction(async (tx) => {
+  // Inline inside a caller's transaction (a confirmed opt-out ends memberships
+  // atomically with its suppression); its own transaction otherwise.
+  await db.transactionOrInline(async (tx) => {
     const result = await tx
       .prepare(
         `UPDATE linkedin_campaign_members SET status=?,next_eligible_at=NULL,ended_at=?::timestamptz,updated_at=?::timestamptz

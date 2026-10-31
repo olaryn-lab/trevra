@@ -7790,6 +7790,255 @@ button:disabled {
   font-size: var(--t-text-xs);
 }
 
+/* TRV-036 / TRV-037: inbox organization. Composition only -- the controls are
+   the shared primitives; colour comes from the token palette. */
+.inbox-tag-neutral {
+  background: var(--t-surface-3);
+  color: var(--t-ink);
+}
+.inbox-tag-green {
+  background: var(--t-green-100);
+  color: var(--t-green-700);
+}
+.inbox-tag-blue {
+  background: var(--t-blue-bg);
+  color: var(--t-blue);
+}
+.inbox-tag-amber {
+  background: var(--t-amber-bg);
+  color: var(--t-amber);
+}
+.inbox-tag-red {
+  background: var(--t-red-bg);
+  color: var(--t-red);
+}
+.li-chip svg {
+  margin-right: 3px;
+}
+.inbox-row {
+  display: flex;
+  align-items: stretch;
+}
+.inbox-row > .li-thread {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+.inbox-row-select {
+  flex: none;
+  width: var(--t-tap);
+  display: grid;
+  place-items: center;
+  border-top: 1px solid var(--t-line-soft);
+}
+label.inbox-row-select {
+  cursor: pointer;
+}
+.li-thread-list li:first-child .inbox-row-select {
+  border-top: 0;
+}
+.inbox-row-select input,
+.inbox-select-all input {
+  accent-color: var(--t-green-600);
+}
+.inbox-select-row {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+.inbox-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--t-tap);
+  padding-left: 13px;
+  color: var(--t-muted);
+  font-size: var(--t-text-xs);
+  cursor: pointer;
+}
+.inbox-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-md);
+  background: var(--t-surface-2);
+  font-size: var(--t-text-xs);
+}
+.inbox-bulk-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+.inbox-more-filters > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--t-tap);
+  list-style: none;
+}
+.inbox-more-filters > summary::-webkit-details-marker {
+  display: none;
+}
+.inbox-more-filters[open] {
+  flex-basis: 100%;
+}
+.inbox-more-filters-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.inbox-org,
+.inbox-class {
+  display: grid;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--t-line-soft);
+}
+.inbox-org-row,
+.inbox-org-tags,
+.inbox-class-head,
+.inbox-class-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.inbox-star.is-filled {
+  fill: currentColor;
+  color: var(--t-amber);
+}
+.inbox-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--t-tap);
+  padding-left: 10px;
+  border-radius: var(--t-r-sm);
+  font-size: var(--t-text-xs);
+  font-weight: var(--t-w-bold);
+}
+.inbox-tag-manager-list .inbox-tag {
+  padding-right: 10px;
+}
+.inbox-tag-remove {
+  display: grid;
+  place-items: center;
+  min-width: var(--t-tap);
+  min-height: var(--t-tap);
+  border: 0;
+  border-radius: var(--t-r-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.inbox-tag-remove:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.inbox-tag-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 12rem);
+  align-items: end;
+  gap: 10px;
+}
+.inbox-tag-create-actions,
+.inbox-tag-create > .li-hint {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.inbox-tag-manager-list {
+  list-style: none;
+  margin: 0;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+.inbox-tag-manager-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.inbox-tag-manager-list .li-hint {
+  margin: 0 auto 0 0;
+}
+.inbox-notes {
+  margin: 12px 0;
+}
+.inbox-note-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.inbox-note {
+  display: grid;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--t-line-soft);
+}
+.inbox-note-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--t-text-sm);
+}
+.inbox-note-head .li-hint {
+  margin: 0;
+}
+.inbox-note-body,
+.inbox-note-history p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--t-text-sm);
+}
+.inbox-note-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.inbox-note-history {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 12px;
+  display: grid;
+  gap: 8px;
+  border-left: 2px solid var(--t-line);
+}
+.inbox-note-add,
+.inbox-note-edit {
+  display: grid;
+  gap: 8px;
+}
+.inbox-class-chip {
+  background: var(--t-blue-bg);
+  color: var(--t-blue);
+}
+.inbox-class-chip.is-confirmed {
+  background: var(--t-green-100);
+  color: var(--t-green-700);
+}
+.inbox-class .li-hint {
+  margin: 0;
+}
+@media (max-width: 640px) {
+  .inbox-tag-create {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .inbox-more-filters-body > * {
+    flex: 1 1 100%;
+  }
+}
+
 /* Initials-in-a-circle: the avatar-led row a native message UI draws with a
    photo Trevra never has. One tone per person, held for the session -- see
    `avatarTone`. Reuses the existing chip palette rather than adding one. */
