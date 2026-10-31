@@ -41,6 +41,7 @@ import {
   type LeadCsvPresetId
 } from './leadCsvPresets';
 import { errorMessage } from './LinkedInSafety';
+import { CrmContactSync } from './CrmContactSync';
 import { ActionMenu } from './ui/action-menu';
 import { Button, Field, Select, Textarea } from './ui/primitives';
 import { pluralGrouped } from './ui/plural';
@@ -312,6 +313,9 @@ export function LinkedInManagerLeadConfig({
   const [visible, setVisible] = useState(PAGE);
   const [draft, setDraft] = useState<ContactDraft | null>(null);
   const [armed, setArmed] = useState('');
+  /** TRV-051: the lead whose CRM sync panel is open above the table. */
+  const [crmSync, setCrmSync] = useState<{ id: string; name: string } | null>(null);
+  const crmSyncRef = useRef<HTMLDivElement | null>(null);
   const [rowBusy, setRowBusy] = useState('');
   const [listError, setListError] = useState('');
   const [renamingList, setRenamingList] = useState(false);
@@ -1707,6 +1711,16 @@ export function LinkedInManagerLeadConfig({
                     </div>
                   )}
 
+                  {crmSync && contacts.some((contact) => contact.id === crmSync.id) && (
+                    <div ref={crmSyncRef}>
+                      <CrmContactSync
+                        leadContactId={crmSync.id}
+                        leadName={crmSync.name}
+                        onClose={() => setCrmSync(null)}
+                      />
+                    </div>
+                  )}
+
                   <div className="li-table-scroll">
                     <table className="li-table lead-contacts">
                       <thead>
@@ -1778,6 +1792,24 @@ export function LinkedInManagerLeadConfig({
                                           icon: <Pencil size={12} />,
                                           disabled: rowBusy !== '' || editing,
                                           onSelect: () => startEdit(contact)
+                                        },
+                                        {
+                                          label: 'Sync to CRM',
+                                          icon: <RefreshCw size={12} />,
+                                          disabled: rowBusy !== '',
+                                          onSelect: () => {
+                                            setDraft(null);
+                                            setArmed('');
+                                            setCrmSync({
+                                              id: contact.id,
+                                              name: `${contact.firstName} ${contact.lastName}`.trim()
+                                            });
+                                            requestAnimationFrame(() =>
+                                              crmSyncRef.current?.scrollIntoView({
+                                                block: 'nearest'
+                                              })
+                                            );
+                                          }
                                         },
                                         {
                                           label: 'Remove lead permanently',

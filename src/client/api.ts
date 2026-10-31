@@ -379,6 +379,16 @@ export async function prepareBufferDraft(
   });
 }
 
+export type CrmContactUpsert = import('../server/crm/contact-upsert-store').CrmUpsertView;
+
+/** TRV-051: search the CRM and prepare one contact upsert behind approval. */
+export async function prepareCrmContactUpsert(input: {
+  leadContactId: string;
+  connectionId?: string;
+}): Promise<{ upsert: CrmContactUpsert; run: PlaybookRun | null }> {
+  return request('/api/crm/contact-upserts', { method: 'POST', body: JSON.stringify(input) });
+}
+
 export async function getContentPerformance(limit = 100): Promise<ContentPerformanceReport> {
   return request(`/api/content/performance?limit=${encodeURIComponent(String(limit))}`);
 }
