@@ -277,7 +277,8 @@ const ACTION_META: Record<Action, ActionMeta> = {
     label: 'Endorse skills',
     Icon: UserCheck,
     chip: 'li-kind-profile_view',
-    blurb: 'Endorses a small bounded number of visible skills.'
+    blurb:
+      'Endorses up to the chosen number of visible skills on one lead’s profile. The daily endorsement limit counts this as one action, however many skills it endorses.'
   },
   wait: {
     label: 'Wait',
@@ -2601,7 +2602,7 @@ function WorkflowStepCard({
 
         {step.action === 'endorse_skills' && (
           <label>
-            Skills to endorse (1–10 per action)
+            Skills to endorse per lead (1–10)
             <input
               type="number"
               min={1}

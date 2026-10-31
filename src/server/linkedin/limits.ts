@@ -143,9 +143,11 @@ export type BandName = 'warmup' | 'steady';
  *              list-processing.
  * - endorse -- 3 / 8. The lowest by a wide margin, for two reasons. Endorsing
  *              a stranger's skills is the least plausible human behaviour of
- *              the three, and ONE endorse action already performs up to three
- *              clicks (`driver-engage.ts` `endorseSkills`), so 8 actions is up
- *              to 24 clicks.
+ *              the three, and ONE endorse action performs up to `maxSkills`
+ *              clicks (1-10 per workflow step; `driver-engage.ts`
+ *              `endorseSkills`). The band counts ACTIONS, one per lead, not
+ *              clicks: 8 actions is up to 80 clicks at the maximum setting.
+ *              endorse-quota.acceptance.test.ts pins that contract.
  *
  * DAILY ONLY for all four judgement rows: no `perWeek`, no `perMonth`.
  * Supplying a daily figure is already a stretch and the gate cannot run
