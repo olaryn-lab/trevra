@@ -12,6 +12,7 @@ import { OutreachManagerBuilder } from '../LinkedInManagerBuilder';
 import { OutreachManagerRead } from '../LinkedInManagerRead';
 import { LinkedInManagerWorkflowConfig } from '../LinkedInManagerWorkflowConfig';
 import { LinkedInPosts } from '../LinkedInPosts';
+import { OutreachAnalytics } from '../LinkedInReportsScreen';
 import { CommunityPostRecovery } from '../CommunityPostRecovery';
 import { InboundPeople } from '../InboundPeople';
 import { Opportunities } from '../Opportunities';
@@ -145,7 +146,8 @@ const OUTREACH_TABS: ReadonlyArray<{
     label: 'Deals',
     mobile: 'main'
   },
-  { sub: 'posts', path: '/outreach/posts', label: 'Social posts', mobile: 'more' }
+  { sub: 'posts', path: '/outreach/posts', label: 'Social posts', mobile: 'more' },
+  { sub: 'analytics', path: '/outreach/analytics', label: 'Analytics', mobile: 'more' }
 ];
 
 function activeSub(sub: string): string {
@@ -265,6 +267,7 @@ export function OutreachView({
           <LinkedInPosts setToast={setToast} />
         </div>
       )}
+      {sub === 'analytics' && <OutreachAnalytics setToast={setToast} />}
       {sub === 'new' && <OutreachManagerBuilder setToast={setToast} onNavigate={onNavigate} />}
       {sub === 'campaign' && route.id && (
         <OutreachManagerRead

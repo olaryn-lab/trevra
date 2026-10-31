@@ -13,7 +13,9 @@ import { FunnelBars, LiStat } from './LinkedInViz';
  * a loop-level question -- how far does what goes out actually get -- so the
  * shell renders `LinkedInFunnel` on `/loop`; the per-campaign table was a
  * campaign question, and it has since been removed; the chart stayed where
- * it was.
+ * it was. A date-ranged per-campaign, daily and per-rep breakdown came back as
+ * its own screen, `/outreach/analytics` (`LinkedInReportsScreen.tsx`), built
+ * on one server report rather than on this route.
  *
  * THE WINDOW IS A CONTROL NOW, AND THE COPY IS THE SERVER'S ANSWER.
  * Both panels used to send a hardcoded 7 and then print "every action ever

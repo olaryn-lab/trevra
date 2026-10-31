@@ -79,6 +79,13 @@ export type CitationSourceSummary = CitationSourceView;
 import type { EmailChannelStatus } from '../server/email/types';
 import type { ConversationMessage, ConversationSummary } from '../server/conversations';
 import type { LinkedInActionKind, LinkedInActionStatus } from '../server/linkedin/actions';
+import type { RepReport, ReportPreset } from '../server/linkedin/rep-reporting';
+export type {
+  RepMetrics,
+  RepReport,
+  ReportMemberRow,
+  ReportPreset
+} from '../server/linkedin/rep-reporting';
 import type { LinkedInPost, LinkedInPostStatus } from '../server/linkedin/posts';
 import type { PostBlock } from '../shared/linkedin-post-format';
 import type { BranchOn, StepCondition } from '../server/linkedin/branching';
@@ -2904,6 +2911,79 @@ export async function downloadLinkedInManagedCampaignExport(id: string): Promise
     throw new ApiError(body.error ?? 'Unable to export campaign', response.status);
   }
   return response.blob();
+}
+
+/**
+ * Range and filters for the per-rep report and its exports (TRV-046, TRV-049).
+ * Either `range` (a preset) or `from` + `to`, never both; `from` is inclusive,
+ * `to` exclusive, both local dates in the workspace's time zone.
+ */
+export interface LinkedInReportQuery {
+  range?: ReportPreset;
+  from?: string;
+  to?: string;
+  seatKey?: string;
+  campaignId?: string;
+}
+
+export interface CsvDownload {
+  blob: Blob;
+  /** The server's filename, which carries the range. */
+  filename: string;
+}
+
+function reportParams(query: LinkedInReportQuery, extra: Record<string, string> = {}): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries({ ...query, ...extra }))
+    if (value) params.set(key, value);
+  return params.toString();
+}
+
+export async function getLinkedInReport(query: LinkedInReportQuery): Promise<RepReport> {
+  return request(`/api/linkedin/manager/reports?${reportParams(query)}`);
+}
+
+async function downloadReportCsv(path: string, fallback: string): Promise<CsvDownload> {
+  const response = await fetch(path, { credentials: 'include' });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText }));
+    throw new ApiError(body.error ?? 'Unable to export these stats', response.status);
+  }
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  return {
+    blob: await response.blob(),
+    filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? fallback
+  };
+}
+
+/** Workspace daily stats, one row per day, honouring the seat and campaign filters. */
+export function downloadLinkedInDailyStatsCsv(query: LinkedInReportQuery): Promise<CsvDownload> {
+  return downloadReportCsv(
+    `/api/linkedin/manager/reports/daily.csv?${reportParams(query)}`,
+    'trevra-daily-stats.csv'
+  );
+}
+
+/** One campaign's stats, one row per day. */
+export function downloadLinkedInCampaignStatsCsv(
+  campaignId: string,
+  query: Omit<LinkedInReportQuery, 'campaignId'>
+): Promise<CsvDownload> {
+  return downloadReportCsv(
+    `/api/linkedin/manager/reports/campaigns/${encodeURIComponent(campaignId)}/daily.csv?${reportParams(query)}`,
+    'trevra-campaign-stats.csv'
+  );
+}
+
+/** Selected members, one row per member per day. Refused (400) past the row cap, never truncated. */
+export function downloadLinkedInTeamStatsCsv(
+  query: LinkedInReportQuery,
+  memberIds: readonly string[]
+): Promise<CsvDownload> {
+  return downloadReportCsv(
+    `/api/linkedin/manager/reports/team.csv?${reportParams(query, { memberIds: memberIds.join(',') })}`,
+    'trevra-team-stats.csv'
+  );
 }
 
 export async function getLinkedInManagedCampaign(

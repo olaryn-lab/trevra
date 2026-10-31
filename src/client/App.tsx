@@ -3462,6 +3462,7 @@ function viewTitle(route: Route): string {
     if (route.sub === 'inbox') return 'Messages';
     if (route.sub === 'opportunities') return 'Deals';
     if (route.sub === 'posts') return 'Social posts';
+    if (route.sub === 'analytics') return 'Analytics';
     if (route.sub === 'new') return 'New campaign';
     if (route.sub === 'campaign') return 'Campaign';
     if (route.sub === 'workflow') return 'Campaign workflow';
