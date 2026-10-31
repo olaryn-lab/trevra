@@ -822,8 +822,11 @@ export async function evaluateLinkedInSafety(
   // Migration 074: this reply answers a person who wrote first, which is not
   // the cold outreach the account ramp slows.
   const answeringInbound = input.replyToInbound === true && input.kind === 'reply';
+  // The count leads on an established account too: at the daily ceiling this
+  // is the first failing check, and a refusal that only said the warm-up was
+  // skipped never named the number that actually bound.
   const warmupDetail = seat?.warmupOverride
-    ? `Account warm-up is explicitly skipped for this established account. Its recorded Trevra warm-up clock is week ${warmupWeek} of ${WARMUP_WEEKS}, but the account-level multiplier is 1.0; campaign ramping and every other safety ceiling still apply.`
+    ? `${used24} of ${warmupCeiling} ${pluralKind(input.kind)} used in the last 24h (${ceilingSource}). Account warm-up is explicitly skipped for this established account. Its recorded Trevra warm-up clock is week ${warmupWeek} of ${WARMUP_WEEKS}, but the account-level multiplier is 1.0; campaign ramping and every other safety ceiling still apply.`
     : warmupCeiling === 0
       ? `The effective ${pluralKind(input.kind)} ceiling is 0/day (${ceilingSource} x ${multiplier}). The active-outreach account warm-up multiplier itself is non-zero; check this account's configured daily limit or other zero ceiling.`
       : isPassiveKind(input.kind) && warmupWeek <= WARMUP_WEEKS

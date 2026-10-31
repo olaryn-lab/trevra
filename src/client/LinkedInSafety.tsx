@@ -60,7 +60,7 @@ export const KIND_LABELS: Record<PacedKind, string> = {
   invite: 'Connection invites',
   dm: 'Direct messages',
   reply: 'Replies',
-  inmail: 'InMail (not sent by Trevra)',
+  inmail: 'InMails',
   profile_view: 'Profile views',
   follow: 'Follows',
   unfollow: 'Unfollows',
