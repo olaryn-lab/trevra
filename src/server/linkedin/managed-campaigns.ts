@@ -4093,7 +4093,11 @@ export async function managedAnalytics(
     .prepare(
       `
     SELECT a.workflow_step_id,a.variant_id,
-      COUNT(*) FILTER (WHERE a.status IN ('sent','accepted','replied'))::int AS sent,
+      -- 'declined' was sent, exactly as in invites_sent above and in the
+      -- operational per-variant counts. Without it the arms did not add up to
+      -- the campaign total, and a variant's reply rate was over a smaller
+      -- population than the one it was compared against.
+      COUNT(*) FILTER (WHERE a.status IN ('sent','accepted','replied','declined'))::int AS sent,
       COUNT(*) FILTER (WHERE a.status='replied')::int AS replied
     FROM linkedin_actions a WHERE ${where} AND a.workflow_step_id IS NOT NULL AND a.variant_id IS NOT NULL
     GROUP BY a.workflow_step_id,a.variant_id ORDER BY a.workflow_step_id,a.variant_id
