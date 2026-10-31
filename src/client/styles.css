@@ -14499,6 +14499,11 @@ label.inbox-row-select {
 .today-action-review-actions {
   justify-content: flex-end;
 }
+.today-handoff-more-body {
+  display: grid;
+  gap: 10px;
+  padding-top: 6px;
+}
 @media (max-width: 680px) {
   .today-action-review {
     grid-column: 1 / -1;

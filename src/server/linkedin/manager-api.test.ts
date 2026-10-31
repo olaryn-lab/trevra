@@ -1023,13 +1023,15 @@ describe('LinkedIn manager HTTP surface', () => {
         .patch('/api/linkedin/manager/seats/owner')
         .send({ label: 'Renamed again' })
         .expect(200);
-      // Today shows it to the founder; from then on it blocks the switch.
+      // Today lists it; reading Today alone presents nothing.
       const today = await as(tokenA).get('/api/today').expect(200);
       expect(
         (today.body.needsAttention as { kind: string; reference: { id: string } }[])
           .filter((item) => item.kind === 'linkedin_handoff_waiting')
           .map((item) => item.reference.id)
       ).toEqual(['lact_manager_switch']);
+      // The card shows it to the founder; from then on it blocks the switch.
+      await as(tokenA).post('/api/linkedin/handoffs/lact_manager_switch/present').expect(200);
       const refused = await as(tokenA)
         .patch('/api/linkedin/manager/seats/owner')
         .send({ sendMode: 'automated' })

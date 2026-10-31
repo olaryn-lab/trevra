@@ -568,6 +568,7 @@ import {
 import {
   guardSeatSendModeChange,
   handoffResolutionSchema,
+  presentLinkedInHandoff,
   resolveLinkedInHandoff
 } from './linkedin/handoff.js';
 import { getSenderIdentity, saveSenderIdentity } from './compliance/sender-identity.js';
@@ -6222,9 +6223,26 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
     })
   );
 
-  // HUMAN-SEND REPORT. The founder sent (or skipped) the invite or message
-  // Trevra handed them in Today. Any workspace member may report it: it is the
-  // same kind of report as the outcome route above, never an instruction.
+  // HUMAN-SEND PRESENTATION. The Today card is on screen: stamp its row
+  // presented (freezing its words) and return them. GET /api/today only lists,
+  // so a prefetch or refresh never marks anything as shown.
+  app.post(
+    '/api/linkedin/handoffs/:id/present',
+    linkedinRoute(async (req, res) => {
+      const handoff = await presentLinkedInHandoff(
+        db,
+        req.auth!.workspaceId,
+        String(req.params.id),
+        new Date()
+      );
+      res.json({ handoff });
+    })
+  );
+
+  // HUMAN-SEND REPORT. The founder sent, skipped or could not send the invite
+  // or message Trevra handed them in Today. Any workspace member may report it:
+  // it is the same kind of report as the outcome route above, never an
+  // instruction.
   app.post(
     '/api/linkedin/handoffs/:id/resolve',
     linkedinRoute(async (req, res) => {
@@ -6235,6 +6253,8 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
           workspaceId: req.auth!.workspaceId,
           actionId: String(req.params.id),
           resolution: input.resolution,
+          ...(input.sentAt === undefined ? {} : { sentAt: input.sentAt }),
+          ...(input.failure === undefined ? {} : { failure: input.failure }),
           actorUserId: req.auth!.userId
         },
         new Date()

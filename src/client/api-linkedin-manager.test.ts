@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   deleteLinkedInManagerLeadContact,
   getLinkedInManagerLeadContacts,
+  presentLinkedInHandoff,
   resolveLinkedInHandoff,
   updateLinkedInManagerSeat,
   updateLinkedInSeatCapabilities
@@ -79,6 +80,48 @@ describe('LinkedIn manager client API wiring', () => {
     expect(path).toBe('/api/linkedin/handoffs/lact_1/resolve');
     expect(init.method).toBe('POST');
     expect(JSON.parse(String(init.body))).toEqual({ resolution: 'sent' });
+  });
+
+  it('carries when it was sent, and why it failed, only when given', async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      async () =>
+        new Response(JSON.stringify({ handoff: { actionId: 'lact_1', status: 'failed' } }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' }
+        })
+    );
+    vi.stubGlobal('fetch', fetchMock);
+
+    await resolveLinkedInHandoff('lact_1', 'sent', { sentAt: '2026-08-04T09:30:00.000Z' });
+    await resolveLinkedInHandoff('lact_1', 'failed', { failure: 'linkedin_refused' });
+    const bodies = fetchMock.mock.calls.map(([, init]) =>
+      JSON.parse(String((init as RequestInit).body))
+    );
+    expect(bodies).toEqual([
+      { resolution: 'sent', sentAt: '2026-08-04T09:30:00.000Z' },
+      { resolution: 'failed', failure: 'linkedin_refused' }
+    ]);
+  });
+
+  it('presents a handoff through its own POST and returns the stamped words', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        new Response(
+          JSON.stringify({ handoff: { actionId: 'lact_1', copyText: 'Hi Maya', subject: null } }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } }
+        )
+      );
+    vi.stubGlobal('fetch', fetchMock);
+
+    expect(await presentLinkedInHandoff('lact_1')).toMatchObject({
+      actionId: 'lact_1',
+      copyText: 'Hi Maya',
+      subject: null
+    });
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(path).toBe('/api/linkedin/handoffs/lact_1/present');
+    expect(init.method).toBe('POST');
   });
 
   it('requires the server to confirm a permanent lead deletion', async () => {

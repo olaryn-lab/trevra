@@ -1,6 +1,11 @@
 import type { Db } from './db.js';
 import { campaignExecutionState } from './linkedin/execution-state.js';
-import { handoffTitle, listLinkedInHandoffs, presentLinkedInHandoffs } from './linkedin/handoff.js';
+import {
+  cancelledHandoffTitle,
+  handoffTitle,
+  listCancelledLinkedInHandoffs,
+  listLinkedInHandoffs
+} from './linkedin/handoff.js';
 import type { LinkedInCheckName } from './linkedin/guard.js';
 import {
   MILESTONE_KINDS_SQL,
@@ -724,12 +729,16 @@ export async function getToday(
     });
   }
 
-  // HUMAN-SEND: the next gated invite or message per human-send seat, stamped
-  // as presented so it stays the founder's (and blocks a switch back to
-  // automatic) until answered. A read that cannot list them must not take
-  // Today down with it.
-  const handoffs = await listLinkedInHandoffs(db, workspaceId, now)
-    .then((listed) => presentLinkedInHandoffs(db, workspaceId, listed, now))
+  // HUMAN-SEND: the next gated invite or message per human-send seat, plus any
+  // presented one something cancelled before the founder answered it. A READ:
+  // nothing is stamped here (a prefetch is not a presentation); the card
+  // stamps its row through POST /api/linkedin/handoffs/:id/present when it is
+  // actually shown. A read that cannot list them must not take Today down.
+  const handoffs = await Promise.all([
+    listLinkedInHandoffs(db, workspaceId, now),
+    listCancelledLinkedInHandoffs(db, workspaceId)
+  ])
+    .then(([waiting, cancelled]) => [...waiting, ...cancelled])
     .catch((error: unknown) => {
       console.error(`Failed to list LinkedIn handoffs for workspace ${workspaceId}`, error);
       return [];
@@ -739,10 +748,14 @@ export async function getToday(
       id: `linkedin_handoff:${handoff.actionId}`,
       kind: 'linkedin_handoff_waiting',
       priority: 42,
-      title: handoffTitle(handoff.kind, handoff.seatLabel),
+      title: handoff.cancelled
+        ? cancelledHandoffTitle(handoff.kind, handoff.seatLabel)
+        : handoffTitle(handoff.kind, handoff.seatLabel),
       detail:
         `${handoff.campaignName ? `${handoff.campaignName}: ` : ''}` +
-        'Trevra checked this against the account limits. Send it on LinkedIn yourself, then mark it sent so the limits count it.',
+        (handoff.cancelled
+          ? 'Trevra cancelled this after showing it to you, so do not send it now. If you already sent it, mark it sent so the limits count it.'
+          : 'Trevra checked this against the account limits. Send it on LinkedIn yourself, then mark it sent so the limits count it.'),
       href: '/outreach',
       observedAt: handoff.plannedFor,
       reference: { type: 'linkedin_action', id: handoff.actionId },
@@ -755,6 +768,7 @@ export async function getToday(
         targetUrl: handoff.targetUrl,
         targetRef: handoff.targetRef,
         campaignName: handoff.campaignName,
+        cancelled: handoff.cancelled,
         channel: 'linkedin'
       }
     });

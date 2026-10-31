@@ -2256,17 +2256,44 @@ export async function skipLinkedInAction(id: string): Promise<LinkedInActionView
 }
 
 /**
+ * A Today handoff card is on screen: stamp it presented. Returns the words as
+ * stamped -- frozen from here on, and what "Mark sent" records. Refused (409)
+ * when the row is no longer this workspace's handoff.
+ */
+export async function presentLinkedInHandoff(
+  id: string
+): Promise<{ actionId: string; copyText: string | null; subject: string | null }> {
+  const result = await request<{
+    handoff: { actionId: string; copyText: string | null; subject: string | null };
+  }>(`/api/linkedin/handoffs/${encodeURIComponent(id)}/present`, {
+    method: 'POST',
+    body: JSON.stringify({})
+  });
+  return result.handoff;
+}
+
+export type LinkedInHandoffFailure = 'profile_unavailable' | 'linkedin_refused';
+
+/**
  * The founder's answer to a human-send handoff in Today: they sent it on
- * LinkedIn themselves, or they are skipping it. A report, never a send.
+ * LinkedIn themselves (optionally saying when), they are skipping it, or
+ * LinkedIn would not let them send it. A report, never a send.
  */
 export async function resolveLinkedInHandoff(
   id: string,
-  resolution: 'sent' | 'skip'
-): Promise<{ actionId: string; status: 'sent' | 'skipped' }> {
-  const result = await request<{ handoff: { actionId: string; status: 'sent' | 'skipped' } }>(
-    `/api/linkedin/handoffs/${encodeURIComponent(id)}/resolve`,
-    { method: 'POST', body: JSON.stringify({ resolution }) }
-  );
+  resolution: 'sent' | 'skip' | 'failed',
+  options: { sentAt?: string; failure?: LinkedInHandoffFailure } = {}
+): Promise<{ actionId: string; status: 'sent' | 'skipped' | 'failed' }> {
+  const result = await request<{
+    handoff: { actionId: string; status: 'sent' | 'skipped' | 'failed' };
+  }>(`/api/linkedin/handoffs/${encodeURIComponent(id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({
+      resolution,
+      ...(options.sentAt ? { sentAt: options.sentAt } : {}),
+      ...(options.failure ? { failure: options.failure } : {})
+    })
+  });
   return result.handoff;
 }
 

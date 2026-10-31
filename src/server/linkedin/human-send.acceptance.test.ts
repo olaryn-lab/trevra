@@ -10,6 +10,7 @@ import type { TodayItem } from '../today.js';
 import { linkedinActionPolicyGate, reviewLinkedInAction } from './action-policy.js';
 import { linkedinAnalytics } from './action-ledger.js';
 import type { LinkedInDriver, LinkedInDriverResult, LinkedInPage } from './driver.js';
+import { campaignExecutionState } from './execution-state.js';
 import { evaluateLinkedInSafety, type LinkedInSafetyVerdict } from './guard.js';
 import { listLinkedInHandoffs, presentLinkedInHandoffs } from './handoff.js';
 import { editQueuedMessage } from './inbox.js';
@@ -24,8 +25,17 @@ import {
 } from './local-worker.js';
 import {
   createManagedCampaign,
+  endManagedCampaignMember,
   managedAnalytics,
-  startManagedCampaign
+  moveManagedCampaignMembers,
+  pauseManagedCampaign,
+  releaseSeatWork,
+  removeCampaignMember,
+  resumeManagedCampaignMemberAtStep,
+  retireSuppressedCampaignMembers,
+  skipManagedCampaignMemberStep,
+  startManagedCampaign,
+  stopManagedCampaign
 } from './managed-campaigns.js';
 import { repReport } from './rep-reporting.js';
 import { runManagedCampaigns } from './runner.js';
@@ -96,15 +106,55 @@ async function atTime<T>(when: Date, run: () => Promise<T>): Promise<T> {
   }
 }
 
-async function todayHandoffs(sessionToken: string, when: Date): Promise<TodayItem[]> {
+/** GET /api/today alone: what the Today screen reads, with no card shown yet. */
+async function todayRead(sessionToken: string, when: Date): Promise<TodayItem[]> {
   const response = await atTime(when, () => as(sessionToken).get('/api/today').expect(200));
   return (response.body.needsAttention as TodayItem[]).filter(
     (item) => item.kind === 'linkedin_handoff_waiting'
   );
 }
 
-function resolveOver(sessionToken: string, actionId: string, resolution: 'sent' | 'skip') {
-  return as(sessionToken).post(`/api/linkedin/handoffs/${actionId}/resolve`).send({ resolution });
+function presentOver(sessionToken: string, actionId: string) {
+  return as(sessionToken).post(`/api/linkedin/handoffs/${actionId}/present`).send({});
+}
+
+/**
+ * What the founder sees: Today's read, then each card presenting itself
+ * (POST .../present), with the words the stamp froze.
+ */
+async function todayHandoffs(sessionToken: string, when: Date): Promise<TodayItem[]> {
+  const items = await todayRead(sessionToken, when);
+  const shown: TodayItem[] = [];
+  for (const item of items) {
+    if (item.metadata.cancelled === true) {
+      shown.push(item);
+      continue;
+    }
+    const response = await atTime(when, () =>
+      presentOver(sessionToken, String(item.reference?.id))
+    );
+    if (response.status !== 200) continue;
+    shown.push({
+      ...item,
+      metadata: {
+        ...item.metadata,
+        copyText: response.body.handoff.copyText,
+        subject: response.body.handoff.subject
+      }
+    });
+  }
+  return shown;
+}
+
+function resolveOver(
+  sessionToken: string,
+  actionId: string,
+  resolution: 'sent' | 'skip' | 'failed',
+  extra: Record<string, unknown> = {}
+) {
+  return as(sessionToken)
+    .post(`/api/linkedin/handoffs/${actionId}/resolve`)
+    .send({ resolution, ...extra });
 }
 
 interface ActionRow {
@@ -891,5 +941,328 @@ describe('TRV-043 human-send acceptance', () => {
         .expect(404)
     );
     expect((await actionRow('lact_isolated')).body).toBe('Hello');
+  });
+});
+
+/* ---------------------------------------------------------------------------
+ * TRV-043 HAND-OFF TRUTH: once a handoff has been presented, nothing automated
+ * may make its outcome unrecordable; presenting is an explicit POST; a held
+ * row can be skipped; the founder may say when the send happened; a failed
+ * attempt settles without counting; policy deny keeps an action from being
+ * presented or announced as waiting on the founder.
+ * ------------------------------------------------------------------------ */
+
+interface Presented {
+  campaignId: string;
+  actionId: string;
+  memberId: string;
+  targetRef: string;
+  shownAt: Date;
+}
+
+/** A one-lead managed campaign whose invite Today has shown the founder. */
+async function presentedCampaignInvite(name: string, slug: string): Promise<Presented> {
+  const campaignId = await campaignOn('owner', name, [slug], 'Hi {{first_name}}');
+  await runManagedCampaigns(db, WS, NOW);
+  const [planned] = await plannedInvites(campaignId);
+  expect(planned).toBeDefined();
+  const shownAt = dueAt(planned);
+  expect((await todayHandoffs(token, shownAt)).map((item) => item.reference?.id)).toEqual([
+    planned.id
+  ]);
+  expect((await actionRow(planned.id)).handoff_presented_at).not.toBeNull();
+  return {
+    campaignId,
+    actionId: planned.id,
+    memberId: planned.campaign_member_id!,
+    targetRef: planned.target_ref,
+    shownAt
+  };
+}
+
+async function rolling24h(when: Date): Promise<string> {
+  const verdict = await evaluateLinkedInSafety(
+    db,
+    {
+      workspaceId: WS,
+      seatKey: 'owner',
+      kind: 'invite',
+      targetRef: 'https://www.linkedin.com/in/rolling-probe/',
+      plannedFor: when.toISOString()
+    },
+    when
+  );
+  return verdict.checks.find((entry) => entry.check === 'rolling-24h')?.detail ?? '';
+}
+
+async function handoffEvents(actionId: string) {
+  return (
+    await listDomainEvents(db, WS, { streamType: 'linkedin_action', streamId: actionId })
+  ).filter((event) => event.eventType.startsWith('linkedin.handoff.'));
+}
+
+async function actionFailure(actionId: string) {
+  return db
+    .prepare('SELECT failure_kind, handoff_resolved_at FROM linkedin_actions WHERE id=?')
+    .get<{ failure_kind: string | null; handoff_resolved_at: unknown }>(actionId);
+}
+
+const BULK_PATHS: Array<{ name: string; cancel: (ctx: Presented, at: Date) => Promise<unknown> }> =
+  [
+    {
+      name: 'stopping the campaign',
+      cancel: (ctx, at) => stopManagedCampaign(db, WS, ctx.campaignId, at)
+    },
+    {
+      name: 'removing the lead',
+      cancel: (ctx, at) => removeCampaignMember(db, WS, ctx.memberId, at)
+    },
+    {
+      name: 'ending the lead',
+      cancel: (ctx, at) => endManagedCampaignMember(db, WS, ctx.memberId, 'completed', at)
+    },
+    {
+      name: "skipping the lead's step",
+      cancel: (ctx, at) => skipManagedCampaignMemberStep(db, WS, ctx.memberId, at)
+    },
+    {
+      name: 'moving the lead to another campaign',
+      cancel: async (ctx, at) => {
+        const target = await campaignOn('owner', 'Move target', ['move-target-lead'], 'Hi');
+        expect(
+          (await moveManagedCampaignMembers(db, WS, ctx.campaignId, target, [ctx.memberId], at))
+            .moved
+        ).toBe(1);
+      }
+    },
+    {
+      name: 'retiring a lead marked do-not-contact',
+      cancel: async (ctx, at) => {
+        await db
+          .prepare(
+            `UPDATE linkedin_lead_contacts SET do_not_contact=TRUE
+             WHERE workspace_id=? AND id=(SELECT contact_id FROM linkedin_campaign_members WHERE workspace_id=? AND id=?)`
+          )
+          .run(WS, WS, ctx.memberId);
+        expect(await retireSuppressedCampaignMembers(db, WS, ctx.campaignId, at)).toBe(1);
+      }
+    },
+    {
+      name: "releasing the seat's work",
+      cancel: (_ctx, at) => releaseSeatWork(db, WS, 'owner', at)
+    },
+    {
+      name: 'the campaign end date stopping it',
+      cancel: async (ctx, at) => {
+        await db
+          .prepare(
+            `UPDATE linkedin_campaigns SET scheduled_end_at=?::timestamptz, end_behavior='stop_immediately'
+             WHERE workspace_id=? AND id=?`
+          )
+          .run(new Date(at.getTime() - MINUTE).toISOString(), WS, ctx.campaignId);
+        await runManagedCampaigns(db, WS, at);
+      }
+    },
+    {
+      name: 'resuming the lead at the same step, which replans it',
+      cancel: async (ctx, at) => {
+        expect(await resumeManagedCampaignMemberAtStep(db, WS, ctx.memberId, 'invite', at)).toBe(
+          true
+        );
+        await runManagedCampaigns(db, WS, at);
+      }
+    }
+  ];
+
+describe('TRV-043 hand-off truth', () => {
+  for (const path of BULK_PATHS) {
+    it(`still records a presented hand send after ${path.name} cancelled it`, async () => {
+      await upsertSeat(db, WS, { warmupOverride: true }, NOW);
+      const ctx = await presentedCampaignInvite('Bulk', 'bulk-maya');
+      const cancelAt = new Date(ctx.shownAt.getTime() + 5 * MINUTE);
+      await path.cancel(ctx, cancelAt);
+      expect((await actionRow(ctx.actionId)).status).toBe('skipped');
+
+      // Today keeps asking: the founder may already have sent it.
+      const later = new Date(ctx.shownAt.getTime() + 2 * 60 * MINUTE);
+      const asked = (await todayRead(token, later)).filter(
+        (item) => item.reference?.id === ctx.actionId
+      );
+      expect(asked).toHaveLength(1);
+      expect(asked[0].metadata.cancelled).toBe(true);
+
+      // ... and "Mark sent" records it, dated when it actually went out.
+      const sentAt = new Date(ctx.shownAt.getTime() + MINUTE);
+      const marked = await atTime(later, () =>
+        resolveOver(token, ctx.actionId, 'sent', { sentAt: sentAt.toISOString() }).expect(200)
+      );
+      expect(marked.body).toEqual({ handoff: { actionId: ctx.actionId, status: 'sent' } });
+      const row = await actionRow(ctx.actionId);
+      expect(row.status).toBe('sent');
+      expect(iso(row.recorded_at)).toBe(sentAt.toISOString());
+      expect(await rolling24h(later)).toMatch(/^1 of /);
+      expect(await markedSentEvents(ctx.actionId)).toHaveLength(1);
+
+      // Answered: Today stops asking, and nothing else goes to that person.
+      expect(await todayHandoffs(token, new Date(later.getTime() + MINUTE))).toEqual([]);
+      const open = await db
+        .prepare(
+          `SELECT COUNT(*)::int AS n FROM linkedin_actions
+           WHERE workspace_id=? AND kind='invite' AND target_ref=? AND status IN ('planned','held')`
+        )
+        .get<{ n: number }>(WS, ctx.targetRef);
+      expect(open?.n).toBe(0);
+    });
+  }
+
+  it('still cancels a queued handoff that was never presented, and that one cannot be marked sent', async () => {
+    const campaignId = await campaignOn('owner', 'Unseen', ['unseen-maya'], 'Hi {{first_name}}');
+    await runManagedCampaigns(db, WS, NOW);
+    const [planned] = await plannedInvites(campaignId);
+    const at = dueAt(planned);
+    // Today READ it, but no card presented it.
+    expect((await todayRead(token, at)).map((item) => item.reference?.id)).toEqual([planned.id]);
+    await stopManagedCampaign(db, WS, campaignId, at);
+    expect((await actionRow(planned.id)).status).toBe('skipped');
+    expect(await todayRead(token, at)).toEqual([]);
+    await atTime(at, () => resolveOver(token, planned.id, 'sent').expect(409));
+    expect((await actionRow(planned.id)).status).toBe('skipped');
+  });
+
+  it('lets the founder answer a cancelled handoff with "I did not send it"', async () => {
+    const ctx = await presentedCampaignInvite('Dismiss', 'dismiss-maya');
+    await stopManagedCampaign(db, WS, ctx.campaignId, ctx.shownAt);
+    await atTime(ctx.shownAt, () => resolveOver(token, ctx.actionId, 'skip').expect(200));
+    expect((await actionRow(ctx.actionId)).status).toBe('skipped');
+    expect(await todayRead(token, ctx.shownAt)).toEqual([]);
+    expect((await handoffEvents(ctx.actionId)).map((event) => event.eventType)).toEqual([
+      'linkedin.handoff.skipped'
+    ]);
+    // Answered means answered: a later "sent" is refused like any skipped row.
+    await atTime(ctx.shownAt, () => resolveOver(token, ctx.actionId, 'sent').expect(409));
+  });
+
+  it('GET /api/today stamps nothing; the explicit present POST stamps and freezes the words shown', async () => {
+    await plan('lact_get_dm', 'owner', 'dm', 'https://www.linkedin.com/in/get-dm/', 'Draft one', {
+      source: 'manual'
+    });
+    for (let read = 0; read < 3; read += 1)
+      expect((await todayRead(token, NOW)).map((item) => item.reference?.id)).toEqual([
+        'lact_get_dm'
+      ]);
+    expect((await actionRow('lact_get_dm')).handoff_presented_at).toBeNull();
+    // A prefetch is not a presentation: the words are still editable and the
+    // seat can still go back to automatic.
+    await editQueuedMessage(db, { workspaceId: WS, actionId: 'lact_get_dm', body: AWKWARD_DM });
+
+    // Other workspaces cannot present it.
+    await atTime(NOW, () => presentOver(otherToken, 'lact_get_dm').expect(404));
+    expect((await actionRow('lact_get_dm')).handoff_presented_at).toBeNull();
+
+    const shown = await atTime(NOW, () => presentOver(token, 'lact_get_dm').expect(200));
+    expect(shown.body.handoff).toMatchObject({ actionId: 'lact_get_dm', copyText: AWKWARD_DM });
+    const stampedAt = iso((await actionRow('lact_get_dm')).handoff_presented_at);
+    expect(stampedAt).toBe(NOW.toISOString());
+    await expect(
+      editQueuedMessage(db, { workspaceId: WS, actionId: 'lact_get_dm', body: 'Too late' })
+    ).rejects.toMatchObject({ status: 409 });
+    // Presenting again is idempotent: same words, first stamp kept.
+    const again = await atTime(new Date(NOW.getTime() + MINUTE), () =>
+      presentOver(token, 'lact_get_dm').expect(200)
+    );
+    expect(again.body.handoff.copyText).toBe(AWKWARD_DM);
+    expect(iso((await actionRow('lact_get_dm')).handoff_presented_at)).toBe(stampedAt);
+    await atTime(NOW, () =>
+      as(token)
+        .patch('/api/linkedin/manager/seats/owner')
+        .send({ sendMode: 'automated' })
+        .expect(409)
+    );
+  });
+
+  it('lets the founder skip a presented handoff that a pause moved to held', async () => {
+    const ctx = await presentedCampaignInvite('Held', 'held-maya');
+    await pauseManagedCampaign(db, WS, ctx.campaignId, ctx.shownAt);
+    expect((await actionRow(ctx.actionId)).status).toBe('held');
+    const skipped = await atTime(ctx.shownAt, () =>
+      resolveOver(token, ctx.actionId, 'skip').expect(200)
+    );
+    expect(skipped.body).toEqual({ handoff: { actionId: ctx.actionId, status: 'skipped' } });
+    expect((await actionRow(ctx.actionId)).status).toBe('skipped');
+    expect(await todayRead(token, ctx.shownAt)).toEqual([]);
+  });
+
+  it('records when the hand send happened, within the presentation and the present', async () => {
+    await upsertSeat(db, WS, { warmupOverride: true }, NOW);
+    const ctx = await presentedCampaignInvite('Sent at', 'sentat-maya');
+    const clickAt = new Date(ctx.shownAt.getTime() + 3 * 60 * MINUTE);
+    // Not in the future beyond a small skew, not before Today showed it.
+    for (const bad of [
+      new Date(clickAt.getTime() + 10 * MINUTE),
+      new Date(ctx.shownAt.getTime() - 10 * MINUTE)
+    ]) {
+      await atTime(clickAt, () =>
+        resolveOver(token, ctx.actionId, 'sent', { sentAt: bad.toISOString() }).expect(400)
+      );
+    }
+    // sentAt belongs to a send report only.
+    await atTime(clickAt, () =>
+      resolveOver(token, ctx.actionId, 'skip', { sentAt: ctx.shownAt.toISOString() }).expect(400)
+    );
+    expect((await actionRow(ctx.actionId)).status).toBe('planned');
+    expect(await markedSentEvents(ctx.actionId)).toEqual([]);
+
+    const sentAt = new Date(ctx.shownAt.getTime() + 2 * MINUTE);
+    await atTime(clickAt, () =>
+      resolveOver(token, ctx.actionId, 'sent', { sentAt: sentAt.toISOString() }).expect(200)
+    );
+    const row = await actionRow(ctx.actionId);
+    expect(iso(row.recorded_at)).toBe(sentAt.toISOString());
+    const [event] = await markedSentEvents(ctx.actionId);
+    expect(event.payload).toMatchObject({ sentAt: sentAt.toISOString() });
+  });
+
+  it('settles a failed hand send like a worker failure: no count, member failed, one event', async () => {
+    const ctx = await presentedCampaignInvite('Failed', 'failed-maya');
+    const clickAt = new Date(ctx.shownAt.getTime() + MINUTE);
+    const [first, second] = await atTime(clickAt, () =>
+      Promise.all([
+        resolveOver(token, ctx.actionId, 'failed', { failure: 'profile_unavailable' }),
+        resolveOver(token, ctx.actionId, 'failed', { failure: 'profile_unavailable' })
+      ])
+    );
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body).toEqual({ handoff: { actionId: ctx.actionId, status: 'failed' } });
+    expect(second.body).toEqual(first.body);
+
+    const row = await actionRow(ctx.actionId);
+    expect(row.status).toBe('skipped');
+    expect(row.recorded_at).toBeNull();
+    expect((await actionFailure(ctx.actionId))?.failure_kind).toBe('not_found');
+    expect((await member(ctx.memberId))?.status).toBe('failed');
+    expect((await handoffEvents(ctx.actionId)).map((event) => event.eventType)).toEqual([
+      'linkedin.handoff.failed'
+    ]);
+    expect(await rolling24h(clickAt)).toMatch(/^0 of /);
+    expect((await linkedinAnalytics(db, WS, null, clickAt)).total.sent).toBe(0);
+    expect(await todayRead(token, clickAt)).toEqual([]);
+    // A failed attempt is not a send.
+    await atTime(clickAt, () => resolveOver(token, ctx.actionId, 'sent').expect(409));
+  });
+
+  it('neither presents nor announces as waiting on the founder an action policy denies', async () => {
+    await policy('deny', 'action:linkedin.invite');
+    const campaignId = await campaignOn('owner', 'Denied', ['denied-maya'], 'Hi {{first_name}}');
+    await runManagedCampaigns(db, WS, NOW);
+    const [planned] = await plannedInvites(campaignId);
+    expect(planned).toBeDefined();
+    const at = dueAt(planned);
+    expect(await todayRead(token, at)).toEqual([]);
+    await atTime(at, () => presentOver(token, planned.id).expect(409));
+    expect((await actionRow(planned.id)).handoff_presented_at).toBeNull();
+    const execution = await campaignExecutionState(db, WS, campaignId, at);
+    expect(execution.humanSendNext).toBe(false);
+    expect(execution.policyDenied).toBe(true);
   });
 });

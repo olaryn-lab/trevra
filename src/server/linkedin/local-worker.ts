@@ -2608,7 +2608,9 @@ export function postgresLocalWorkerStore(
       // step is complete”. Keep the lead on the same node so Retry can replay
       // this exact action without racing downstream work. Branch/operator skips
       // use their own settlement paths and are the only skips that advance.
-      await db.transaction(async (tx) => {
+      // Inline when called inside a transaction (a founder's failed handoff
+      // report settles through here, atomically with its event).
+      await db.transactionOrInline(async (tx) => {
         await tx
           .prepare(
             `
