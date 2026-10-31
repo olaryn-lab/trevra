@@ -32,17 +32,19 @@ describe('hostedRunBlocker', () => {
     }
   });
 
-  it('tells a member to ask the workspace owner', () => {
-    const base = { ...ready, role: 'member' as const };
-    expect(hostedRunBlocker({ ...base, modelAccessMissing: true })).toContain(
-      'The workspace owner has to configure model access'
-    );
-    expect(hostedRunBlocker({ ...base, spendingEnabled: false })).toContain(
-      'The workspace owner has to turn on model spending'
-    );
-    expect(hostedRunBlocker({ ...base, capReached: true })).toContain(
-      'The workspace owner can raise the limit.'
-    );
+  it('tells a member or manager to ask the workspace owner', () => {
+    for (const role of ['member', 'manager'] as const) {
+      const base = { ...ready, role };
+      expect(hostedRunBlocker({ ...base, modelAccessMissing: true })).toContain(
+        'The workspace owner has to configure model access'
+      );
+      expect(hostedRunBlocker({ ...base, spendingEnabled: false })).toContain(
+        'The workspace owner has to turn on model spending'
+      );
+      expect(hostedRunBlocker({ ...base, capReached: true })).toContain(
+        'The workspace owner can raise the limit.'
+      );
+    }
   });
 
   it('keeps the owner-independent blockers', () => {

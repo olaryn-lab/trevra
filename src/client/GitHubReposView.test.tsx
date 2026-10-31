@@ -112,6 +112,11 @@ describe('GitHubReposView', () => {
       'Only the workspace owner can choose which repositories to watch.'
     );
     expect(memberEmpty).not.toContain('Watch repository');
+
+    // TRV-045: a manager reads the member line; repositories stay owner-only.
+    const manager = render(state([repo()]), 'manager');
+    expect(manager).not.toContain('Watch repository');
+    expect(manager).toContain('Only the workspace owner can choose which repositories to watch.');
   });
 
   it('shows neither owner controls nor the member line while the role is pending', () => {
