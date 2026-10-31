@@ -4,10 +4,14 @@ import {
   getLinkedInActionReviews,
   type LinkedInActionReview
 } from './api';
+import { AiDraftPanel } from './AiDraftPanel';
 import { useIsWorkspaceOwner } from './auth-client';
 import { useOutreachRefresh } from './LinkedInSafety';
 import { Panel } from './ui/layout';
 import { Button } from './ui/primitives';
+
+/** Kinds whose body an AI draft may propose (TRV-039). */
+const AI_DRAFTABLE_KINDS = new Set(['invite', 'dm', 'inmail']);
 
 /** Holds and reviews exact queued LinkedIn writes before the Companion worker
  * acts. This is a workspace-wide queue, including non-campaign inbox replies. */
@@ -16,6 +20,7 @@ export function LinkedInActionApprovals() {
   const [rows, setRows] = useState<LinkedInActionReview[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const [drafting, setDrafting] = useState('');
   const latestRead = useRef(0);
   const load = useCallback(async () => {
     const requestId = ++latestRead.current;
@@ -65,62 +70,98 @@ export function LinkedInActionApprovals() {
         </div>
       )}
       <div className="li-review-list">
-        {rows.map((row) => (
-          <article className="li-review-item" key={row.actionId}>
-            <div className="li-review-heading">
-              <strong>{row.kind.replaceAll('_', ' ')}</strong>
-              <span>{row.targetRef}</span>
-            </div>
-            <p className="li-review-meta">LinkedIn account: {row.seatKey}</p>
-            {row.subject && (
-              <p>
-                <strong>Subject:</strong> {row.subject}
-              </p>
-            )}
-            {row.body && <pre className="li-review-message">{row.body}</pre>}
-            {row.threadUrn && (
-              <details className="li-review-details">
-                <summary>Technical details</summary>
-                <p>Reply thread: {row.threadUrn}</p>
-              </details>
-            )}
-            {row.hasAttachments && (
-              <p className="li-review-warning">
-                Attachment included. Review the original queued action before approving.
-              </p>
-            )}
-            <div className="li-review-footer">
-              <p>
-                {row.policy.effect === 'deny'
-                  ? `Blocked by workspace policy: ${row.policy.policyName}`
-                  : 'Waiting for workspace owner approval.'}
-              </p>
-              {owner && row.policy.effect === 'require_approval' && (
-                <Button
-                  variant="primary"
-                  disabled={busy !== '' || row.hasAttachments}
-                  onClick={async () => {
-                    setBusy(row.actionId);
-                    try {
-                      await approveLinkedInActionReview(row.actionId, row.contentHash);
-                      await load();
-                    } catch (cause) {
-                      setError(
-                        cause instanceof Error
-                          ? cause.message
-                          : 'Action changed; refresh before review.'
-                      );
-                    } finally {
-                      setBusy('');
-                    }
-                  }}
-                >
-                  {busy === row.actionId ? 'Approving…' : 'Approve this action'}
-                </Button>
+        {rows.map((row) => {
+          const needsApproval =
+            row.policy.effect === 'require_approval' || (row.aiDraft !== null && !row.approved);
+          const canDraft =
+            row.policy.effect !== 'deny' &&
+            !row.hasAttachments &&
+            Boolean(row.campaignId && row.memberId) &&
+            AI_DRAFTABLE_KINDS.has(row.kind);
+          const panelOpen = drafting === row.actionId;
+          return (
+            <article className="li-review-item" key={row.actionId}>
+              <div className="li-review-heading">
+                <strong>{row.kind.replaceAll('_', ' ')}</strong>
+                <span>{row.targetRef}</span>
+              </div>
+              <p className="li-review-meta">LinkedIn account: {row.seatKey}</p>
+              {row.aiDraft && (
+                <p className="li-review-meta">
+                  AI-drafted body
+                  {row.aiDraft.modelLabel ? ` (${row.aiDraft.modelLabel})` : ''}. It never sends
+                  without approval of this exact text.
+                </p>
               )}
-            </div>
-          </article>
-        ))}
+              {row.subject && (
+                <p>
+                  <strong>Subject:</strong> {row.subject}
+                </p>
+              )}
+              {row.body && <pre className="li-review-message">{row.body}</pre>}
+              {row.threadUrn && (
+                <details className="li-review-details">
+                  <summary>Technical details</summary>
+                  <p>Reply thread: {row.threadUrn}</p>
+                </details>
+              )}
+              {row.hasAttachments && (
+                <p className="li-review-warning">
+                  Attachment included. Review the original queued action before approving.
+                </p>
+              )}
+              <div className="li-review-footer">
+                <p>
+                  {row.policy.effect === 'deny'
+                    ? `Blocked by workspace policy: ${row.policy.policyName}`
+                    : 'Waiting for workspace owner approval.'}
+                </p>
+                {canDraft && !panelOpen && (
+                  <Button disabled={busy !== ''} onClick={() => setDrafting(row.actionId)}>
+                    Draft with AI
+                  </Button>
+                )}
+                {owner && row.policy.effect !== 'deny' && needsApproval && !panelOpen && (
+                  <Button
+                    variant="primary"
+                    disabled={busy !== '' || row.hasAttachments}
+                    onClick={async () => {
+                      setBusy(row.actionId);
+                      try {
+                        await approveLinkedInActionReview(row.actionId, row.contentHash);
+                        await load();
+                      } catch (cause) {
+                        setError(
+                          cause instanceof Error
+                            ? cause.message
+                            : 'Action changed; refresh before review.'
+                        );
+                      } finally {
+                        setBusy('');
+                      }
+                    }}
+                  >
+                    {busy === row.actionId ? 'Approving…' : 'Approve this action'}
+                  </Button>
+                )}
+              </div>
+              {panelOpen && row.campaignId && row.memberId && (
+                <AiDraftPanel
+                  campaignId={row.campaignId}
+                  memberId={row.memberId}
+                  stepId={row.workflowStepId}
+                  actionId={row.actionId}
+                  owner={owner}
+                  onClose={() => setDrafting('')}
+                  onApproved={async () => {
+                    setDrafting('');
+                    await load();
+                  }}
+                />
+              )}
+            </article>
+          );
+        })}
       </div>
     </Panel>
   );

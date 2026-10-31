@@ -4,8 +4,14 @@ import {
   getCampaignEmailReviews,
   type CampaignEmailReview
 } from './api';
+import { AiDraftPanel } from './AiDraftPanel';
 import { useIsWorkspaceOwner } from './auth-client';
 import { useOutreachRefresh } from './LinkedInSafety';
+import { Button } from './ui/primitives';
+
+/** Needs a human: policy asks for review, or the body is AI drafted (TRV-039). */
+const needsApproval = (row: CampaignEmailReview) =>
+  (row.policy.effect === 'require_approval' || row.aiDraft !== null) && !row.approved;
 
 /**
  * A message is reviewed with its actual rendered content: no campaign-wide
@@ -16,6 +22,7 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
   const [reviews, setReviews] = useState<CampaignEmailReview[]>([]);
   const [failure, setFailure] = useState('');
   const [busy, setBusy] = useState('');
+  const [drafting, setDrafting] = useState('');
   const load = useCallback(async () => {
     try {
       const rows = await getCampaignEmailReviews(campaignId);
@@ -29,9 +36,7 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
     void load();
   }, [load]);
   useOutreachRefresh(load);
-  const pending = reviews.filter(
-    (row) => row.policy.effect === 'require_approval' && !row.approved
-  );
+  const pending = reviews.filter(needsApproval);
   if (!failure && !pending.length && !reviews.some((row) => row.policy.effect === 'deny'))
     return null;
   return (
@@ -47,11 +52,7 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
         </div>
       )}
       {reviews
-        .filter(
-          (row) =>
-            row.policy.effect === 'deny' ||
-            (row.policy.effect === 'require_approval' && !row.approved)
-        )
+        .filter((row) => row.policy.effect === 'deny' || needsApproval(row))
         .map((row) => (
           <article key={row.actionId} className="panel">
             <p>
@@ -61,6 +62,13 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
             <p>
               <strong>Subject:</strong> {row.subject}
             </p>
+            {row.aiDraft && (
+              <p>
+                AI-drafted body
+                {row.aiDraft.modelLabel ? ` (${row.aiDraft.modelLabel})` : ''}. It never sends
+                without approval of this exact text.
+              </p>
+            )}
             <pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>
               {row.body}
               {'\n\n'}
@@ -80,28 +88,50 @@ export function CampaignEmailApprovals({ campaignId }: { campaignId: string }) {
                 ? `Blocked by workspace policy: ${row.policy.policyName}`
                 : 'Waiting for workspace owner approval.'}
             </p>
-            {owner && row.policy.effect === 'require_approval' && (
-              <button
-                type="button"
-                disabled={busy !== '' || !row.sender}
-                onClick={async () => {
-                  setBusy(row.actionId);
-                  try {
-                    await approveCampaignEmailReview(campaignId, row.actionId, row.contentHash);
-                    await load();
-                  } catch (error) {
-                    setFailure(
-                      error instanceof Error
-                        ? error.message
-                        : 'The email changed. Refresh and review again.'
-                    );
-                  } finally {
-                    setBusy('');
-                  }
+            {row.policy.effect !== 'deny' && drafting !== row.actionId && (
+              <Button disabled={busy !== ''} onClick={() => setDrafting(row.actionId)}>
+                Draft with AI
+              </Button>
+            )}
+            {owner &&
+              row.policy.effect !== 'deny' &&
+              needsApproval(row) &&
+              drafting !== row.actionId && (
+                <button
+                  type="button"
+                  disabled={busy !== '' || !row.sender}
+                  onClick={async () => {
+                    setBusy(row.actionId);
+                    try {
+                      await approveCampaignEmailReview(campaignId, row.actionId, row.contentHash);
+                      await load();
+                    } catch (error) {
+                      setFailure(
+                        error instanceof Error
+                          ? error.message
+                          : 'The email changed. Refresh and review again.'
+                      );
+                    } finally {
+                      setBusy('');
+                    }
+                  }}
+                >
+                  {busy === row.actionId ? 'Approving…' : 'Approve this exact email'}
+                </button>
+              )}
+            {drafting === row.actionId && (
+              <AiDraftPanel
+                campaignId={campaignId}
+                memberId={row.memberId}
+                stepId={row.workflowStepId}
+                actionId={row.actionId}
+                owner={owner}
+                onClose={() => setDrafting('')}
+                onApproved={async () => {
+                  setDrafting('');
+                  await load();
                 }}
-              >
-                {busy === row.actionId ? 'Approving…' : 'Approve this exact email'}
-              </button>
+              />
             )}
           </article>
         ))}

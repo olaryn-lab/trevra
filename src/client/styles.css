@@ -1672,6 +1672,67 @@ h1 {
   }
 }
 
+/* TRV-039 AI draft review: composition only. Controls keep the shared skin. */
+.ai-draft-panel {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-sm);
+  background: var(--t-surface);
+}
+.ai-draft-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: var(--t-text-sm);
+}
+.ai-draft-badge,
+.ai-draft-meta {
+  color: var(--muted);
+  font-size: var(--t-text-xs);
+}
+.ai-draft-panel .ai-draft-meta {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ai-draft-panel .ui-textarea[aria-invalid='true'] {
+  border-color: var(--red);
+}
+.ai-draft-reason {
+  white-space: pre-wrap;
+}
+.ai-draft-evidence {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: var(--t-text-xs);
+}
+.ai-draft-evidence > div {
+  display: grid;
+  grid-template-columns: minmax(96px, 160px) minmax(0, 1fr);
+  gap: 8px;
+}
+.ai-draft-evidence dt {
+  color: var(--muted);
+}
+.ai-draft-evidence dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+@media (max-width: 760px) {
+  .ai-draft-evidence > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .ai-draft-actions > .ui-button {
+    width: 100%;
+  }
+}
+
 /* Workspace setup is a task flow, not a wall of unrelated settings cards.
    The first connection section is always visible; secondary controls are
    available through accessible native disclosures without remounting forms. */

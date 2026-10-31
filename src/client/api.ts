@@ -3043,9 +3043,18 @@ export async function pauseLinkedInManagedCampaign(id: string): Promise<ManagedC
   ).campaign;
 }
 
+/** Provenance of an AI-drafted body applied to a queued action (TRV-039). */
+export interface AppliedAiDraft {
+  draftId: string;
+  origin: string;
+  modelLabel: string | null;
+  evidenceHash: string;
+}
 export interface LinkedInActionReview {
   actionId: string;
   campaignId: string | null;
+  memberId: string | null;
+  workflowStepId: string | null;
   seatKey: string;
   kind: string;
   targetRef: string;
@@ -3056,6 +3065,7 @@ export interface LinkedInActionReview {
   contentHash: string;
   approved: boolean;
   policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+  aiDraft: AppliedAiDraft | null;
 }
 export async function getLinkedInActionReviews(): Promise<LinkedInActionReview[]> {
   return (
@@ -3077,6 +3087,8 @@ export async function approveLinkedInActionReview(
 export interface CampaignEmailReview {
   actionId: string;
   campaignId: string;
+  memberId: string;
+  workflowStepId: string;
   recipient: string;
   subject: string;
   body: string;
@@ -3087,6 +3099,7 @@ export interface CampaignEmailReview {
   contentHash: string;
   approved: boolean;
   policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+  aiDraft: AppliedAiDraft | null;
 }
 export async function getCampaignEmailReviews(campaignId: string): Promise<CampaignEmailReview[]> {
   const result = await request<{ reviews: CampaignEmailReview[] }>(
@@ -3104,6 +3117,99 @@ export async function approveCampaignEmailReview(
     { method: 'POST', body: JSON.stringify({ contentHash }) }
   );
   return result.review;
+}
+
+/** TRV-039: an AI draft is a proposal bound to one exact payload hash. */
+export type AiDraftStatus = 'proposed' | 'approved' | 'edited' | 'rejected' | 'superseded' | 'sent';
+export interface AiDraft {
+  id: string;
+  campaignId: string;
+  memberId: string;
+  workflowStepId: string;
+  actionId: string;
+  actionType: 'linkedin' | 'email';
+  channel: 'linkedin_invite' | 'linkedin_message' | 'linkedin_inmail' | 'email';
+  origin: 'model' | 'template_fallback' | 'human_edit';
+  modelLabel: string | null;
+  evidenceHash: string;
+  payloadHash: string;
+  text: string;
+  attempts: number;
+  fallbackReason: string | null;
+  parentDraftId: string | null;
+  status: AiDraftStatus;
+  requestedBy: string;
+  decidedBy: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+  sentAt: string | null;
+  contactName: string;
+  maxChars: number;
+  evidenceFacts: Array<{ label: string; value: string }>;
+}
+export interface AiDraftReadiness {
+  modelConfigured: boolean;
+  modelLabel: string | null;
+  budgetEnabled: boolean;
+  budgetRemainingCents: number;
+  blocker: string | null;
+  setupPath: string;
+}
+export interface AiDraftRequestResult {
+  memberId: string;
+  stepId: string | null;
+  outcome: 'drafted' | 'fallback' | 'skipped';
+  draftId: string | null;
+  reason: string | null;
+}
+const aiDraftsPath = (campaignId: string) =>
+  `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/ai-drafts`;
+export async function getAiDrafts(
+  campaignId: string
+): Promise<{ drafts: AiDraft[]; readiness: AiDraftReadiness }> {
+  return request(aiDraftsPath(campaignId));
+}
+export async function requestAiDrafts(
+  campaignId: string,
+  targets: Array<{ memberId: string; stepId?: string | null }>
+): Promise<{ results: AiDraftRequestResult[]; drafts: AiDraft[] }> {
+  return request(aiDraftsPath(campaignId), {
+    method: 'POST',
+    body: JSON.stringify({ targets })
+  });
+}
+export async function editAiDraft(
+  campaignId: string,
+  draftId: string,
+  text: string,
+  payloadHash: string
+): Promise<AiDraft> {
+  return (
+    await request<{ draft: AiDraft }>(
+      `${aiDraftsPath(campaignId)}/${encodeURIComponent(draftId)}/edit`,
+      { method: 'POST', body: JSON.stringify({ text, payloadHash }) }
+    )
+  ).draft;
+}
+export async function approveAiDraft(
+  campaignId: string,
+  draftId: string,
+  payloadHash: string
+): Promise<AiDraft> {
+  return (
+    await request<{ draft: AiDraft }>(
+      `${aiDraftsPath(campaignId)}/${encodeURIComponent(draftId)}/approve`,
+      { method: 'POST', body: JSON.stringify({ payloadHash }) }
+    )
+  ).draft;
+}
+export async function rejectAiDraft(campaignId: string, draftId: string): Promise<AiDraft> {
+  return (
+    await request<{ draft: AiDraft }>(
+      `${aiDraftsPath(campaignId)}/${encodeURIComponent(draftId)}/reject`,
+      { method: 'POST', body: '{}' }
+    )
+  ).draft;
 }
 
 export async function stopLinkedInManagedCampaign(id: string): Promise<ManagedCampaign> {
