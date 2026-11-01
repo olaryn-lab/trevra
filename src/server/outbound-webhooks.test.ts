@@ -8,15 +8,37 @@ import {
   deactivateOutboundWebhookSubscription,
   dispatchOutboundWebhookDeliveries,
   listOutboundWebhookSubscriptions,
-  validateWebhookTarget,
-  type WebhookFetch
+  validateWebhookTarget
 } from './outbound-webhooks.js';
+import type {
+  WebhookEgressPolicy,
+  WebhookResolver,
+  WebhookTransport,
+  WebhookTransportRequest
+} from './outbound-webhook-egress.js';
 
 const WS_A = 'ws_out_webhook_qa_a';
 const WS_B = 'ws_out_webhook_qa_b';
 const NOW = new Date('2026-10-21T13:00:00.000Z');
 const HOSTS = ['hooks.partner.example'];
+const POLICY: WebhookEgressPolicy = { allowedHosts: HOSTS, allowedPorts: [], allowHttp: false };
+const resolver: WebhookResolver = async () => [{ address: '93.184.216.34', family: 4 }];
+const EGRESS = { policy: POLICY, resolver };
 let db: Db;
+
+/** Stub transport: records what would have been sent; `respond` decides the status. */
+function stubTransport(
+  respond: (request: WebhookTransportRequest) => number | Promise<number> = () => 204
+): { transport: WebhookTransport; calls: WebhookTransportRequest[] } {
+  const calls: WebhookTransportRequest[] = [];
+  return {
+    calls,
+    transport: async (request) => {
+      calls.push(request);
+      return { status: await respond(request) };
+    }
+  };
+}
 
 async function createEvent(workspaceId: string, eventType = 'linkedin_campaign.started') {
   const event = await appendDomainEvent(db, {
@@ -58,6 +80,10 @@ async function rowsFor(workspaceId: string) {
 
 beforeEach(async () => {
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
+  // The dispatcher under test claims due deliveries across ALL workspaces (it
+  // is the worker), so leftovers from an earlier file on this worker's database
+  // would be claimed here. Files on one worker run sequentially.
+  await db.prepare('DELETE FROM outbound_webhook_deliveries').run();
   for (const workspaceId of [WS_A, WS_B]) {
     await db
       .prepare(
@@ -100,7 +126,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
           url: 'https://hooks.partner.example/notify',
           eventTypes: ['arbitrary.private.event']
         },
-        HOSTS
+        EGRESS
       )
     ).rejects.toThrow(/supported lifecycle events/);
     expect(await listOutboundWebhookSubscriptions(db, WS_A)).toEqual([]);
@@ -114,7 +140,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started', 'playbook.run.completed']
       },
-      HOSTS
+      EGRESS
     );
     const b = await createOutboundWebhookSubscription(
       db,
@@ -123,7 +149,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     expect(a.signingSecret).toMatch(/^whsec_[0-9a-f]{64}$/);
     expect(b.signingSecret).not.toBe(a.signingSecret);
@@ -162,7 +188,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
           'linkedin_campaign.stopped'
         ]
       },
-      HOSTS
+      EGRESS
     );
     for (const eventType of [
       'linkedin_campaign.started',
@@ -207,7 +233,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     await expect(
       db.transaction(async (tx) => {
@@ -231,7 +257,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
     expect(await rowsFor(WS_A)).toHaveLength(0);
   });
 
-  it('signs an immutable minimal body, never redirects and is idempotent on successful delivery', async () => {
+  it('signs an immutable minimal body, pins the vetted address and is idempotent on successful delivery', async () => {
     const created = await createOutboundWebhookSubscription(
       db,
       {
@@ -239,33 +265,38 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     await createEvent(WS_A);
-    const calls: Array<{ url: string; init: RequestInit }> = [];
-    const fetchImpl: WebhookFetch = async (url, init) => {
-      calls.push({ url, init });
-      return new Response(null, { status: 204 });
-    };
+    const { transport, calls } = stubTransport();
     expect(
-      await dispatchOutboundWebhookDeliveries(db, { now: NOW, allowedHosts: HOSTS, fetchImpl })
+      await dispatchOutboundWebhookDeliveries(db, { now: NOW, policy: POLICY, resolver, transport })
     ).toMatchObject({ claimed: 1, delivered: 1, retried: 0 });
     expect(calls).toHaveLength(1);
-    expect(calls[0].url).toBe('https://hooks.partner.example/notify');
-    expect(calls[0].init).toMatchObject({ method: 'POST', redirect: 'error' });
-    const headers = calls[0].init.headers as Record<string, string>;
-    const body = String(calls[0].init.body);
+    expect(calls[0].url.toString()).toBe('https://hooks.partner.example/notify');
+    expect(calls[0]).toMatchObject({
+      address: '93.184.216.34',
+      family: 4,
+      connectTimeoutMs: 3_000,
+      totalTimeoutMs: 10_000,
+      maxResponseBytes: 64 * 1024
+    });
+    const headers = calls[0].headers;
+    const body = calls[0].body;
     const signature = createHmac('sha256', created.signingSecret)
       .update(`${Math.floor(NOW.getTime() / 1000)}.${body}`)
       .digest('hex');
+    // Unchanged single-signature header outside a rotation overlap.
     expect(headers['X-Trevra-Signature']).toBe(
       `t=${Math.floor(NOW.getTime() / 1000)},v1=${signature}`
     );
     expect(headers['X-Trevra-Event-Id']).toBeTruthy();
     expect(headers['X-Trevra-Delivery-Id']).toBeTruthy();
+    expect(headers['X-Trevra-Attempt-Series']).toBe('0');
+    expect(headers['X-Trevra-Attempt']).toBe('1');
     expect(await rowsFor(WS_A)).toMatchObject([{ status: 'delivered', attempts: 1 }]);
     expect(
-      await dispatchOutboundWebhookDeliveries(db, { now: NOW, allowedHosts: HOSTS, fetchImpl })
+      await dispatchOutboundWebhookDeliveries(db, { now: NOW, policy: POLICY, resolver, transport })
     ).toMatchObject({ claimed: 0 });
     expect(calls).toHaveLength(1);
   });
@@ -278,31 +309,29 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     await createEvent(WS_A);
-    const ids: string[] = [];
-    let calls = 0;
-    const fetchImpl: WebhookFetch = async (_url, init) => {
-      calls++;
-      ids.push((init.headers as Record<string, string>)['X-Trevra-Delivery-Id']);
-      return calls === 1
-        ? new Response('busy', { status: 503 })
-        : new Response(null, { status: 204 });
-    };
+    const { transport, calls } = stubTransport(() => (calls.length === 1 ? 503 : 204));
     expect(
-      await dispatchOutboundWebhookDeliveries(db, { now: NOW, allowedHosts: HOSTS, fetchImpl })
+      await dispatchOutboundWebhookDeliveries(db, { now: NOW, policy: POLICY, resolver, transport })
     ).toMatchObject({ claimed: 1, retried: 1 });
     expect(await rowsFor(WS_A)).toMatchObject([
       { status: 'pending', attempts: 1, last_http_status: 503 }
     ]);
     expect(
-      await dispatchOutboundWebhookDeliveries(db, { now: NOW, allowedHosts: HOSTS, fetchImpl })
+      await dispatchOutboundWebhookDeliveries(db, { now: NOW, policy: POLICY, resolver, transport })
     ).toMatchObject({ claimed: 0 });
     const later = new Date(NOW.getTime() + 65_000);
     expect(
-      await dispatchOutboundWebhookDeliveries(db, { now: later, allowedHosts: HOSTS, fetchImpl })
+      await dispatchOutboundWebhookDeliveries(db, {
+        now: later,
+        policy: POLICY,
+        resolver,
+        transport
+      })
     ).toMatchObject({ claimed: 1, delivered: 1 });
+    const ids = calls.map((call) => call.headers['X-Trevra-Delivery-Id']);
     expect(ids).toHaveLength(2);
     expect(ids[0]).toBe(ids[1]);
   });
@@ -315,7 +344,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     await createEvent(WS_A);
     let release!: () => void;
@@ -326,22 +355,26 @@ describe('durable outbound lifecycle webhook outbox', () => {
     const firstStarted = new Promise<void>((resolve) => {
       started = resolve;
     });
-    const calls: string[] = [];
-    const fetchImpl: WebhookFetch = async (_url, init) => {
-      calls.push((init.headers as Record<string, string>)['X-Trevra-Delivery-Id']);
+    const { transport, calls } = stubTransport(async () => {
       started();
       await gate;
-      return new Response(null, { status: 204 });
-    };
+      return 204;
+    });
     const first = dispatchOutboundWebhookDeliveries(db, {
       now: NOW,
-      allowedHosts: HOSTS,
-      fetchImpl
+      policy: POLICY,
+      resolver,
+      transport
     });
     await firstStarted;
     try {
       expect(
-        await dispatchOutboundWebhookDeliveries(db, { now: NOW, allowedHosts: HOSTS, fetchImpl })
+        await dispatchOutboundWebhookDeliveries(db, {
+          now: NOW,
+          policy: POLICY,
+          resolver,
+          transport
+        })
       ).toMatchObject({ claimed: 0 });
     } finally {
       release();
@@ -359,7 +392,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     const target = await createOutboundWebhookSubscription(
       db,
@@ -368,7 +401,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     const original = await db
       .prepare(
@@ -392,15 +425,11 @@ describe('durable outbound lifecycle webhook outbox', () => {
         target.subscription.id
       );
     await createEvent(WS_B);
-    let sent = 0;
-    const fetchImpl: WebhookFetch = async () => {
-      sent++;
-      return new Response(null, { status: 204 });
-    };
+    const { transport, calls } = stubTransport();
     expect(
-      await dispatchOutboundWebhookDeliveries(db, { now: NOW, allowedHosts: HOSTS, fetchImpl })
+      await dispatchOutboundWebhookDeliveries(db, { now: NOW, policy: POLICY, resolver, transport })
     ).toMatchObject({ claimed: 1, delivered: 0, retried: 1 });
-    expect(sent).toBe(0);
+    expect(calls).toHaveLength(0);
     expect(await rowsFor(WS_B)).toMatchObject([{ status: 'pending', attempts: 1 }]);
   });
 
@@ -412,7 +441,7 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     const b = await createOutboundWebhookSubscription(
       db,
@@ -421,21 +450,17 @@ describe('durable outbound lifecycle webhook outbox', () => {
         url: 'https://hooks.partner.example/notify',
         eventTypes: ['linkedin_campaign.started']
       },
-      HOSTS
+      EGRESS
     );
     await createEvent(WS_A);
     await createEvent(WS_B);
     expect(await deactivateOutboundWebhookSubscription(db, WS_A, a.subscription.id)).toBe(true);
     expect(await rowsFor(WS_A)).toMatchObject([{ status: 'dead' }]);
-    let sent = 0;
-    const fetchImpl: WebhookFetch = async () => {
-      sent++;
-      return new Response(null, { status: 204 });
-    };
+    const { transport, calls } = stubTransport();
     expect(
-      await dispatchOutboundWebhookDeliveries(db, { now: NOW, allowedHosts: HOSTS, fetchImpl })
+      await dispatchOutboundWebhookDeliveries(db, { now: NOW, policy: POLICY, resolver, transport })
     ).toMatchObject({ claimed: 1, delivered: 1 });
-    expect(sent).toBe(1);
+    expect(calls).toHaveLength(1);
     expect(await rowsFor(WS_B)).toMatchObject([{ status: 'delivered' }]);
     expect(b.subscription.id).not.toBe(a.subscription.id);
   });

@@ -509,25 +509,81 @@ describe('pasted LinkedIn profile URLs', () => {
   });
 });
 
-describe('profile URL import limit reporting', () => {
-  it('reports unique overflow as rejected rather than fabricated duplicates', async () => {
+describe('profile URL import cap (TRV-021)', () => {
+  it('refuses a paste over 10,000 distinct profiles before writing anything', async () => {
     const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'URL overflow' }, NOW);
     const unique = Array.from(
       { length: 10_001 },
-      (_, index) => `https://unrelated.test/in/profile-${index}`
+      (_, index) => `https://www.linkedin.com/in/profile-${index}/`
     );
-    const outcome = await importLeadProfileUrls(
-      db,
-      { workspaceId: WORKSPACE_ID, listId: list.id, urls: [...unique, unique[0]!] },
-      NOW
-    );
-    expect(outcome).toMatchObject({ inserted: 0, duplicates: 1, reused: 0 });
-    expect(outcome.rejected).toHaveLength(10_001);
-    expect(outcome.rejected.find((item) => item.value === unique[10_000])).toMatchObject({
-      value: unique[10_000],
-      reason: expect.stringContaining('10,000 unique items')
+    await expect(
+      importLeadProfileUrls(
+        db,
+        { workspaceId: WORKSPACE_ID, listId: list.id, urls: [...unique, unique[0]!] },
+        NOW
+      )
+    ).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('10,001 different LinkedIn profiles')
     });
     expect(await contactCount()).toBe(0);
+    expect(await countLeadContacts(db, WORKSPACE_ID, list.id)).toBe(0);
+  });
+
+  it('imports exactly the cap and refuses cap + 1 outright, never truncating', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'At the cap' }, NOW);
+    const urls = (count: number, prefix: string) =>
+      Array.from(
+        { length: count },
+        (_, index) => `https://www.linkedin.com/in/${prefix}-${index}/`
+      );
+    // Repeats and rejected lines do not count toward the cap; distinct profiles do.
+    const atCap = await importLeadProfileUrls(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        urls: [...urls(5, 'cap'), 'https://www.linkedin.com/in/cap-0/', 'https://example.com/x'],
+        cap: 5
+      },
+      NOW
+    );
+    expect(atCap).toMatchObject({ inserted: 5, duplicates: 1, reused: 0 });
+    expect(atCap.rejected).toEqual([
+      { line: 7, value: 'https://example.com/x', reason: 'Not a LinkedIn URL.' }
+    ]);
+    await expect(
+      importLeadProfileUrls(
+        db,
+        { workspaceId: WORKSPACE_ID, listId: list.id, urls: urls(6, 'over'), cap: 5 },
+        NOW
+      )
+    ).rejects.toMatchObject({ status: 400 });
+    expect(await countLeadContacts(db, WORKSPACE_ID, list.id)).toBe(5);
+    expect(await contactCount()).toBe(5);
+  });
+
+  it('names every rejected line with its line number and reason', async () => {
+    const list = await createLeadList(db, { workspaceId: WORKSPACE_ID, name: 'Reasons' }, NOW);
+    const outcome = await importLeadProfileUrls(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        listId: list.id,
+        urls: [
+          'https://www.linkedin.com/in/reason-ok/',
+          'https://www.linkedin.com/search/results/people/?keywords=cto',
+          'https://www.linkedin.com/company/acme/, https://www.linkedin.com/in/reason-two/',
+          'https://www.linkedin.com/posts/someone_activity-7000000000000000000-abcd'
+        ]
+      },
+      NOW
+    );
+    expect(outcome.inserted).toBe(2);
+    expect(outcome.rejected.map((entry) => entry.line)).toEqual([2, 3, 4]);
+    expect(outcome.rejected[0]?.reason).toMatch(/search/i);
+    expect(outcome.rejected[1]?.reason).toMatch(/company/i);
+    expect(outcome.rejected[2]?.reason).toMatch(/post/i);
   });
 });
 

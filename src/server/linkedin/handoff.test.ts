@@ -49,7 +49,7 @@ function resolve(actionId: string, resolution: 'sent' | 'skip', workspaceId = WO
   return resolveLinkedInHandoff(db, { workspaceId, actionId, resolution, actorUserId: null }, NOW);
 }
 
-/** What Today does: list at NOW, then stamp what it shows. */
+/** What the card's present POST does for each row: list at NOW, then stamp it. */
 async function presentAtNow(): Promise<string[]> {
   const listed = await listLinkedInHandoffs(db, WORKSPACE, NOW, { dayShape: FLAT_DAY_SHAPE });
   return (await presentLinkedInHandoffs(db, WORKSPACE, listed, NOW)).map(

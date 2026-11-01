@@ -256,13 +256,15 @@ export interface EnforcedCeiling {
 }
 
 /**
- * What the gate will actually let a campaign on this account do, per kind.
+ * What the planner will budget a campaign on this account with, per kind.
  *
  * NOTHING IS RECOMPUTED THAT THE SERVER ALREADY ANSWERED. `ceiling` on a day
- * row is the account's real per-day allowance -- band, the operator's own
- * setting, the band override, the per-seat warm-up week, the acceptance-rate
- * throttle and posture, all already applied -- so it is read, not rebuilt out
- * of parts on a screen that cannot see the ledger those parts came from.
+ * row is the account's structural per-day allowance -- band, the operator's
+ * own setting, the band override, the per-seat warm-up week and posture, all
+ * already applied -- so it is read, not rebuilt out of parts on a screen that
+ * cannot see the ledger those parts came from. The send-time check may admit
+ * fewer on a given day (today's draw, the cold-account ramp); that number is
+ * the day row's `today`.
  *
  * THE ONE THING THAT IS COMPUTED IS THE CAMPAIGN RAMP, and it is computed the
  * way `guard.ts` computes it: the campaign-day fraction multiplies the ceiling

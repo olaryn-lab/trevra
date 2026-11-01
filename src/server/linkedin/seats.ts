@@ -262,6 +262,7 @@ export function describeSeatProxy(raw: string | null): SeatProxyView | null {
  * a claim.
  */
 export interface SeatPatch {
+  /** Absent means unchanged; null unassigns the seat. */
   ownerUserId?: string | null;
   label?: string;
   profileUrl?: string | null;
@@ -946,7 +947,10 @@ export async function upsertSeat(
       daily_message_limit, daily_profile_view_limit, daily_follow_limit, safety_band_override, warmup_override, send_mode, created_at, updated_at
     ) VALUES (?,?,?,?, ?,?::date,?::int,?,?::timestamptz,?::timestamptz,?::timestamptz,?,?,?::jsonb,?,?,?,?,?,?,?,?,?,?,?)
     ON CONFLICT (workspace_id, seat_key) DO UPDATE SET
-      owner_user_id = COALESCE(excluded.owner_user_id, linkedin_seats.owner_user_id),
+      -- The last parameter says whether the patch named an owner. Absent keeps
+      -- the stored one; an explicit value, null included, replaces it. A
+      -- COALESCE here made unassigning a seat a silent no-op.
+      owner_user_id = CASE WHEN ?::boolean THEN excluded.owner_user_id ELSE linkedin_seats.owner_user_id END,
       label = excluded.label,
       profile_url = excluded.profile_url,
       account_opened_on = excluded.account_opened_on,
@@ -1000,7 +1004,8 @@ export async function upsertSeat(
       warmupOverride,
       sendMode,
       timestamp,
-      timestamp
+      timestamp,
+      patch.ownerUserId !== undefined
     );
 
   // Proxy writes are separate from the seat UPSERT because the full credential

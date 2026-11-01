@@ -12,7 +12,7 @@ import {
   type MeetingsSetupState,
   type ProviderWebhookEndpointSummary
 } from './api';
-import { useWorkspaceRole } from './auth-client';
+import { lacksOwnerRole, useWorkspaceRole } from './auth-client';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import {
@@ -147,7 +147,7 @@ export function MeetingsSetup({ setToast }: { setToast: (message: string) => voi
                 </Button>
               )}
             </div>
-          ) : role === 'member' ? (
+          ) : lacksOwnerRole(role) ? (
             <>
               {savedLink && <p>{savedLink}</p>}
               <OwnerOnlyNote>change the booking link</OwnerOnlyNote>
@@ -162,7 +162,7 @@ export function MeetingsSetup({ setToast }: { setToast: (message: string) => voi
       <h4>Cal.com</h4>
       {role === 'owner' ? (
         <CalcomWebhooks setToast={setToast} />
-      ) : role === 'member' && setup ? (
+      ) : lacksOwnerRole(role) && setup ? (
         <>
           <p className="li-hint">
             {setup.calcomConnected ? 'Cal.com webhook is set up.' : 'Cal.com is not connected.'}

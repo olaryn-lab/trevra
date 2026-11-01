@@ -17,12 +17,13 @@ import {
   setCaptureSourceStatus,
   type CaptureSourceSummary
 } from './api';
-import { useWorkspaceRole } from './auth-client';
+import { lacksOwnerRole, useWorkspaceRole } from './auth-client';
 import { OwnerOnlyNote } from './ui/forms';
 import { Button, Field, Input, Select } from './ui/primitives';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import { ProviderWebhookSetup } from './ProviderWebhookSetup';
+import { OutboundWebhookSetup } from './OutboundWebhookSetup';
 import { MeetingsSetup } from './MeetingsSetup';
 import './lead-capture.css';
 
@@ -334,7 +335,7 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
               </p>
             )}
 
-            {role === 'member' && (
+            {lacksOwnerRole(role) && (
               <OwnerOnlyNote>create, disable or rotate capture sources</OwnerOnlyNote>
             )}
             {isOwner && (
@@ -407,7 +408,8 @@ export function LeadCaptureSetup({ setToast }: { setToast: (message: string) => 
         )}
       </section>
       {isOwner && <ProviderWebhookSetup setToast={setToast} />}
-      {role === 'member' && (
+      {isOwner && <OutboundWebhookSetup setToast={setToast} />}
+      {lacksOwnerRole(role) && (
         <section className="page-panel" id="stripe-payments">
           <div className="section-heading">
             <div>

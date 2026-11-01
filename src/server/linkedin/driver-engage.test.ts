@@ -403,25 +403,30 @@ describe('endorseSkills', () => {
     expect(result.detail).toContain('Endorsed 1 of the 9');
   });
 
-  it('clamps every requested skill count to ten and honors configured workflow maxSkills', async () => {
+  it('clamps every requested skill count to three and honors configured workflow maxSkills', async () => {
     const one = skillsPage(9);
     await endorseSkills(one.page, TARGET, { sleep: one.sleep, limit: 1 });
     expect(one.clicked).toHaveLength(1);
 
     const many = skillsPage(40);
     await endorseSkills(many.page, TARGET, { sleep: many.sleep, limit: 99 });
-    expect(many.clicked).toHaveLength(10);
-    expect(many.slept).toEqual(Array(9).fill(1250));
+    expect(many.clicked).toHaveLength(3);
+    expect(many.slept).toEqual([1250, 1250]);
 
     const workflow = skillsPage(9);
     const result = await endorseSkills(workflow.page, TARGET, {
       sleep: workflow.sleep,
-      maxSkills: 4,
+      maxSkills: 2,
       limit: 1
     });
-    expect(workflow.clicked).toHaveLength(4);
-    expect(workflow.slept).toEqual([1250, 1250, 1250]);
-    expect(result.detail).toContain('Endorsed 4 of the 9');
+    expect(workflow.clicked).toHaveLength(2);
+    expect(workflow.slept).toEqual([1250]);
+    expect(result.detail).toContain('Endorsed 2 of the 9');
+
+    // A workflow saved before the cap asked for more; the driver still stops at 3.
+    const legacy = skillsPage(9);
+    await endorseSkills(legacy.page, TARGET, { sleep: legacy.sleep, maxSkills: 10 });
+    expect(legacy.clicked).toHaveLength(3);
 
     const zero = skillsPage(9);
     await endorseSkills(zero.page, TARGET, { sleep: zero.sleep, limit: 0 });

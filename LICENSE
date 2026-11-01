@@ -1,0 +1,19 @@
+Copyright (c) 2026 Trevra. All rights reserved.
+
+This software, including its source code, documentation and build artifacts, is
+proprietary to Trevra. No license, express or implied, is granted to use, copy,
+modify, merge, publish, distribute, sublicense, deploy, host, or sell this
+software or any part of it, except under a separate written agreement signed by
+Trevra.
+
+Being able to view the source code does not grant any of these rights.
+
+Third-party components included in or used by this software remain under their
+own licenses. They are listed in the published software bill of materials
+(/catalog/trevra.sbom.cdx.json).
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE COPYRIGHT
+HOLDER BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY ARISING FROM, OUT OF
+OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.

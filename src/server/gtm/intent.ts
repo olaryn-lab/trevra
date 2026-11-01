@@ -39,7 +39,7 @@ import {
   prepareOutreach,
   type PreparedOutreachResult
 } from '../outreach/prepare.js';
-
+import { hasCapability, type WorkspaceRole } from '../roles.js';
 export const GTM_OBJECTIVES = [
   'find_accounts',
   'research_accounts',
@@ -916,9 +916,9 @@ async function accountPlan(db: Db, workspaceId: string, intent: GtmIntent): Prom
   });
 }
 
-function captureInboundPlan(intent: GtmIntent, actorRole: 'owner' | 'member'): GtmPlan {
+function captureInboundPlan(intent: GtmIntent, actorRole: WorkspaceRole): GtmPlan {
   const blockers: GtmPlanBlocker[] = [];
-  if (actorRole !== 'owner') {
+  if (!hasCapability(actorRole, 'integrations.manage')) {
     blockers.push({
       code: 'capture_owner_required',
       message: 'Only workspace owners can create a lead capture source.',
@@ -981,13 +981,13 @@ async function enrichContactsPlan(
   db: Db,
   workspaceId: string,
   intent: GtmIntent,
-  actorRole: 'owner' | 'member'
+  actorRole: WorkspaceRole
 ): Promise<GtmPlan> {
   const domains = intent.audience?.domains ?? [];
   const emailsPerDomain = intent.enrichment?.emailsPerDomain ?? DEFAULT_EMAILS_PER_DOMAIN;
   const includeUnverified = intent.enrichment?.includeUnverified ?? false;
   const blockers: GtmPlanBlocker[] = [];
-  if (actorRole !== 'owner') {
+  if (!hasCapability(actorRole, 'enrichment.spend')) {
     blockers.push({
       code: 'enrichment_owner_required',
       message: 'Only workspace owners can approve paid contact enrichment.',
@@ -1120,7 +1120,7 @@ export async function compileGtmIntent(
   db: Db,
   workspaceId: string,
   rawIntent: unknown,
-  context: { actorRole?: 'owner' | 'member' } = {}
+  context: { actorRole?: WorkspaceRole } = {}
 ): Promise<GtmPlan> {
   const intent = normalizeIntent(rawIntent);
   if (intent.objective === 'prepare_outreach') return prepareOutreachPlan(db, workspaceId, intent);
@@ -1144,7 +1144,7 @@ export async function prepareGtmPlan(
     /** The caller's real actor type, recorded on the email approval runs it prepares. */
     actorType: 'user' | 'agent';
     actorUserId: string;
-    actorRole: 'owner' | 'member';
+    actorRole: WorkspaceRole;
     plan: unknown;
     planHash: string;
     idempotencyKey: string;
@@ -1158,7 +1158,7 @@ export async function prepareGtmPlan(
   if (supplied.objective === 'enrich_contacts') {
     // The owner gate runs before the replay too, so a member cannot read a
     // queued run's summary back through someone else's idempotency key.
-    if (input.actorRole !== 'owner') {
+    if (!hasCapability(input.actorRole, 'enrichment.spend')) {
       throw new GtmPlanError('Only workspace owners can approve paid contact enrichment.', 403);
     }
     // Replay BEFORE re-compiling: a queued run reserves credits, which moves

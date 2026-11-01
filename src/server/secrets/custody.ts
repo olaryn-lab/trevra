@@ -87,6 +87,8 @@ export interface SecretCustodyRow {
   envelopeVersion: number;
   keyId: string | null;
   custody: SecretCustody;
+  /** Set on an outbound webhook's live overlap secret, which shares its row. */
+  slot?: 'previous';
 }
 
 export interface SecretsCustodyReport {
@@ -128,6 +130,8 @@ interface CustodyRowData {
   kind: string;
   key_version: number;
   key_id: string | null;
+  /** The `previous_*` columns of an outbound webhook subscription. */
+  slot?: 'previous';
 }
 
 /*
@@ -169,6 +173,27 @@ const PROVIDER_WEBHOOK_SECRET_ROWS = `
   WHERE (?::text IS NULL OR workspace_id = ?::text)
   ORDER BY workspace_id, id
 `;
+/*
+ * Outbound webhook signing secrets. The seat and kind are the row identity
+ * `outbound-webhooks.ts` seals them under. The overlap secret (`previous_*`)
+ * counts only while it is still being signed with; an expired one is never
+ * opened again and `expireOutboundWebhookSecrets` clears it.
+ */
+const OUTBOUND_WEBHOOK_SECRET_ROWS = `
+  SELECT id, workspace_id, 'owner'::text AS seat_key, 'outbound:' || id AS kind,
+         key_version, key_id
+  FROM outbound_webhook_subscriptions
+  WHERE (?::text IS NULL OR workspace_id = ?::text)
+  ORDER BY workspace_id, id
+`;
+const OUTBOUND_WEBHOOK_PREVIOUS_SECRET_ROWS = `
+  SELECT id, workspace_id, 'owner'::text AS seat_key, 'outbound:' || id AS kind,
+         previous_key_version AS key_version, previous_key_id AS key_id
+  FROM outbound_webhook_subscriptions
+  WHERE (?::text IS NULL OR workspace_id = ?::text)
+    AND previous_ciphertext IS NOT NULL AND previous_secret_expires_at > now()
+  ORDER BY workspace_id, id
+`;
 
 /**
  * WHICH ROWS ARE STILL ON THE OLD KEY -- the question the rotation runbook
@@ -207,7 +232,8 @@ export async function secretsCustodyReport(
       kind: row.kind,
       envelopeVersion: Number(row.key_version),
       keyId: row.key_id,
-      custody
+      custody,
+      ...(row.slot ? { slot: row.slot } : {})
     });
   }
 
@@ -278,7 +304,10 @@ export async function resealSecrets(
       if (!sealedRow) continue; // Deleted between the scan and here. Nothing to do.
       const plaintext = openSecret(sealedRow, context, env);
       const sealed = sealSecret(plaintext, context, env);
-      await writeSealed(db, row, sealed);
+      // Replaced by a live write (a re-entered key, a rotated webhook secret)
+      // since the read: that write already used the current key, and ours
+      // would put the OLD value back.
+      if (!(await writeSealed(db, row, sealed, sealedRow.ciphertext))) continue;
       result.resealed += 1;
     } catch (error) {
       // `openSecret` and `sealSecret` are both written never to put the value
@@ -346,6 +375,14 @@ function contextFor(row: CustodyRowData): SecretContext {
       kind: row.kind
     };
   }
+  if (row.store === 'outbound_webhook_subscriptions') {
+    return {
+      store: 'outbound_webhook_subscriptions',
+      workspaceId: row.workspace_id,
+      seatKey: row.seat_key,
+      kind: row.kind
+    };
+  }
   return seatCredentialContext(
     row.workspace_id,
     row.seat_key,
@@ -355,7 +392,23 @@ function contextFor(row: CustodyRowData): SecretContext {
 
 async function loadCustodyRows(db: Db, workspaceId?: string): Promise<CustodyRowData[]> {
   const scope = workspaceId ?? null;
-  const [workspaceRows, seatRows, proxyRows, captureRows, webhookRows] = await Promise.all([
+  type Row = {
+    id: string;
+    workspace_id: string;
+    seat_key: string;
+    kind: string;
+    key_version: number;
+    key_id: string | null;
+  };
+  const [
+    workspaceRows,
+    seatRows,
+    proxyRows,
+    captureRows,
+    webhookRows,
+    outboundRows,
+    outboundPreviousRows
+  ] = await Promise.all([
     db.prepare(WORKSPACE_SECRET_ROWS).all<{
       id: string;
       workspace_id: string;
@@ -363,38 +416,12 @@ async function loadCustodyRows(db: Db, workspaceId?: string): Promise<CustodyRow
       key_version: number;
       key_id: string | null;
     }>(scope, scope),
-    db.prepare(SEAT_CREDENTIAL_ROWS).all<{
-      id: string;
-      workspace_id: string;
-      seat_key: string;
-      kind: string;
-      key_version: number;
-      key_id: string | null;
-    }>(scope, scope),
-    db.prepare(SEAT_PROXY_ROWS).all<{
-      id: string;
-      workspace_id: string;
-      seat_key: string;
-      kind: string;
-      key_version: number;
-      key_id: string | null;
-    }>(scope, scope),
-    db.prepare(CAPTURE_SOURCE_SECRET_ROWS).all<{
-      id: string;
-      workspace_id: string;
-      seat_key: string;
-      kind: string;
-      key_version: number;
-      key_id: string | null;
-    }>(scope, scope),
-    db.prepare(PROVIDER_WEBHOOK_SECRET_ROWS).all<{
-      id: string;
-      workspace_id: string;
-      seat_key: string;
-      kind: string;
-      key_version: number;
-      key_id: string | null;
-    }>(scope, scope)
+    db.prepare(SEAT_CREDENTIAL_ROWS).all<Row>(scope, scope),
+    db.prepare(SEAT_PROXY_ROWS).all<Row>(scope, scope),
+    db.prepare(CAPTURE_SOURCE_SECRET_ROWS).all<Row>(scope, scope),
+    db.prepare(PROVIDER_WEBHOOK_SECRET_ROWS).all<Row>(scope, scope),
+    db.prepare(OUTBOUND_WEBHOOK_SECRET_ROWS).all<Row>(scope, scope),
+    db.prepare(OUTBOUND_WEBHOOK_PREVIOUS_SECRET_ROWS).all<Row>(scope, scope)
   ]);
   return [
     // `workspace_secrets` rows are the owner seat by definition -- see
@@ -407,17 +434,29 @@ async function loadCustodyRows(db: Db, workspaceId?: string): Promise<CustodyRow
     ...seatRows.map((row) => ({ store: 'linkedin_seat_credentials' as const, ...row })),
     ...proxyRows.map((row) => ({ store: 'linkedin_seat_proxy_secrets' as const, ...row })),
     ...captureRows.map((row) => ({ store: 'capture_source_secrets' as const, ...row })),
-    ...webhookRows.map((row) => ({ store: 'provider_webhook_endpoints' as const, ...row }))
+    ...webhookRows.map((row) => ({ store: 'provider_webhook_endpoints' as const, ...row })),
+    ...outboundRows.map((row) => ({ store: 'outbound_webhook_subscriptions' as const, ...row })),
+    ...outboundPreviousRows.map((row) => ({
+      store: 'outbound_webhook_subscriptions' as const,
+      ...row,
+      slot: 'previous' as const
+    }))
   ];
 }
 
 /**
  * Sealed-envelope column names. `provider_webhook_endpoints` prefixes them with
- * `secret_` because that row IS the endpoint, not a secret slot. The prefix comes
- * from the closed `SecretStore` union, never from input.
+ * `secret_` because that row IS the endpoint, not a secret slot; an outbound
+ * webhook's overlap secret lives in its `previous_` columns. The prefix comes
+ * from the closed `SecretStore` union and slot, never from input.
  */
-function sealedColumns(store: SecretStore) {
-  const prefix = store === 'provider_webhook_endpoints' ? 'secret_' : '';
+function sealedColumns(row: CustodyRowData) {
+  const prefix =
+    row.slot === 'previous'
+      ? 'previous_'
+      : row.store === 'provider_webhook_endpoints'
+        ? 'secret_'
+        : '';
   return {
     ciphertext: `${prefix}ciphertext`,
     iv: `${prefix}iv`,
@@ -428,7 +467,7 @@ function sealedColumns(store: SecretStore) {
 }
 
 async function readSealed(db: Db, row: CustodyRowData) {
-  const c = sealedColumns(row.store);
+  const c = sealedColumns(row);
   const stored = await db
     .prepare(
       `SELECT ${c.ciphertext} AS ciphertext, ${c.iv} AS iv, ${c.authTag} AS auth_tag,
@@ -461,16 +500,27 @@ async function writeSealed(
     authTag: Buffer;
     keyVersion: number;
     keyId: string | null;
-  }
-): Promise<void> {
+  },
+  readCiphertext: Buffer
+): Promise<boolean> {
   // `updated_at` is deliberately NOT touched: it means "when did the operator
-  // last change this secret", and a maintenance pass did not.
-  const c = sealedColumns(row.store);
-  await db
+  // last change this secret", and a maintenance pass did not. The ciphertext
+  // guard makes this a compare-and-swap against the value that was opened.
+  const c = sealedColumns(row);
+  const { changes } = await db
     .prepare(
-      `UPDATE ${table(row.store)} SET ${c.ciphertext}=?, ${c.iv}=?, ${c.authTag}=?, ${c.keyVersion}=?, ${c.keyId}=? WHERE id=?`
+      `UPDATE ${table(row.store)} SET ${c.ciphertext}=?, ${c.iv}=?, ${c.authTag}=?, ${c.keyVersion}=?, ${c.keyId}=? WHERE id=? AND ${c.ciphertext}=?`
     )
-    .run(sealed.ciphertext, sealed.iv, sealed.authTag, sealed.keyVersion, sealed.keyId, row.id);
+    .run(
+      sealed.ciphertext,
+      sealed.iv,
+      sealed.authTag,
+      sealed.keyVersion,
+      sealed.keyId,
+      row.id,
+      readCiphertext
+    );
+  return changes > 0;
 }
 
 /**
@@ -495,5 +545,6 @@ function table(store: SecretStore): string {
   if (store === 'linkedin_seat_proxy_secrets') return 'linkedin_seat_proxy_secrets';
   if (store === 'capture_source_secrets') return 'capture_source_secrets';
   if (store === 'provider_webhook_endpoints') return 'provider_webhook_endpoints';
+  if (store === 'outbound_webhook_subscriptions') return 'outbound_webhook_subscriptions';
   return 'linkedin_seat_credentials';
 }

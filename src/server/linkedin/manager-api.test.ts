@@ -374,6 +374,155 @@ describe('LinkedIn manager HTTP surface', () => {
     expect(JSON.stringify(own)).toContain('Chen');
   });
 
+  it('previews and imports a LinkedIn Connections.csv with its Notes preamble skipped and the title mapped (TRV-021)', async () => {
+    const csv = Buffer.from(
+      [
+        'Notes:',
+        '"When exporting your connection data, you may notice that some of the email addresses are missing. You can learn more here https://www.linkedin.com/help/linkedin/answer/261"',
+        'Keep this export private',
+        '',
+        'First Name,Last Name,URL,Email Address,Company,Position,Connected On',
+        'Maya,Chen,https://www.linkedin.com/in/maya-connections-api,,"Acme, Inc.","VP, Sales",12 Mar 2024'
+      ].join('\n')
+    );
+    const mapping = {
+      firstName: 'First Name',
+      lastName: 'Last Name',
+      company: 'Company',
+      title: 'Position',
+      email: 'Email Address',
+      profileUrl: 'URL'
+    };
+    const preview = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists/preview')
+        .field('mapping', JSON.stringify(mapping))
+        .attach('file', csv, { filename: 'Connections.csv', contentType: 'text/csv' })
+        .expect(200)
+    ).body;
+    expect(preview).toMatchObject({
+      acceptedCount: 1,
+      rejectedCount: 0,
+      mapping,
+      accepted: [
+        expect.objectContaining({
+          firstName: 'Maya',
+          company: 'Acme, Inc.',
+          profileUrl: 'https://www.linkedin.com/in/maya-connections-api/',
+          customFields: expect.objectContaining({ title: 'VP, Sales' })
+        })
+      ]
+    });
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Connections', sourceKind: 'csv' })
+        .expect(201)
+    ).body.list;
+    const imported = (
+      await as(tokenA)
+        .post(`/api/linkedin/manager/lead-lists/${list.id}/import`)
+        .field('mapping', JSON.stringify(mapping))
+        .attach('file', csv, { filename: 'Connections.csv', contentType: 'text/csv' })
+        .expect(201)
+    ).body;
+    expect(imported).toMatchObject({ inserted: 1, rejected: [] });
+  });
+
+  it('checks pasted profile URLs before any write, refuses cap + 1 and stays in its own workspace (TRV-021)', async () => {
+    const countContacts = async (workspaceId: string) =>
+      Number(
+        (
+          await db
+            .prepare(
+              'SELECT COUNT(*)::int AS total FROM linkedin_lead_contacts WHERE workspace_id=?'
+            )
+            .get<{ total: number }>(workspaceId)
+        )?.total ?? 0
+      );
+    const paste = [
+      'https://www.linkedin.com/in/paste-maya/?trk=feed',
+      'linkedin.com/in/paste-maya, https://www.linkedin.com/in/paste-ravi/',
+      'https://www.linkedin.com/search/results/people/?keywords=cto',
+      'https://www.linkedin.com/company/acme/'
+    ].join('\n');
+    const checked = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists/preview-profile-urls')
+        .send({ urls: paste })
+        .expect(200)
+    ).body;
+    expect(checked).toMatchObject({
+      acceptedCount: 2,
+      duplicates: 1,
+      rejectedCount: 2,
+      cap: 10_000,
+      rejected: [
+        expect.objectContaining({ line: 3, reason: expect.stringMatching(/search/i) }),
+        expect.objectContaining({ line: 4, reason: expect.stringMatching(/company/i) })
+      ]
+    });
+    expect(await countContacts(A)).toBe(0);
+
+    const overCap = Array.from(
+      { length: 10_001 },
+      (_, index) => `https://www.linkedin.com/in/cap-${index}/`
+    ).join('\n');
+    const refusedCheck = await as(tokenA)
+      .post('/api/linkedin/manager/lead-lists/preview-profile-urls')
+      .send({ urls: overCap })
+      .expect(400);
+    expect(refusedCheck.body.error).toContain('10,001 different LinkedIn profiles');
+    await as(tokenA)
+      .post('/api/linkedin/manager/lead-lists/preview-profile-urls')
+      .send({ urls: '  \n ' })
+      .expect(400);
+
+    const list = (
+      await as(tokenA)
+        .post('/api/linkedin/manager/lead-lists')
+        .send({ name: 'Pasted', sourceKind: 'profile_urls' })
+        .expect(201)
+    ).body.list;
+    const refusedImport = await as(tokenA)
+      .post(`/api/linkedin/manager/lead-lists/${list.id}/profile-urls`)
+      .send({ urls: overCap })
+      .expect(400);
+    expect(refusedImport.body.error).toContain('Nothing was imported');
+    expect(await countContacts(A)).toBe(0);
+
+    // Another workspace cannot add to, or learn about, this list.
+    await as(tokenB)
+      .post(`/api/linkedin/manager/lead-lists/${list.id}/profile-urls`)
+      .send({ urls: paste })
+      .expect(404);
+    expect(await countContacts(A)).toBe(0);
+    expect(await countContacts(B)).toBe(0);
+
+    const imported = (
+      await as(tokenA)
+        .post(`/api/linkedin/manager/lead-lists/${list.id}/profile-urls`)
+        .send({ urls: paste })
+        .expect(201)
+    ).body;
+    expect(imported).toMatchObject({ inserted: 2, duplicates: 1, rejectedCount: 2 });
+    expect(imported.rejected.map((entry: { line: number }) => entry.line)).toEqual([3, 4]);
+
+    // Rejections are bounded in the response; the count stays exact.
+    const junk = Array.from({ length: 450 }, (_, index) => `not-a-profile-${index}`).join('\n');
+    const bounded = (
+      await as(tokenA)
+        .post(`/api/linkedin/manager/lead-lists/${list.id}/profile-urls`)
+        .send({ urls: junk })
+        .expect(201)
+    ).body;
+    expect(bounded).toMatchObject({ inserted: 0, rejectedCount: 450 });
+    expect(bounded.rejected).toHaveLength(200);
+    expect(bounded.rejected[199]).toMatchObject({ line: 200 });
+    expect(await countContacts(A)).toBe(2);
+    expect(await countContacts(B)).toBe(0);
+  });
+
   it('supports strict reusable workflow CRUD and rejects unsupported variables', async () => {
     const valid = {
       name: 'Founder flow',
@@ -874,13 +1023,15 @@ describe('LinkedIn manager HTTP surface', () => {
         .patch('/api/linkedin/manager/seats/owner')
         .send({ label: 'Renamed again' })
         .expect(200);
-      // Today shows it to the founder; from then on it blocks the switch.
+      // Today lists it; reading Today alone presents nothing.
       const today = await as(tokenA).get('/api/today').expect(200);
       expect(
         (today.body.needsAttention as { kind: string; reference: { id: string } }[])
           .filter((item) => item.kind === 'linkedin_handoff_waiting')
           .map((item) => item.reference.id)
       ).toEqual(['lact_manager_switch']);
+      // The card shows it to the founder; from then on it blocks the switch.
+      await as(tokenA).post('/api/linkedin/handoffs/lact_manager_switch/present').expect(200);
       const refused = await as(tokenA)
         .patch('/api/linkedin/manager/seats/owner')
         .send({ sendMode: 'automated' })

@@ -13,12 +13,16 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
+  Star,
+  UserRound,
   X
 } from 'lucide-react';
 import {
   ApiError,
   completeLinkedInManualTask,
   editLinkedInActionBody,
+  getInboxAssignees,
+  getInboxTags,
   getLinkedInActions,
   getLinkedInManagedCampaigns,
   getLinkedInManualTasks,
@@ -29,8 +33,9 @@ import {
   skipLinkedInAction,
   syncLinkedInInbox,
   syncLinkedInThread,
+  type AssignableMember,
+  type InboxTag,
   type LinkedInActionView,
-  type LinkedInConversation,
   type LinkedInMessageRecord,
   type LinkedInSafetyVerdict,
   type LinkedInSeatResponse,
@@ -50,6 +55,15 @@ import {
   nextInboxMessageLimit
 } from './inboxMessageWindow';
 import { ConfidenceTag } from './LinkedInViz';
+import { RichContentAttachNote, RichContentHelp } from './RichContentHelp';
+import {
+  InboxBulkBar,
+  ReplyClassPanel,
+  replyClassLabel,
+  tagColorClass,
+  ThreadNotesPanel,
+  ThreadOrganizePanel
+} from './InboxOrganize';
 import { Select } from './ui/primitives';
 import { plural } from './ui/plural';
 
@@ -90,11 +104,35 @@ import { plural } from './ui/plural';
 /** No message filter is on by default: an inbox that opens filtered is an inbox that looks empty. */
 interface InboxFilters {
   unread: boolean;
-  hasReply: boolean;
+  starred: boolean;
+  /** '' any, 'yes' they have written, 'no' still silent. */
+  replied: '' | 'yes' | 'no';
   campaignId: string;
+  tagId: string;
+  /** '' anyone, 'me', 'unassigned', or a member's user id. */
+  assignee: string;
+  lastFrom: '' | 'lead' | 'sender';
+  /** Archived conversations are hidden unless asked for. */
+  archived: 'hide' | 'only' | 'any';
 }
 
-const EMPTY_FILTERS: InboxFilters = { unread: false, hasReply: false, campaignId: '' };
+const EMPTY_FILTERS: InboxFilters = {
+  unread: false,
+  starred: false,
+  replied: '',
+  campaignId: '',
+  tagId: '',
+  assignee: '',
+  lastFrom: '',
+  archived: 'hide'
+};
+
+/** How many of the filters behind "More filters" are narrowing the list. */
+const moreFilterCount = (filters: InboxFilters) =>
+  [filters.tagId, filters.assignee, filters.lastFrom, filters.archived !== 'hide'].filter(Boolean)
+    .length;
+
+type InboxConversation = Awaited<ReturnType<typeof getLinkedInThread>>;
 
 /**
  * HOW MUCH OF THE INBOX ONE READ ASKS FOR, and how much it can ever get.
@@ -402,7 +440,35 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
   const [searchHasMore, setSearchHasMore] = useState(false);
   useEffect(() => {
     setSearchPage(0);
-  }, [activeSeatKey, filters.unread, filters.hasReply, filters.campaignId]);
+  }, [activeSeatKey, filters]);
+  /** TRV-036: the workspace tag catalog and who a conversation can be assigned to. */
+  const [tags, setTags] = useState<InboxTag[]>([]);
+  const [assignees, setAssignees] = useState<AssignableMember[]>([]);
+  /** Conversation ids ticked for a bulk action. Pruned to what is listed. */
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const loadTags = useCallback(async () => {
+    try {
+      setTags(await getInboxTags());
+    } catch {
+      /* tags organize the inbox; failing to read them never blocks reading it */
+    }
+  }, []);
+  useEffect(() => {
+    void loadTags();
+    void (async () => {
+      try {
+        setAssignees(await getInboxAssignees());
+      } catch {
+        /* the assignee control falls back to Unassigned */
+      }
+    })();
+  }, [loadTags]);
+  const meUserId = assignees.find((member) => member.isMe)?.userId ?? null;
+  /** A tag filter whose tag was deleted would read as an empty inbox. */
+  useEffect(() => {
+    if (filters.tagId && !tags.some((tag) => tag.id === filters.tagId))
+      setFilters((current) => ({ ...current, tagId: '' }));
+  }, [tags, filters.tagId]);
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setSearchPage(0);
@@ -414,7 +480,7 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
   const [threadLimit, setThreadLimit] = useState(THREAD_PAGE);
   const [openUrn, setOpenUrn] = useState<string | null>(null);
   const [openTaskId, setOpenTaskId] = useState<string | null>(null);
-  const [conversation, setConversation] = useState<LinkedInConversation | null>(null);
+  const [conversation, setConversation] = useState<InboxConversation | null>(null);
   /**
    * The visible message window belongs to the selected thread. Changing
    * conversations resets to 50 without relying on effects or stale fetches;
@@ -478,8 +544,15 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
     try {
       const next = await getLinkedInThreads({
         ...(filters.unread ? { unread: true } : {}),
-        ...(filters.hasReply ? { hasReply: true } : {}),
+        ...(filters.replied ? { hasReply: filters.replied === 'yes' } : {}),
         ...(filters.campaignId ? { campaignId: filters.campaignId } : {}),
+        ...(filters.starred ? { starred: true } : {}),
+        ...(filters.tagId ? { tagId: filters.tagId } : {}),
+        ...(filters.assignee ? { assignee: filters.assignee } : {}),
+        ...(filters.lastFrom ? { lastFrom: filters.lastFrom } : {}),
+        ...(filters.archived === 'hide'
+          ? {}
+          : { archived: filters.archived === 'only' ? true : ('any' as const) }),
         seatKey: activeSeatKey,
         ...(serverSearch ? { search: serverSearch, offset: searchPage * THREAD_PAGE } : {}),
         limit: serverSearch ? THREAD_PAGE : threadLimit
@@ -505,15 +578,16 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
     } finally {
       if (listToken.current === token) setLoading(false);
     }
-  }, [
-    filters.unread,
-    filters.hasReply,
-    filters.campaignId,
-    activeSeatKey,
-    threadLimit,
-    serverSearch,
-    searchPage
-  ]);
+  }, [filters, activeSeatKey, threadLimit, serverSearch, searchPage]);
+
+  useEffect(() => {
+    setSelected((current) => {
+      if (current.size === 0) return current;
+      const listed = new Set(threads.map((thread) => thread.id));
+      const kept = [...current].filter((threadId) => listed.has(threadId));
+      return kept.length === current.size ? current : new Set(kept);
+    });
+  }, [threads]);
 
   const loadTasks = useCallback(async () => {
     try {
@@ -526,7 +600,11 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
       const conversations =
         next.length === 0
           ? []
-          : await getLinkedInThreads({ seatKey: activeSeatKey, limit: THREAD_MAX });
+          : await getLinkedInThreads({
+              seatKey: activeSeatKey,
+              limit: THREAD_MAX,
+              archived: 'any'
+            });
       setTaskThreads(conversations);
       setTaskThreadsTruncated(conversations.length >= THREAD_MAX);
       setTaskError('');
@@ -708,6 +786,31 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
       setReading(false);
     }
   };
+
+  /**
+   * After an organize change: re-read the list (filters may now exclude the
+   * row) and the open conversation, leaving the composer and its draft alone.
+   */
+  const refreshOrganized = async () => {
+    await loadThreads();
+    const urn = conversation?.thread.threadUrn;
+    if (!urn) return;
+    try {
+      setConversation(await getLinkedInThread(urn, seatForThread(urn)));
+    } catch {
+      /* the list re-read above already reflects the change */
+    }
+  };
+  const refreshTags = async () => {
+    await loadTags();
+  };
+  const toggleSelected = (threadId: string) =>
+    setSelected((current) => {
+      const next = new Set(current);
+      if (next.has(threadId)) next.delete(threadId);
+      else next.add(threadId);
+      return next;
+    });
 
   /** A deliberate selection resets the visible history; background sync does not. */
   const selectThread = (threadUrn: string) => {
@@ -1099,7 +1202,7 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
   );
 
   const filtered =
-    filters.unread || filters.hasReply || Boolean(filters.campaignId) || Boolean(search.trim());
+    JSON.stringify(filters) !== JSON.stringify(EMPTY_FILTERS) || Boolean(search.trim());
   const messages = conversation?.messages ?? [];
   const shownMessageLimit = inboxMessageLimitForThread(
     messageWindow,
@@ -1146,6 +1249,9 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
    * turn on, and what their copy explains -- see `LIVE_REPLY_STATUSES`.
    */
   const taskLiveReply = openTask ? liveReplyTo(openTask.profileUrl) : null;
+  /** TRV-037: the classification of the newest inbound message, oldest-first list. */
+  const latestClassification =
+    conversation?.replyClassifications[conversation.replyClassifications.length - 1] ?? null;
   const threadLiveReply = conversation ? liveReplyTo(conversation.thread.profileUrl) : null;
 
   return (
@@ -1204,12 +1310,26 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
           </button>
           <button
             type="button"
-            className={`li-range ${filters.hasReply ? 'is-active' : ''}`}
-            aria-pressed={filters.hasReply}
-            onClick={() => setFilters((current) => ({ ...current, hasReply: !current.hasReply }))}
+            className={`li-range ${filters.starred ? 'is-active' : ''}`}
+            aria-pressed={filters.starred}
+            onClick={() => setFilters((current) => ({ ...current, starred: !current.starred }))}
           >
-            Has a reply
+            Starred
           </button>
+          <Select
+            aria-label="Replies"
+            value={filters.replied}
+            onChange={(event) =>
+              setFilters((current) => ({
+                ...current,
+                replied: event.target.value as InboxFilters['replied']
+              }))
+            }
+          >
+            <option value="">Replied or not</option>
+            <option value="yes">Has a reply</option>
+            <option value="no">No reply yet</option>
+          </Select>
           <Select
             aria-label="Campaign"
             value={filters.campaignId}
@@ -1225,6 +1345,73 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
             ))}
           </Select>
           {loading && <LoaderCircle className="spin" size={14} aria-label="Reading the inbox" />}
+          <details className="inbox-more-filters">
+            <summary className={`li-range ${moreFilterCount(filters) ? 'is-active' : ''}`}>
+              More filters{moreFilterCount(filters) ? ` (${moreFilterCount(filters)})` : ''}
+            </summary>
+            <div className="inbox-more-filters-body">
+              <Select
+                aria-label="Tag"
+                value={filters.tagId}
+                onChange={(event) =>
+                  setFilters((current) => ({ ...current, tagId: event.target.value }))
+                }
+              >
+                <option value="">Any tag</option>
+                {tags.map((tag) => (
+                  <option key={tag.id} value={tag.id}>
+                    {tag.name}
+                  </option>
+                ))}
+              </Select>
+              <Select
+                aria-label="Assignee"
+                value={filters.assignee}
+                onChange={(event) =>
+                  setFilters((current) => ({ ...current, assignee: event.target.value }))
+                }
+              >
+                <option value="">Anyone or no one</option>
+                <option value="me">Assigned to me</option>
+                <option value="unassigned">Unassigned</option>
+                {assignees
+                  .filter((member) => !member.isMe)
+                  .map((member) => (
+                    <option key={member.userId} value={member.userId}>
+                      {member.name}
+                    </option>
+                  ))}
+              </Select>
+              <Select
+                aria-label="Last message from"
+                value={filters.lastFrom}
+                onChange={(event) =>
+                  setFilters((current) => ({
+                    ...current,
+                    lastFrom: event.target.value as InboxFilters['lastFrom']
+                  }))
+                }
+              >
+                <option value="">Last message from anyone</option>
+                <option value="lead">Last message from the lead</option>
+                <option value="sender">Last message from you</option>
+              </Select>
+              <Select
+                aria-label="Archived conversations"
+                value={filters.archived}
+                onChange={(event) =>
+                  setFilters((current) => ({
+                    ...current,
+                    archived: event.target.value as InboxFilters['archived']
+                  }))
+                }
+              >
+                <option value="hide">Hide archived</option>
+                <option value="any">Include archived</option>
+                <option value="only">Only archived</option>
+              </Select>
+            </div>
+          </details>
         </div>
         <button
           className="secondary-button li-inbox-sync"
@@ -1272,6 +1459,33 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
 
           {taskError && <p className="li-hint">{taskError}</p>}
 
+          {threads.length > 0 && (
+            <div className="inbox-select-row">
+              <label className="inbox-select-all">
+                <input
+                  type="checkbox"
+                  checked={threads.every((thread) => selected.has(thread.id))}
+                  onChange={(event) =>
+                    setSelected(
+                      event.target.checked ? new Set(threads.map((thread) => thread.id)) : new Set()
+                    )
+                  }
+                />
+                Select all {threads.length} listed
+              </label>
+            </div>
+          )}
+          {selected.size > 0 && (
+            <InboxBulkBar
+              selectedIds={[...selected]}
+              tags={tags}
+              assignees={assignees}
+              onApplied={refreshOrganized}
+              onClear={() => setSelected(new Set())}
+              setToast={setToast}
+            />
+          )}
+
           {inboxRows.length === 0 ? (
             <div className="empty-state">
               <Inbox size={26} />
@@ -1301,7 +1515,9 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
             <ul className="li-thread-list">
               {inboxRows.map((row) =>
                 row.kind === 'task' ? (
-                  <li key={row.key}>
+                  <li key={row.key} className="inbox-row">
+                    {/* Keeps task rows aligned with selectable conversation rows. */}
+                    <span className="inbox-row-select" aria-hidden="true" />
                     <button
                       type="button"
                       className={`li-thread ${openTaskId === row.task.id ? 'is-open' : ''}`}
@@ -1334,7 +1550,15 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                     </button>
                   </li>
                 ) : (
-                  <li key={row.key}>
+                  <li key={row.key} className="inbox-row">
+                    <label className="inbox-row-select">
+                      <input
+                        type="checkbox"
+                        checked={selected.has(row.thread.id)}
+                        onChange={() => toggleSelected(row.thread.id)}
+                        aria-label={`Select the conversation with ${row.thread.name ?? 'this person'}`}
+                      />
+                    </label>
                     <button
                       type="button"
                       className={`li-thread ${openUrn === row.thread.threadUrn ? 'is-open' : ''}`}
@@ -1372,6 +1596,41 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                             <span className="li-chip li-status-replied">replied</span>
                           )}
                           {row.thread.campaignId && <span className="li-chip">campaign</span>}
+                          {row.thread.starred && (
+                            <span className="li-chip inbox-tag-amber">
+                              <Star size={11} aria-hidden="true" /> starred
+                            </span>
+                          )}
+                          {row.thread.archived && <span className="li-chip">archived</span>}
+                          {row.thread.assignee && (
+                            <span className="li-chip">
+                              <UserRound size={11} aria-hidden="true" />{' '}
+                              {row.thread.assignee.userId === meUserId
+                                ? 'you'
+                                : row.thread.assignee.name}
+                            </span>
+                          )}
+                          {row.thread.tags.slice(0, 3).map((tag) => (
+                            <span key={tag.id} className={`li-chip ${tagColorClass(tag.color)}`}>
+                              {tag.name}
+                            </span>
+                          ))}
+                          {row.thread.tags.length > 3 && (
+                            <span className="li-chip">+{row.thread.tags.length - 3} tags</span>
+                          )}
+                          {row.thread.replySuggestion && (
+                            <span
+                              className={`li-chip inbox-class-chip${
+                                row.thread.replySuggestion.status === 'confirmed'
+                                  ? ' is-confirmed'
+                                  : ''
+                              }`}
+                            >
+                              {row.thread.replySuggestion.status === 'confirmed'
+                                ? replyClassLabel(row.thread.replySuggestion.confirmedClass)
+                                : `${replyClassLabel(row.thread.replySuggestion.suggestedClass)} (suggested)`}
+                            </span>
+                          )}
                         </span>
                       </span>
                     </button>
@@ -1498,6 +1757,8 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                   />
                 </label>
                 {scheduleRow}
+                <RichContentAttachNote channel="linkedin_reply" />
+                <RichContentHelp current="linkedin_reply" />
                 <p className="li-hint">
                   {openTask.suggestedBody?.trim()
                     ? 'This draft came from the campaign step. Change as much of it as you like — nothing goes anywhere until you queue it.'
@@ -1717,6 +1978,29 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                 </button>
               </div>
 
+              <ThreadOrganizePanel
+                thread={conversation.thread}
+                tags={tags}
+                assignees={assignees}
+                onChanged={refreshOrganized}
+                onTagsChanged={refreshTags}
+                setToast={setToast}
+              />
+              {latestClassification && (
+                <ReplyClassPanel
+                  key={`${latestClassification.messageId}-${latestClassification.status}`}
+                  classification={latestClassification}
+                  personName={conversation.thread.name ?? 'This person'}
+                  onConfirmed={refreshOrganized}
+                  setToast={setToast}
+                />
+              )}
+              <ThreadNotesPanel
+                threadId={conversation.thread.id}
+                meUserId={meUserId}
+                setToast={setToast}
+              />
+
               {messages.length === 0 ? (
                 <p className="empty-copy">
                   No message has been stored for this conversation. Sync it to read what LinkedIn
@@ -1794,6 +2078,8 @@ export function OutreachInbox({ setToast }: { setToast: (message: string) => voi
                   />
                 </label>
                 {scheduleRow}
+                <RichContentAttachNote channel="linkedin_reply" />
+                <RichContentHelp current="linkedin_reply" />
 
                 {/* Verbatim, and headed neutrally for the same reason as the
                     task composer: "held back to keep the account safe" is the

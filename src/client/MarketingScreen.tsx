@@ -336,7 +336,7 @@ export function MarketingScreen({
 
       <section className="launch-section deploy-section" id="deploy">
         <div className="split-heading">
-          <h2>Start hosted. Self-host if you prefer.</h2>
+          <h2>Start hosted. Self-hosting is a preview.</h2>
           <p>Same product. Same approval gate. Choose who runs the infrastructure.</p>
         </div>
 
@@ -380,7 +380,9 @@ export function MarketingScreen({
             <Server size={20} aria-hidden="true" />
             <span>
               <strong>Prefer your own infrastructure?</strong>
-              <small>Trevra runs on PostgreSQL. See the self-hosting guide for requirements.</small>
+              <small>
+                Self-hosting is an unsupported preview. See the self-hosting guide for requirements.
+              </small>
             </span>
           </div>
           <a

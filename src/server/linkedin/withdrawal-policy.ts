@@ -257,6 +257,10 @@ export async function withdrawalPolicyGate(
       `Workspace policy denies withdrawals: ${review.policy.policyName}`
     );
   if (review.policy.effect === 'require_approval' && !review.approved)
-    return decide('held', false, 'Owner approval required for this exact invite withdrawal.');
+    return decide(
+      'held',
+      false,
+      'Owner or manager approval required for this exact invite withdrawal.'
+    );
   return decide('allowed', true, 'Current workspace policy allows this exact withdrawal.');
 }

@@ -1672,6 +1672,67 @@ h1 {
   }
 }
 
+/* TRV-039 AI draft review: composition only. Controls keep the shared skin. */
+.ai-draft-panel {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-sm);
+  background: var(--t-surface);
+}
+.ai-draft-heading {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: var(--t-text-sm);
+}
+.ai-draft-badge,
+.ai-draft-meta {
+  color: var(--muted);
+  font-size: var(--t-text-xs);
+}
+.ai-draft-panel .ai-draft-meta {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ai-draft-panel .ui-textarea[aria-invalid='true'] {
+  border-color: var(--red);
+}
+.ai-draft-reason {
+  white-space: pre-wrap;
+}
+.ai-draft-evidence {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0 0;
+  font-size: var(--t-text-xs);
+}
+.ai-draft-evidence > div {
+  display: grid;
+  grid-template-columns: minmax(96px, 160px) minmax(0, 1fr);
+  gap: 8px;
+}
+.ai-draft-evidence dt {
+  color: var(--muted);
+}
+.ai-draft-evidence dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+@media (max-width: 760px) {
+  .ai-draft-evidence > div {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+  .ai-draft-actions > .ui-button {
+    width: 100%;
+  }
+}
+
 /* Workspace setup is a task flow, not a wall of unrelated settings cards.
    The first connection section is always visible; secondary controls are
    available through accessible native disclosures without remounting forms. */
@@ -7052,6 +7113,50 @@ button:disabled {
   letter-spacing: var(--t-track-caps);
 }
 
+/* TRV-040: the rich-content matrix as help (generated from
+   src/shared/rich-content.ts), and the attach control a text-only channel
+   shows disabled. Composition only; the table, button and hint keep their
+   shared skins. */
+.rich-content-help summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--t-tap);
+}
+.rich-content-help tr.is-current {
+  background: var(--t-green-50);
+}
+.rich-content-help td[data-support='supported'] {
+  color: var(--green);
+}
+.rich-content-help td[data-support='link_only'] {
+  color: var(--t-amber-ink);
+}
+.rich-content-help td[data-support='unsupported'] {
+  color: var(--t-muted);
+}
+.rich-content-reasons {
+  display: grid;
+  gap: 4px;
+  max-width: var(--t-measure);
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--t-muted);
+  font-size: var(--t-text-xs);
+  line-height: 1.45;
+}
+.rich-content-attach,
+.rich-content-remove {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+.rich-content-attach .li-hint,
+.rich-content-remove .li-merge-warn {
+  flex: 1 1 220px;
+  margin: 0;
+}
+
 /* Empty: what a workflow IS, then three of them one click away. */
 .li-wf-empty {
   padding: 30px 20px 26px;
@@ -7727,6 +7832,255 @@ button:disabled {
   flex-wrap: wrap;
   color: var(--muted);
   font-size: var(--t-text-xs);
+}
+
+/* TRV-036 / TRV-037: inbox organization. Composition only -- the controls are
+   the shared primitives; colour comes from the token palette. */
+.inbox-tag-neutral {
+  background: var(--t-surface-3);
+  color: var(--t-ink);
+}
+.inbox-tag-green {
+  background: var(--t-green-100);
+  color: var(--t-green-700);
+}
+.inbox-tag-blue {
+  background: var(--t-blue-bg);
+  color: var(--t-blue);
+}
+.inbox-tag-amber {
+  background: var(--t-amber-bg);
+  color: var(--t-amber);
+}
+.inbox-tag-red {
+  background: var(--t-red-bg);
+  color: var(--t-red);
+}
+.li-chip svg {
+  margin-right: 3px;
+}
+.inbox-row {
+  display: flex;
+  align-items: stretch;
+}
+.inbox-row > .li-thread {
+  flex: 1 1 auto;
+  width: auto;
+  min-width: 0;
+}
+.inbox-row-select {
+  flex: none;
+  width: var(--t-tap);
+  display: grid;
+  place-items: center;
+  border-top: 1px solid var(--t-line-soft);
+}
+label.inbox-row-select {
+  cursor: pointer;
+}
+.li-thread-list li:first-child .inbox-row-select {
+  border-top: 0;
+}
+.inbox-row-select input,
+.inbox-select-all input {
+  accent-color: var(--t-green-600);
+}
+.inbox-select-row {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+.inbox-select-all {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: var(--t-tap);
+  padding-left: 13px;
+  color: var(--t-muted);
+  font-size: var(--t-text-xs);
+  cursor: pointer;
+}
+.inbox-bulk {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid var(--t-line);
+  border-radius: var(--t-r-md);
+  background: var(--t-surface-2);
+  font-size: var(--t-text-xs);
+}
+.inbox-bulk-note {
+  flex-basis: 100%;
+  margin: 0;
+}
+.inbox-more-filters > summary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--t-tap);
+  list-style: none;
+}
+.inbox-more-filters > summary::-webkit-details-marker {
+  display: none;
+}
+.inbox-more-filters[open] {
+  flex-basis: 100%;
+}
+.inbox-more-filters-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+.inbox-org,
+.inbox-class {
+  display: grid;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--t-line-soft);
+}
+.inbox-org-row,
+.inbox-org-tags,
+.inbox-class-head,
+.inbox-class-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.inbox-star.is-filled {
+  fill: currentColor;
+  color: var(--t-amber);
+}
+.inbox-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--t-tap);
+  padding-left: 10px;
+  border-radius: var(--t-r-sm);
+  font-size: var(--t-text-xs);
+  font-weight: var(--t-w-bold);
+}
+.inbox-tag-manager-list .inbox-tag {
+  padding-right: 10px;
+}
+.inbox-tag-remove {
+  display: grid;
+  place-items: center;
+  min-width: var(--t-tap);
+  min-height: var(--t-tap);
+  border: 0;
+  border-radius: var(--t-r-sm);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.inbox-tag-remove:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.inbox-tag-create {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 12rem);
+  align-items: end;
+  gap: 10px;
+}
+.inbox-tag-create-actions,
+.inbox-tag-create > .li-hint {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.inbox-tag-manager-list {
+  list-style: none;
+  margin: 0;
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+.inbox-tag-manager-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.inbox-tag-manager-list .li-hint {
+  margin: 0 auto 0 0;
+}
+.inbox-notes {
+  margin: 12px 0;
+}
+.inbox-note-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 12px;
+}
+.inbox-note {
+  display: grid;
+  gap: 6px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--t-line-soft);
+}
+.inbox-note-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  font-size: var(--t-text-sm);
+}
+.inbox-note-head .li-hint {
+  margin: 0;
+}
+.inbox-note-body,
+.inbox-note-history p {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--t-text-sm);
+}
+.inbox-note-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.inbox-note-history {
+  list-style: none;
+  margin: 0;
+  padding: 0 0 0 12px;
+  display: grid;
+  gap: 8px;
+  border-left: 2px solid var(--t-line);
+}
+.inbox-note-add,
+.inbox-note-edit {
+  display: grid;
+  gap: 8px;
+}
+.inbox-class-chip {
+  background: var(--t-blue-bg);
+  color: var(--t-blue);
+}
+.inbox-class-chip.is-confirmed {
+  background: var(--t-green-100);
+  color: var(--t-green-700);
+}
+.inbox-class .li-hint {
+  margin: 0;
+}
+@media (max-width: 640px) {
+  .inbox-tag-create {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .inbox-more-filters-body > * {
+    flex: 1 1 100%;
+  }
 }
 
 /* Initials-in-a-circle: the avatar-led row a native message UI draws with a
@@ -10030,6 +10384,38 @@ button:disabled {
 .mgr-settings-block > h4 {
   margin: 0;
 }
+.mgr-auto-enrol-rules {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.mgr-auto-enrol-rules > li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: var(--t-tap);
+  border-bottom: 1px solid var(--t-line-soft);
+}
+.mgr-auto-enrol-rules > li > span {
+  display: grid;
+  min-width: 0;
+}
+.mgr-auto-enrol-rules small {
+  color: var(--muted);
+  font-size: var(--t-text-xs);
+}
+.mgr-auto-enrol-rules strong {
+  overflow-wrap: anywhere;
+}
+.mgr-auto-enrol-add {
+  margin-bottom: 0;
+}
+.mgr-auto-enrol-add > .ui-field {
+  flex: 1 1 240px;
+}
 @media (max-width: 640px) {
   .mgr-campaign-section-list {
     grid-template-columns: minmax(0, 1fr);
@@ -10921,11 +11307,35 @@ button:disabled {
   justify-self: start;
 }
 
+/* The sources Trevra does not support (TRV-021/022/023): the same definition
+   list, with room for the "Not supported" chip beside each name, and the source
+   a deep link asked about marked so its answer is found first. */
+.lead-kinds dd p {
+  margin: 0;
+}
+.lead-kinds dd p + p {
+  margin-top: 4px;
+}
+.lead-kinds dl > div.is-requested {
+  border-left: 3px solid var(--t-amber-line);
+  padding-left: 10px;
+}
+@media (min-width: 641px) {
+  .lead-intake-unsupported .lead-kinds dl > div {
+    grid-template-columns: minmax(0, 30ch) minmax(0, 1fr);
+  }
+}
+
 /* A row number is 1-4 characters; the reason beside it is the sentence worth
    reading, so the number keeps a column its own width and no more. */
 .lead-rejects th:first-child,
 .lead-rejects td:first-child {
   width: 7ch;
+}
+/* A rejected entry is often a long URL with no break point. It wraps, so the
+   reason beside it stays on a phone screen instead of three widths off it. */
+.lead-rejects td {
+  overflow-wrap: anywhere;
 }
 
 /* Seven columns are not squeezed into a phone: the table keeps a readable
@@ -14121,6 +14531,11 @@ button:disabled {
 .today-action-review-actions {
   justify-content: flex-end;
 }
+.today-handoff-more-body {
+  display: grid;
+  gap: 10px;
+  padding-top: 6px;
+}
 @media (max-width: 680px) {
   .today-action-review {
     grid-column: 1 / -1;
@@ -14782,6 +15197,55 @@ button:disabled {
   .billing-plan-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* TRV-057 plan state: stale snapshot, trial, renewal and entitlement notices. */
+.billing-notice {
+  max-width: var(--t-measure);
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--t-amber-line);
+  border-radius: var(--t-r-sm);
+  background: var(--t-amber-bg);
+  color: var(--t-amber-ink);
+  font-size: var(--t-text-xs);
+  line-height: 1.55;
+}
+.billing-notice-blocked {
+  border-left: 3px solid var(--t-amber);
+}
+.billing-notice + .metrics-grid {
+  margin-top: 16px;
+}
+.billing-over-list {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+.billing-confirm-body {
+  display: grid;
+  gap: 10px;
+}
+.billing-confirm-body p {
+  margin: 0;
+}
+.billing-lifecycle-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+.billing-blocked-notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+.billing-blocked-notice a {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--t-tap);
+  color: var(--t-green-600);
+  font-weight: var(--t-w-strong);
 }
 
 /* Shared Olaryn login contract: centered, product-branded, compact method list.

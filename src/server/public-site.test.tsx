@@ -94,16 +94,27 @@ function styled(className: string): boolean {
 }
 
 describe('public claims and actual execution capabilities', () => {
-  it('does not present a repository without a published license as open source', () => {
+  it('does not present the proprietary repository as open source', async () => {
     expect(indexHtml).not.toMatch(/\bopen[- ]source\b|\bbuilt in the open\b/i);
     expect(indexHtml).toContain('self-hosting guide');
+    expect(indexHtml).toContain('Self-hosting is an unsupported preview');
     expect(readme).not.toMatch(/^Trevra is the open-source/i);
-    expect(readme).toContain('No open-source license has been published');
+    expect(readme).toContain('Trevra is proprietary software; all rights are reserved');
+    expect(await readFile(resolve('LICENSE'), 'utf8')).toContain('All rights reserved.');
+    // The shipped documents and the server-rendered footer make the same claim:
+    // the only "open-source" left is the third-party components clause in Terms.
+    for (const page of ['how-it-works', 'pricing', 'privacy', 'security', 'terms']) {
+      const html = (await readFile(resolve('public', page, 'index.html'), 'utf8')).replace(
+        'Open-source components are provided under the license included with their source.',
+        ''
+      );
+      expect(html, page).not.toMatch(/\bopen[- ]source\b|\bbuilt in the open\b/i);
+    }
   });
 
   it('lists exactly the actual named execution adapters in the README', () => {
     for (const kind of EXECUTION_ACTION_TYPES) expect(readme).toContain(`\`${kind}\``);
-    expect(EXECUTION_ACTION_TYPES).toHaveLength(4);
+    expect(EXECUTION_ACTION_TYPES).toHaveLength(5);
   });
 });
 

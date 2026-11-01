@@ -46,6 +46,7 @@ import {
 } from './driver-inbox.js';
 import { evaluateLinkedInSafety, type LinkedInSafetyVerdict } from './guard.js';
 import { linkedinActionPolicyGate } from './action-policy.js';
+import { actionAttachmentViolation } from '../../shared/rich-content.js';
 import { createLinkedInReplyPreflight } from './reply-preflight.js';
 import { targetRefCandidates } from './inbox.js';
 import {
@@ -443,6 +444,13 @@ export interface DueLinkedInAction {
   manual?: boolean;
   channelMetadata?: Record<string, unknown>;
   attachment?: Record<string, unknown> | null;
+  /**
+   * TRV-040: the `attachment_json` column as stored (parsed when it parses,
+   * the raw string when it does not). The rich-content check reads this, not
+   * `attachment`, so an array or unreadable value is refused and held rather
+   * than narrowed to null and sent as text alone. Absent on hand-built rows.
+   */
+  attachmentStored?: unknown;
 }
 
 export type BatchStatus = 'completed' | 'halted';
@@ -1250,6 +1258,32 @@ export async function runLinkedInLocalBatch(
       continue;
     }
 
+    /*
+     * TRV-040: THE ATTACHMENT AGAINST THE RICH-CONTENT MATRIX, BEFORE ANY PAGE.
+     *
+     * Rows planned before the matrix existed can carry content their channel
+     * refuses: an invite or group message whose file the driver used to ignore
+     * (the text went out and the attachment silently did not), a DM with a
+     * voice note. Such a row is HELD, not sent and not stripped: the claim is
+     * released with `content_unsupported` on the row so the campaign card and
+     * the review queue say why, the attachment is left exactly as it was for a
+     * person to remove or replace, and the pass moves on. Checked after the
+     * state read so a stale row is still retired rather than held forever.
+     */
+    const contentRefusal = actionAttachmentViolation(
+      action.kind,
+      action.attachmentStored !== undefined ? action.attachmentStored : action.attachment
+    );
+    if (contentRefusal) {
+      await store.releaseClaim(action.id, 'content_unsupported');
+      deferred.push(action.id);
+      result.blocked += 1;
+      log(
+        `LinkedIn local worker held action ${action.id}: ${contentRefusal.reason} Nothing was opened or sent; remove or replace the attachment to release it.`
+      );
+      continue;
+    }
+
     /**
      * THE BRANCH, EVALUATED IN THE LOOP AND NOT IN THE CLAIM.
      *
@@ -1582,6 +1616,23 @@ export async function runLinkedInLocalBatch(
     }
 
     if (
+      (action.kind === 'company_follow' || action.kind === 'company_like') &&
+      failureKind === 'already_connected'
+    ) {
+      // Follow-company and like-company-post act on ONE configured page for the
+      // seat, yet are planned once per lead. Every lead after the first finds
+      // the page already followed (or its latest post already liked): the
+      // step's goal already holds, which is not a failure of this lead. Retire
+      // the row with no failure kind (skipped rows consume no rolling limit)
+      // and advance the lead, instead of parking it as failed on this node.
+      await store.settleBranchSkipped(action.id, detail.trim(), at);
+      log(
+        `LinkedIn local worker retired action ${action.id}: the seat-level state already holds.${detail}`
+      );
+      continue;
+    }
+
+    if (
       failureKind === 'not_found' ||
       failureKind === 'already_connected' ||
       failureKind === 'already_pending' ||
@@ -1598,6 +1649,7 @@ export async function runLinkedInLocalBatch(
       // no rolling limit/replay claim, but the campaign member stays FAILED on
       // this node until an operator retries or deliberately skips the step.
       await store.settleSkipped(action.id, failureKind, at);
+      log(`LinkedIn local worker skipped action ${action.id} (${failureKind}).${detail}`);
       continue;
     }
 
@@ -2302,6 +2354,14 @@ export function postgresLocalWorkerStore(
             ? (raw as Record<string, unknown>)
             : {};
         })(),
+        attachmentStored: (() => {
+          if (typeof row.attachment_json !== 'string') return row.attachment_json ?? null;
+          try {
+            return JSON.parse(row.attachment_json) as unknown;
+          } catch {
+            return row.attachment_json;
+          }
+        })(),
         attachment: (() => {
           const raw =
             typeof row.attachment_json === 'string'
@@ -2313,8 +2373,11 @@ export function postgresLocalWorkerStore(
                   }
                 })()
               : row.attachment_json;
-          return raw && typeof raw === 'object' && !Array.isArray(raw)
-            ? (raw as Record<string, unknown>)
+          // A one-element array is the same single attachment; anything wider
+          // is refused by the rich-content check before it gets this far.
+          const single = Array.isArray(raw) && raw.length === 1 ? (raw[0] as unknown) : raw;
+          return single && typeof single === 'object' && !Array.isArray(single)
+            ? (single as Record<string, unknown>)
             : null;
         })()
       };
@@ -2545,7 +2608,9 @@ export function postgresLocalWorkerStore(
       // step is complete”. Keep the lead on the same node so Retry can replay
       // this exact action without racing downstream work. Branch/operator skips
       // use their own settlement paths and are the only skips that advance.
-      await db.transaction(async (tx) => {
+      // Inline when called inside a transaction (a founder's failed handoff
+      // report settles through here, atomically with its event).
+      await db.transactionOrInline(async (tx) => {
         await tx
           .prepare(
             `
@@ -4957,8 +5022,9 @@ export async function closeLinkedInBrowser(workspaceId?: string, seatKey?: strin
     ? (() => {
         // A seat key names exactly one handle; without one, every seat under
         // this workspace, which is what "close this workspace's browser" has
-        // to mean now that a workspace can have several.
-        const prefix = `${workspaceId}`;
+        // to mean now that a workspace can have several. The prefix carries the
+        // handle key's separator, so closing ws_1 cannot close ws_10's seats.
+        const prefix = seatHandleKey(workspaceId, '');
         const keys = seatKey
           ? [seatHandleKey(workspaceId, seatKey)]
           : [...browsers.keys()].filter((key) => key.startsWith(prefix));

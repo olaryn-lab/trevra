@@ -6,10 +6,11 @@ import {
   executeRedditCommentAction,
   type RedditCommentReview
 } from './api';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 
 export function RedditCommentPanel({ setToast }: { setToast: (message: string) => void }) {
-  const owner = useIsWorkspaceOwner();
+  // Owner or manager (`outreach.approve`, src/server/roles.ts).
+  const owner = useWorkspaceCan('outreach.approve');
   const [rows, setRows] = useState<RedditCommentReview[]>([]);
   const [url, setUrl] = useState('');
   const [body, setBody] = useState('');

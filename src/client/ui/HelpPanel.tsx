@@ -286,6 +286,11 @@ const DESTINATIONS: Array<{ path: string; label: string; hint: string }> = [
     label: 'Social posts',
     hint: 'Scheduled and published LinkedIn posts'
   },
+  {
+    path: '/outreach/analytics',
+    label: 'Outreach · Analytics',
+    hint: 'Per-campaign, daily and per-rep numbers, with CSV exports'
+  },
   { path: '/ledger', label: 'Activity', hint: 'What happened and what needs review' },
   {
     path: '/research',

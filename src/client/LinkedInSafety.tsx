@@ -60,7 +60,7 @@ export const KIND_LABELS: Record<PacedKind, string> = {
   invite: 'Connection invites',
   dm: 'Direct messages',
   reply: 'Replies',
-  inmail: 'InMail (not sent by Trevra)',
+  inmail: 'InMails',
   profile_view: 'Profile views',
   follow: 'Follows',
   unfollow: 'Unfollows',
@@ -245,34 +245,6 @@ export function useSeatLimits(seatKey?: string): SeatLimitsRead {
  * file and the sentence explaining why kept in another is how two kill
  * switches drifted apart in the first place.
  */
-/**
- * The acceptance throttle, in words, from the factor the server actually sent.
- *
- * `signals.acceptance.throttleFactor` is 0.5 today and five sentences on this
- * screen wrote that 0.5 out as "halves" or "halved" in prose -- five copies of
- * a server constant in five places the server cannot reach, every one of which
- * would have gone on saying "halves" the day the factor moved. The factor is
- * in the payload the screen already holds, so it is read.
- *
- * The object is taken as an argument rather than appended by the caller
- * because the non-half phrasing needs it in the middle of the clause: "cuts
- * the volume to 30% of it", not "cuts to 30% the volume".
- */
-const throttleVerb = (factor: number | null, object: string, past = false) =>
-  factor === null
-    ? `${past ? 'reduced' : 'reduces'} ${object}`
-    : factor === 0.5
-      ? `${past ? 'halved' : 'halves'} ${object}`
-      : `${past ? 'cut' : 'cuts'} ${object} to ${Math.round(factor * 100)}% of it`;
-
-/** The same decision quoted as an imperative, for “X would quietly become end it”. */
-const throttleImperative = (factor: number | null) =>
-  factor === null
-    ? 'reduce it'
-    : factor === 0.5
-      ? 'halve it'
-      : `cut it to ${Math.round(factor * 100)}%`;
-
 export const SEAT_STOP_COPY = {
   /** The verb for an IMMEDIATE stop. Never used over the agent, whose stop is cooperative. */
   // Not "Pause everything": this stops the seat, and it now shares a bar with a
@@ -344,14 +316,14 @@ export const SEAT_STOP_COPY = {
   /**
    * Why a human is the only thing that may cut a seat to zero.
    *
-   * The acceptance throttle halves volume and never zeroes it, and the reason
-   * is not caution: a seat cut to zero can never produce the outcomes that
-   * would clear the throttle, so “halve it” would quietly become “end it”.
-   * Ending a seat is a decision for a human, and this control is that
-   * decision -- which is exactly why it demands a reason.
+   * Low invite acceptance is an advisory since the simplified dispatch
+   * (docs/release/2026-10-27-linkedin-simplified-dispatch.md): the gate, the
+   * planner and the limits report no longer reduce volume for it. Ending a
+   * seat is a decision for a human, and this control is that decision --
+   * which is exactly why it demands a reason.
    */
-  onlyAHumanZeroesASeat: (throttleFactor: number | null) =>
-    `Trevra never cuts this seat to zero on its own. Below the acceptance floor it ${throttleVerb(throttleFactor, 'the volume')}, because a seat cut to zero can never produce the outcomes that would clear the throttle — “${throttleImperative(throttleFactor)}” would quietly become “end it”. Ending a seat is a decision for a human, and this is that decision.`
+  onlyAHumanZeroesASeat:
+    'Trevra never cuts this seat to zero on its own. Low invite acceptance is shown as an advisory to review targeting, not an automatic slowdown. Ending a seat is a decision for a human, and this is that decision.'
 } as const;
 
 interface SeatStop {
@@ -369,12 +341,6 @@ interface SeatStop {
   readError: string;
   /** The pause or resume failed. Each of these names what did NOT change. */
   failure: string;
-  /**
-   * What the acceptance throttle multiplies volume by, for the one sentence the
-   * shell renders about it. Null until the first read lands -- the copy then
-   * says “reduces” rather than naming a number nobody sent.
-   */
-  throttleFactor: number | null;
   /** Refuses an empty reason before the wire and answers false. */
   pause: (reason: string) => Promise<boolean>;
   resume: () => Promise<boolean>;
@@ -540,7 +506,6 @@ export function useSeatStop(): SeatStop {
     busy,
     readError: error,
     failure,
-    throttleFactor: limits?.signals.acceptance.throttleFactor ?? null,
     pause,
     resume,
     clearFailure: () => setFailure(''),

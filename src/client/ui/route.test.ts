@@ -136,6 +136,7 @@ describe('isAppPath', () => {
       '/outreach/inbox',
       '/outreach/opportunities',
       '/outreach/posts',
+      '/outreach/analytics',
       '/outreach/campaign/licmp_1',
       '/outreach/workflow/liwf_1',
       '/outreach/workflow/liwf_1/licmp_1',

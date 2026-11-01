@@ -24,6 +24,7 @@ import {
   type PacedKind
 } from './limits.js';
 import {
+  assertEndorseSkillCap,
   BOOKING_LINK_MISSING_MESSAGE,
   BOOKING_LINK_PREVIEW_PLACEHOLDER,
   BookingLinkMissingError,
@@ -42,6 +43,7 @@ import {
   type WorkflowVariableCoverage
 } from './workflows.js';
 import { getBookingUrl } from '../meetings/booking-link.js';
+import { assertWorkflowRichContent } from './rich-content-guard.js';
 
 /**
  * AN ALIAS, NOT A SECOND UNION.
@@ -232,6 +234,22 @@ export interface CampaignQueueSummary {
   failed: number;
   /** Actions already allocated inside the campaign's current 24h ramp day, by the four headline safety buckets. */
   allocatedCampaignDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
+  /**
+   * What is already allocated on this campaign's sender seat (`seatKey`) by
+   * every campaign and route on it: rows (any status but skipped) planned for
+   * the 24h either side of now, in the planner's budget buckets (`runner.ts`
+   * `budgetKindForLedgerKind`). Shown as what is allocated on the account; the
+   * room the card shows is `seatRoomToday`, which the planner itself uses.
+   */
+  allocatedSeatDay: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
+  /**
+   * The room the planner will actually use on this campaign's sender seat
+   * today, per headline bucket: `runner.ts` `seatDayRoom` (the send gate's
+   * allowance less every row still queued on the seat). This, not ceiling
+   * minus `allocatedSeatDay`, is the card's "remaining" (TRV-020). Zero for a
+   * seat that is not configured.
+   */
+  seatRoomToday: Record<'invite' | 'dm' | 'profile_view' | 'follow', number>;
   /**
    * WHAT EACH WORKFLOW STEP IS ACTUALLY WAITING FOR, one row per step.
    *
@@ -815,6 +833,9 @@ export async function createManagedCampaign(
   if (missingSeat) throw new Error(`LinkedIn account '${missingSeat}' is not configured.`);
   if (!list) throw new Error('Lead list not found.');
   if (!workflow) throw new Error('Workflow not found.');
+  // TRV-040: a workflow stored before the matrix may carry content it refuses;
+  // a new campaign must not snapshot it.
+  assertWorkflowRichContent(workflow.steps);
   const timestamp = now.toISOString();
   const campaignId = id('licmp');
   let enrolled = 0;
@@ -946,6 +967,166 @@ function emailMatchesSuppressedDomain(email: string | null, domains: readonly st
   return domains.some((blocked) => domain === blocked || domain.endsWith(`.${blocked}`));
 }
 
+/** `pk.profile_key`: the canonical key of the member lead's `c.profile_url`. */
+const PROFILE_KEY_LATERAL_SQL = `CROSS JOIN LATERAL (
+         SELECT CASE WHEN c.profile_url IS NULL OR BTRIM(c.profile_url)='' THEN NULL
+                     ELSE LOWER(RTRIM(SPLIT_PART(SPLIT_PART(c.profile_url, chr(63),1),'#',1),'/')) END AS profile_key
+       ) pk`;
+
+/**
+ * THE workspace-suppression predicate for a campaign member (aliases `m`, `c`,
+ * `pk`): an unlifted all/LinkedIn suppression matching the lead's Person, email
+ * (the lead's own or its linked Person's) or LinkedIn profile. Eligibility and
+ * the runner's planning boundary share this one expression so they cannot
+ * disagree about who is suppressed; the send-time guard (`seatLedgerFacts`)
+ * asks the same question from the action's target profile.
+ */
+const WORKSPACE_SUPPRESSION_SQL = `EXISTS (
+                SELECT 1 FROM suppressions s
+                WHERE s.workspace_id=m.workspace_id AND s.lifted_at IS NULL
+                  AND s.channel IN ('all','linkedin')
+                  AND (
+                    (s.person_id IS NOT NULL AND s.person_id=c.person_id)
+                    OR (s.email_normalized IS NOT NULL AND c.email IS NOT NULL
+                        AND s.email_normalized=LOWER(BTRIM(c.email)))
+                    OR (s.email_normalized IS NOT NULL AND c.person_id IS NOT NULL
+                        AND EXISTS (SELECT 1 FROM contacts sp
+                                    WHERE sp.workspace_id=m.workspace_id AND sp.id=c.person_id
+                                      AND sp.email_normalized=s.email_normalized))
+                    OR (s.linkedin_url IS NOT NULL AND pk.profile_key IS NOT NULL
+                        AND LOWER(RTRIM(SPLIT_PART(SPLIT_PART(s.linkedin_url, chr(63),1),'#',1),'/'))=pk.profile_key)
+                  )
+              )`;
+
+async function neverContactReasonsFor(
+  db: Db,
+  workspaceId: string,
+  profileUrls: ReadonlyArray<string | null>
+): Promise<Map<string, string>> {
+  const neverContact = await filterExcluded(
+    db,
+    workspaceId,
+    profileUrls.filter((url): url is string => Boolean(url))
+  );
+  return new Map(neverContact.excluded.map((entry) => [entry.targetRef.trim(), entry.reason]));
+}
+
+/**
+ * The workspace-authority part of eligibility, in precedence order. Campaign
+ * policy may relax local heuristics, but it cannot opt a Never Contact or
+ * suppressed Person back into outreach; only the lead-level do-not-contact flag
+ * honours the campaign's `excludeDoNotContact`.
+ */
+function workspaceAuthorityReason(
+  row: { profile_url: string | null; global_suppression: boolean; do_not_contact: boolean },
+  neverContactReasons: ReadonlyMap<string, string>,
+  excludeDoNotContact: boolean
+): string | null {
+  if (row.profile_url && neverContactReasons.has(row.profile_url.trim()))
+    return `Never contact: ${neverContactReasons.get(row.profile_url.trim()) || 'Excluded by workspace'}`;
+  if (row.global_suppression) return 'Workspace suppression';
+  if (excludeDoNotContact && row.do_not_contact) return 'Do not contact';
+  return null;
+}
+
+/**
+ * Retire every LIVE member of one campaign, admitted or not, whom workspace
+ * authority now forbids contacting. Same predicate and reason strings as
+ * {@link reevaluateCampaignExclusions}.
+ *
+ * WHY THE RUNNER CALLS THIS BEFORE ADMISSION AND PLANNING, EVERY TICK.
+ * Eligibility was otherwise computed only when a member was enrolled. A
+ * suppression written afterwards (Inbound "Mark not a lead", an email-only
+ * opt-out, a lead marked do-not-contact) reached no campaign: enrolment
+ * returns early when nothing new arrived, admission takes any pending member,
+ * and the planner never looked. The send-time guard caught part of that later,
+ * but a suppressed Person must never be planned at all.
+ *
+ * Unadmitted members get the eligibility semantics (excluded with an
+ * eligibility reason, restorable by a later re-evaluation once lifted).
+ * Admitted members are ended the way `addExclusions` ends them, and their
+ * unclaimed queued work is skipped; claimed work stays with the send-time guard.
+ *
+ * lc-debt: rescans every live member of every running campaign each tick;
+ * upgrade path is a suppression/exclusion watermark so unchanged campaigns skip
+ * the scan.
+ */
+export async function retireSuppressedCampaignMembers(
+  db: Db,
+  workspaceId: string,
+  campaignId: string,
+  now: Date = new Date()
+): Promise<number> {
+  return db.transactionOrInline(async (tx) => {
+    const campaign = await tx
+      .prepare('SELECT exclusion_policy_json FROM linkedin_campaigns WHERE workspace_id=? AND id=?')
+      .get<{ exclusion_policy_json: unknown }>(workspaceId, campaignId);
+    if (!campaign) return 0;
+    const policy = parseJsonObject(campaign.exclusion_policy_json) as CampaignExclusionPolicy;
+    const rows = await tx
+      .prepare(
+        `SELECT m.id,c.profile_url,c.do_not_contact,${WORKSPACE_SUPPRESSION_SQL} AS global_suppression
+         FROM linkedin_campaign_members m
+         JOIN linkedin_lead_contacts c ON c.id=m.contact_id AND c.workspace_id=m.workspace_id
+         ${PROFILE_KEY_LATERAL_SQL}
+         WHERE m.workspace_id=? AND m.campaign_id=? AND m.status = ANY(?::text[])`
+      )
+      .all<{
+        id: string;
+        profile_url: string | null;
+        do_not_contact: boolean;
+        global_suppression: boolean;
+      }>(workspaceId, campaignId, [...ACTIVE_MEMBER_STATUSES]);
+    if (rows.length === 0) return 0;
+    const neverContactReasons = await neverContactReasonsFor(
+      tx,
+      workspaceId,
+      rows.map((row) => row.profile_url)
+    );
+    const ids: string[] = [];
+    const reasons: string[] = [];
+    for (const row of rows) {
+      const reason = workspaceAuthorityReason(
+        row,
+        neverContactReasons,
+        policy.excludeDoNotContact !== false
+      );
+      if (!reason) continue;
+      ids.push(row.id);
+      reasons.push(reason);
+    }
+    if (ids.length === 0) return 0;
+    const timestamp = now.toISOString();
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_members m
+         SET status='excluded', exclusion_reason=x.reason,
+             ended_at=CASE WHEN m.admitted_at IS NULL THEN m.ended_at ELSE ?::timestamptz END,
+             next_eligible_at=NULL, updated_at=?::timestamptz
+         FROM unnest(?::text[],?::text[]) AS x(id,reason)
+         WHERE m.workspace_id=? AND m.campaign_id=? AND m.id=x.id AND m.status = ANY(?::text[])`
+      )
+      .run(timestamp, timestamp, ids, reasons, workspaceId, campaignId, [
+        ...ACTIVE_MEMBER_STATUSES
+      ]);
+    await tx
+      .prepare(
+        `UPDATE linkedin_actions SET status='skipped',claimed_at=NULL,recorded_at=NULL
+         WHERE workspace_id=? AND campaign_member_id=ANY(?::text[])
+           AND status IN ('planned','held') AND claimed_at IS NULL`
+      )
+      .run(workspaceId, ids);
+    await tx
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+         SET status='skipped',claimed_at=NULL,updated_at=?::timestamptz
+         WHERE workspace_id=? AND member_id=ANY(?::text[]) AND status='planned'`
+      )
+      .run(timestamp, workspaceId, ids);
+    return ids.length;
+  });
+}
+
 /**
  * Recompute explainable eligibility for every UNADMITTED member of one campaign.
  * Creation, dynamic-list enrolment and paused campaign edits all call this exact
@@ -971,18 +1152,7 @@ export async function reevaluateCampaignExclusions(
   const rows = await db
     .prepare(
       `SELECT m.id,m.status,m.exclusion_reason,c.email,c.company,c.first_name,c.last_name,c.profile_url,c.do_not_contact,
-              EXISTS (
-                SELECT 1 FROM suppressions s
-                WHERE s.workspace_id=m.workspace_id AND s.lifted_at IS NULL
-                  AND s.channel IN ('all','linkedin')
-                  AND (
-                    (s.person_id IS NOT NULL AND s.person_id=c.person_id)
-                    OR (s.email_normalized IS NOT NULL AND c.email IS NOT NULL
-                        AND s.email_normalized=LOWER(BTRIM(c.email)))
-                    OR (s.linkedin_url IS NOT NULL AND pk.profile_key IS NOT NULL
-                        AND LOWER(RTRIM(SPLIT_PART(SPLIT_PART(s.linkedin_url, chr(63),1),'#',1),'/'))=pk.profile_key)
-                  )
-              ) AS global_suppression,
+              ${WORKSPACE_SUPPRESSION_SQL} AS global_suppression,
               EXISTS (
                 SELECT 1 FROM linkedin_campaign_members other
                 WHERE other.workspace_id=m.workspace_id AND other.contact_id=m.contact_id
@@ -1029,10 +1199,7 @@ export async function reevaluateCampaignExclusions(
               )::int AS profile_rank
        FROM linkedin_campaign_members m
        JOIN linkedin_lead_contacts c ON c.id=m.contact_id AND c.workspace_id=m.workspace_id
-       CROSS JOIN LATERAL (
-         SELECT CASE WHEN c.profile_url IS NULL OR BTRIM(c.profile_url)='' THEN NULL
-                     ELSE LOWER(RTRIM(SPLIT_PART(SPLIT_PART(c.profile_url, chr(63),1),'#',1),'/')) END AS profile_key
-       ) pk
+       ${PROFILE_KEY_LATERAL_SQL}
        WHERE m.workspace_id=? AND m.campaign_id=? AND m.admitted_at IS NULL
          AND m.status IN ('pending','excluded')
        ORDER BY m.created_at,m.id`
@@ -1061,13 +1228,10 @@ export async function reevaluateCampaignExclusions(
     (policy.suppressedCompanies ?? []).map((v) => v.trim().toLowerCase()).filter(Boolean)
   );
   const domains = normalizedSuppressedDomains(policy.suppressedDomains);
-  const neverContact = await filterExcluded(
+  const neverContactReasons = await neverContactReasonsFor(
     db,
     workspaceId,
-    rows.map((row) => row.profile_url).filter((url): url is string => Boolean(url))
-  );
-  const neverContactReasons = new Map(
-    neverContact.excluded.map((entry) => [entry.targetRef.trim(), entry.reason])
+    rows.map((row) => row.profile_url)
   );
   const ids: string[] = [];
   const statuses: string[] = [];
@@ -1085,10 +1249,12 @@ export async function reevaluateCampaignExclusions(
     // Global suppression is a workspace authority boundary. Campaign policy may
     // relax local eligibility heuristics, but it cannot opt a suppressed Person
     // back into outreach.
-    if (row.profile_url && neverContactReasons.has(row.profile_url.trim()))
-      reason = `Never contact: ${neverContactReasons.get(row.profile_url.trim()) || 'Excluded by workspace'}`;
-    else if (row.global_suppression) reason = 'Workspace suppression';
-    else if (policy.excludeDoNotContact !== false && row.do_not_contact) reason = 'Do not contact';
+    const authority = workspaceAuthorityReason(
+      row,
+      neverContactReasons,
+      policy.excludeDoNotContact !== false
+    );
+    if (authority) reason = authority;
     else if (!row.first_name.trim() || !row.last_name.trim() || !row.company.trim())
       reason = 'Missing lead identity';
     else if (policy.excludeMissingProfile !== false && !row.profile_url?.trim())
@@ -1253,6 +1419,82 @@ export async function enrolNewContacts(
       inserted.map((row) => row.id)
     );
   return Number(promoted?.total ?? 0);
+}
+
+/** One member an auto-enrol rule just created, with the verdict eligibility gave it. */
+export interface ListedContactEnrolment {
+  memberId: string;
+  contactId: string;
+  status: string;
+  exclusionReason: string | null;
+}
+
+/**
+ * {@link enrolNewContacts} for named contacts only: the same derived member id,
+ * the same `__eligibility__` placeholder and the same
+ * {@link reevaluateCampaignExclusions} verdict, so an auto-enrol rule admits
+ * exactly who a manual import into the campaign's list would. The contacts must
+ * already be members of the campaign's lead list; anyone who is not is skipped.
+ *
+ * Returns only the members THIS call created. A contact already in the
+ * campaign, or live in another campaign (`idx_linkedin_campaign_members_one_active`),
+ * conflicts and is not reported -- which is what makes a replayed arrival a
+ * no-op rather than a second enrolment. The caller owns the transaction and the
+ * campaign-state check.
+ */
+export async function enrolListedContacts(
+  db: Db,
+  workspaceId: string,
+  campaign: { id: string; leadListId: string; steps: readonly WorkflowStep[] },
+  contactIds: readonly string[],
+  now: Date = new Date()
+): Promise<ListedContactEnrolment[]> {
+  const ids = [...new Set(contactIds.filter(Boolean))];
+  if (campaign.steps.length === 0 || ids.length === 0) return [];
+  const timestamp = now.toISOString();
+  const inserted = await db
+    .prepare(
+      `
+    INSERT INTO linkedin_campaign_members
+      (id,workspace_id,campaign_id,contact_id,status,step_index,current_step_id,completed_step_ids,next_eligible_at,assigned_variants,exclusion_reason,created_at,updated_at)
+    SELECT ${DERIVED_MEMBER_ID}, ?, ?, m.contact_id, 'excluded', 0, NULL, '[]'::jsonb, NULL, '{}'::jsonb, '__eligibility__', ?, ?
+    FROM linkedin_lead_list_members m
+    WHERE m.workspace_id=? AND m.list_id=? AND m.contact_id = ANY(?::text[])
+    ORDER BY m.contact_id
+    ON CONFLICT DO NOTHING RETURNING id
+  `
+    )
+    .all<{ id: string }>(
+      workspaceId,
+      campaign.id,
+      workspaceId,
+      campaign.id,
+      timestamp,
+      timestamp,
+      workspaceId,
+      campaign.leadListId,
+      ids
+    );
+  if (inserted.length === 0) return [];
+  // lc-debt: re-evaluates every unadmitted member of the campaign, as the
+  // tick does, for each arrival; upgrade path: scope the pass to the inserted ids.
+  await reevaluateCampaignExclusions(db, workspaceId, campaign.id, now);
+  const rows = await db
+    .prepare(
+      `SELECT id,contact_id,status,exclusion_reason FROM linkedin_campaign_members
+       WHERE workspace_id=? AND campaign_id=? AND id = ANY(?::text[]) ORDER BY contact_id`
+    )
+    .all<{ id: string; contact_id: string; status: string; exclusion_reason: string | null }>(
+      workspaceId,
+      campaign.id,
+      inserted.map((row) => row.id)
+    );
+  return rows.map((row) => ({
+    memberId: row.id,
+    contactId: row.contact_id,
+    status: row.status,
+    exclusionReason: row.exclusion_reason
+  }));
 }
 
 export async function listCampaignWaves(
@@ -1556,7 +1798,15 @@ export async function startManagedCampaign(
   db: Db,
   workspaceId: string,
   campaignId: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  options: {
+    /**
+     * Runs inside the activation transaction, after the campaign row is
+     * locked, and only when the campaign is not already running -- the TRV-057
+     * entitlement gate's count-under-lock hook. Throwing aborts the start.
+     */
+    beforeActivate?: (tx: Db) => Promise<void>;
+  } = {}
 ): Promise<ManagedCampaign> {
   const campaign = await getManagedCampaign(db, workspaceId, campaignId);
   if (!campaign) throw new Error('Campaign not found.');
@@ -1577,6 +1827,12 @@ export async function startManagedCampaign(
   // sequence already chosen for pending leads, and admitted leads carry their
   // own immutable snapshot from wave admission.
   await db.transaction(async (tx) => {
+    if (options.beforeActivate) {
+      const current = await tx
+        .prepare('SELECT status FROM linkedin_campaigns WHERE workspace_id=? AND id=? FOR UPDATE')
+        .get<{ status: string }>(workspaceId, campaignId);
+      if (current && current.status !== 'running') await options.beforeActivate(tx);
+    }
     await tx
       .prepare(
         `UPDATE linkedin_campaigns SET status='running',started_at=COALESCE(started_at,?),paused_at=NULL,updated_at=? WHERE workspace_id=? AND id=?`
@@ -2658,7 +2914,7 @@ export async function campaignQueueSummary(
   const allocations = await db
     .prepare(
       `SELECT
-       COUNT(*) FILTER (WHERE kind IN ('invite','group_invite','event_invite','company_invite'))::int AS invite,
+       COUNT(*) FILTER (WHERE kind IN ('invite','group_invite','event_invite','company_invite_follow'))::int AS invite,
        COUNT(*) FILTER (WHERE kind IN ('dm','reply','inmail','group_message','event_message'))::int AS dm,
        COUNT(*) FILTER (WHERE kind='profile_view')::int AS profile_view,
        COUNT(*) FILTER (WHERE kind IN ('follow','unfollow','disconnect','company_follow'))::int AS follow
@@ -2672,6 +2928,41 @@ export async function campaignQueueSummary(
       dayStart,
       dayEnd
     );
+  // Bucketed the planner's way (`runner.ts` `budgetKindForLedgerKind`): reply
+  // and InMail are budgeted apart from `dm` there.
+  const seatAllocations = await db
+    .prepare(
+      `SELECT
+       COUNT(*) FILTER (WHERE kind IN ('invite','company_invite_follow','event_invite','group_invite'))::int AS invite,
+       COUNT(*) FILTER (WHERE kind IN ('dm','group_message','event_message'))::int AS dm,
+       COUNT(*) FILTER (WHERE kind='profile_view')::int AS profile_view,
+       COUNT(*) FILTER (WHERE kind IN ('follow','unfollow','disconnect','company_follow'))::int AS follow
+     FROM linkedin_actions
+     WHERE workspace_id=? AND seat_key=? AND status<>'skipped'
+       AND planned_for IS NOT NULL AND planned_for>=?::timestamptz AND planned_for<=?::timestamptz`
+    )
+    .get<Record<'invite' | 'dm' | 'profile_view' | 'follow', number>>(
+      workspaceId,
+      campaign.seatKey,
+      new Date(now.getTime() - 86_400_000).toISOString(),
+      new Date(now.getTime() + 86_400_000).toISOString()
+    );
+  // A dynamic import: runner.ts imports this module.
+  const seatRoomToday = { invite: 0, dm: 0, profile_view: 0, follow: 0 };
+  const sender = await getSeat(db, workspaceId, campaign.seatKey);
+  if (sender) {
+    const { seatDayRoom } = await import('./runner.js');
+    const room = await seatDayRoom(
+      db,
+      workspaceId,
+      campaign.seatKey,
+      sender,
+      ['invite', 'dm', 'profile_view', 'follow'],
+      now
+    );
+    for (const kind of ['invite', 'dm', 'profile_view', 'follow'] as const)
+      seatRoomToday[kind] = room.get(kind)?.room ?? 0;
+  }
   const blocked =
     (
       await db
@@ -2702,6 +2993,13 @@ export async function campaignQueueSummary(
       profile_view: Number(allocations?.profile_view ?? 0),
       follow: Number(allocations?.follow ?? 0)
     },
+    allocatedSeatDay: {
+      invite: Number(seatAllocations?.invite ?? 0),
+      dm: Number(seatAllocations?.dm ?? 0),
+      profile_view: Number(seatAllocations?.profile_view ?? 0),
+      follow: Number(seatAllocations?.follow ?? 0)
+    },
+    seatRoomToday,
     backlogByStep: [...backlog.entries()].map(([index, value]) => ({
       stepId: campaign.steps[index]?.id ?? `step-${index + 1}`,
       ...value
@@ -2923,6 +3221,8 @@ export async function updateCampaignSequence(
   if (campaign.status === 'stopped' || campaign.status === 'completed')
     throw new Error(`A ${campaign.status} campaign cannot have its steps changed.`);
   const parsed = workflowStepsSchema.parse(steps);
+  assertWorkflowRichContent(parsed);
+  assertEndorseSkillCap(parsed);
   const snapshot = JSON.stringify({
     manager: true,
     workflowId: campaign.workflowId,
@@ -2966,6 +3266,7 @@ export async function applyLatestWorkflowToPendingMembers(
     throw new Error(`A ${campaign.status} campaign cannot be upgraded.`);
   const workflow = await getWorkflow(db, workspaceId, campaign.workflowId);
   if (!workflow) throw new Error('Campaign workflow no longer exists.');
+  assertWorkflowRichContent(workflow.steps);
   const snapshot = JSON.stringify({
     manager: true,
     workflowId: workflow.id,
@@ -3194,7 +3495,9 @@ export async function endManagedCampaignMember(
 ): Promise<boolean> {
   const timestamp = now.toISOString();
   let changed = 0;
-  await db.transaction(async (tx) => {
+  // Inline inside a caller's transaction (a confirmed opt-out ends memberships
+  // atomically with its suppression); its own transaction otherwise.
+  await db.transactionOrInline(async (tx) => {
     const result = await tx
       .prepare(
         `UPDATE linkedin_campaign_members SET status=?,next_eligible_at=NULL,ended_at=?::timestamptz,updated_at=?::timestamptz
@@ -4077,7 +4380,11 @@ export async function managedAnalytics(
     .prepare(
       `
     SELECT a.workflow_step_id,a.variant_id,
-      COUNT(*) FILTER (WHERE a.status IN ('sent','accepted','replied'))::int AS sent,
+      -- 'declined' was sent, exactly as in invites_sent above and in the
+      -- operational per-variant counts. Without it the arms did not add up to
+      -- the campaign total, and a variant's reply rate was over a smaller
+      -- population than the one it was compared against.
+      COUNT(*) FILTER (WHERE a.status IN ('sent','accepted','replied','declined'))::int AS sent,
       COUNT(*) FILTER (WHERE a.status='replied')::int AS replied
     FROM linkedin_actions a WHERE ${where} AND a.workflow_step_id IS NOT NULL AND a.variant_id IS NOT NULL
     GROUP BY a.workflow_step_id,a.variant_id ORDER BY a.workflow_step_id,a.variant_id

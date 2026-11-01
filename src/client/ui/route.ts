@@ -39,7 +39,17 @@ export const SECTIONS: readonly Section[] = ['loop', 'outreach', 'ledger', 'rese
 /** Which second segments each section answers to. */
 const SUB_ROUTES: Record<Section, readonly string[]> = {
   loop: ['', 'cost'],
-  outreach: ['', 'new', 'campaign', 'workflow', 'inbound', 'inbox', 'opportunities', 'posts'],
+  outreach: [
+    '',
+    'new',
+    'campaign',
+    'workflow',
+    'inbound',
+    'inbox',
+    'opportunities',
+    'posts',
+    'analytics'
+  ],
   ledger: ['', 'run'],
   research: [''],
   // `team` only exists with an invitation id: `/setup/team/:invitationId`.

@@ -4,18 +4,12 @@ import {
   CircleAlert,
   ExternalLink,
   LoaderCircle,
-  Pencil,
-  Play,
   RefreshCw,
   Gauge,
   ListPlus,
-  ScanSearch,
-  ShieldCheck,
   Users
 } from 'lucide-react';
 import {
-  ApiError,
-  createLinkedInLeadSource,
   getLinkedInLeadAllowance,
   getLinkedInLeadSources,
   getLinkedInLeads,
@@ -29,36 +23,34 @@ import {
   type LinkedInLeadSource
 } from './api';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
-import { errorMessage, stageTargets, useOutreachRefresh } from './LinkedInSafety';
+import { LinkedInManagerLeadConfig, type LeadIntakeRequest } from './LinkedInManagerLeadConfig';
+import { UnsupportedIntakeSources } from './LeadIntakeSources';
+import { errorMessage, reloadOutreach, stageTargets, useOutreachRefresh } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import { formatVisitWindow, queueWaitCopy } from './LinkedInTiming';
-import { Select } from './ui/primitives';
+import { unsupportedIntakeSourceFor } from '../shared/lead-intake';
 import { navigate } from './ui/route';
 import { plural } from './ui/plural';
 
 /**
- * A fold on `/outreach` ("Find people") -- a search page or a post, walked
- * into a list of people. `/outreach/leads` redirects here and opens the fold.
+ * A fold on `/outreach` ("Find people").
  *
- * THIS FEATURE IS OFF BY DEFAULT AND THAT IS DELIBERATE, which is the only
- * thing about this screen worth writing at length.
+ * TREVRA DOES NOT SCRAPE LINKEDIN SEARCH, SALES NAVIGATOR OR POST ENGAGERS
+ * (TRV-021/022/023). Reading other people's profiles out of a search page or
+ * a post's reactions is scraping under LinkedIn's User Agreement, and it puts
+ * the operator's account at risk. So this screen no longer offers to queue a
+ * walk at all: it says plainly that those sources are not supported and why,
+ * and puts the two honest ways in right underneath -- a CSV import (with
+ * presets for LinkedIn's own connections export and generic list exports) and
+ * a paste of profile URLs the operator already has. The server refuses the
+ * old queue route with the stable code `intake_source_unsupported` either way.
  *
- * Everything else in outreach automates the operator's OWN account: their
- * seat, their invites, their messages, paced so the account survives. Reading
- * other people's profiles out of a search page is a different act with a
- * different name on it -- it is scraping under LinkedIn's User Agreement 8.2 --
- * and the contractual exposure is not the same exposure. So it is a second,
- * separate opt-in, it is a config decision rather than a switch on a screen,
- * and a hosted deployment cannot grant it at all.
+ * `?kind=` and `?url=` deep links (from Today's suggestions) still land here:
+ * the requested source is named first in the explanation, and the URL is
+ * offered as a plain link to open on LinkedIn -- never queued.
  *
- * Which means this screen renders `offReason` VERBATIM and offers no control
- * to change it. A toggle here would be the product quietly deciding for the
- * operator that the two risks are the same risk. They are not, and the copy
- * says so in two sentences rather than an essay nobody reads.
- *
- * THE LIST STILL READS WHEN IT IS OFF. A workspace with sources from before
- * the switch was turned off must still be able to see what they found; only
- * queueing a new walk is refused.
+ * THE SOURCES LIST STILL READS. A workspace with sources from before this
+ * change must still be able to see what they found and save it to a list.
  */
 const KIND_LABELS: Record<LeadSourceKind, string> = {
   search: 'People search',
@@ -71,71 +63,10 @@ const KIND_LABELS: Record<LeadSourceKind, string> = {
   company_employees: 'Company employees'
 };
 
-const KIND_HINTS: Record<LeadSourceKind, string> = {
-  search: 'Find people from LinkedIn people search.',
-  sales_navigator: 'Use a Sales Navigator people search you already ran.',
-  content: 'Find people writing or commenting about these terms.',
-  post: 'Find people who reacted to or commented on one post.',
-  recruiter: 'Use a Recruiter/Talent search you already ran.',
-  group_members: 'Read the visible members of a LinkedIn group you belong to.',
-  event_attendees: 'Read visible attendees from a LinkedIn event page.',
-  company_employees: 'Read visible profiles from a company’s People page.'
-};
-
-const KIND_PLACEHOLDERS: Record<LeadSourceKind, string> = {
-  search: 'https://www.linkedin.com/search/results/people/?keywords=…',
-  sales_navigator: 'https://www.linkedin.com/sales/search/people?query=…',
-  content: 'https://www.linkedin.com/search/results/content/?keywords=…',
-  post: 'https://www.linkedin.com/posts/…',
-  recruiter: 'https://www.linkedin.com/talent/…',
-  group_members: 'https://www.linkedin.com/groups/123456/members/',
-  event_attendees: 'https://www.linkedin.com/events/…',
-  company_employees: 'https://www.linkedin.com/company/acme/people/'
-};
-
-/** Which kinds the keyword box can write a URL for. Sales Navigator cannot be composed. */
-const KEYWORD_KINDS: readonly LeadSourceKind[] = ['search', 'content'];
-
 const INTERACTION_LABELS: Record<'post' | 'comment', string> = {
   post: 'Wrote the post',
   comment: 'Commented'
 };
-
-/**
- * Keywords -> the search URL LinkedIn itself would produce.
- *
- * TYPING KEYWORDS IS THE WHOLE INTERACTION. The URL field fills itself as the
- * operator types, and the walk queues straight from that -- a step that only
- * ever produces one predictable string is a step the screen can take itself.
- *
- * TWO SURFACES, ONE BOX. `people` answers "who matches these words" from
- * profile text; `content` answers "who is TALKING about these words" and is
- * the one the brief asks for -- posts and comments, with the post kept. The
- * kind selector picks which question is being asked; the box is the same.
- *
- * It stays a convenience OVER the URL field, not a replacement for it.
- * Everything past a keyword string -- industry, seniority, company headcount,
- * connection degree -- lives in facet parameters whose values are LinkedIn's
- * own internal ids, and no honest version of this box can invent them. So the
- * operator who wants filters runs the search on LinkedIn and pastes it, and
- * hand-editing the URL stops the keywords overwriting it. The field is the
- * source of truth either way. Sales Navigator is not offered here at all: its
- * `query=(...)` grammar is entirely facet ids, so a keyword-only Sales
- * Navigator URL would be a worse search wearing a better name.
- */
-function searchUrlForKeywords(kind: LeadSourceKind, keywords: string): string | null {
-  const query = keywords.trim().replace(/\s+/g, ' ');
-  if (!query) return null;
-  if (!KEYWORD_KINDS.includes(kind)) return null;
-  const url = new URL(
-    kind === 'content'
-      ? 'https://www.linkedin.com/search/results/content/'
-      : 'https://www.linkedin.com/search/results/people/'
-  );
-  url.searchParams.set('keywords', query);
-  url.searchParams.set('origin', 'GLOBAL_SEARCH_HEADER');
-  return url.toString();
-}
 
 const STATUS_LABELS: Record<LeadSourceStatus, string> = {
   pending: 'Queued',
@@ -192,35 +123,30 @@ const sameSourceUrl = (sourceRef: string | null, sourceUrl: string): boolean => 
 };
 
 interface LeadSourcePrefill {
-  kind: LeadSourceKind;
+  /** The source a deep link asked for, or null when the screen was opened plainly. */
+  kind: LeadSourceKind | null;
   url: string;
-  keywords: string;
 }
 
 function readLeadSourcePrefill(): LeadSourcePrefill {
-  const fallback: LeadSourcePrefill = { kind: 'search', url: '', keywords: '' };
+  const fallback: LeadSourcePrefill = { kind: null, url: '' };
   if (typeof window === 'undefined') return fallback;
   const params = new URLSearchParams(window.location.search);
   const rawKind = params.get('kind') ?? '';
   if (!Object.prototype.hasOwnProperty.call(KIND_LABELS, rawKind)) return fallback;
   const kind = rawKind as LeadSourceKind;
   const rawUrl = params.get('url')?.trim() ?? '';
-  if (!rawUrl) return { ...fallback, kind };
+  if (!rawUrl) return { kind, url: '' };
   try {
     const parsed = new URL(rawUrl);
     if (
       parsed.protocol !== 'https:' ||
       !['linkedin.com', 'www.linkedin.com'].includes(parsed.hostname.toLowerCase())
     )
-      return { ...fallback, kind };
-    return {
-      kind,
-      url: parsed.toString(),
-      keywords:
-        kind === 'search' || kind === 'content' ? (parsed.searchParams.get('keywords') ?? '') : ''
-    };
+      return { kind, url: '' };
+    return { kind, url: parsed.toString() };
   } catch {
-    return { ...fallback, kind };
+    return { kind, url: '' };
   }
 }
 
@@ -228,19 +154,14 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
   const [activeSeatKey] = useActiveSeatKey();
   const [sources, setSources] = useState<LinkedInLeadSource[]>([]);
   const [enabled, setEnabled] = useState(true);
-  const [offReason, setOffReason] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
   const [prefill] = useState(readLeadSourcePrefill);
-  const [kind, setKind] = useState<LeadSourceKind>(prefill.kind);
-  const [url, setUrl] = useState(prefill.url);
-  /** What to search for. Writes the URL below until the operator edits it themselves. */
-  const [keywords, setKeywords] = useState(prefill.keywords);
-  /** True once the URL was hand-edited, after which keywords stop touching it. */
-  const [urlDirty, setUrlDirty] = useState(Boolean(prefill.url));
-  const [urlEditing, setUrlEditing] = useState(false);
-  const [busy, setBusy] = useState(false);
+  /** Which import the explanation's buttons last asked the importer to bring forward. */
+  const [intakeRequest, setIntakeRequest] = useState<LeadIntakeRequest | null>(null);
+  const requestIntake = (mode: LeadIntakeRequest['mode']) =>
+    setIntakeRequest((current) => ({ mode, seq: (current?.seq ?? 0) + 1 }));
 
   /** The source being drilled into. Null on the list. */
   const [openSource, setOpenSource] = useState<LinkedInLeadSource | null>(null);
@@ -281,7 +202,6 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
       const result = await getLinkedInLeadSources(200, activeSeatKey);
       setSources(result.sources);
       setEnabled(result.enabled);
-      setOffReason(result.offReason);
       setError('');
     } catch (err) {
       setError(
@@ -339,55 +259,12 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
         .then((result) => {
           setSources(result.sources);
           setEnabled(result.enabled);
-          setOffReason(result.offReason);
         })
         .catch(() => undefined);
     }, 30_000);
     return () => window.clearInterval(timer);
   }, [hasLiveSources, activeSeatKey]);
   useOutreachRefresh(load);
-
-  const queue = async () => {
-    if (!url.trim()) {
-      setError('Type a search above or paste a LinkedIn URL first.');
-      return;
-    }
-    setBusy(true);
-    setError('');
-    try {
-      const result = await createLinkedInLeadSource({
-        kind,
-        url: url.trim(),
-        seatKey: activeSeatKey
-      });
-      setToast(
-        result.duplicate
-          ? 'That URL is already queued or running — nothing was created, and the live source is in the list below.'
-          : 'Queued. The walk happens on the local worker’s own tick, at paced gaps, in a real browser.'
-      );
-      setUrl('');
-      setKeywords('');
-      setUrlDirty(false);
-      await load();
-    } catch (err) {
-      // The 409 here is the opt-in refusing, and its sentence names which kind
-      // of off it is. It reads verbatim, in the calm block, not as a fault --
-      // which is what the comment always said and what the red banner was doing
-      // the opposite of. A 409 on this route can only be `assertLeadSourcingOn`
-      // refusing, so it is also news: the switch is off, and this screen now
-      // knows it and stops offering a walk it cannot queue.
-      if (err instanceof ApiError && err.status === 409) {
-        setEnabled(false);
-        setOffReason(errorMessage(err, 'Lead sourcing is switched off for this deployment.'));
-        setError('');
-      } else {
-        setError(errorMessage(err, 'Unable to queue that source'));
-      }
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const openLeads = async (source: LinkedInLeadSource) => {
     setOpenSource(source);
     setLeads([]);
@@ -513,21 +390,6 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
     <div className="page-stack">
       {error && <div className="error-banner">{error}</div>}
 
-      {/* Not an error, and it must not be styled as one: this is a deliberate
-        posture, so it reads as an explanation with the server's own sentence
-        in it and no control to overturn it. */}
-      {!enabled && (
-        <section className="li-leads-off">
-          <ShieldCheck size={20} />
-          <div>
-            <strong>Lead sourcing is unavailable right now.</strong>
-            <p className="li-blocked-message">
-              {offReason ?? 'Connect the local LinkedIn companion to enable this feature.'}
-            </p>
-          </div>
-        </section>
-      )}
-
       {openSource ? (
         <LeadList
           source={openSource}
@@ -552,152 +414,21 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
         />
       ) : (
         <>
-          <section className="page-panel">
-            <div className="section-heading">
-              <div>
-                <h3 aria-level={2}>Find people on LinkedIn</h3>
-                <p>
-                  Choose the search type, type what you are looking for, and Trevra builds the
-                  LinkedIn URL for you. Queueing it only schedules a local browser walk — it
-                  contacts nobody.
-                </p>
-              </div>
-              <ScanSearch size={20} className="li-heading-icon" />
-            </div>
+          {/* Not an error, and not styled as one: a deliberate posture, said in
+            plain words, with the supported ways in directly underneath. */}
+          <UnsupportedIntakeSources
+            requested={prefill.kind ? unsupportedIntakeSourceFor(prefill.kind) : null}
+            requestedUrl={prefill.url || undefined}
+            onImportCsv={() => requestIntake('csv')}
+            onPasteUrls={() => requestIntake('paste')}
+          />
 
-            <div className="li-form-grid">
-              <label>
-                Search type
-                <Select
-                  value={kind}
-                  disabled={!enabled}
-                  onChange={(event) => {
-                    const next = event.target.value as LeadSourceKind;
-                    setKind(next);
-                    setUrlDirty(false);
-                    setUrl(searchUrlForKeywords(next, keywords) ?? '');
-                  }}
-                >
-                  <option value="search">{KIND_LABELS.search}</option>
-                  <option value="content">{KIND_LABELS.content}</option>
-                  <option value="sales_navigator">{KIND_LABELS.sales_navigator}</option>
-                  <option value="post">{KIND_LABELS.post}</option>
-                </Select>
-                <small className="li-hint">{KIND_HINTS[kind]}</small>
-              </label>
-
-              {KEYWORD_KINDS.includes(kind) && (
-                <label>
-                  Search
-                  <input
-                    value={keywords}
-                    disabled={!enabled}
-                    placeholder={
-                      kind === 'content'
-                        ? 'cold outreach, sales automation'
-                        : 'revops founder seed stage'
-                    }
-                    onChange={(event) => {
-                      const next = event.target.value;
-                      setKeywords(next);
-                      if (!urlDirty) setUrl(searchUrlForKeywords(kind, next) ?? '');
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key !== 'Enter' || busy || !enabled || !url.trim()) return;
-                      event.preventDefault();
-                      void queue();
-                    }}
-                  />
-                  <small className="li-hint">
-                    The LinkedIn URL below is built automatically as you type.
-                  </small>
-                </label>
-              )}
-            </div>
-
-            <div className="li-search-builder">
-              <div className="li-url-field">
-                <div className="li-url-label-row">
-                  <span className="li-url-label">LinkedIn URL</span>
-                  {!urlEditing && (
-                    <button
-                      className="li-url-edit"
-                      type="button"
-                      disabled={!enabled}
-                      aria-label="Edit LinkedIn URL"
-                      title="Edit LinkedIn URL"
-                      onClick={() => setUrlEditing(true)}
-                    >
-                      <Pencil size={14} /> Edit
-                    </button>
-                  )}
-                </div>
-                {urlEditing ? (
-                  <div className="li-url-editor-row">
-                    <textarea
-                      rows={2}
-                      autoFocus
-                      aria-label="LinkedIn URL"
-                      value={url}
-                      disabled={!enabled}
-                      onChange={(event) => {
-                        setUrl(event.target.value);
-                        setUrlDirty(true);
-                      }}
-                      placeholder={KIND_PLACEHOLDERS[kind]}
-                    />
-                    <button
-                      className="secondary-button"
-                      type="button"
-                      onClick={() => setUrlEditing(false)}
-                    >
-                      Done
-                    </button>
-                  </div>
-                ) : (
-                  <div className="li-url-display" title={url || KIND_PLACEHOLDERS[kind]}>
-                    <code>{url || KIND_PLACEHOLDERS[kind]}</code>
-                  </div>
-                )}
-              </div>
-              <p className="li-hint">
-                {KEYWORD_KINDS.includes(kind)
-                  ? urlDirty
-                    ? 'Using the URL you pasted or edited. Trevra preserves LinkedIn filters in that URL.'
-                    : 'Built from your search. If you want LinkedIn filters such as industry, seniority or connection degree, run that filtered search on LinkedIn and paste its URL here.'
-                  : 'Paste the LinkedIn URL you want Trevra to open.'}
-              </p>
-              {urlDirty && KEYWORD_KINDS.includes(kind) && keywords.trim() && (
-                <button
-                  className="ghost-button"
-                  type="button"
-                  disabled={!enabled}
-                  onClick={() => {
-                    setUrlDirty(false);
-                    setUrl(searchUrlForKeywords(kind, keywords) ?? '');
-                  }}
-                >
-                  Use generated URL
-                </button>
-              )}
-            </div>
-
-            <div className="panel-footer">
-              <span>
-                Queueing only schedules this source for the local LinkedIn worker. Exclusions are
-                applied later, before anybody can become an outreach target.
-              </span>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={busy || !enabled || !url.trim()}
-                onClick={() => void queue()}
-              >
-                {busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}{' '}
-                {kind === 'post' ? 'Queue post' : 'Queue search'}
-              </button>
-            </div>
-          </section>
+          <LinkedInManagerLeadConfig
+            onChanged={reloadOutreach}
+            setToast={setToast}
+            showSourceGuide={false}
+            intakeRequest={intakeRequest}
+          />
 
           {/* The ceiling on collection itself, which is a different question from
             how deep any one walk goes: six walks in a morning each stopping at
@@ -748,7 +479,7 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
                           disabled={!enabled}
                           onChange={(event) => setCapDraft(event.target.value)}
                         />
-                        <small className="li-hint">0–1000. Set 0 to collect nobody at all.</small>
+                        <small className="li-hint">0–100. Set 0 to collect nobody at all.</small>
                       </label>
                       {/* NOT ZERO WHEN IT IS UNKNOWN. A failed read of the allowance used
                         to print "Still allowed 0", which reads as a hard block that
@@ -853,9 +584,8 @@ export function OutreachLeads({ setToast }: { setToast: (message: string) => voi
 
             {sources.length === 0 ? (
               <p className="empty-copy">
-                {enabled
-                  ? 'No source has been walked yet. Paste a search or a post URL above.'
-                  : 'No source was ever walked on this workspace, and none can be while lead sourcing is off.'}
+                No lead source has been recorded on this workspace. Import a CSV or paste profile
+                URLs above to build a lead list.
               </p>
             ) : (
               <div className="li-source-list">

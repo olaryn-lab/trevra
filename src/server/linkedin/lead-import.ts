@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 import { parse } from 'csv-parse/sync';
+import {
+  LEAD_CSV_PREAMBLE_SCAN_ROWS,
+  leadCsvHeaderRowIndex
+} from '../../shared/lead-csv-header.js';
 import { profileUrlFor } from './driver.js';
 
 export const LEAD_FIELDS = [
@@ -24,6 +28,12 @@ export interface LeadFieldMapping {
   profileUrl?: string;
   /** One combined-name column, e.g. an explicitly exported prospect list. */
   fullName?: string;
+  /**
+   * Job title / position. Never automatched (an unmapped title column keeps
+   * its own custom-field key, as it always has); set only when the operator or
+   * a preset chose it, and stored as the `title` custom field.
+   */
+  title?: string;
 }
 
 export interface NormalizedLeadInput {
@@ -422,11 +432,12 @@ export function customFieldKey(header: string): string {
 
 function customFieldsOf(
   row: Record<string, string>,
-  mapping: LeadFieldMapping
+  mapping: LeadFieldMapping,
+  reserved: readonly string[] = []
 ): Record<string, string> {
   const mapped = new Set(Object.values(mapping).filter((value): value is string => Boolean(value)));
   const out: Record<string, string> = {};
-  const used = new Set<string>();
+  const used = new Set<string>(reserved);
   for (const [header, raw] of Object.entries(row)) {
     if (mapped.has(header)) continue;
     const value = String(raw ?? '')
@@ -464,6 +475,16 @@ export function normalizeLeadRow(
     throw new Error(`Missing required ${missing}.`);
   }
   const email = normalizeEmail(read('email'));
+  // A mapped title is stored under one stable merge key, `title`, whatever the
+  // export called it; an unmapped column that also folds to `title` steps aside.
+  const customFields = customFieldsOf(row, mapping, mapping.title ? ['title'] : []);
+  const title = mapping.title
+    ? String(row[mapping.title] ?? '')
+        .normalize('NFKC')
+        .replace(/\s+/g, ' ')
+        .trim()
+    : '';
+  if (title) customFields.title = title;
   const lead: NormalizedLeadInput = {
     firstName,
     lastName,
@@ -473,7 +494,7 @@ export function normalizeLeadRow(
     country: nullable(read('country')),
     profileUrl: canonicalProfileUrl(read('profileUrl')),
     dedupeKey: '',
-    customFields: customFieldsOf(row, mapping),
+    customFields,
     original: { ...row }
   };
   lead.dedupeKey = leadDedupeKey(lead);
@@ -543,16 +564,46 @@ export function normalizeScrapedLead(input: ScrapedLeadRecord): NormalizedLeadIn
   return lead;
 }
 
+const CSV_OPTIONS = {
+  bom: true,
+  skip_empty_lines: true,
+  relax_column_count: true,
+  trim: false
+} as const;
+
+/**
+ * The CSV as header-keyed records, skipping a LinkedIn Connections preamble.
+ *
+ * An ordinary file (header on row one) goes through csv-parse's own `columns`
+ * handling exactly as it always has. Only a file whose header sits below a
+ * preamble is keyed here by hand, the same way `columns` keys a record: header
+ * cell i names cell i, a short record keeps only the cells it has, extra cells
+ * are dropped, and a repeated header name keeps its last value.
+ */
+function readLeadCsvRecords(csv: string): {
+  headers: string[];
+  records: Array<Record<string, string>>;
+} {
+  const head = parse(csv, { ...CSV_OPTIONS, to: LEAD_CSV_PREAMBLE_SCAN_ROWS }) as string[][];
+  const headerIndex = leadCsvHeaderRowIndex(head);
+  if (headerIndex === 0) {
+    const records = parse(csv, { ...CSV_OPTIONS, columns: true }) as Array<Record<string, string>>;
+    return { headers: records.length > 0 ? Object.keys(records[0]) : [], records };
+  }
+  const rows = (parse(csv, CSV_OPTIONS) as string[][]).slice(headerIndex);
+  const headerRow = rows[0] ?? [];
+  const records = rows.slice(1).map((cells) => {
+    const record = Object.create(null) as Record<string, string>;
+    const width = Math.min(headerRow.length, cells.length);
+    for (let index = 0; index < width; index += 1) record[headerRow[index]] = cells[index];
+    return { ...record };
+  });
+  return { headers: [...new Set(headerRow)], records };
+}
+
 export function parseLeadCsv(csv: string, override: LeadFieldMapping = {}): LeadCsvPreview {
   if (!csv.trim()) throw new Error('CSV content is empty.');
-  const records = parse(csv, {
-    columns: true,
-    bom: true,
-    skip_empty_lines: true,
-    relax_column_count: true,
-    trim: false
-  }) as Array<Record<string, string>>;
-  const headers = records.length > 0 ? Object.keys(records[0]) : [];
+  const { headers, records } = readLeadCsvRecords(csv);
   if (headers.length === 0) throw new Error('CSV needs a header row.');
   const { mapping: auto, confidence: mappingConfidence } =
     autoMatchLeadFieldsWithConfidence(headers);
@@ -593,4 +644,126 @@ export function parseLeadCsv(csv: string, override: LeadFieldMapping = {}): Lead
     }
   });
   return { headers, mapping, mappingConfidence, accepted, rejected };
+}
+
+/* --------------------------------------------------------------------------
+ * Pasted LinkedIn profile URLs.
+ * ------------------------------------------------------------------------ */
+
+/**
+ * THE MOST DISTINCT PROFILES ONE PASTE MAY IMPORT. Past it the whole paste is
+ * refused with a sentence saying so -- never a silent cut at the boundary,
+ * because a list that quietly lost its tail is a list the operator believes
+ * is complete.
+ */
+export const PROFILE_URL_IMPORT_CAP = 10_000;
+
+export interface PastedProfile {
+  /** 1-based line of the paste this entry came from. */
+  line: number;
+  value: string;
+  profileUrl: string;
+}
+
+export interface PastedProfileRejection {
+  line: number;
+  value: string;
+  reason: string;
+}
+
+export interface ProfileUrlPaste {
+  /** One entry per distinct profile, in paste order. */
+  profiles: PastedProfile[];
+  /** Entries that normalised to a profile already listed earlier in the paste. */
+  duplicates: number;
+  rejected: PastedProfileRejection[];
+}
+
+const URL_SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
+const SCHEMELESS_LINKEDIN = /^(?:[a-z0-9-]+\.)*linkedin\.com(?:[/?#]|$)/i;
+
+/**
+ * The profile URL a pasted entry names, through the shared normaliser, or
+ * null. Only URL-shaped entries count: a bare word such as a first name is not
+ * a profile, even though the CSV normaliser would read it as a vanity handle.
+ */
+export function pastedProfileUrl(value: string): string | null {
+  const raw = value.trim();
+  if (URL_SCHEME.test(raw)) return canonicalProfileUrl(raw);
+  if (SCHEMELESS_LINKEDIN.test(raw)) return canonicalProfileUrl(`https://${raw}`);
+  if (/^\/?in\/[^/]+\/?$/i.test(raw)) return canonicalProfileUrl(raw);
+  return null;
+}
+
+/** Why a pasted entry is not a profile URL, in words the operator can act on. */
+export function pastedProfileRejectionReason(value: string): string {
+  const raw = value.trim();
+  const schemeless = !URL_SCHEME.test(raw);
+  if (schemeless && !SCHEMELESS_LINKEDIN.test(raw))
+    return 'Not a LinkedIn profile URL. Paste a link like https://www.linkedin.com/in/their-name/.';
+  let url: URL;
+  try {
+    url = new URL(schemeless ? `https://${raw}` : raw);
+  } catch {
+    return 'Not a valid URL.';
+  }
+  const host = url.hostname.toLowerCase();
+  if (
+    (url.protocol !== 'https:' && url.protocol !== 'http:') ||
+    (host !== 'linkedin.com' && !host.endsWith('.linkedin.com'))
+  )
+    return 'Not a LinkedIn URL.';
+  const path = url.pathname.toLowerCase();
+  if (path.startsWith('/search/'))
+    return 'LinkedIn search URL, not a profile. Trevra does not collect people from search results; open the search on LinkedIn and paste the profiles you chose.';
+  if (path.startsWith('/sales/'))
+    return 'Sales Navigator URL. Trevra does not collect from Sales Navigator; paste the person’s public linkedin.com/in/ profile URL instead.';
+  if (path.startsWith('/talent/') || path.startsWith('/recruiter/'))
+    return 'LinkedIn Recruiter URL. Trevra does not collect from Recruiter; paste the person’s public linkedin.com/in/ profile URL instead.';
+  if (/^\/(?:company|school|showcase)\//.test(path))
+    return 'Company or school page, not a person’s profile.';
+  if (/^\/(?:posts|feed|pulse)\//.test(path))
+    return 'Post or article URL. Collecting the people who liked or commented on a post is not supported; paste the profile URLs of people you identified yourself.';
+  if (/^\/(?:groups|events)\//.test(path)) return 'Group or event page, not a person’s profile.';
+  if (path.startsWith('/in/') && host !== 'linkedin.com' && host !== 'www.linkedin.com')
+    return 'Use the www.linkedin.com/in/ address of this profile.';
+  if (/^\/in\/[^/]+\/.+/.test(path))
+    return 'Points inside a profile (activity or details). Paste the main profile URL, https://www.linkedin.com/in/their-name/.';
+  return 'Not a LinkedIn /in/ profile URL.';
+}
+
+/**
+ * A paste, line by line: each line may hold several entries separated by
+ * commas, semicolons or whitespace. Every entry is normalised, repeats of the
+ * same profile collapse onto the first, and every entry that is not a profile
+ * is returned with its line and a reason. Pure -- the cap is the caller's.
+ */
+export function parseProfileUrlPaste(lines: readonly string[]): ProfileUrlPaste {
+  const profiles: PastedProfile[] = [];
+  const rejected: PastedProfileRejection[] = [];
+  const seen = new Set<string>();
+  let duplicates = 0;
+  lines.forEach((text, index) => {
+    for (const value of text.split(/[\s,;]+/g)) {
+      if (!value) continue;
+      const profileUrl = pastedProfileUrl(value);
+      if (!profileUrl) {
+        rejected.push({ line: index + 1, value, reason: pastedProfileRejectionReason(value) });
+        continue;
+      }
+      const key = profileUrl.toLowerCase();
+      if (seen.has(key)) {
+        duplicates += 1;
+        continue;
+      }
+      seen.add(key);
+      profiles.push({ line: index + 1, value, profileUrl });
+    }
+  });
+  return { profiles, duplicates, rejected };
+}
+
+/** The refusal for a paste with more distinct profiles than one import takes. */
+export function profileUrlCapMessage(count: number, cap = PROFILE_URL_IMPORT_CAP): string {
+  return `This paste holds ${count.toLocaleString('en-US')} different LinkedIn profiles, and one import takes at most ${cap.toLocaleString('en-US')}. Nothing was imported. Split the list and add it in parts.`;
 }

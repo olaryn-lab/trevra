@@ -13,11 +13,11 @@ itself, on a schedule, with the laptop closed.
 Everything Trevra stores today is either **public**, **hashed**, or **held by
 someone else**:
 
-| Secret | How it lives today |
-|---|---|
+| Secret                                   | How it lives today                                                       |
+| ---------------------------------------- | ------------------------------------------------------------------------ |
 | Provider OAuth (Gmail, Stripe, HubSpot…) | Held by **Nango**. Trevra keeps a connection reference, never the token. |
-| Agent tokens | **Hashed.** Trevra can verify one, never reproduce it. |
-| Session cookies | Signed, short-lived. |
+| Agent tokens                             | **Hashed.** Trevra can verify one, never reproduce it.                   |
+| Session cookies                          | Signed, short-lived.                                                     |
 
 A model key is the first secret Trevra must **decrypt and use**. That is a
 genuinely new security surface, and it is the reason this document exists before
@@ -27,14 +27,14 @@ the code does.
 
 ## 2. Threat model
 
-| Attacker gets | Outcome | Mitigation |
-|---|---|---|
-| A database dump | **Ciphertext only.** Useless. | Keys encrypted with `TREVRA_SECRETS_KEY`, which lives in the environment / secret manager — never in Postgres, never in a migration, never in a backup of the database. |
-| The env var alone | Useless without the database. | Two-location split is the whole point. |
-| **Both** | Full key compromise. | Unrecoverable by design. Trevra shows each key’s `last4` and creation date so the operator can find and revoke it at the provider fast. Assume-breach: make rotation easy, not impossible. |
-| A logged-in user of the workspace | Can use the key via the agent, cannot read it. | Plaintext is never returned by any API, at any privilege. Write-only from the UI’s perspective. |
-| Someone reading logs / a bug report | Nothing. | The key is never logged, never in an error message, never in `skill_runs`, never in evidence, never in a payload hash. |
-| A prompt injection in scraped content | Cannot exfiltrate the key. | The key is never in the model’s context. It is a transport credential, applied at the HTTP layer, not a tool input. |
+| Attacker gets                         | Outcome                                        | Mitigation                                                                                                                                                                                 |
+| ------------------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| A database dump                       | **Ciphertext only.** Useless.                  | Keys encrypted with `TREVRA_SECRETS_KEY`, which lives in the environment / secret manager — never in Postgres, never in a migration, never in a backup of the database.                    |
+| The env var alone                     | Useless without the database.                  | Two-location split is the whole point.                                                                                                                                                     |
+| **Both**                              | Full key compromise.                           | Unrecoverable by design. Trevra shows each key’s `last4` and creation date so the operator can find and revoke it at the provider fast. Assume-breach: make rotation easy, not impossible. |
+| A logged-in user of the workspace     | Can use the key via the agent, cannot read it. | Plaintext is never returned by any API, at any privilege. Write-only from the UI’s perspective.                                                                                            |
+| Someone reading logs / a bug report   | Nothing.                                       | The key is never logged, never in an error message, never in `skill_runs`, never in evidence, never in a payload hash.                                                                     |
+| A prompt injection in scraped content | Cannot exfiltrate the key.                     | The key is never in the model’s context. It is a transport credential, applied at the HTTP layer, not a tool input.                                                                        |
 
 That last row matters more than it looks. Trevra reads Reddit threads, GitHub
 issues, and web pages — all attacker-controlled text. The key must never be
@@ -77,10 +77,10 @@ makes it a server-side request forgery primitive: left unchecked, a member could
 point it at `https://169.254.169.254/` and read cloud instance metadata out of
 the agent's own transcript. Two layers, because one is not enough:
 
-| Layer | Where | Catches |
-|---|---|---|
-| Structural | On save, no DNS | Raw IPs, loopback, single-label and `.local` hosts, plain HTTP |
-| Resolving | On every model call, via `createSsrfFetch()` | A public hostname that resolves to a private address, and every redirect hop |
+| Layer      | Where                                        | Catches                                                                      |
+| ---------- | -------------------------------------------- | ---------------------------------------------------------------------------- |
+| Structural | On save, no DNS                              | Raw IPs, loopback, single-label and `.local` hosts, plain HTTP               |
+| Resolving  | On every model call, via `createSsrfFetch()` | A public hostname that resolves to a private address, and every redirect hop |
 
 A self-hoster running Ollama or vLLM on their own network sets
 `TREVRA_ALLOW_PRIVATE_MODEL_HOSTS=true` deliberately. The default is deny,
@@ -116,17 +116,17 @@ LiteLLM Proxy.
 The tool-calling loop is commodity; the approval boundary is not. So the loop
 comes from **[Vercel AI SDK](https://ai-sdk.dev)** (`ai`, Apache-2.0, three
 direct dependencies) plus `@ai-sdk/openai-compatible`, and everything that makes
-Trevra *Trevra* — approvals, the hash-pinned payload, the ledger, scopes,
+Trevra _Trevra_ — approvals, the hash-pinned payload, the ledger, scopes,
 policy, the budget — stays ours.
 
 What the SDK gives us that a hand-written loop would have to earn:
 
-| Need | How |
-|---|---|
-| Bounded steps | `stopWhen: isStepCount(n)` |
-| Per-step token usage, to charge the budget | `onStepEnd({ usage })` — per step, not just a total |
-| Our JSON-Schema tools, unchanged | `dynamicTool` + `jsonSchema()` — the documented path for runtime schemas |
-| The SSRF guard on a workspace-supplied endpoint | `createOpenAICompatible({ fetch })` takes our `createSsrfFetch()` |
+| Need                                            | How                                                                      |
+| ----------------------------------------------- | ------------------------------------------------------------------------ |
+| Bounded steps                                   | `stopWhen: isStepCount(n)`                                               |
+| Per-step token usage, to charge the budget      | `onStepEnd({ usage })` — per step, not just a total                      |
+| Our JSON-Schema tools, unchanged                | `dynamicTool` + `jsonSchema()` — the documented path for runtime schemas |
+| The SSRF guard on a workspace-supplied endpoint | `createOpenAICompatible({ fetch })` takes our `createSsrfFetch()`        |
 
 What it does **not** impose: no persistence, no state machine, no tracing
 backend, no agent-memory model. That matters more than the features — a
@@ -135,12 +135,12 @@ the ledger, and the ledger is the trust surface.
 
 **One thing we deliberately do not use.** The SDK ships `toolApproval:
 'user-approval'`, an in-loop pause. It is not our approval boundary and must not
-become one: it pauses a *conversation*, while Trevra pins an exact payload hash
+become one: it pauses a _conversation_, while Trevra pins an exact payload hash
 that a human signs and rejects the payload if it changed afterwards. Our
 boundary is stronger and sits lower — no tool in the surface can execute an
 external write at all. See app-spec §11.
 
-**Honest caveat.** The transport is uniform; *agent quality* is not. A loop
+**Honest caveat.** The transport is uniform; _agent quality_ is not. A loop
 depends on reliable tool-calling, and OpenAI-compatible shims vary considerably
 in how faithfully they implement it. Any provider will connect; not every
 provider will drive the loop well. A native Anthropic adapter (`@ai-sdk/anthropic`)
@@ -183,23 +183,26 @@ CREATE TABLE workspace_agent_budget (
 
 Exactly what your laptop agent may do. No more, for living closer to the data.
 
-| | Hosted agent |
-|---|---|
-| Read the revenue brief, clients, runs | Yes |
-| Run `sideEffect: 'none'` and `'network-read'` skills | Yes |
-| Start playbooks | Yes |
-| **Prepare** actions | Yes |
-| **Approve** anything | **No** |
-| **Execute** an external write | **No** |
-| Read the model key | No — it is applied at the transport layer |
-| Manage connections, tokens, or policies | No |
+|                                                                   | Hosted agent                              |
+| ----------------------------------------------------------------- | ----------------------------------------- |
+| Read the revenue brief, clients, runs                             | Yes                                       |
+| Run `sideEffect: 'none'` and `'network-read'` skills              | Yes                                       |
+| Start playbooks                                                   | Yes                                       |
+| **Prepare** actions (a playbook run parked at `waiting_approval`) | Yes                                       |
+| **Approve** anything                                              | **No**                                    |
+| **Execute** an external write                                     | **No**                                    |
+| Read the model key                                                | No — it is applied at the transport layer |
+| Manage connections, tokens, or policies                           | No                                        |
 
 It runs with agent-token scopes: `skills:read`, `skills:run`, `runs:read`,
-`playbooks:read`, `playbooks:run`, `workflows:read`, `workspace:read`,
-`actions:prepare` — every scope a laptop agent token is issued with, which is
-the point of the sentence above. `runs:read` was missing from an earlier draft
-of this list by oversight, not by design: an agent that cannot read the ledger
-cannot check whether the thing it just ran actually worked.
+`playbooks:read`, `playbooks:run`, `workflows:read`, `workspace:read` — every
+scope a laptop agent token is issued with, which is the point of the sentence
+above. There is no `actions:prepare` scope and no separate prepare tool:
+"preparing" means `trevra_start_playbook`, which parks the run at
+`waiting_approval` with the exact payload hash until a human decides inside
+Trevra. `runs:read` was missing from an earlier draft of this list by
+oversight, not by design: an agent that cannot read the ledger cannot check
+whether the thing it just ran actually worked.
 
 Every model call and every tool call lands in the ledger. An autonomous agent
 you cannot audit afterwards is not a feature.
@@ -208,11 +211,11 @@ you cannot audit afterwards is not a feature.
 
 ## 7. Self-host vs hosted
 
-| | Self-hosted | Trevra Cloud |
-|---|---|---|
-| `TREVRA_SECRETS_KEY` | Operator generates and holds it | Trevra holds it, per-environment |
-| Blast radius of Trevra being breached | Your box only | Every workspace with a stored key |
-| Honest recommendation | Fine | **Say this plainly on the key-entry screen.** A hosted service holding customer model keys is a real, concentrated liability, and users deserve to weigh it before pasting. |
+|                                       | Self-hosted                     | Trevra Cloud                                                                                                                                                                |
+| ------------------------------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `TREVRA_SECRETS_KEY`                  | Operator generates and holds it | Trevra holds it, per-environment                                                                                                                                            |
+| Blast radius of Trevra being breached | Your box only                   | Every workspace with a stored key                                                                                                                                           |
+| Honest recommendation                 | Fine                            | **Say this plainly on the key-entry screen.** A hosted service holding customer model keys is a real, concentrated liability, and users deserve to weigh it before pasting. |
 
 If that trade is not acceptable, the BYO-agent path stays available and stores
 no key at all. **That is the default, and it should stay the default.**
@@ -229,7 +232,7 @@ no key at all. **That is the default, and it should stay the default.**
 **Cross-reference, not a widening of this document's scope.** `workspace_secrets`
 now also holds `kind: 'cli_oauth_token'` — a workspace's own Claude/Codex
 subscription token, for the opt-in third way to run the hosted agent alongside
-BYOK. That *is* the new decision the line above warns about, made once and
+BYOK. That _is_ the new decision the line above warns about, made once and
 deliberately; it is written up in
 [docs/cli-agent-and-hosted.md](./cli-agent-and-hosted.md) and in the doc
 comment on `resolveWorkspaceCliBackend` in `src/server/agent/cli.ts`, not here
@@ -257,15 +260,15 @@ probes rather than opinions. It is worth recording what it found, because the
 pattern is instructive: **the perimeter around the key held; the thing that
 failed was the cap.**
 
-| Found | Why it mattered |
-|---|---|
-| A provider that omits `usage` was charged **nothing** | The cap never bound. With autopilot at the 15-minute floor that is 96 runs a day, unmetered, while the UI reported `$0.00 of $20.00 used`. §4 predicts these shims by name. |
+| Found                                                             | Why it mattered                                                                                                                                                                   |
+| ----------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A provider that omits `usage` was charged **nothing**             | The cap never bound. With autopilot at the 15-minute floor that is 96 runs a day, unmetered, while the UI reported `$0.00 of $20.00 used`. §4 predicts these shims by name.       |
 | ...and after the first fix, `usage: {prompt_tokens: 0}` still was | The same hole, one JSON field away. A completed call cannot use zero prompt tokens — the system prompt alone is ~150 — so a zero prompt count is now treated as no report at all. |
-| The SDK swallows step-callback errors | One transient database error lost a step's ledger row **and** its charge, silently, while the loop kept spending and still reported `completed`. |
-| Marking a run `stopped` stopped nothing | The loop appended another step and charged 75 cents *after* the operator was told it had stopped. A row is not a process. |
-| One crashed run wedged a workspace's autopilot **permanently** | And an ordinary rolling deploy was enough to cause it. |
-| The self-host escape hatch was dead on the first call | `TREVRA_ALLOW_PRIVATE_MODEL_HOSTS=true` let an operator save an Ollama endpoint that was then refused every time. |
-| The redirect loop re-attached `Authorization` cross-origin | Platform `fetch` strips it deliberately; ours restored it, so hop 2 to an attacker host carried the key. |
+| The SDK swallows step-callback errors                             | One transient database error lost a step's ledger row **and** its charge, silently, while the loop kept spending and still reported `completed`.                                  |
+| Marking a run `stopped` stopped nothing                           | The loop appended another step and charged 75 cents _after_ the operator was told it had stopped. A row is not a process.                                                         |
+| One crashed run wedged a workspace's autopilot **permanently**    | And an ordinary rolling deploy was enough to cause it.                                                                                                                            |
+| The self-host escape hatch was dead on the first call             | `TREVRA_ALLOW_PRIVATE_MODEL_HOSTS=true` let an operator save an Ollama endpoint that was then refused every time.                                                                 |
+| The redirect loop re-attached `Authorization` cross-origin        | Platform `fetch` strips it deliberately; ours restored it, so hop 2 to an attacker host carried the key.                                                                          |
 
 Two lessons worth keeping:
 
@@ -273,6 +276,6 @@ Two lessons worth keeping:
    switch and the self-host flag all had tests, and all three were broken. The
    tests asserted the shape of the code rather than the behaviour of the system.
 2. **Name-based assertions are not invariant checks.** The test that "no tool can
-   approve or execute" matched tool *names* against a regex. A skill called
+   approve or execute" matched tool _names_ against a regex. A skill called
    `gtm.share-update` doing an external write passed it. The real guard did
    refuse — but the test would never have caught its removal.

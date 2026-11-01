@@ -21,11 +21,16 @@ import { DEMO_USER_ID, DEMO_WORKSPACE_ID, id, resetDemoData } from './db.js';
 import { listConnections } from './serializers.js';
 import {
   OUTBOUND_WEBHOOK_EVENTS,
-  OutboundWebhookInputError,
+  OutboundWebhookError,
   createOutboundWebhookSubscription,
   deactivateOutboundWebhookSubscription,
+  getOutboundWebhookStats,
+  listOutboundWebhookAttempts,
   listOutboundWebhookSubscriptions,
-  listOutboundWebhookDeliveries
+  listOutboundWebhookDeliveries,
+  replayOutboundWebhookDeliveries,
+  rotateOutboundWebhookSecret,
+  updateOutboundWebhookSubscription
 } from './outbound-webhooks.js';
 import {
   applyUnsubscribeToken,
@@ -52,8 +57,19 @@ import {
   enrollTrevraPasskey,
   getAuthwardCapabilities,
   handleAuthwardBackchannelLogout,
-  resolveBetterAuthIdentity
+  resolveBetterAuthIdentity,
+  runAsRoleChange
 } from './auth-service.js';
+import {
+  WORKSPACE_ROLES,
+  canManageTeammate,
+  capabilityRefusal,
+  hasCapability,
+  parseWorkspaceRole,
+  requireCapability,
+  type Capability,
+  type WorkspaceRole
+} from './roles.js';
 import {
   createNangoConnectSession,
   disconnectIntegration,
@@ -63,7 +79,15 @@ import {
   triggerConnectionSync
 } from './integration-service.js';
 import { getSiteConfig, recordMarketingEvent, registerPublicSiteRoutes } from './public-site.js';
-import { BillingServiceError, getBillingClient } from './billing-client.js';
+import { mountBillingRoutes } from './billing/routes.js';
+import { EntitlementDeniedError, denialsBlock, loadEntitlements } from './billing/entitlements.js';
+import {
+  assertCampaignActivation,
+  assertNewSeatPrecheck,
+  assertSeatWrite,
+  assertTeamInvite,
+  type SeatVolumePatch
+} from './billing/boundaries.js';
 import {
   listResearchRuns,
   listResearchSources,
@@ -74,12 +98,8 @@ import {
 import {
   AGENT_SCOPES,
   createAgentToken,
-  hasAgentScope,
   listAgentTokens,
-  resolveAgentIdentity,
-  revokeAgentToken,
-  type AgentIdentity,
-  type AgentScope
+  revokeAgentToken
 } from './agent-access.js';
 import {
   executeWorkspaceSkill,
@@ -116,7 +136,9 @@ import {
   citationSourceView,
   connectCitationSource
 } from './watch/citations.js';
-import { handleMcpHttpRequest, rejectMcpNonPost } from './mcp-http.js';
+import { isPublicApiPath, mountPublicApi } from './public-api/mount.js';
+import { PublicApiError, REQUEST_ID_PATTERN, sendPublicApiError } from './public-api/errors.js';
+import type { PublicApiRateLimitPolicy } from './public-api/rate-limit.js';
 import {
   decidePlaybookApproval,
   getPlaybookRun,
@@ -126,7 +148,7 @@ import {
   startPlaybookRun,
   updatePlaybookApprovalBody
 } from './playbooks/engine.js';
-import { listDomainEvents } from './control-plane/events.js';
+import { appendDomainEvent, listDomainEvents } from './control-plane/events.js';
 import { listWorkspacePolicies } from './control-plane/policy.js';
 import {
   createModulePublisher,
@@ -140,10 +162,8 @@ import {
 import { AgentBudgetError, getAgentBudget, setAgentBudget } from './agent/budget.js';
 import {
   AgentPrincipalError,
-  configuredAgentSkillIds,
   createAgent,
   ensureDefaultAgent,
-  getAgent,
   listAgents,
   updateAgent
 } from './agents.js';
@@ -176,6 +196,14 @@ import { listContentFormatTemplates } from './content/format-templates.js';
 import { contentPerformanceReport } from './content/performance.js';
 import { ContentChannelVariantError, contentChannelVariants } from './content/channel-variants.js';
 import { BufferDraftError, listBufferChannels } from './content/buffer.js';
+import { CrmUpsertError } from './crm/contact-providers.js';
+import {
+  CRM_UPSERT_BULK_MAX,
+  prepareCrmContactUpsert,
+  prepareCrmContactUpserts,
+  prepareCrmUpsertBulkSchema,
+  prepareCrmUpsertSchema
+} from './crm/contact-upsert.js';
 import {
   PublicReportError,
   listPublicContentReportPerformance,
@@ -289,7 +317,6 @@ import {
   type RedditLocalWorkerConfig
 } from './reddit/local-worker.js';
 import {
-  ACCEPTANCE_THROTTLE_FACTOR,
   ACCEPTANCE_WINDOW_DAYS,
   ACTION_GAP_SECONDS,
   BUSINESS_HOURS,
@@ -332,6 +359,7 @@ import {
   warmupWeekOf,
   type SeatPatch
 } from './linkedin/seats.js';
+import { linkedInDailyAllowance, type LinkedInAllowanceBound } from './linkedin/guard.js';
 import {
   SIDE_TASK_NAMES,
   availabilityCatchUpPending,
@@ -374,7 +402,9 @@ import {
   resolveSeatProxy,
   type LinkedInLocalWorkerConfig
 } from './linkedin/local-worker.js';
-import { LinkedInApiError } from './linkedin/errors.js';
+import { LinkedInApiError, richContentRefusalDetails } from './linkedin/errors.js';
+import { richAttachmentListSchema } from './linkedin/rich-content-guard.js';
+import { checkRichContent, workflowRichContentViolation } from '../shared/rich-content.js';
 import {
   ingestOutcome,
   linkedinAnalytics,
@@ -414,7 +444,6 @@ import {
 } from './linkedin/sequence.js';
 import { BRANCH_ON_VALUES } from './linkedin/branching.js';
 import {
-  createLeadSource,
   dailyLeadAllowance,
   getLeadSource,
   listLeadSources,
@@ -436,6 +465,28 @@ import {
   threadByUrn
 } from './linkedin/inbox.js';
 import {
+  addNote,
+  bulkOrganizeThreads,
+  confirmReplyClassification,
+  createTag,
+  deleteNote,
+  deleteTag,
+  editNote,
+  INBOX_BULK_ACTIONS,
+  INBOX_TAG_COLORS,
+  listAssignableMembers,
+  listNoteRevisions,
+  listNotes,
+  listTags,
+  listThreadClassifications,
+  tagThread,
+  THREAD_NOTE_BODY_MAX,
+  untagThread,
+  updateTag,
+  updateThreadOrganization
+} from './linkedin/inbox-organization.js';
+import { REPLY_CLASSES } from './linkedin/reply-classification.js';
+import {
   countPendingInvites,
   listWithdrawals,
   selectWithdrawalCandidates,
@@ -455,6 +506,7 @@ import {
 import { DEFAULT_SEQUENCE_TEMPLATE_ID, SEQUENCE_TEMPLATES } from './linkedin/templates.js';
 import { addExclusions, filterExcluded, listExclusions } from './linkedin/exclusions.js';
 import { parseLeadCsv } from './linkedin/lead-import.js';
+import { unsupportedIntakeRefusal } from '../shared/lead-intake.js';
 import {
   LEAD_CONTACT_READ_LIMIT,
   createLeadList,
@@ -463,6 +515,8 @@ import {
   importLeadCsv,
   importLeadProfileUrls,
   importLeadSourceContacts,
+  importPeopleIntoLeadList,
+  previewLeadProfileUrls,
   ingestLeadSignal,
   listLeadLists,
   readLeadContactReviewPage,
@@ -473,6 +527,7 @@ import {
 } from './linkedin/lead-lists.js';
 import {
   deleteWorkflow,
+  endorseSkillCapViolation,
   getWorkflow,
   listWorkflows,
   saveWorkflow,
@@ -502,8 +557,20 @@ import {
   reviewLinkedInAction
 } from './linkedin/action-policy.js';
 import {
+  AI_DRAFT_BATCH_MAX,
+  AI_DRAFT_SETUP_PATH,
+  AiDraftError,
+  approveAiDraft,
+  assertDraftBatch,
+  editAiDraft,
+  listAiDrafts,
+  rejectAiDraft,
+  requestAiDrafts
+} from './linkedin/ai-drafts.js';
+import {
   guardSeatSendModeChange,
   handoffResolutionSchema,
+  presentLinkedInHandoff,
   resolveLinkedInHandoff
 } from './linkedin/handoff.js';
 import { getSenderIdentity, saveSenderIdentity } from './compliance/sender-identity.js';
@@ -555,6 +622,7 @@ import {
   updateManagedCampaignControls,
   type ManagedCampaign
 } from './linkedin/managed-campaigns.js';
+import { registerLinkedInReportRoutes } from './linkedin/rep-reporting-routes.js';
 // three modules and this file are written against; nothing here reaches past
 // the functions below into the store's own SQL.
 import {
@@ -607,7 +675,13 @@ import { listContacts } from './lead-capture/people.js';
 import { listInboundSubmissions } from './lead-capture/submissions.js';
 import { listProductMilestones } from './lead-capture/milestone-recorder.js';
 import { inboundAttributionSummary } from './lead-capture/attribution.js';
-import { persistImportedPeople } from './lead-capture/import.js';
+import { persistImportedPeopleWithIds } from './lead-capture/import.js';
+import {
+  createAutoEnrolRule,
+  disableAutoEnrolRule,
+  getAutoEnrolRule,
+  listAutoEnrolRules
+} from './linkedin/auto-enrol.js';
 import { captureSourceCreateSchema, LeadCaptureError } from './lead-capture/types.js';
 import { createHunterProvider } from './enrichment/hunter.js';
 import { EnrichmentProviderError } from './enrichment/provider.js';
@@ -672,11 +746,15 @@ const linkedinTargetsUpload = multer({
 });
 
 type AuthedRequest = Request & {
-  auth?: { userId: string; workspaceId: string; email: string; role: 'owner' | 'member' };
+  auth?: { userId: string; workspaceId: string; email: string; role: WorkspaceRole };
 };
-type AgentRequest = Request & { agent?: AgentIdentity };
 
-export function createApp(db: Db) {
+export interface CreateAppOptions {
+  /** Test seam for the TRV-053 public API limiter; production uses the defaults. */
+  publicApi?: { rateLimits?: PublicApiRateLimitPolicy; now?: () => Date };
+}
+
+export function createApp(db: Db, options: CreateAppOptions = {}) {
   // Wires `db` to auth-service.ts's better-auth `afterCreateOrganization` hook
   // (see the block comment near the top of that file). Idempotent, so calling
   // it again here is harmless even when index.ts's boot sequence already did --
@@ -727,7 +805,13 @@ export function createApp(db: Db) {
         level: process.env.NODE_ENV === 'test' ? 'silent' : (process.env.LOG_LEVEL ?? 'info')
       }),
       genReqId: (req, res) => {
-        const requestId = String(req.headers['x-request-id'] ?? randomUUID());
+        // Echo a caller's id only when it is a short, header-safe token; any
+        // other value is replaced rather than reflected into logs and headers.
+        const supplied = req.headers['x-request-id'];
+        const requestId =
+          typeof supplied === 'string' && REQUEST_ID_PATTERN.test(supplied)
+            ? supplied
+            : randomUUID();
         res.setHeader('x-request-id', requestId);
         return requestId;
       },
@@ -1220,7 +1304,22 @@ export function createApp(db: Db) {
     windowMs: 60 * 1000,
     limit: 300,
     standardHeaders: true,
-    legacyHeaders: false
+    legacyHeaders: false,
+    // Same 429 as the library default everywhere except the TRV-053 public
+    // routes, which answer in their documented error envelope.
+    handler: (req, res, _next, limiterOptions) => {
+      if (isPublicApiPath(req))
+        return sendPublicApiError(
+          req,
+          res,
+          new PublicApiError(
+            429,
+            'rate_limited',
+            'Too many requests from this address. Retry after the Retry-After interval.'
+          )
+        );
+      res.status(limiterOptions.statusCode).send(limiterOptions.message);
+    }
   });
   const workspaceLimiter = rateLimit({
     windowMs: 60 * 1000,
@@ -1313,168 +1412,21 @@ export function createApp(db: Db) {
     }
   });
 
-  // Agent tokens deliberately expose a smaller surface than browser sessions.
-  // Claude Code, Codex, and other MCP clients can inspect and run skills, but
-  // cannot silently inherit billing, integration, or account-management access.
-  // Claude Code, Codex, and other MCP clients can inspect and run skills, but
-  // cannot silently inherit billing, integration, or account-management access.
-  app.post(
-    '/api/agent/mcp',
-    requireAgentScope(db, 'skills:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        await handleMcpHttpRequest(db, req.agent!, req, res);
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-  app.get('/api/agent/mcp', requireAgentScope(db, 'skills:read'), rejectMcpNonPost);
-  app.delete('/api/agent/mcp', requireAgentScope(db, 'skills:read'), rejectMcpNonPost);
-
-  app.get(
-    '/api/agent/skills',
-    requireAgentScope(db, 'skills:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const skills = await listWorkspaceSkills(db, req.agent!.workspaceId);
-        const agent = await getAgent(db, req.agent!.workspaceId, req.agent!.agentId);
-        const allowed = agent ? configuredAgentSkillIds(agent) : null;
-        res.json({
-          skills: skills.filter(
-            (skill) => skill.enabled && (allowed === null || allowed.includes(skill.id))
-          )
-        });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.post(
-    '/api/agent/skills/:id/run',
-    requireAgentScope(db, 'skills:run'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const skillId = String(req.params.id);
-        const agent = await getAgent(db, req.agent!.workspaceId, req.agent!.agentId);
-        const allowed = agent ? configuredAgentSkillIds(agent) : null;
-        if (allowed !== null && !allowed.includes(skillId)) {
-          return res.status(403).json({ error: `Skill is not assigned to this Agent: ${skillId}` });
-        }
-        const result = await executeWorkspaceSkill(db, {
-          workspaceId: req.agent!.workspaceId,
-          skillId,
-          payload: req.body ?? {},
-          actorType: 'agent',
-          actorId: req.agent!.agentId
-        });
-        res.status(201).json(result);
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/runs',
-    requireAgentScope(db, 'runs:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const filters = skillRunFiltersSchema.parse(req.query);
-        res.json({ runs: await listWorkspaceSkillRuns(db, req.agent!.workspaceId, filters) });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/runs/:id',
-    requireAgentScope(db, 'runs:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const run = await getWorkspaceSkillRun(db, req.agent!.workspaceId, String(req.params.id));
-        if (!run) return res.status(404).json({ error: 'Skill run not found' });
-        res.json({ run });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/playbooks',
-    requireAgentScope(db, 'playbooks:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        res.json({ playbooks: await listWorkspacePlaybooks(db, req.agent!.workspaceId) });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.post(
-    '/api/agent/playbooks/:id/runs',
-    requireAgentScope(db, 'playbooks:run'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const input = playbookStartSchema.parse(req.body ?? {});
-        const run = await startPlaybookRun(db, {
-          workspaceId: req.agent!.workspaceId,
-          playbookId: String(req.params.id),
-          version: input.version,
-          payload: input.input,
-          actorType: 'agent',
-          actorId: req.agent!.agentId
-        });
-        res.status(201).json({ run });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/playbook-runs',
-    requireAgentScope(db, 'workflows:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const filters = playbookRunFiltersSchema.parse(req.query);
-        res.json({ runs: await listPlaybookRuns(db, req.agent!.workspaceId, filters) });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/playbook-runs/:id',
-    requireAgentScope(db, 'workflows:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const run = await getPlaybookRun(db, req.agent!.workspaceId, String(req.params.id));
-        if (!run) return res.status(404).json({ error: 'Playbook run not found' });
-        res.json({ run });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
-
-  app.get(
-    '/api/agent/events',
-    requireAgentScope(db, 'workflows:read'),
-    async (req: AgentRequest, res, next) => {
-      try {
-        const filters = eventFiltersSchema.parse(req.query);
-        res.json({ events: await listDomainEvents(db, req.agent!.workspaceId, filters) });
-      } catch (error) {
-        next(error);
-      }
-    }
-  );
+  // The supported public API (TRV-053): agent-token routes declared once in
+  // src/server/public-api/registry.ts, each behind token auth, the shared
+  // PostgreSQL rate limiter, scope checks, validation and the documented error
+  // envelope, plus GET /api/v1/openapi.json. Agent tokens deliberately expose a
+  // smaller surface than browser sessions: MCP clients and integrations can
+  // inspect and run skills and playbooks, but cannot silently inherit billing,
+  // integration, approval, or account-management access. Any other /api path
+  // falls through to requireSession below and answers a token with 401.
+  mountPublicApi(app, db, {
+    readSession: (req) => readSession(db, req),
+    rateLimits: options.publicApi?.rateLimits,
+    now: options.publicApi?.now,
+    beforeUnauthenticated: (req, res, next) =>
+      carriesSessionCredential(req) ? unattributedLimiter(req, res, next) : next()
+  });
 
   app.use('/api', requireSession(db, unattributedLimiter));
   // Mounted immediately after the session resolves, which is the first moment
@@ -1483,12 +1435,13 @@ export function createApp(db: Db) {
   // else's.
   app.use('/api', workspaceLimiter);
 
-  // Merchant outbound event notifications. Mutations are owner-only; event
-  // type allowlist and destination host allowlist are also server-enforced.
-  // Signing secret is returned ONLY at initial creation, never on GET.
+  // Merchant outbound event notifications. Mutations are owner-only
+  // (`outbound_webhooks.manage`, roles.ts); event type allowlist and
+  // destination egress policy are server-enforced.
+  // A signing secret is returned ONLY by create and rotate, never on GET.
   app.get(
     '/api/outbound-webhooks',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         res.setHeader('Cache-Control', 'no-store');
@@ -1502,7 +1455,7 @@ export function createApp(db: Db) {
   );
   app.post(
     '/api/outbound-webhooks',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1530,7 +1483,7 @@ export function createApp(db: Db) {
   );
   app.get(
     '/api/outbound-webhooks/:id/deliveries',
-    ownerOnly('inspect outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'inspect outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1551,7 +1504,7 @@ export function createApp(db: Db) {
   );
   app.delete(
     '/api/outbound-webhooks/:id',
-    ownerOnly('manage outbound webhooks'),
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
@@ -1569,103 +1522,135 @@ export function createApp(db: Db) {
       }
     }
   );
-
-  app.get('/api/billing', async (req: AuthedRequest, res, next) => {
-    try {
-      const billing = getBillingClient();
-      if (!billing) {
-        res.setHeader('Cache-Control', 'no-store');
-        res.json({ enabled: false });
-        return;
-      }
-      const workspace = await db
-        .prepare('SELECT id,name FROM workspaces WHERE id=?')
-        .get<{ id: string; name: string }>(req.auth!.workspaceId);
-      if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
-      const snapshot = await billing.workspaceSnapshot({
-        workspaceId: workspace.id,
-        name: workspace.name,
-        currency: 'USD'
-      });
-      res.setHeader('Cache-Control', 'no-store');
-      res.json(snapshot);
-    } catch (error) {
-      if (error instanceof BillingServiceError) {
-        res.status(503).json({ error: 'Billing service unavailable' });
-        return;
-      }
-      next(error);
-    }
-  });
-
-  app.get('/api/billing/plans', async (_req: AuthedRequest, res, next) => {
-    try {
-      const billing = getBillingClient();
-      res.setHeader('Cache-Control', 'no-store');
-      if (!billing) return res.json({ enabled: false, plans: [] });
-      res.json({ enabled: true, plans: await billing.plans() });
-    } catch (error) {
-      if (error instanceof BillingServiceError) {
-        res.status(503).json({ error: 'Billing service unavailable' });
-        return;
-      }
-      next(error);
-    }
-  });
-
-  app.post(
-    '/api/billing/checkout',
-    ownerOnly('change the workspace billing plan'),
+  app.patch(
+    '/api/outbound-webhooks/:id',
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
-        const parsed = z
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const input = z
           .object({
-            planCode: z.string().trim().min(3).max(128),
-            idempotencyKey: z.string().regex(/^[A-Za-z0-9._:-]{8,255}$/)
+            url: z.string().trim().url().max(1500).optional(),
+            eventTypes: z
+              .array(z.enum(OUTBOUND_WEBHOOK_EVENTS))
+              .min(1)
+              .max(OUTBOUND_WEBHOOK_EVENTS.length)
+              .optional(),
+            active: z.boolean().optional()
           })
           .strict()
-          .safeParse(req.body);
-        if (!parsed.success) return res.status(400).json({ error: 'A valid planCode is required' });
-
-        const billing = getBillingClient();
-        if (!billing) return res.status(503).json({ error: 'Billing is not configured' });
-
-        const workspace = await db
-          .prepare('SELECT id,name FROM workspaces WHERE id=?')
-          .get<{ id: string; name: string }>(req.auth!.workspaceId);
-        if (!workspace) return res.status(404).json({ error: 'Workspace not found' });
-
-        await billing.ensureWorkspaceCustomer({
-          workspaceId: workspace.id,
-          name: workspace.name,
-          currency: 'USD'
-        });
-        const origin =
-          process.env.BETTER_AUTH_URL?.trim().replace(/\/$/, '') ||
-          `${req.protocol}://${req.get('host')}`;
-        const checkout = await billing.startPlan({
-          workspaceId: workspace.id,
-          planCode: parsed.data.planCode,
-          successUrl: `${origin}/setup/billing?checkout=success`,
-          cancelUrl: `${origin}/setup/billing?checkout=cancelled`,
-          idempotencyKey: parsed.data.idempotencyKey
+          .refine(
+            (value) =>
+              value.url !== undefined ||
+              value.eventTypes !== undefined ||
+              value.active !== undefined,
+            'Nothing to update'
+          )
+          .parse(req.body ?? {});
+        const subscription = await updateOutboundWebhookSubscription(db, {
+          workspaceId: req.auth!.workspaceId,
+          subscriptionId,
+          ...input
         });
         res.setHeader('Cache-Control', 'no-store');
-        res.json(checkout);
+        if (!subscription) return res.status(404).json({ error: 'Subscription not found' });
+        res.json({ subscription });
       } catch (error) {
-        if (error instanceof BillingServiceError) {
-          res.status(error.status && error.status >= 400 && error.status < 500 ? 400 : 503).json({
-            error:
-              error.status && error.status >= 400 && error.status < 500
-                ? error.message
-                : 'Billing service unavailable'
-          });
-          return;
-        }
         next(error);
       }
     }
   );
+  app.post(
+    '/api/outbound-webhooks/:id/rotate-secret',
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const input = z
+          .object({ overlapHours: z.number().int().min(0).max(168).default(24) })
+          .strict()
+          .parse(req.body ?? {});
+        const result = await rotateOutboundWebhookSecret(db, {
+          workspaceId: req.auth!.workspaceId,
+          subscriptionId,
+          overlapSeconds: input.overlapHours * 3600,
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        if (!result) return res.status(404).json({ error: 'Subscription not found' });
+        res.json(result);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.get(
+    '/api/outbound-webhooks/:id/health',
+    requireCapability('outbound_webhooks.manage', 'inspect outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const limit = z.coerce.number().int().min(1).max(100).default(25).parse(req.query.limit);
+        const [stats, attempts] = await Promise.all([
+          getOutboundWebhookStats(db, req.auth!.workspaceId, subscriptionId),
+          listOutboundWebhookAttempts(db, req.auth!.workspaceId, subscriptionId, limit)
+        ]);
+        res.setHeader('Cache-Control', 'no-store');
+        if (!stats || !attempts) return res.status(404).json({ error: 'Subscription not found' });
+        res.json({ stats, attempts });
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.post(
+    '/api/outbound-webhooks/:id/replay',
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        // Range is checked by the service so a limit past the cap gets its
+        // explicit message rather than a generic schema error.
+        const input = z
+          .object({ limit: z.number().int().optional() })
+          .strict()
+          .parse(req.body ?? {});
+        const result = await replayOutboundWebhookDeliveries(db, {
+          workspaceId: req.auth!.workspaceId,
+          subscriptionId,
+          limit: input.limit,
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(result);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+  app.post(
+    '/api/outbound-webhooks/:id/deliveries/:deliveryId/replay',
+    requireCapability('outbound_webhooks.manage', 'manage outbound webhooks'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const subscriptionId = z.string().min(1).max(100).parse(req.params.id);
+        const deliveryId = z.string().min(1).max(100).parse(req.params.deliveryId);
+        const result = await replayOutboundWebhookDeliveries(db, {
+          workspaceId: req.auth!.workspaceId,
+          subscriptionId,
+          deliveryId,
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(result);
+      } catch (error) {
+        next(error);
+      }
+    }
+  );
+
+  // Billing stays owner-only: `billing.manage` (src/server/roles.ts).
+  mountBillingRoutes(app, db, (act) => requireCapability('billing.manage', act));
 
   app.get('/api/skills', async (req: AuthedRequest, res, next) => {
     try {
@@ -1692,7 +1677,7 @@ export function createApp(db: Db) {
 
   app.put(
     '/api/setup/meetings/booking-link',
-    ownerOnly('change the booking link'),
+    requireCapability('integrations.manage', 'change the booking link'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1729,7 +1714,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/capture-sources',
-    ownerOnly('create a lead capture source'),
+    requireCapability('integrations.manage', 'create a lead capture source'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = captureSourceCreateSchema.parse(req.body ?? {});
@@ -1764,7 +1749,7 @@ export function createApp(db: Db) {
 
   app.patch(
     '/api/capture-sources/:id/status',
-    ownerOnly('change a lead capture source'),
+    requireCapability('integrations.manage', 'change a lead capture source'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1787,7 +1772,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/capture-sources/:id/rotate',
-    ownerOnly('rotate a lead capture source secret'),
+    requireCapability('integrations.manage', 'rotate a lead capture source secret'),
     async (req: AuthedRequest, res, next) => {
       try {
         const rotated = await rotateCaptureSourceSecret(db, {
@@ -1828,7 +1813,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/github/repos',
-    ownerOnly('watch a GitHub repository'),
+    requireCapability('integrations.manage', 'watch a GitHub repository'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1849,7 +1834,7 @@ export function createApp(db: Db) {
 
   app.delete(
     '/api/github/repos/:id',
-    ownerOnly('stop watching a GitHub repository'),
+    requireCapability('integrations.manage', 'stop watching a GitHub repository'),
     async (req: AuthedRequest, res, next) => {
       try {
         const removed = await unwatchRepository(db, req.auth!.workspaceId, String(req.params.id));
@@ -1874,7 +1859,7 @@ export function createApp(db: Db) {
 
   app.get(
     '/api/setup/webhooks',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const endpoints = await listProviderWebhookEndpoints(db, req.auth!.workspaceId);
@@ -1892,7 +1877,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/setup/webhooks/draft',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1915,7 +1900,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/setup/webhooks',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -1978,7 +1963,7 @@ export function createApp(db: Db) {
 
   app.patch(
     '/api/setup/webhooks/:id/status',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const endpointId = webhookEndpointIdSchema.parse(String(req.params.id));
@@ -2002,7 +1987,7 @@ export function createApp(db: Db) {
 
   app.delete(
     '/api/setup/webhooks/:id',
-    ownerOnly('manage provider webhooks'),
+    requireCapability('integrations.manage', 'manage provider webhooks'),
     async (req: AuthedRequest, res, next) => {
       try {
         const endpointId = webhookEndpointIdSchema.parse(String(req.params.id));
@@ -2126,7 +2111,7 @@ export function createApp(db: Db) {
         // workspace, so that remains owner-only. Using or disconnecting the
         // already-paired machine is ordinary workspace operation and every
         // member may do it.
-        canManage: req.auth!.role === 'owner',
+        canManage: hasCapability(req.auth!.role, 'credentials.manage'),
         canUse: true,
         canDisconnect: true
       });
@@ -2137,7 +2122,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/linkedin/companion/pair',
-    ownerOnly('pair a computer for LinkedIn'),
+    requireCapability('credentials.manage', 'pair a computer for LinkedIn'),
     async (req: AuthedRequest, res, next) => {
       try {
         const pairing = await createCompanionPairing(db, {
@@ -2188,37 +2173,111 @@ export function createApp(db: Db) {
    * a Trevra account anywhere else -- so this route has no need to look that
    * up itself, and the adder never learns it either way.
    *
-   * Owner-only, same carve-out shape as the LinkedIn credential routes: full
-   * workspace parity for members, except who gets to change who is IN the
-   * workspace.
+   * Who may invite whom is the capability map's (roles.ts): an owner or a
+   * manager may invite a `member` (`team.invite`); only the owner may invite
+   * a manager or another owner (`team.roles`). Better Auth's own
+   * `beforeCreateInvitation` hook (auth-service.ts) applies the same rule, so
+   * the plugin route cannot be used to get around this one.
    */
   const teamAddMemberSchema = z.object({
     email: z.string().trim().email().max(320),
-    role: z.enum(['owner', 'member']).default('member')
+    role: z.enum(WORKSPACE_ROLES).default('member')
   });
-  app.post('/api/team/members', async (req: AuthedRequest, res, next) => {
-    try {
-      if (req.auth!.role !== 'owner')
-        return res.status(403).json({ error: 'Only the workspace owner can add teammates' });
-      const input = teamAddMemberSchema.parse(req.body ?? {});
-      const workspaceId = req.auth!.workspaceId;
-      // `createInvitation` requires this request's own session (the inviter),
-      // so it is the one call in this route that needs headers rather than
-      // the userId system-action shortcut the rest of this route's callers
-      // (e.g. the backfill) use elsewhere in this codebase.
-      const invitation = await betterAuth.api.createInvitation({
-        headers: fromNodeHeaders(req.headers),
-        body: { email: input.email, organizationId: workspaceId, role: input.role }
-      });
-      res.status(201).json({ status: 'invited', invitation });
-    } catch (error) {
-      if (error instanceof APIError)
-        return res
-          .status(error.statusCode ?? 400)
-          .json({ error: error.body?.message ?? error.message });
-      next(error);
+  app.post(
+    '/api/team/members',
+    requireCapability('team.invite', 'add teammates'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = teamAddMemberSchema.parse(req.body ?? {});
+        if (!canManageTeammate(req.auth!.role, input.role, 'invite'))
+          return res
+            .status(403)
+            .json({ error: capabilityRefusal('team.roles', 'invite a manager or owner') });
+        const workspaceId = req.auth!.workspaceId;
+        // `createInvitation` requires this request's own session (the inviter),
+        // so it is the one call in this route that needs headers rather than
+        // the userId system-action shortcut the rest of this route's callers
+        // (e.g. the backfill) use elsewhere in this codebase.
+        const invite = () =>
+          betterAuth.api.createInvitation({
+            headers: fromNodeHeaders(req.headers),
+            body: { email: input.email, organizationId: workspaceId, role: input.role }
+          });
+        // TRV-057: members + pending invitations must fit the plan's team limit.
+        // Under TREVRA_BILLING_ENFORCEMENT=enforce the entitlement lock is held
+        // until the invitation is committed, so two concurrent invites at the
+        // limit cannot both pass the count. In observe mode nothing blocks, so
+        // there is nothing to serialize: Better Auth's beforeCreateInvitation
+        // hook records the would-deny on its own connection (recording it here,
+        // inside a transaction that waits on that hook, would deadlock on the
+        // dedupe claim).
+        const entitlements = await loadEntitlements(db, workspaceId);
+        const invitation = denialsBlock(entitlements)
+          ? await db.transaction(async (tx) => {
+              await assertTeamInvite(tx, entitlements, workspaceId, { lock: true });
+              return invite();
+            })
+          : await invite();
+        res.status(201).json({ status: 'invited', invitation });
+      } catch (error) {
+        if (error instanceof APIError)
+          return res
+            .status(error.statusCode ?? 400)
+            .json({ error: error.body?.message ?? error.message });
+        next(error);
+      }
     }
-  });
+  );
+
+  /**
+   * Change a teammate's role (TRV-045): promote a member to manager, demote a
+   * manager to member, or move ownership. Owner-only (`team.roles`).
+   *
+   * THE ONLY WAY IN. Better Auth's own `/organization/update-member-role` is
+   * refused unless this route opened the role-change scope
+   * (`runAsRoleChange`, auth-service.ts) -- that scope is what lets
+   * `afterUpdateMemberRole` append a `workspace.member_role_changed` domain
+   * event naming who changed whom from what to what. Better Auth still applies
+   * its own checks underneath: `member:update` (owner only) and the last-owner
+   * guard (`assertOwnerChangeAllowed`).
+   */
+  const teamRoleChangeSchema = z.object({ role: z.enum(WORKSPACE_ROLES) }).strict();
+  app.patch(
+    '/api/team/members/:memberId',
+    requireCapability('team.roles', "change a teammate's role"),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const { role } = teamRoleChangeSchema.parse(req.body ?? {});
+        const workspaceId = req.auth!.workspaceId;
+        const memberId = String(req.params.memberId);
+        const target = await db
+          .prepare('SELECT id,"userId",role FROM member WHERE id=? AND "organizationId"=?')
+          .get<{ id: string; userId: string; role: string }>(memberId, workspaceId);
+        if (!target) return res.status(404).json({ error: 'Teammate not found in this workspace' });
+        if (target.role === role)
+          return res.json({
+            member: { id: target.id, userId: target.userId, role: target.role },
+            changed: false
+          });
+        const updated = await runAsRoleChange({ actorUserId: req.auth!.userId }, () =>
+          betterAuth.api.updateMemberRole({
+            headers: fromNodeHeaders(req.headers),
+            body: { memberId, role, organizationId: workspaceId }
+          })
+        );
+        res.json({
+          member: { id: updated.id, userId: updated.userId, role: updated.role },
+          changed: true
+        });
+      } catch (error) {
+        if (error instanceof APIError)
+          return res
+            .status(error.statusCode ?? 400)
+            .json({ error: error.body?.message ?? error.message });
+        next(error);
+      }
+    }
+  );
 
   app.get('/api/skills', async (req: AuthedRequest, res, next) => {
     try {
@@ -2379,6 +2438,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/playbook-runs/:id/steps/:stepId/decision',
+    requireCapability('playbooks.decide', 'decide a playbook approval'),
     async (req: AuthedRequest, res, next) => {
       try {
         const decision = playbookDecisionSchema.parse(req.body ?? {});
@@ -2422,7 +2482,7 @@ export function createApp(db: Db) {
   // not a privilege, and a teammate who cannot see the policy cannot obey it.
   app.post(
     '/api/policies',
-    ownerOnly("change this workspace's policies"),
+    requireCapability('policy.manage', "change this workspace's policies"),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = policyWriteSchema.parse(req.body ?? {});
@@ -2461,7 +2521,7 @@ export function createApp(db: Db) {
   // it. `updated_at` moves; `version` does not, because nothing reads it.
   app.patch(
     '/api/policies/:id',
-    ownerOnly("change this workspace's policies"),
+    requireCapability('policy.manage', "change this workspace's policies"),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = policyPatchSchema.parse(req.body ?? {});
@@ -2493,7 +2553,7 @@ export function createApp(db: Db) {
   // deleting a `deny` policy is how you turn a refusal off.
   app.delete(
     '/api/policies/:id',
-    ownerOnly("change this workspace's policies"),
+    requireCapability('policy.manage', "change this workspace's policies"),
     async (req: AuthedRequest, res, next) => {
       try {
         const result = await db
@@ -2521,7 +2581,7 @@ export function createApp(db: Db) {
   // strangers -- there is no way to un-say that afterwards.
   app.post(
     '/api/registry/publishers',
-    ownerOnly('create a module publisher for this workspace'),
+    requireCapability('registry.manage', 'create a module publisher for this workspace'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = publisherCreateSchema.parse(req.body ?? {});
@@ -2544,7 +2604,7 @@ export function createApp(db: Db) {
   // workspace's name in front of everybody else's install route.
   app.post(
     '/api/registry/modules/:id/releases',
-    ownerOnly('publish a module release'),
+    requireCapability('registry.manage', 'publish a module release'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = moduleReleaseSchema.parse(req.body ?? {});
@@ -2585,7 +2645,7 @@ export function createApp(db: Db) {
   // per-teammate decision.
   app.post(
     '/api/registry/modules/:id/install',
-    ownerOnly('install a community module'),
+    requireCapability('registry.manage', 'install a community module'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = moduleInstallSchema.parse(req.body ?? {});
@@ -2608,7 +2668,7 @@ export function createApp(db: Db) {
   // generic commercial projection control surface no longer exists.
   app.delete(
     '/api/registry/modules/:id/install',
-    ownerOnly('uninstall a community module'),
+    requireCapability('registry.manage', 'uninstall a community module'),
     async (req: AuthedRequest, res, next) => {
       try {
         const removed = await uninstallModuleRelease(
@@ -2634,36 +2694,40 @@ export function createApp(db: Db) {
     }
   });
 
-  app.post('/api/agents', ownerOnly('create an Agent'), async (req: AuthedRequest, res, next) => {
-    try {
-      const input = z
-        .object({
-          name: z.string().trim().min(1).max(100),
-          purpose: z.string().trim().min(1).max(500),
-          instructions: z.string().trim().max(4000).optional(),
-          skillIds: z.array(z.string().trim().min(1).max(200)).max(100).optional()
-        })
-        .strict()
-        .parse(req.body ?? {});
-      await assertAssignableAgentSkills(db, req.auth!.workspaceId, input.skillIds);
-      res.status(201).json({
-        agent: await createAgent(db, {
-          workspaceId: req.auth!.workspaceId,
-          createdByUserId: req.auth!.userId,
-          ...input
-        })
-      });
-    } catch (error) {
-      if (error instanceof AgentPrincipalError) {
-        return res.status(error.status).json({ error: error.message });
+  app.post(
+    '/api/agents',
+    requireCapability('agents.manage', 'create an Agent'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            name: z.string().trim().min(1).max(100),
+            purpose: z.string().trim().min(1).max(500),
+            instructions: z.string().trim().max(4000).optional(),
+            skillIds: z.array(z.string().trim().min(1).max(200)).max(100).optional()
+          })
+          .strict()
+          .parse(req.body ?? {});
+        await assertAssignableAgentSkills(db, req.auth!.workspaceId, input.skillIds);
+        res.status(201).json({
+          agent: await createAgent(db, {
+            workspaceId: req.auth!.workspaceId,
+            createdByUserId: req.auth!.userId,
+            ...input
+          })
+        });
+      } catch (error) {
+        if (error instanceof AgentPrincipalError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        next(error);
       }
-      next(error);
     }
-  });
+  );
 
   app.patch(
     '/api/agents/:id',
-    ownerOnly('change an Agent'),
+    requireCapability('agents.manage', 'change an Agent'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -2712,33 +2776,37 @@ export function createApp(db: Db) {
     }
   });
 
-  app.post('/api/agent-tokens', async (req: AuthedRequest, res, next) => {
-    try {
-      const input = z
-        .object({
-          agentId: z.string().trim().min(1).max(200).optional(),
-          name: z.string().trim().min(1).max(100),
-          scopes: z.array(z.enum(AGENT_SCOPES)).min(1).max(AGENT_SCOPES.length).optional(),
-          expiresAt: z.string().datetime().nullable().optional()
-        })
-        .parse(req.body ?? {});
-      const created = await createAgentToken(db, {
-        workspaceId: req.auth!.workspaceId,
-        userId: req.auth!.userId,
-        agentId: input.agentId,
-        name: input.name,
-        scopes: input.scopes,
-        expiresAt: input.expiresAt
-      });
-      res.setHeader('Cache-Control', 'no-store');
-      res.status(201).json(created);
-    } catch (error) {
-      if (error instanceof AgentPrincipalError) {
-        return res.status(error.status).json({ error: error.message });
+  app.post(
+    '/api/agent-tokens',
+    requireCapability('agent_tokens.create', 'create an agent token'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = z
+          .object({
+            agentId: z.string().trim().min(1).max(200).optional(),
+            name: z.string().trim().min(1).max(100),
+            scopes: z.array(z.enum(AGENT_SCOPES)).min(1).max(AGENT_SCOPES.length).optional(),
+            expiresAt: z.string().datetime().nullable().optional()
+          })
+          .parse(req.body ?? {});
+        const created = await createAgentToken(db, {
+          workspaceId: req.auth!.workspaceId,
+          userId: req.auth!.userId,
+          agentId: input.agentId,
+          name: input.name,
+          scopes: input.scopes,
+          expiresAt: input.expiresAt
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(201).json(created);
+      } catch (error) {
+        if (error instanceof AgentPrincipalError) {
+          return res.status(error.status).json({ error: error.message });
+        }
+        next(error);
       }
-      next(error);
     }
-  });
+  );
 
   // Owner-only. Revoking is the act that stops somebody's Claude Code or Codex
   // working mid-session, and it is not reversible -- a revoked token cannot be
@@ -2747,7 +2815,7 @@ export function createApp(db: Db) {
   // ordinary use, and every token it mints is scoped to this workspace anyway.
   app.delete(
     '/api/agent-tokens/:id',
-    ownerOnly('revoke an agent token'),
+    requireCapability('api_tokens.manage', 'revoke an agent token'),
     async (req: AuthedRequest, res, next) => {
       try {
         const revoked = await revokeAgentToken(
@@ -2826,7 +2894,7 @@ export function createApp(db: Db) {
   // prompts are sent.
   app.put(
     '/api/agent-setup/config',
-    ownerOnly("change this workspace's model endpoint"),
+    requireCapability('agent.configure', "change this workspace's model endpoint"),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentConfigSchema.parse(req.body ?? {});
@@ -2859,7 +2927,7 @@ export function createApp(db: Db) {
   app.put(
     '/api/agent-setup/key',
     authLimiter,
-    ownerOnly("store this workspace's model API key"),
+    requireCapability('credentials.manage', "store this workspace's model API key"),
     async (req: AuthedRequest, res, next) => {
       try {
         if (!secretsConfigured()) {
@@ -2887,7 +2955,7 @@ export function createApp(db: Db) {
 
   app.delete(
     '/api/agent-setup/key',
-    ownerOnly("remove this workspace's model API key"),
+    requireCapability('credentials.manage', "remove this workspace's model API key"),
     async (req: AuthedRequest, res, next) => {
       try {
         const deleted = await deleteWorkspaceSecret(
@@ -2925,7 +2993,7 @@ export function createApp(db: Db) {
   app.put(
     '/api/enrichment/key',
     authLimiter,
-    ownerOnly("store this workspace's Hunter API key"),
+    requireCapability('credentials.manage', "store this workspace's Hunter API key"),
     async (req: AuthedRequest, res, next) => {
       try {
         if (!secretsConfigured()) {
@@ -2990,7 +3058,7 @@ export function createApp(db: Db) {
 
   app.delete(
     '/api/enrichment/key',
-    ownerOnly("remove this workspace's Hunter API key"),
+    requireCapability('credentials.manage', "remove this workspace's Hunter API key"),
     async (req: AuthedRequest, res, next) => {
       try {
         await deleteWorkspaceSecret(db, req.auth!.workspaceId, 'hunter_api_key', req.auth!.userId);
@@ -3005,7 +3073,7 @@ export function createApp(db: Db) {
 
   app.put(
     '/api/enrichment/cap',
-    ownerOnly('change the enrichment credit cap'),
+    requireCapability('enrichment.spend', 'change the enrichment credit cap'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -3041,7 +3109,7 @@ export function createApp(db: Db) {
   // config or a token.
   app.put(
     '/api/agent-setup/cli-config',
-    ownerOnly('choose which CLI agent this workspace runs'),
+    requireCapability('agent.configure', 'choose which CLI agent this workspace runs'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentCliConfigSchema.parse(req.body ?? {});
@@ -3070,7 +3138,7 @@ export function createApp(db: Db) {
   app.put(
     '/api/agent-setup/cli-token',
     authLimiter,
-    ownerOnly("store this workspace's CLI subscription token"),
+    requireCapability('credentials.manage', "store this workspace's CLI subscription token"),
     async (req: AuthedRequest, res, next) => {
       try {
         if (!secretsConfigured()) {
@@ -3097,7 +3165,7 @@ export function createApp(db: Db) {
 
   app.delete(
     '/api/agent-setup/cli-token',
-    ownerOnly("remove this workspace's CLI subscription token"),
+    requireCapability('credentials.manage', "remove this workspace's CLI subscription token"),
     async (req: AuthedRequest, res, next) => {
       try {
         const deleted = await deleteWorkspaceSecret(
@@ -3124,7 +3192,7 @@ export function createApp(db: Db) {
   // gated, and a member who wants it off can pause the schedule or the budget.
   app.put(
     '/api/agent-setup/cli-risk-accept',
-    ownerOnly('accept the CLI agent risk disclaimer'),
+    requireCapability('agent.configure', 'accept the CLI agent risk disclaimer'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentCliRiskAcceptSchema.parse(req.body ?? {});
@@ -3147,7 +3215,7 @@ export function createApp(db: Db) {
   // see why a run stopped.
   app.put(
     '/api/agent-setup/budget',
-    ownerOnly('change the agent budget'),
+    requireCapability('agent.configure', 'change the agent budget'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentBudgetSchema.parse(req.body ?? {});
@@ -3168,7 +3236,7 @@ export function createApp(db: Db) {
   // nobody in the room, and both of them are the owner's.
   app.put(
     '/api/agent-setup/schedule',
-    ownerOnly('change the unattended agent schedule'),
+    requireCapability('agent.configure', 'change the unattended agent schedule'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = agentScheduleSchema.parse(req.body ?? {});
@@ -3349,7 +3417,7 @@ export function createApp(db: Db) {
   // and a file that has left cannot be un-downloaded when a membership ends.
   app.get(
     '/api/ledger/exports/:id',
-    ownerOnly('download a ledger export'),
+    requireCapability('exports.download', 'download a ledger export'),
     async (req: AuthedRequest, res, next) => {
       try {
         const stored = await readLedgerExport(db, req.auth!.workspaceId, String(req.params.id));
@@ -3412,7 +3480,7 @@ export function createApp(db: Db) {
    */
   app.get(
     '/api/workspace/export',
-    ownerOnly('export this workspace'),
+    requireCapability('workspace.export', 'export this workspace'),
     async (req: AuthedRequest, res, next) => {
       try {
         const workspaceId = req.auth!.workspaceId;
@@ -3444,7 +3512,7 @@ export function createApp(db: Db) {
    */
   app.get(
     '/api/workspace/erasure',
-    ownerOnly('erase this workspace'),
+    requireCapability('workspace.erase', 'erase this workspace'),
     async (req: AuthedRequest, res, next) => {
       try {
         const workspaceId = req.auth!.workspaceId;
@@ -3522,7 +3590,7 @@ export function createApp(db: Db) {
    */
   app.delete(
     '/api/workspace',
-    ownerOnly('erase this workspace'),
+    requireCapability('workspace.erase', 'erase this workspace'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = workspaceErasureSchema.parse(req.body ?? {});
@@ -3688,7 +3756,7 @@ export function createApp(db: Db) {
   // owner who inspected the original public thread can settle their outcome.
   app.get(
     '/api/outreach/posts/unresolved',
-    ownerOnly('review unresolved community replies'),
+    requireCapability('community.resolve', 'review unresolved community replies'),
     async (req: AuthedRequest, res, next) => {
       try {
         res.setHeader('Cache-Control', 'no-store');
@@ -3703,7 +3771,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/outreach/posts/:id/resolve',
-    ownerOnly('resolve an uncertain community reply'),
+    requireCapability('community.resolve', 'resolve an uncertain community reply'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -4238,6 +4306,22 @@ export function createApp(db: Db) {
       if (post.status === 'canceled')
         return res.status(409).json({ error: 'A canceled post cannot be sent to Buffer.' });
       const text = renderPostBody(post.blocks).trim();
+      // TRV-040: Buffer drafts are text-only. A post with images is refused
+      // with the matrix's code instead of losing its images on the way.
+      const mediaRefusal = checkRichContent(
+        'buffer_draft',
+        post.media.map((image) => ({
+          name: image.name,
+          mimeType: image.mimeType,
+          sizeBytes: image.size
+        }))
+      );
+      if (mediaRefusal)
+        return res.status(422).json({
+          error: mediaRefusal.reason,
+          code: mediaRefusal.code,
+          ...richContentRefusalDetails(mediaRefusal)
+        });
       if (!text)
         return res
           .status(409)
@@ -4270,6 +4354,57 @@ export function createApp(db: Db) {
       next(error);
     }
   });
+
+  // TRV-051: prepare a `crm.upsert-contact` behind founder approval. Nothing is
+  // written to the CRM here; the approval run at `/ledger/run/:id` executes it.
+  app.post(
+    '/api/crm/contact-upserts',
+    requireCapability('crm.prepare', 'prepare a CRM contact sync'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const input = prepareCrmUpsertSchema.parse(req.body ?? {});
+        const result = await prepareCrmContactUpsert(db, req.auth!.workspaceId, {
+          ...input,
+          actorType: 'user',
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.status(result.created ? 201 : 200).json({ upsert: result.upsert, run: result.run });
+      } catch (error) {
+        if (error instanceof CrmUpsertError)
+          return res.status(error.status).json({ error: error.message, code: error.code });
+        next(error);
+      }
+    }
+  );
+
+  app.post(
+    '/api/crm/contact-upserts/bulk',
+    requireCapability('crm.prepare', 'prepare a CRM contact sync'),
+    async (req: AuthedRequest, res, next) => {
+      try {
+        const ids = (req.body ?? {}).leadContactIds;
+        if (Array.isArray(ids) && ids.length > CRM_UPSERT_BULK_MAX)
+          return res.status(400).json({
+            error: `A bulk CRM sync prepares at most ${CRM_UPSERT_BULK_MAX} leads at a time; ${ids.length} were sent.`,
+            code: 'bulk_limit',
+            max: CRM_UPSERT_BULK_MAX
+          });
+        const input = prepareCrmUpsertBulkSchema.parse(req.body ?? {});
+        const result = await prepareCrmContactUpserts(db, req.auth!.workspaceId, {
+          ...input,
+          actorType: 'user',
+          actorId: req.auth!.userId
+        });
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(result);
+      } catch (error) {
+        if (error instanceof CrmUpsertError)
+          return res.status(error.status).json({ error: error.message, code: error.code });
+        next(error);
+      }
+    }
+  );
 
   app.post('/api/content/opportunities/:id/carousel', async (req: AuthedRequest, res, next) => {
     try {
@@ -4652,7 +4787,7 @@ export function createApp(db: Db) {
 
   app.put(
     '/api/email/inbound-mailbox',
-    ownerOnly('choose the inbound mailbox'),
+    requireCapability('integrations.manage', 'choose the inbound mailbox'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -4677,7 +4812,7 @@ export function createApp(db: Db) {
 
   app.delete(
     '/api/email/inbound-mailbox',
-    ownerOnly('stop reading the inbound mailbox'),
+    requireCapability('integrations.manage', 'stop reading the inbound mailbox'),
     async (req: AuthedRequest, res, next) => {
       try {
         await clearInboundMailbox(db, req.auth!.workspaceId);
@@ -4701,7 +4836,7 @@ export function createApp(db: Db) {
 
   app.put(
     '/api/email/dkim-selector',
-    ownerOnly('set the DKIM selector'),
+    requireCapability('integrations.manage', 'set the DKIM selector'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = z
@@ -4959,7 +5094,7 @@ export function createApp(db: Db) {
   // Owner-only: connecting creates a signing secret, like any capture source.
   app.put(
     '/api/watches/:id/citation-source',
-    ownerOnly('connect AI-answer citation samples'),
+    requireCapability('integrations.manage', 'connect AI-answer citation samples'),
     async (req: AuthedRequest, res, next) => {
       try {
         const watch = await getWatch(db, req.auth!.workspaceId, String(req.params.id));
@@ -5338,16 +5473,49 @@ export function createApp(db: Db) {
   // handoff is still open (see guardSeatSendModeChange). The seat row lock, the
   // check and the seat write share ONE transaction, so a handoff cannot be
   // presented between the check and the write.
-  async function writeSeatGuardingSwitch<T>(
+  //
+  // TRV-057: when `expansion` is passed, the plan's LinkedIn-account cap (new
+  // seat) or credit position (raised daily ceiling) is checked in the same
+  // transaction, under the entitlement lock, before the write.
+  //
+  // TRV-044: a write that changes the seat's owner (assign, reassign, unassign,
+  // or a new seat's first owner) appends `linkedin_seat.owner_changed` in the
+  // same transaction, naming the actor and both owners. The advisory lock makes
+  // the previous owner exact even when two writers create the same seat.
+  async function writeSeatGuardingSwitch<T extends { ownerUserId: string | null }>(
     workspaceId: string,
     seatKey: string,
     sendMode: string | undefined,
     now: Date,
-    write: (tx: Db) => Promise<T>
+    write: (tx: Db) => Promise<T>,
+    expansion: { patch: SeatVolumePatch } | undefined,
+    actorUserId: string
   ): Promise<T> {
+    const entitlements = expansion ? await loadEntitlements(db, workspaceId) : null;
     return db.transaction(async (tx) => {
+      await tx
+        .prepare('SELECT pg_advisory_xact_lock(hashtext(?),hashtext(?))')
+        .get(`trevra:linkedin-seat-owner:${workspaceId}`, seatKey);
       await guardSeatSendModeChange(tx, workspaceId, seatKey, sendMode, now);
-      return write(tx);
+      if (entitlements && expansion)
+        await assertSeatWrite(tx, entitlements, workspaceId, seatKey, expansion.patch);
+      const before = await tx
+        .prepare('SELECT owner_user_id FROM linkedin_seats WHERE workspace_id=? AND seat_key=?')
+        .get<{ owner_user_id: string | null }>(workspaceId, seatKey);
+      const previousOwnerUserId = before?.owner_user_id ?? null;
+      const seat = await write(tx);
+      if (seat.ownerUserId !== previousOwnerUserId)
+        await appendDomainEvent(tx, {
+          workspaceId,
+          streamType: 'linkedin_seat',
+          streamId: seatKey,
+          eventType: 'linkedin_seat.owner_changed',
+          actorType: 'user',
+          actorId: actorUserId,
+          occurredAt: now,
+          payload: { seatKey, previousOwnerUserId, ownerUserId: seat.ownerUserId }
+        });
+      return seat;
     });
   }
 
@@ -5361,8 +5529,14 @@ export function createApp(db: Db) {
   app.put(
     '/api/linkedin/seat',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, "change a LinkedIn account's limits");
+      assertCapability(req, 'account_safety.manage', "change a LinkedIn account's limits");
       const { seatKey = OWNER_SEAT_KEY, ...input } = linkedinSeatSchema.parse(req.body ?? {});
+      // An owner named here must be a current member of this workspace, the
+      // same rule the manager routes apply; null still unassigns.
+      const ownerUserId =
+        input.ownerUserId === undefined
+          ? undefined
+          : await resolveWorkspaceMemberUserId(db, req, input.ownerUserId);
       assertSeatProxyUsable(req.auth!.workspaceId, seatKey, input.proxyUrl);
       const now = new Date();
       let seat;
@@ -5372,7 +5546,16 @@ export function createApp(db: Db) {
           seatKey,
           input.sendMode,
           now,
-          (tx) => upsertSeat(tx, req.auth!.workspaceId, input as SeatPatch, now, seatKey)
+          (tx) =>
+            upsertSeat(
+              tx,
+              req.auth!.workspaceId,
+              { ...input, ...(ownerUserId !== undefined ? { ownerUserId } : {}) } as SeatPatch,
+              now,
+              seatKey
+            ),
+          { patch: input },
+          req.auth!.userId
         );
       } catch (error) {
         // seats.ts owns the label/timezone/date rules and its refusals are
@@ -5446,7 +5629,7 @@ export function createApp(db: Db) {
       // account was paused because somebody thought something was wrong, and
       // deciding it is fine now is the decision the audit row below records
       // against a name.
-      assertWorkspaceOwner(req, 'resume a paused LinkedIn account');
+      assertCapability(req, 'account_safety.manage', 'resume a paused LinkedIn account');
       const { seatKey, reason } = linkedinResumeSchema.parse({ ...(req.body ?? {}), ...req.query });
       const workspaceId = req.auth!.workspaceId;
       const now = new Date();
@@ -5526,7 +5709,7 @@ export function createApp(db: Db) {
   app.delete(
     '/api/linkedin/seat',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'disconnect a LinkedIn account');
+      assertCapability(req, 'account_safety.manage', 'disconnect a LinkedIn account');
       const { seatKey } = linkedinSeatSelectorSchema.parse(req.query);
       const workspaceId = req.auth!.workspaceId;
       // The queue first: planned and held rows to 'skipped', pending manual tasks
@@ -5592,12 +5775,20 @@ export function createApp(db: Db) {
       // Credential-management carve-out (design doc "Decisions made during
       // brainstorming" #2): full workspace parity for any member, EXCEPT this.
       // Only the workspace owner may replace the stored LinkedIn sign-in.
-      if (req.auth!.role !== 'owner') {
+      if (!hasCapability(req.auth!.role, 'credentials.manage')) {
         throw new LinkedInApiError(
           'Only the workspace owner can manage the stored LinkedIn credentials',
           403
         );
       }
+      // TRV-057: credentials for a new seat key are the first step of
+      // connecting another LinkedIn account; refuse before any sign-in.
+      await assertNewSeatPrecheck(
+        db,
+        await loadEntitlements(db, workspaceId),
+        workspaceId,
+        seatKey
+      );
 
       // THE HOSTED GATE, READ FROM THE ONE DEFINITION OF IT -- and it is no
       // longer unconditional, which is the whole of what hosted execution
@@ -5654,7 +5845,7 @@ export function createApp(db: Db) {
     linkedinRoute(async (req, res) => {
       const workspaceId = req.auth!.workspaceId;
       // Same owner-only carve-out as the save route above.
-      if (req.auth!.role !== 'owner') {
+      if (!hasCapability(req.auth!.role, 'credentials.manage')) {
         throw new LinkedInApiError(
           'Only the workspace owner can manage the stored LinkedIn credentials',
           403
@@ -5717,7 +5908,11 @@ export function createApp(db: Db) {
   app.post(
     '/api/linkedin/hosted-execution',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'authorise Trevra to act on this LinkedIn account');
+      assertCapability(
+        req,
+        'credentials.manage',
+        'authorise Trevra to act on this LinkedIn account'
+      );
       const input = z
         .object({
           // EXPLICIT, AND THE VERSION MUST MATCH. A client that agreed to wording
@@ -5750,7 +5945,11 @@ export function createApp(db: Db) {
   app.delete(
     '/api/linkedin/hosted-execution',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'withdraw the authorisation for hosted LinkedIn execution');
+      assertCapability(
+        req,
+        'credentials.manage',
+        'withdraw the authorisation for hosted LinkedIn execution'
+      );
       const ack = await revokeHostedExecutionAck(db, {
         workspaceId: req.auth!.workspaceId,
         actorUserId: req.auth!.userId
@@ -5800,7 +5999,7 @@ export function createApp(db: Db) {
       // Whoever can call it can drive an authentication attempt against the
       // owner's real LinkedIn account -- and a run of failed ones is exactly the
       // signal that gets an account challenged or restricted.
-      assertWorkspaceOwner(req, 'sign a LinkedIn account in');
+      assertCapability(req, 'credentials.manage', 'sign a LinkedIn account in');
       const input = linkedinSeatLoginSchema.parse(req.body ?? {});
 
       let config: LinkedInLocalWorkerConfig;
@@ -5856,8 +6055,15 @@ export function createApp(db: Db) {
       // wearing a different name -- and on the manual path it re-points the seat
       // at whichever account the browser happens to be logged into, which is a
       // change of account, not a refresh.
-      assertWorkspaceOwner(req, 'detect a LinkedIn account');
+      assertCapability(req, 'credentials.manage', 'detect a LinkedIn account');
       const input = linkedinSeatDetectSchema.parse(req.body ?? {});
+      // TRV-057: a new seat key is another connected LinkedIn account.
+      await assertNewSeatPrecheck(
+        db,
+        await loadEntitlements(db, req.auth!.workspaceId),
+        req.auth!.workspaceId,
+        input.seatKey
+      );
 
       let config: LinkedInLocalWorkerConfig;
       try {
@@ -6000,7 +6206,8 @@ export function createApp(db: Db) {
       const action = await editQueuedMessage(db, {
         workspaceId: req.auth!.workspaceId,
         actionId: String(req.params.id),
-        body: input.body
+        body: input.body,
+        ...(input.attachments === undefined ? {} : { attachments: input.attachments })
       });
       res.json({ action });
     })
@@ -6024,9 +6231,26 @@ export function createApp(db: Db) {
     })
   );
 
-  // HUMAN-SEND REPORT. The founder sent (or skipped) the invite or message
-  // Trevra handed them in Today. Any workspace member may report it: it is the
-  // same kind of report as the outcome route above, never an instruction.
+  // HUMAN-SEND PRESENTATION. The Today card is on screen: stamp its row
+  // presented (freezing its words) and return them. GET /api/today only lists,
+  // so a prefetch or refresh never marks anything as shown.
+  app.post(
+    '/api/linkedin/handoffs/:id/present',
+    linkedinRoute(async (req, res) => {
+      const handoff = await presentLinkedInHandoff(
+        db,
+        req.auth!.workspaceId,
+        String(req.params.id),
+        new Date()
+      );
+      res.json({ handoff });
+    })
+  );
+
+  // HUMAN-SEND REPORT. The founder sent, skipped or could not send the invite
+  // or message Trevra handed them in Today. Any workspace member may report it:
+  // it is the same kind of report as the outcome route above, never an
+  // instruction.
   app.post(
     '/api/linkedin/handoffs/:id/resolve',
     linkedinRoute(async (req, res) => {
@@ -6037,6 +6261,8 @@ export function createApp(db: Db) {
           workspaceId: req.auth!.workspaceId,
           actionId: String(req.params.id),
           resolution: input.resolution,
+          ...(input.sentAt === undefined ? {} : { sentAt: input.sentAt }),
+          ...(input.failure === undefined ? {} : { failure: input.failure }),
           actorUserId: req.auth!.userId
         },
         new Date()
@@ -6096,7 +6322,7 @@ export function createApp(db: Db) {
   app.post(
     '/api/linkedin/posts/:id/approve',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve a LinkedIn scheduled post');
+      assertCapability(req, 'outreach.approve', 'approve a LinkedIn scheduled post');
       const input = z
         .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
         .strict()
@@ -6148,7 +6374,37 @@ export function createApp(db: Db) {
   );
   app.post(
     '/api/linkedin/posts/:id/media',
-    express.raw({ type: [...LINKEDIN_POST_IMAGE_TYPES], limit: LINKEDIN_POST_IMAGE_MAX_BYTES }),
+    // TRV-040: an over-limit body is refused with the matrix's stable code.
+    (req: Request, res: Response, next: NextFunction) =>
+      linkedinPostMediaBody(req, res, (error?: unknown) => {
+        if (
+          error &&
+          typeof error === 'object' &&
+          (error as { type?: string }).type === 'entity.too.large'
+        ) {
+          const declared = Number(req.headers['content-length'] ?? 0);
+          const refusal = checkRichContent('linkedin_post', [
+            {
+              mimeType: String(req.headers['content-type'] ?? ''),
+              sizeBytes:
+                Number.isFinite(declared) && declared > LINKEDIN_POST_IMAGE_MAX_BYTES
+                  ? declared
+                  : LINKEDIN_POST_IMAGE_MAX_BYTES + 1
+            }
+          ]);
+          const reason = refusal?.reason ?? 'LinkedIn post attachments must be 10 MB or smaller.';
+          res.status(413).json({
+            error: reason,
+            code: 'attachment_too_large',
+            reason,
+            channel: 'linkedin_post',
+            contentType: refusal?.contentType ?? 'image',
+            index: 0
+          });
+          return;
+        }
+        next(error as Error | undefined);
+      }),
     linkedinRoute(async (req, res) => {
       const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
       const mimeType = String(req.headers['content-type'] ?? '')
@@ -6298,7 +6554,7 @@ export function createApp(db: Db) {
   app.post(
     '/api/linkedin/manager/seats',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, "change a LinkedIn account's limits");
+      assertCapability(req, 'account_safety.manage', "change a LinkedIn account's limits");
       const input = linkedinManagerSeatCreateSchema.parse(req.body ?? {});
       const ownerUserId =
         input.ownerUserId === undefined
@@ -6313,7 +6569,9 @@ export function createApp(db: Db) {
           input.sendMode,
           now,
           (tx) =>
-            upsertSeat(tx, req.auth!.workspaceId, { ...input, ownerUserId }, now, input.seatKey)
+            upsertSeat(tx, req.auth!.workspaceId, { ...input, ownerUserId }, now, input.seatKey),
+          { patch: input },
+          req.auth!.userId
         );
         res.status(201).json({ seat });
       } catch (error) {
@@ -6325,7 +6583,16 @@ export function createApp(db: Db) {
   app.patch(
     '/api/linkedin/manager/seats/:seatKey',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, "change a LinkedIn account's limits");
+      // A manager may reassign which teammate a seat belongs to
+      // (`seats.assign`) but not its ceilings, hours or band: a body carrying
+      // `ownerUserId` and nothing else is an assignment, anything more is the
+      // owner-only account-risk decision described at PUT /api/linkedin/seat.
+      const body = req.body && typeof req.body === 'object' ? (req.body as object) : {};
+      const assignmentOnly =
+        'ownerUserId' in body && Object.keys(body).every((key) => key === 'ownerUserId');
+      if (assignmentOnly)
+        assertCapability(req, 'seats.assign', 'assign a LinkedIn account to a teammate');
+      else assertCapability(req, 'account_safety.manage', "change a LinkedIn account's limits");
       const seatKey = linkedinSeatKeySchema.parse(String(req.params.seatKey));
       const input = linkedinSeatSchema.parse(req.body ?? {});
       const ownerUserId =
@@ -6350,7 +6617,9 @@ export function createApp(db: Db) {
                 { ...input, ...(ownerUserId !== undefined ? { ownerUserId } : {}) },
                 now,
                 seatKey
-              )
+              ),
+            { patch: input },
+            req.auth!.userId
           )
         });
       } catch (error) {
@@ -6362,7 +6631,11 @@ export function createApp(db: Db) {
   app.patch(
     '/api/linkedin/manager/seats/:seatKey/capabilities',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, "change a LinkedIn account's InMail capability");
+      assertCapability(
+        req,
+        'account_safety.manage',
+        "change a LinkedIn account's InMail capability"
+      );
       const seatKey = linkedinSeatKeySchema.parse(String(req.params.seatKey));
       const input = z
         .object({
@@ -6395,7 +6668,7 @@ export function createApp(db: Db) {
   app.put(
     '/api/linkedin/manager/mailboxes/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'change campaign mailbox limits');
+      assertCapability(req, 'account_safety.manage', 'change campaign mailbox limits');
       const input = z
         .object({
           dailyLimit: z.number().int().min(1).max(1000),
@@ -6524,7 +6797,7 @@ export function createApp(db: Db) {
         !workflow ||
         (workflow.scope === 'personal' &&
           workflow.ownerUserId !== req.auth!.userId &&
-          req.auth!.role !== 'owner')
+          !hasCapability(req.auth!.role, 'workflows.manage_workspace'))
       )
         throw new LinkedInApiError('Workflow not found', 404);
       try {
@@ -6591,7 +6864,7 @@ export function createApp(db: Db) {
   app.post(
     '/api/linkedin/manager/action-approvals/:actionId',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve a LinkedIn browser action');
+      assertCapability(req, 'outreach.approve', 'approve a LinkedIn browser action');
       const input = z
         .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
         .strict()
@@ -6610,6 +6883,8 @@ export function createApp(db: Db) {
           )
         });
       } catch (error) {
+        // A coded refusal (TRV-040 held content) keeps its code and status.
+        if (error instanceof LinkedInApiError) throw error;
         throw new LinkedInApiError(error instanceof Error ? error.message : 'Approval failed', 409);
       }
     })
@@ -6629,7 +6904,7 @@ export function createApp(db: Db) {
   app.post(
     '/api/linkedin/manager/campaigns/:id/email-approvals/:actionId',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve an outbound campaign email');
+      assertCapability(req, 'outreach.approve', 'approve an outbound campaign email');
       const campaignId = String(req.params.id);
       const actionId = String(req.params.actionId);
       const input = z
@@ -6657,14 +6932,125 @@ export function createApp(db: Db) {
     })
   );
 
-  // Deleting is destructive cleanup, not a stop control. It is owner-only and
+  // TRV-039: AI drafts of one lead's queued outreach copy. The model only
+  // proposes text; approval needs `outreach.approve` (owner or manager), binds the exact payload hash and
+  // goes through the same per-action approvals as above.
+  const aiDraftRoute = (handler: (req: AuthedRequest, res: Response) => Promise<unknown>) =>
+    linkedinRoute(async (req, res) => {
+      try {
+        await handler(req, res);
+      } catch (error) {
+        if (!(error instanceof AiDraftError)) throw error;
+        res
+          .status(error.status)
+          .json({ error: error.message, code: error.code, setupPath: AI_DRAFT_SETUP_PATH });
+      }
+    });
+  const aiDraftHash = z.string().regex(/^[0-9a-f]{64}$/);
+  app.get(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts',
+    aiDraftRoute(async (req, res) => {
+      const campaignId = String(req.params.id);
+      if (!(await getManagedCampaign(db, req.auth!.workspaceId, campaignId)))
+        throw new LinkedInApiError('Managed campaign not found', 404);
+      res.json(await listAiDrafts(db, req.auth!.workspaceId, campaignId));
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts',
+    aiDraftRoute(async (req, res) => {
+      // Count first, so 51 targets get the batch message rather than a schema error.
+      const raw = z
+        .object({ targets: z.array(z.unknown()) })
+        .strict()
+        .parse(req.body ?? {});
+      if (raw.targets.length > AI_DRAFT_BATCH_MAX || raw.targets.length === 0)
+        assertDraftBatch(raw.targets.map((_, index) => ({ memberId: String(index) })));
+      const targets = z
+        .array(
+          z
+            .object({
+              memberId: z.string().min(1).max(100),
+              stepId: z.string().min(1).max(64).nullable().optional()
+            })
+            .strict()
+        )
+        .parse(raw.targets);
+      res.json(
+        await requestAiDrafts(db, {
+          workspaceId: req.auth!.workspaceId,
+          campaignId: String(req.params.id),
+          targets,
+          requestedBy: req.auth!.userId
+        })
+      );
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts/:draftId/edit',
+    aiDraftRoute(async (req, res) => {
+      const input = z
+        .object({ text: z.string().max(20_000), payloadHash: aiDraftHash })
+        .strict()
+        .parse(req.body ?? {});
+      res.json({
+        draft: await editAiDraft(db, {
+          workspaceId: req.auth!.workspaceId,
+          campaignId: String(req.params.id),
+          draftId: String(req.params.draftId),
+          payloadHash: input.payloadHash,
+          text: input.text,
+          actorId: req.auth!.userId
+        })
+      });
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts/:draftId/approve',
+    aiDraftRoute(async (req, res) => {
+      assertCapability(req, 'outreach.approve', 'approve an AI-drafted message');
+      const input = z
+        .object({ payloadHash: aiDraftHash })
+        .strict()
+        .parse(req.body ?? {});
+      res.json({
+        draft: await approveAiDraft(db, {
+          workspaceId: req.auth!.workspaceId,
+          campaignId: String(req.params.id),
+          draftId: String(req.params.draftId),
+          payloadHash: input.payloadHash,
+          actorId: req.auth!.userId
+        })
+      });
+    })
+  );
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/ai-drafts/:draftId/reject',
+    aiDraftRoute(async (req, res) => {
+      assertCapability(req, 'outreach.approve', 'reject an AI-drafted message');
+      z.object({})
+        .strict()
+        .parse(req.body ?? {});
+      res.json({
+        draft: await rejectAiDraft(db, {
+          workspaceId: req.auth!.workspaceId,
+          campaignId: String(req.params.id),
+          draftId: String(req.params.draftId),
+          actorId: req.auth!.userId
+        })
+      });
+    })
+  );
+
+  // Deleting is destructive cleanup, not a stop control. It needs
+  // `campaigns.manage_all` (owner or manager) and
   // the domain function refuses anything except a stopped or completed row, so
   // a running/paused/draft campaign must go through Cancel/Stop first even if a
   // caller bypasses the browser UI.
   app.delete(
     '/api/linkedin/manager/campaigns/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'delete a managed campaign');
+      assertCapability(req, 'campaigns.manage_all', 'delete a managed campaign');
       try {
         const deleted = await deleteManagedCampaign(
           db,
@@ -6680,6 +7066,7 @@ export function createApp(db: Db) {
   );
   app.get(
     '/api/linkedin/manager/campaigns/:id/export.csv',
+    requireCapability('reports.view', 'export campaign stats'),
     linkedinRoute(async (req, res) => {
       const campaignId = String(req.params.id);
       const campaign = await getManagedCampaign(db, req.auth!.workspaceId, campaignId);
@@ -6807,7 +7194,7 @@ export function createApp(db: Db) {
   app.patch(
     '/api/linkedin/manager/campaigns/:id/owner',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'transfer campaign ownership');
+      assertCapability(req, 'campaigns.manage_all', 'transfer campaign ownership');
       const campaignId = String(req.params.id);
       const campaign = await getManagedCampaign(db, req.auth!.workspaceId, campaignId);
       if (!campaign) throw new LinkedInApiError('Managed campaign not found', 404);
@@ -6972,7 +7359,12 @@ export function createApp(db: Db) {
         .parse(req.body ?? {});
       try {
         const now = new Date();
-        const started = await startManagedCampaign(db, req.auth!.workspaceId, campaignId, now);
+        // TRV-057: the plan's running-campaign cap and credit balance are
+        // checked inside the activation transaction, under the entitlement lock.
+        const entitlements = await loadEntitlements(db, req.auth!.workspaceId);
+        const started = await startManagedCampaign(db, req.auth!.workspaceId, campaignId, now, {
+          beforeActivate: (tx) => assertCampaignActivation(tx, entitlements, req.auth!.workspaceId)
+        });
         await recordManagedCampaignAudit(
           db,
           {
@@ -7146,6 +7538,83 @@ export function createApp(db: Db) {
         now
       );
       res.json(result);
+    })
+  );
+
+  // TRV-029: a capture source or lead list enrolling its new leads into this
+  // campaign through the manual admission path (linkedin/auto-enrol.ts).
+  app.get(
+    '/api/linkedin/manager/campaigns/:id/auto-enrol-rules',
+    linkedinRoute(async (req, res) => {
+      const campaignId = String(req.params.id);
+      if (!(await getManagedCampaign(db, req.auth!.workspaceId, campaignId)))
+        throw new LinkedInApiError('Managed campaign not found', 404);
+      res.json({ rules: await listAutoEnrolRules(db, req.auth!.workspaceId, campaignId) });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/manager/campaigns/:id/auto-enrol-rules',
+    linkedinRoute(async (req, res) => {
+      assertCapability(req, 'campaigns.auto_enrol', 'set up auto-enrol rules');
+      const campaignId = String(req.params.id);
+      const campaign = await assertCanManageManagedCampaign(
+        db,
+        req,
+        campaignId,
+        'set up auto-enrol rules'
+      );
+      const input = z
+        .object({
+          sourceKind: z.enum(['capture_source', 'lead_list']),
+          sourceId: z.string().trim().min(1).max(160)
+        })
+        .strict()
+        .parse(req.body ?? {});
+      await assertCanUseLinkedInSeats(
+        db,
+        req,
+        campaign.senderKeys,
+        'auto-enrol into this campaign'
+      );
+      if (input.sourceKind === 'lead_list')
+        await assertCanUseLeadListSeat(
+          db,
+          req,
+          await leadListSeatOf(db, req.auth!.workspaceId, input.sourceId),
+          'auto-enrol leads from this list'
+        );
+      const rule = await createAutoEnrolRule(
+        db,
+        { workspaceId: req.auth!.workspaceId, campaignId, ...input, actorUserId: req.auth!.userId },
+        new Date()
+      );
+      res.status(201).json({ rule });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/manager/auto-enrol-rules/:id/disable',
+    linkedinRoute(async (req, res) => {
+      assertCapability(req, 'campaigns.auto_enrol', 'disable auto-enrol rules');
+      z.object({})
+        .strict()
+        .parse(req.body ?? {});
+      const ruleId = String(req.params.id);
+      const existing = await getAutoEnrolRule(db, req.auth!.workspaceId, ruleId);
+      if (!existing) throw new LinkedInApiError('Auto-enrol rule not found', 404);
+      await assertCanManageManagedCampaign(
+        db,
+        req,
+        existing.campaignId,
+        'disable auto-enrol rules'
+      );
+      const rule = await disableAutoEnrolRule(
+        db,
+        { workspaceId: req.auth!.workspaceId, ruleId, actorUserId: req.auth!.userId },
+        new Date()
+      );
+      res.json({ rule });
     })
   );
 
@@ -7567,6 +8036,10 @@ export function createApp(db: Db) {
     })
   );
 
+  // Per-rep reporting and the date-range stats exports (TRV-046, TRV-049).
+  app.use('/api/linkedin/manager/reports', requireCapability('reports.view', 'view team reports'));
+  registerLinkedInReportRoutes(app, db);
+
   /* Manager configuration CRUD. These writes configure data; they do not create action-ledger rows. */
   app.post(
     '/api/linkedin/manager/lead-lists/preview',
@@ -7631,6 +8104,7 @@ export function createApp(db: Db) {
         const seatKey = linkedinSeatKeySchema.parse(
           typeof req.body?.seatKey === 'string' ? req.body.seatKey : OWNER_SEAT_KEY
         );
+        await assertCanUseLeadListSeat(db, req, seatKey, 'import leads');
         const result = await importLeadCsv(
           db,
           {
@@ -7653,6 +8127,7 @@ export function createApp(db: Db) {
     '/api/linkedin/manager/lead-lists',
     linkedinRoute(async (req, res) => {
       const input = linkedinLeadListCreateSchema.parse(req.body ?? {});
+      await assertCanUseLeadListSeat(db, req, input.seatKey, 'create a lead list');
       try {
         const list = await createLeadList(
           db,
@@ -7672,16 +8147,32 @@ export function createApp(db: Db) {
     })
   );
 
+  /**
+   * Pasted profile URLs: the check (writes nothing) and the import. Both read
+   * the paste line by line so every rejected entry names its line, and both
+   * refuse a paste over `PROFILE_URL_IMPORT_CAP` distinct profiles outright
+   * rather than importing its head.
+   */
+  app.post(
+    '/api/linkedin/manager/lead-lists/preview-profile-urls',
+    linkedinRoute(async (req, res) => {
+      const input = linkedinProfileUrlPasteSchema.parse(req.body ?? {});
+      const preview = previewLeadProfileUrls(input.urls.split(/\r?\n/));
+      res.json({
+        acceptedCount: preview.profiles.length,
+        duplicates: preview.duplicates,
+        rejected: preview.rejected.slice(0, PROFILE_URL_REJECTIONS_SHOWN),
+        rejectedCount: preview.rejected.length,
+        cap: preview.cap
+      });
+    })
+  );
+
   app.post(
     '/api/linkedin/manager/lead-lists/:id/profile-urls',
     linkedinRoute(async (req, res) => {
-      const input = z
-        .object({
-          urls: z.string().trim().min(1).max(500_000),
-          seatKey: linkedinSeatKeySchema.optional()
-        })
-        .strict()
-        .parse(req.body ?? {});
+      const input = linkedinProfileUrlPasteSchema.parse(req.body ?? {});
+      await assertCanUseLeadListSeat(db, req, input.seatKey ?? OWNER_SEAT_KEY, 'import leads');
       try {
         const result = await importLeadProfileUrls(
           db,
@@ -7689,14 +8180,17 @@ export function createApp(db: Db) {
             workspaceId: req.auth!.workspaceId,
             listId: String(req.params.id),
             seatKey: input.seatKey,
-            urls: input.urls
-              .split(/[\s,;]+/g)
-              .map((value) => value.trim())
-              .filter(Boolean)
+            urls: input.urls.split(/\r?\n/)
           },
           new Date()
         );
-        res.status(201).json(result);
+        // A paste of junk can hold far more rejected entries than any screen
+        // shows; the list is bounded and the count stays exact.
+        res.status(201).json({
+          ...result,
+          rejected: result.rejected.slice(0, PROFILE_URL_REJECTIONS_SHOWN),
+          rejectedCount: result.rejected.length
+        });
       } catch (error) {
         rethrowLinkedInManagerError(error);
       }
@@ -7760,13 +8254,13 @@ export function createApp(db: Db) {
    * beside its write -- a rule enforced in the route is a rule the next caller
    * skips.
    *
-   * Owner-only: this is the delete that removes a workspace's contact data
+   * Needs `lead_lists.manage` (owner or manager): this is the delete that removes a workspace's contact data
    * rather than a row about it.
    */
   app.patch(
     '/api/linkedin/manager/lead-lists/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'rename a lead list');
+      assertCapability(req, 'lead_lists.manage', 'rename a lead list');
       const input = z
         .object({ name: z.string().trim().min(1).max(200) })
         .strict()
@@ -7784,7 +8278,7 @@ export function createApp(db: Db) {
   app.delete(
     '/api/linkedin/manager/lead-lists/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'delete a lead list');
+      assertCapability(req, 'lead_lists.manage', 'delete a lead list');
       let deleted;
       try {
         // No existence pre-check: `deleteLeadList` takes the row `FOR UPDATE` so
@@ -7823,14 +8317,14 @@ export function createApp(db: Db) {
     })
   );
 
-  // Owner-only, and MORE destructive than the lead-list delete three routes
+  // `lead_lists.manage` (owner or manager), and MORE destructive than the lead-list delete three routes
   // above which already is: deleting a contact cascades it out of every
   // campaign it is enrolled in and cancels the manual tasks written for it,
   // where deleting a list only drops memberships.
   app.delete(
     '/api/linkedin/manager/contacts/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'delete a lead and its campaign enrolments');
+      assertCapability(req, 'lead_lists.manage', 'delete a lead and its campaign enrolments');
       res.json({
         deleted: await removeLeadContact(db, req.auth!.workspaceId, String(req.params.id))
       });
@@ -7841,16 +8335,50 @@ export function createApp(db: Db) {
     '/api/linkedin/manager/workflows/validate',
     linkedinRoute(async (req, res) => {
       const parsed = workflowStepsSchema.safeParse((req.body ?? {}).steps);
-      res.json(
-        parsed.success
-          ? { valid: true, steps: parsed.data, issues: [] }
-          : {
-              valid: false,
-              issues: parsed.error.issues.map((issue) => ({
-                path: issue.path,
-                message: issue.message
-              }))
+      // TRV-040: the rich-content matrix is a save-time rule, so validation
+      // reports it the same way a schema issue is reported.
+      const contentRefusal = parsed.success ? workflowRichContentViolation(parsed.data) : null;
+      const stepIndex = contentRefusal
+        ? parsed.data!.findIndex((step) => step.id === contentRefusal.stepId)
+        : -1;
+      const endorseRefusal =
+        parsed.success && !contentRefusal ? endorseSkillCapViolation(parsed.data) : null;
+      if (endorseRefusal) {
+        res.json({
+          valid: false,
+          issues: [
+            {
+              path: [endorseRefusal.index, 'config', 'maxSkills'],
+              message: endorseRefusal.message,
+              stepId: endorseRefusal.stepId
             }
+          ]
+        });
+        return;
+      }
+      res.json(
+        parsed.success && !contentRefusal
+          ? { valid: true, steps: parsed.data, issues: [] }
+          : contentRefusal
+            ? {
+                valid: false,
+                issues: [
+                  {
+                    path: [stepIndex, 'config', 'variants'],
+                    message: contentRefusal.reason,
+                    code: contentRefusal.code,
+                    stepId: contentRefusal.stepId,
+                    variantId: contentRefusal.variantId
+                  }
+                ]
+              }
+            : {
+                valid: false,
+                issues: parsed.error!.issues.map((issue) => ({
+                  path: issue.path,
+                  message: issue.message
+                }))
+              }
       );
     })
   );
@@ -7859,8 +8387,11 @@ export function createApp(db: Db) {
     '/api/linkedin/manager/workflows',
     linkedinRoute(async (req, res) => {
       const input = linkedinWorkflowWriteSchema.parse(req.body ?? {});
-      const scope = input.scope ?? (req.auth!.role === 'owner' ? 'workspace' : 'personal');
-      if (scope === 'workspace') assertWorkspaceOwner(req, 'create workspace workflow templates');
+      const scope =
+        input.scope ??
+        (hasCapability(req.auth!.role, 'workflows.manage_workspace') ? 'workspace' : 'personal');
+      if (scope === 'workspace')
+        assertCapability(req, 'workflows.manage_workspace', 'create workspace workflow templates');
       try {
         res.status(201).json({
           workflow: await saveWorkflow(
@@ -7945,48 +8476,22 @@ export function createApp(db: Db) {
   );
 
   /* ---------------------------------------------------------------------
-   * Lead sourcing (030).
+   * Lead sourcing (030), now refused (TRV-021/022/023).
    *
-   * BEHIND ITS OWN OPT-IN, which is not the local worker's. Sending on your
-   * own account on your own machine is what the product is for and defaults
-   * ON for a self-hoster; reading other people's profiles out of search
-   * results is scraping under LinkedIn's User Agreement 8.2 and defaults OFF.
-   * A self-hoster who upgraded must not acquire a crawler they never asked
-   * for.
-   *
-   * THE 409 NAMES WHICH KIND OF OFF, exactly as `linkedInOffReason` does for
-   * the worker: hosted is a decision the deployment made and no environment
-   * variable can undo it; anything else is a switch, and the sentence names
-   * it. Telling an operator to go looking for a setting that does not exist
-   * is the dead end this distinction removes.
+   * Collecting people out of LinkedIn search, Sales Navigator or a post's
+   * likers and commenters is scraping under LinkedIn's User Agreement 8.2 and
+   * puts the operator's account at risk, so no request here creates a walk, on
+   * any deployment or switch. The refusal is a 409 with a STABLE CODE
+   * (`intake_source_unsupported`) and the same product sentence the intake
+   * screen renders, naming the supported paths: CSV import and pasted profile
+   * URLs. Reading sources stored before this stays open below.
    * ------------------------------------------------------------------ */
 
   app.post(
     '/api/linkedin/lead-sources',
     linkedinRoute(async (req, res) => {
       const input = linkedinLeadSourceSchema.parse(req.body ?? {});
-      assertLeadSourcingOn();
-      let created;
-      try {
-        created = await createLeadSource(
-          db,
-          {
-            workspaceId: req.auth!.workspaceId,
-            seatKey: input.seatKey,
-            kind: input.kind,
-            url: input.url
-          },
-          new Date()
-        );
-      } catch (error) {
-        // leads.ts owns the URL rule and its refusal is caller input, not a fault.
-        throw new LinkedInApiError(error instanceof Error ? error.message : String(error), 400);
-      }
-      // 200 rather than 201 for a duplicate: a double-clicked button did not
-      // create anything, and the live row is the honest answer.
-      res
-        .status(created.duplicate ? 200 : 201)
-        .json({ source: created.source, duplicate: created.duplicate });
+      res.status(409).json(unsupportedIntakeRefusal(input.kind));
     })
   );
   app.get(
@@ -8029,7 +8534,7 @@ export function createApp(db: Db) {
       // is willing to do at all under LinkedIn's User Agreement 8.2, and raising
       // it raises the account's exposure. Reading it stays open, because a
       // teammate whose import stopped has to be able to see why.
-      assertWorkspaceOwner(req, "change this workspace's daily lead ceiling");
+      assertCapability(req, 'account_safety.manage', "change this workspace's daily lead ceiling");
       const input = linkedinDailyLeadCapSchema.parse(req.body ?? {});
       await setDailyLeadCap(db, req.auth!.workspaceId, input.cap, new Date(), input.seatKey);
       res.json(await dailyLeadAllowance(db, req.auth!.workspaceId, new Date(), input.seatKey));
@@ -8058,6 +8563,7 @@ export function createApp(db: Db) {
     '/api/linkedin/lead-sources/:id/import',
     linkedinRoute(async (req, res) => {
       const input = linkedinLeadSourceImportSchema.parse(req.body ?? {});
+      await assertCanUseLeadListSeat(db, req, input.seatKey, 'import leads');
       try {
         res
           .status(201)
@@ -8109,8 +8615,19 @@ export function createApp(db: Db) {
   app.get(
     '/api/linkedin/inbox/threads',
     linkedinRoute(async (req, res) => {
-      const filters = linkedinInboxFiltersSchema.parse(req.query);
-      res.json({ threads: await listThreads(db, req.auth!.workspaceId, filters) });
+      const { assignee, ...filters } = linkedinInboxFiltersSchema.parse(req.query);
+      res.json({
+        threads: await listThreads(db, req.auth!.workspaceId, {
+          ...filters,
+          // 'me' and 'unassigned' are resolved here, where the session is known.
+          ...(assignee === undefined
+            ? {}
+            : {
+                assigneeUserId:
+                  assignee === 'unassigned' ? null : assignee === 'me' ? req.auth!.userId : assignee
+              })
+        })
+      });
     })
   );
 
@@ -8125,7 +8642,224 @@ export function createApp(db: Db) {
         seatKey
       );
       if (!conversation) throw new LinkedInApiError('LinkedIn conversation not found', 404);
-      res.json(conversation);
+      res.json({
+        ...conversation,
+        // TRV-037: stored suggestions, plus unsaved previews for inbound
+        // messages synced before classification existed. Advisory only.
+        replyClassifications: await listThreadClassifications(
+          db,
+          req.auth!.workspaceId,
+          conversation.thread.id,
+          conversation.messages
+        )
+      });
+    })
+  );
+
+  /* TRV-036 inbox organization and TRV-037 reply-class confirmation. Every
+   * handler scopes by the session's workspace; ids from elsewhere are 404. */
+  app.use(
+    '/api/linkedin/inbox/organize',
+    requireCapability('inbox.organize', 'organize the inbox')
+  );
+  app.get(
+    '/api/linkedin/inbox/organize/tags',
+    linkedinRoute(async (req, res) => {
+      res.json({ tags: await listTags(db, req.auth!.workspaceId) });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/tags',
+    linkedinRoute(async (req, res) => {
+      const input = inboxTagCreateSchema.parse(req.body ?? {});
+      const tag = await createTag(
+        db,
+        { workspaceId: req.auth!.workspaceId, actorUserId: req.auth!.userId, ...input },
+        new Date()
+      );
+      res.status(201).json({ tag });
+    })
+  );
+
+  app.patch(
+    '/api/linkedin/inbox/organize/tags/:tagId',
+    linkedinRoute(async (req, res) => {
+      const input = inboxTagUpdateSchema.parse(req.body ?? {});
+      const tag = await updateTag(
+        db,
+        { workspaceId: req.auth!.workspaceId, tagId: String(req.params.tagId), ...input },
+        new Date()
+      );
+      res.json({ tag });
+    })
+  );
+
+  app.delete(
+    '/api/linkedin/inbox/organize/tags/:tagId',
+    linkedinRoute(async (req, res) => {
+      res.json(await deleteTag(db, req.auth!.workspaceId, String(req.params.tagId)));
+    })
+  );
+
+  app.get(
+    '/api/linkedin/inbox/organize/assignees',
+    linkedinRoute(async (req, res) => {
+      res.json({
+        assignees: await listAssignableMembers(db, req.auth!.workspaceId, req.auth!.userId)
+      });
+    })
+  );
+
+  app.patch(
+    '/api/linkedin/inbox/organize/threads/:threadId',
+    linkedinRoute(async (req, res) => {
+      const input = inboxThreadOrganizeSchema.parse(req.body ?? {});
+      await updateThreadOrganization(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          threadId: String(req.params.threadId),
+          actorUserId: req.auth!.userId,
+          ...input
+        },
+        new Date()
+      );
+      res.json({ ok: true });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/threads/:threadId/tags',
+    linkedinRoute(async (req, res) => {
+      const { tagId } = inboxThreadTagSchema.parse(req.body ?? {});
+      await tagThread(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          threadId: String(req.params.threadId),
+          tagId,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.json({ ok: true });
+    })
+  );
+
+  app.delete(
+    '/api/linkedin/inbox/organize/threads/:threadId/tags/:tagId',
+    linkedinRoute(async (req, res) => {
+      await untagThread(db, {
+        workspaceId: req.auth!.workspaceId,
+        threadId: String(req.params.threadId),
+        tagId: String(req.params.tagId)
+      });
+      res.json({ ok: true });
+    })
+  );
+
+  app.get(
+    '/api/linkedin/inbox/organize/threads/:threadId/notes',
+    linkedinRoute(async (req, res) => {
+      res.json({
+        notes: await listNotes(db, req.auth!.workspaceId, String(req.params.threadId))
+      });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/threads/:threadId/notes',
+    linkedinRoute(async (req, res) => {
+      const { body } = inboxNoteSchema.parse(req.body ?? {});
+      const note = await addNote(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          threadId: String(req.params.threadId),
+          body,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.status(201).json({ note });
+    })
+  );
+
+  app.patch(
+    '/api/linkedin/inbox/organize/notes/:noteId',
+    linkedinRoute(async (req, res) => {
+      const { body } = inboxNoteSchema.parse(req.body ?? {});
+      const note = await editNote(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          noteId: String(req.params.noteId),
+          body,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.json({ note });
+    })
+  );
+
+  app.delete(
+    '/api/linkedin/inbox/organize/notes/:noteId',
+    linkedinRoute(async (req, res) => {
+      res.json(
+        await deleteNote(
+          db,
+          {
+            workspaceId: req.auth!.workspaceId,
+            noteId: String(req.params.noteId),
+            actorUserId: req.auth!.userId
+          },
+          new Date()
+        )
+      );
+    })
+  );
+
+  app.get(
+    '/api/linkedin/inbox/organize/notes/:noteId/revisions',
+    linkedinRoute(async (req, res) => {
+      res.json({
+        revisions: await listNoteRevisions(db, req.auth!.workspaceId, String(req.params.noteId))
+      });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/messages/:messageId/classification',
+    linkedinRoute(async (req, res) => {
+      const input = inboxClassificationConfirmSchema.parse(req.body ?? {});
+      const classification = await confirmReplyClassification(
+        db,
+        {
+          workspaceId: req.auth!.workspaceId,
+          messageId: String(req.params.messageId),
+          confirmedClass: input.confirmedClass,
+          endMembership: input.endMembership,
+          actorUserId: req.auth!.userId
+        },
+        new Date()
+      );
+      res.json({ classification });
+    })
+  );
+
+  app.post(
+    '/api/linkedin/inbox/organize/bulk',
+    linkedinRoute(async (req, res) => {
+      const input = inboxBulkSchema.parse(req.body ?? {});
+      res.json(
+        await bulkOrganizeThreads(
+          db,
+          { workspaceId: req.auth!.workspaceId, actorUserId: req.auth!.userId, ...input },
+          new Date()
+        )
+      );
     })
   );
 
@@ -8179,6 +8913,10 @@ export function createApp(db: Db) {
     '/api/linkedin/inbox/threads/:threadUrn/reply',
     linkedinRoute(async (req, res) => {
       const input = linkedinReplySchema.parse(req.body ?? {});
+      // A reply is sent FROM a LinkedIn account, so it takes the same seat rule
+      // as starting a campaign on it: an owner or manager, or the teammate the
+      // seat is assigned to. Reading and syncing the shared inbox stay open.
+      await assertCanUseLinkedInSeats(db, req, [input.seatKey], 'reply');
       const queued = await enqueueReply(
         db,
         {
@@ -8187,6 +8925,7 @@ export function createApp(db: Db) {
           threadUrn: String(req.params.threadUrn),
           body: input.body,
           ...(input.plannedFor === undefined ? {} : { plannedFor: input.plannedFor }),
+          ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
           queuedByUserId: req.auth!.userId
         },
         new Date()
@@ -8326,7 +9065,7 @@ export function createApp(db: Db) {
   app.post(
     '/api/linkedin/withdrawals/approvals/:id',
     linkedinRoute(async (req, res) => {
-      assertWorkspaceOwner(req, 'approve a LinkedIn withdrawal');
+      assertCapability(req, 'outreach.approve', 'approve a LinkedIn withdrawal');
       const withdrawalId = String(req.params.id);
       const input = z
         .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
@@ -8612,7 +9351,7 @@ export function createApp(db: Db) {
   app.delete(
     '/api/reddit/credentials',
     redditRoute(async (req, res) => {
-      if (req.auth!.role !== 'owner') {
+      if (!hasCapability(req.auth!.role, 'credentials.manage')) {
         throw new RedditApiError(
           'Only the workspace owner can disconnect the stored Reddit account',
           403
@@ -8761,8 +9500,11 @@ export function createApp(db: Db) {
   app.post(
     '/api/reddit/comments/:id/approve',
     redditRoute(async (req, res) => {
-      if (req.auth!.role !== 'owner')
-        throw new RedditApiError('Only the workspace owner can approve a Reddit comment.', 403);
+      if (!hasCapability(req.auth!.role, 'outreach.approve'))
+        throw new RedditApiError(
+          `${capabilityRefusal('outreach.approve', 'approve a Reddit comment')}.`,
+          403
+        );
       const contentHash = z
         .object({ contentHash: z.string().regex(/^[a-f0-9]{64}$/) })
         .strict()
@@ -8788,8 +9530,11 @@ export function createApp(db: Db) {
   app.post(
     '/api/reddit/comments/:id/execute',
     redditRoute(async (req, res) => {
-      if (req.auth!.role !== 'owner')
-        throw new RedditApiError('Only the workspace owner can post a Reddit comment.', 403);
+      if (!hasCapability(req.auth!.role, 'outreach.approve'))
+        throw new RedditApiError(
+          `${capabilityRefusal('outreach.approve', 'post a Reddit comment')}.`,
+          403
+        );
       const commentId = String(req.params.id);
       if (!(await getRedditCommentReview(db, req.auth!.workspaceId, commentId)))
         throw new RedditApiError('Comment not found.', 404);
@@ -8930,15 +9675,32 @@ export function createApp(db: Db) {
     try {
       const input = accountImportSchema.parse(req.body ?? {});
       const workspaceId = req.auth!.workspaceId;
+      // A named lead list is checked like a CSV import into it, before anything is written.
+      if (input.leadListId)
+        await assertCanUseLeadListSeat(
+          db,
+          req,
+          await leadListSeatOf(db, workspaceId, input.leadListId),
+          'import leads'
+        );
       const result = await importAccounts(db, workspaceId, input.text, {
         source: input.source,
         tags: input.tags
       });
       if (input.people.length > 0) {
-        result.people = await persistImportedPeople(db, workspaceId, input.people, {
+        const persisted = await persistImportedPeopleWithIds(db, workspaceId, input.people, {
           type: 'human',
           id: req.auth!.userId
         });
+        result.people = persisted.result;
+        // TRV-029: the People reach campaigns through the list, by the same
+        // admission path as a CSV row (and the list's auto-enrol rules).
+        if (input.leadListId)
+          result.leadList = await importPeopleIntoLeadList(
+            db,
+            { workspaceId, listId: input.leadListId, personIds: persisted.personIds },
+            new Date()
+          );
       }
       // ONE BULK RESCORE, not one per row: an import is up to 2,000 accounts,
       // and a round trip each would make the paste the slowest thing in the
@@ -8956,6 +9718,8 @@ export function createApp(db: Db) {
       // created, and saying 201 would make a no-op look like work.
       res.status(result.created > 0 || (result.people?.created ?? 0) > 0 ? 201 : 200).json(result);
     } catch (error) {
+      if (error instanceof LinkedInApiError)
+        return res.status(error.status).json({ error: error.message });
       next(error);
     }
   });
@@ -9057,7 +9821,7 @@ export function createApp(db: Db) {
 
   app.put(
     '/api/workspace/sender-identity',
-    ownerOnly('change the sender identity'),
+    requireCapability('compliance.manage', 'change the sender identity'),
     async (req: AuthedRequest, res, next) => {
       try {
         const senderIdentity = await saveSenderIdentity(
@@ -9096,7 +9860,7 @@ export function createApp(db: Db) {
 
   app.put(
     '/api/compliance/people/:personId/country',
-    ownerOnly('set a person country'),
+    requireCapability('compliance.manage', 'set a person country'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = countryInputSchema.parse(req.body ?? {});
@@ -9122,7 +9886,7 @@ export function createApp(db: Db) {
 
   app.put(
     '/api/compliance/accounts/:accountId/country',
-    ownerOnly('set an account country'),
+    requireCapability('compliance.manage', 'set an account country'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = countryInputSchema.parse(req.body ?? {});
@@ -9148,7 +9912,7 @@ export function createApp(db: Db) {
 
   app.post(
     '/api/compliance/people/:personId/lawful-bases',
-    ownerOnly('record a lawful basis'),
+    requireCapability('compliance.manage', 'record a lawful basis'),
     async (req: AuthedRequest, res, next) => {
       try {
         const input = lawfulBasisInputSchema.parse(req.body ?? {});
@@ -9198,16 +9962,20 @@ export function createApp(db: Db) {
 
   app.use((error: unknown, req: Request, res: Response, _next: NextFunction) => {
     if (error instanceof AgentBudgetError) return res.status(409).json({ error: error.message });
+    if (error instanceof EntitlementDeniedError) return res.status(402).json(error.body());
     if (
       error instanceof SkillApiError ||
       error instanceof PlaybookError ||
       error instanceof LeadCaptureError ||
       error instanceof ProviderWebhookError ||
       error instanceof GitHubRepoError ||
-      error instanceof ComplianceError ||
-      error instanceof OutboundWebhookInputError
+      error instanceof ComplianceError
     )
       return res.status(error.status).json({ error: error.message });
+    if (error instanceof OutboundWebhookError)
+      return res
+        .status(error.status)
+        .json({ error: error.message, ...(error.code ? { code: error.code } : {}) });
     if (error instanceof z.ZodError)
       return res.status(400).json({ error: 'Invalid request', issues: error.issues });
     if (error instanceof multer.MulterError) return res.status(400).json({ error: error.message });
@@ -9573,21 +10341,6 @@ function wait(ms: number): Promise<null> {
   });
 }
 
-function requireAgentScope(db: Db, scope: AgentScope) {
-  return async (req: AgentRequest, res: Response, next: NextFunction) => {
-    try {
-      const identity = await resolveAgentIdentity(db, req.headers);
-      if (!identity) return res.status(401).json({ error: 'Valid Trevra agent token required' });
-      if (!hasAgentScope(identity, scope))
-        return res.status(403).json({ error: `Agent token is missing scope: ${scope}` });
-      req.agent = identity;
-      next();
-    } catch (error) {
-      next(error);
-    }
-  };
-}
-
 function requireSession(db: Db, unattributedLimiter: RequestHandler) {
   return async (req: AuthedRequest, res: Response, next: NextFunction) => {
     try {
@@ -9637,30 +10390,6 @@ export function carriesSessionCredential(req: Request): boolean {
   );
 }
 
-/**
- * The owner carve-out, applied to the acts a teammate must not perform alone.
- *
- * ONE MECHANISM, TWO CALL SHAPES, AND NOTHING NEW UNDERNEATH. Both read the
- * same `req.auth!.role` the three original carve-outs read -- adding a
- * teammate, and saving or wiping the stored LinkedIn sign-in -- because a
- * second notion of "privileged" is a second thing to keep in step with
- * better-auth's member roles, and the day the two disagree is the day one of
- * them is wrong. `resolveActiveWorkspace` fails closed to 'member', so a
- * membership that cannot be read is refused here rather than waved through.
- *
- * `ownerOnly` runs BEFORE a plain route's handler, which is where the check
- * belongs when the handler's first act is the privileged one.
- * `assertWorkspaceOwner` throws from INSIDE a `linkedinRoute` handler, because
- * that wrapper is what turns a typed 4xx into a response and a middleware
- * would answer that surface in a different shape than every other refusal on
- * it.
- *
- * WHY EACH ACT IS ON THE LIST is written at the route, not here -- and two
- * that a reader will expect are deliberately NOT on it. See the comments on
- * `POST /api/linkedin/seat/pause` and
- * `POST /api/linkedin/manager/campaigns/:id/pause`: a kill switch only an
- * absent owner can reach is not a kill switch.
- */
 async function assertAssignableAgentSkills(
   db: Db,
   workspaceId: string,
@@ -9677,18 +10406,32 @@ async function assertAssignableAgentSkills(
   }
 }
 
-function ownerOnly(act: string): RequestHandler {
-  return (req, res, next) => {
-    if ((req as AuthedRequest).auth!.role !== 'owner') {
-      return res.status(403).json({ error: `Only the workspace owner can ${act}` });
-    }
-    next();
-  };
-}
-
-function assertWorkspaceOwner(req: AuthedRequest, act: string): void {
-  if (req.auth!.role !== 'owner')
-    throw new LinkedInApiError(`Only the workspace owner can ${act}`, 403);
+/**
+ * The capability gate (TRV-045), applied to the acts a role must not perform.
+ *
+ * ONE MAP, TWO CALL SHAPES. Both read `req.auth!.role` against `CAPABILITIES`
+ * in roles.ts -- never `role === 'owner'` -- because a second notion of
+ * "privileged" is a second thing to keep in step with Better Auth's member
+ * roles, and the day the two disagree is the day one of them is wrong.
+ * `resolveActiveWorkspace` fails closed to 'member', so a membership that
+ * cannot be read is refused here rather than waved through.
+ *
+ * `requireCapability` (roles.ts) runs BEFORE a plain route's handler, which is
+ * where the check belongs when the handler's first act is the privileged one.
+ * `assertCapability` throws from INSIDE a `linkedinRoute` handler, because
+ * that wrapper is what turns a typed 4xx into a response and a middleware
+ * would answer that surface in a different shape than every other refusal on
+ * it.
+ *
+ * WHY EACH ACT IS GATED is written at the route, not here -- and two that a
+ * reader will expect are deliberately NOT gated. See the comments on
+ * `POST /api/linkedin/seat/pause` and
+ * `POST /api/linkedin/manager/campaigns/:id/pause`: a kill switch only an
+ * absent owner can reach is not a kill switch.
+ */
+function assertCapability(req: AuthedRequest, capability: Capability, act: string): void {
+  if (!hasCapability(req.auth!.role, capability))
+    throw new LinkedInApiError(capabilityRefusal(capability, act), 403);
 }
 
 async function resolveWorkspaceMemberUserId(
@@ -9730,7 +10473,7 @@ async function assertCanUseLinkedInSeats(
   seatKeys: readonly string[],
   act: string
 ): Promise<void> {
-  if (req.auth!.role === 'owner') return;
+  if (hasCapability(req.auth!.role, 'campaigns.manage_all')) return;
   for (const seatKey of [...new Set(seatKeys)]) {
     const seat = await getSeat(db, req.auth!.workspaceId, seatKey);
     if (!seat) throw new LinkedInApiError('LinkedIn account not found', 404);
@@ -9742,6 +10485,37 @@ async function assertCanUseLinkedInSeats(
   }
 }
 
+/**
+ * A lead list belongs to one seat, so creating or importing into one needs a
+ * seat that exists in THIS workspace (still connected) and that the caller may
+ * use. Another workspace's seat answers exactly like one that never existed.
+ *
+ * The default seat key is the exception: it is the placeholder the first
+ * connected account fills, so lists built before any account is connected
+ * (CSV onboarding, the Inbound list) keep working as they did before.
+ */
+async function assertCanUseLeadListSeat(
+  db: Db,
+  req: AuthedRequest,
+  seatKey: string,
+  act: string
+): Promise<void> {
+  if (!(await getSeat(db, req.auth!.workspaceId, seatKey))) {
+    if (seatKey === OWNER_SEAT_KEY) return;
+    throw new LinkedInApiError('LinkedIn account not found', 404);
+  }
+  await assertCanUseLinkedInSeats(db, req, [seatKey], act);
+}
+
+/** The seat a lead list belongs to, found by id inside this workspace only. */
+async function leadListSeatOf(db: Db, workspaceId: string, listId: string): Promise<string> {
+  const row = await db
+    .prepare('SELECT seat_key FROM linkedin_lead_lists WHERE workspace_id=? AND id=?')
+    .get<{ seat_key: string }>(workspaceId, listId);
+  if (!row) throw new LinkedInApiError('Lead list not found', 404);
+  return row.seat_key;
+}
+
 async function assertCanManageManagedCampaign(
   db: Db,
   req: AuthedRequest,
@@ -9750,8 +10524,14 @@ async function assertCanManageManagedCampaign(
 ): Promise<ManagedCampaign> {
   const campaign = await getManagedCampaign(db, req.auth!.workspaceId, campaignId);
   if (!campaign) throw new LinkedInApiError('Managed campaign not found', 404);
-  if (req.auth!.role !== 'owner' && campaign.ownerUserId !== req.auth!.userId)
-    throw new LinkedInApiError(`Only the campaign owner or workspace owner can ${act}`, 403);
+  if (
+    !hasCapability(req.auth!.role, 'campaigns.manage_all') &&
+    campaign.ownerUserId !== req.auth!.userId
+  )
+    throw new LinkedInApiError(
+      `Only the campaign owner or a workspace owner or manager can ${act}`,
+      403
+    );
   return campaign;
 }
 
@@ -9760,9 +10540,12 @@ function assertCanManageWorkflow(
   workflow: LinkedInWorkflow,
   act: string
 ): void {
-  if (req.auth!.role === 'owner') return;
+  if (hasCapability(req.auth!.role, 'workflows.manage_workspace')) return;
   if (workflow.scope !== 'personal' || workflow.ownerUserId !== req.auth!.userId)
-    throw new LinkedInApiError(`Only the workflow owner or workspace owner can ${act}`, 403);
+    throw new LinkedInApiError(
+      `Only the workflow owner or a workspace owner or manager can ${act}`,
+      403
+    );
 }
 
 async function assertCanManageCampaignMember(
@@ -10023,7 +10806,7 @@ async function readSession(
   userId: string;
   workspaceId: string;
   email: string;
-  role: 'owner' | 'member';
+  role: WorkspaceRole;
 } | null> {
   const token = req.cookies?.[SESSION_COOKIE] as string | undefined;
   if (token) {
@@ -10072,11 +10855,12 @@ async function readSession(
  *     session instead of being re-derived on every request.
  *
  * Role comes from the SAME `getActiveMember` call that proves membership, so
- * it can never disagree with which workspace was actually resolved. A member
- * row that is missing entirely (should not happen for a home workspace, whose
- * owner-at-creation invariant this codebase maintains everywhere it creates
- * one) resolves to the least-privileged 'member' rather than throwing --
- * fail-closed, matching this codebase's existing authorization conventions.
+ * it can never disagree with which workspace was actually resolved, and is
+ * read through `parseWorkspaceRole` (roles.ts). A member row that is missing
+ * entirely (should not happen for a home workspace, whose owner-at-creation
+ * invariant this codebase maintains everywhere it creates one) resolves to the
+ * least-privileged 'member' rather than throwing -- fail-closed, matching this
+ * codebase's existing authorization conventions.
  */
 async function resolveActiveWorkspace(
   headers: Request['headers'],
@@ -10086,7 +10870,7 @@ async function resolveActiveWorkspace(
     homeWorkspaceId: string;
     activeOrganizationId: string | null;
   }
-): Promise<{ userId: string; workspaceId: string; email: string; role: 'owner' | 'member' }> {
+): Promise<{ userId: string; workspaceId: string; email: string; role: WorkspaceRole }> {
   const authHeaders = fromNodeHeaders(headers);
 
   if (identity.activeOrganizationId) {
@@ -10096,7 +10880,7 @@ async function resolveActiveWorkspace(
         userId: identity.userId,
         workspaceId: identity.activeOrganizationId,
         email: identity.email,
-        role: member.role === 'owner' ? 'owner' : 'member'
+        role: parseWorkspaceRole(member.role)
       };
     }
   }
@@ -10114,7 +10898,7 @@ async function resolveActiveWorkspace(
     userId: identity.userId,
     workspaceId: identity.homeWorkspaceId,
     email: identity.email,
-    role: homeMember?.role === 'owner' ? 'owner' : 'member'
+    role: homeMember ? parseWorkspaceRole(homeMember.role) : 'member'
   };
 }
 
@@ -10152,7 +10936,15 @@ function enforceAllowedOrigin(req: Request, res: Response, next: NextFunction) {
     'http://localhost:43173',
     'http://localhost:43887'
   ]);
-  if (!allowed.has(origin)) return res.status(403).json({ error: 'Origin not allowed' });
+  if (!allowed.has(origin)) {
+    if (isPublicApiPath(req))
+      return sendPublicApiError(
+        req,
+        res,
+        new PublicApiError(403, 'origin_not_allowed', 'Origin not allowed')
+      );
+    return res.status(403).json({ error: 'Origin not allowed' });
+  }
   next();
 }
 
@@ -10187,7 +10979,10 @@ function linkedinRoute(handler: (req: AuthedRequest, res: Response) => Promise<u
       await handler(req, res);
     } catch (error) {
       if (error instanceof LinkedInApiError || error instanceof LinkedInPostsApiError) {
-        res.status(error.status).json({ error: error.message });
+        res.status(error.status).json({
+          error: error.message,
+          ...(error.code ? { code: error.code, ...(error.details ?? {}) } : {})
+        });
         return;
       }
       next(error);
@@ -10197,7 +10992,12 @@ function linkedinRoute(handler: (req: AuthedRequest, res: Response) => Promise<u
 
 /** Turn only EXPECTED manager-domain failures into 4xx; database faults still surface as 500. */
 function rethrowLinkedInManagerError(error: unknown): never {
-  if (error instanceof LinkedInApiError || error instanceof z.ZodError) throw error;
+  if (
+    error instanceof LinkedInApiError ||
+    error instanceof z.ZodError ||
+    error instanceof EntitlementDeniedError
+  )
+    throw error;
   const code =
     typeof error === 'object' && error !== null && 'code' in error
       ? String((error as { code?: unknown }).code ?? '')
@@ -10322,19 +11122,12 @@ function linkedinWorkerConfigOrRefuse(): LinkedInLocalWorkerConfig {
 }
 
 /**
- * Production gate for browser-based LinkedIn harvesting. Existing rows remain
- * readable, but creating a new browser walk is always refused.
+ * Why browser-based LinkedIn harvesting is off, for the read route. Existing
+ * rows remain readable; creating a walk is refused with
+ * `unsupportedIntakeRefusal` (TRV-021/022/023).
  */
 const DISABLED_LINKEDIN_LEAD_SOURCING_REASON =
   'Manual browser-based LinkedIn lead sourcing is disabled. Trevra may observe engagement on a post it published only when TREVRA_LINKEDIN_LEAD_SOURCING=true and the existing local/companion gate allows it. Import a CSV, add profiles manually, or use an existing lead list for arbitrary sourcing.';
-
-function assertLeadSourcingOn(): void {
-  // Arbitrary browser harvesting is not exposed as a production action. The
-  // only background exception is engagement on a post Trevra itself published,
-  // with durable provenance and the explicit sourcing/companion gate enforced
-  // by jobs.ts. Existing harvested rows remain readable/importable.
-  throw new LinkedInApiError(DISABLED_LINKEDIN_LEAD_SOURCING_REASON, 409);
-}
 
 type SideTaskScheduleView = {
   startAt: Date;
@@ -10718,10 +11511,29 @@ const linkedinLeadFieldMappingSchema = z
     phone: z.string().min(1).optional(),
     country: z.string().min(1).optional(),
     profileUrl: z.string().min(1).optional(),
-    fullName: z.string().min(1).optional()
+    fullName: z.string().min(1).optional(),
+    title: z.string().min(1).optional()
   })
   .strict();
 
+/**
+ * A pasted list of LinkedIn profile URLs. The character ceiling is sized so
+ * the binding limit is `PROFILE_URL_IMPORT_CAP` profiles (10,000 x 200 chars),
+ * not a string length an operator cannot see. Not trimmed: a leading blank
+ * line still counts, so the line numbers in rejections match the paste.
+ */
+const linkedinProfileUrlPasteSchema = z
+  .object({
+    urls: z
+      .string()
+      .max(2_000_000)
+      .refine((value) => value.trim().length > 0, 'Paste at least one LinkedIn profile URL.'),
+    seatKey: linkedinSeatKeySchema.optional()
+  })
+  .strict();
+
+/** How many rejected entries one profile-URL check lists; the count is always exact. */
+const PROFILE_URL_REJECTIONS_SHOWN = 200;
 const linkedinLeadContactUpdateSchema = z
   .object({
     firstName: z.string().trim().min(1).max(200),
@@ -11022,7 +11834,16 @@ const linkedinActionFiltersSchema = z.object({
  */
 const linkedinSkipSchema = z.object({}).strict();
 // One field, strict: an edit changes words and nothing else.
-const linkedinEditBodySchema = z.object({ body: z.string().min(1).max(8000) }).strict();
+// Words, plus (TRV-040) an optional attachment list checked against the row
+// kind's rich-content row. Nothing here can move status, slot, target or kind.
+const linkedinEditBodySchema = z
+  .object({ body: z.string().min(1).max(8000), attachments: richAttachmentListSchema.optional() })
+  .strict();
+
+const linkedinPostMediaBody = express.raw({
+  type: [...LINKEDIN_POST_IMAGE_TYPES],
+  limit: LINKEDIN_POST_IMAGE_MAX_BYTES
+});
 
 /**
  * The one sanctioned way an HTTP request reports a send.
@@ -11218,7 +12039,53 @@ const linkedinInboxFiltersSchema = z.object({
   seatKey: z.string().trim().min(1).max(64).optional(),
   search: z.string().trim().max(120).optional(),
   offset: z.coerce.number().int().min(0).max(100000).default(0),
-  limit: z.coerce.number().int().min(1).max(500).default(100)
+  limit: z.coerce.number().int().min(1).max(500).default(100),
+  // TRV-036 organization filters.
+  tagId: z.string().trim().min(1).max(120).optional(),
+  /** 'me', 'unassigned', or a Trevra user id. */
+  assignee: z.string().trim().min(1).max(120).optional(),
+  starred: queryBoolean.optional(),
+  archived: z
+    .enum(['true', 'false', 'any'])
+    .transform((value) => (value === 'any' ? ('any' as const) : value === 'true'))
+    .optional(),
+  lastFrom: z.enum(['lead', 'sender']).optional()
+});
+
+const inboxTagColorSchema = z.enum(INBOX_TAG_COLORS);
+const inboxTagCreateSchema = z.object({
+  name: z.string().trim().min(1).max(40),
+  color: inboxTagColorSchema.optional()
+});
+const inboxTagUpdateSchema = z
+  .object({
+    name: z.string().trim().min(1).max(40).optional(),
+    color: inboxTagColorSchema.optional()
+  })
+  .refine((value) => value.name !== undefined || value.color !== undefined, {
+    message: 'Change the name or the colour'
+  });
+const inboxThreadOrganizeSchema = z
+  .object({
+    starred: z.boolean().optional(),
+    archived: z.boolean().optional(),
+    unread: z.boolean().optional(),
+    assigneeUserId: z.string().trim().min(1).max(120).nullable().optional()
+  })
+  .strict();
+const inboxThreadTagSchema = z.object({ tagId: z.string().trim().min(1).max(120) });
+const inboxNoteSchema = z.object({ body: z.string().trim().min(1).max(THREAD_NOTE_BODY_MAX) });
+const inboxClassificationConfirmSchema = z.object({
+  confirmedClass: z.enum(REPLY_CLASSES),
+  endMembership: z.boolean().optional()
+});
+// The id list is bounded well above INBOX_BULK_MAX so the domain function, not
+// the parser, answers an over-cap selection with its clear message.
+const inboxBulkSchema = z.object({
+  threadIds: z.array(z.string().trim().min(1).max(120)).min(1).max(5000),
+  action: z.enum(INBOX_BULK_ACTIONS),
+  tagId: z.string().trim().min(1).max(120).optional(),
+  assigneeUserId: z.string().trim().min(1).max(120).optional()
 });
 
 /**
@@ -11258,8 +12125,9 @@ const linkedinReplySchema = z
   .object({
     body: z.string().min(1).max(8000),
     plannedFor: z.string().datetime().optional(),
-    /** Which account is replying. See `linkedinInboxSyncSchema`. */
-    seatKey: linkedinSeatKeySchema.default(OWNER_SEAT_KEY)
+    seatKey: linkedinSeatKeySchema.default(OWNER_SEAT_KEY),
+    /** TRV-040: refused by the matrix with its code; replies are text-only. */
+    attachments: richAttachmentListSchema.optional()
   })
   .strict();
 
@@ -11358,7 +12226,9 @@ const accountImportSchema = z
           })
       )
       .max(4000)
-      .default([])
+      .default([]),
+    /** Put the imported People in this lead list as well (TRV-029). */
+    leadListId: z.string().trim().min(1).max(120).optional()
   })
   .strict();
 
@@ -11551,6 +12421,21 @@ interface LinkedInCeiling {
   /** The same fact in a sentence a founder can read. */
   rule: string;
   /**
+   * DAY ROWS ONLY. What the send-time gate admits of this kind in the 24 hours
+   * ending now (`guard.ts` `linkedInDailyAllowance`): `ceiling` above after
+   * today's draw and the cold-account day-over-day ramp, and `remaining` after
+   * the operator pool, the rolling 7- and 30-day bands, the InMail quota and
+   * the outstanding-invite backlog -- the number the managed-campaign planner
+   * budgets with (`runner.ts`). `ceiling` above stays the structural number.
+   */
+  today?: {
+    ceiling: number;
+    used: number;
+    remaining: number;
+    boundBy: LinkedInAllowanceBound;
+    rule: string;
+  };
+  /**
    * The provenance of `bandCeiling` -- of the RESEARCH, not of the number that
    * ended up binding. An operator's own setting has no confidence tag and is
    * not given one here: `ceilingSource` says when it is what bound, and
@@ -11560,8 +12445,6 @@ interface LinkedInCeiling {
   confidence: LinkedInLimitConfidence;
   source: string;
 }
-
-const LINKEDIN_WINDOW_HOURS = { day: 24, week: 24 * 7, month: 24 * 30 } as const;
 
 /** The three kinds that share ONE operator setting. `guard.ts` counts them together. */
 const MESSAGE_POOL_KINDS = ['dm', 'reply', 'inmail', 'group_message', 'event_message'] as const;
@@ -11631,11 +12514,14 @@ async function effectiveLinkedInLimits(
   for (const kind of PACED_KINDS) {
     const bandLimits = bandForSeat(kind, band, seat);
     bands[kind] = bandLimits;
-    const [usedDay, usedWeek, usedMonth] = await Promise.all([
-      countActionsInWindow(db, seatRef, kind, LINKEDIN_WINDOW_HOURS.day, now),
-      countActionsInWindow(db, seatRef, kind, LINKEDIN_WINDOW_HOURS.week, now),
-      countActionsInWindow(db, seatRef, kind, LINKEDIN_WINDOW_HOURS.month, now)
-    ]);
+    // COUNTED THE GATE'S WAY, by the gate's own ledger statement: this kind's
+    // family (an event invite spends the invite week), on this seat and every
+    // seat confirmed as the same member. Single-kind counts showed weekly room
+    // the gate then refused.
+    const today = await linkedInDailyAllowance(db, seatRef, seat, kind, now);
+    const usedDay = today.used;
+    const usedWeek = today.used7d;
+    const usedMonth = today.used30d;
 
     /**
      * THE CEILING THE PACER AND THE GATE WILL ACTUALLY APPLY, through the same
@@ -11664,18 +12550,18 @@ async function effectiveLinkedInLimits(
     // `warmupMultiplier` here reported zero profile views in week 1 for a seat
     // the gate would have let view all fifteen.
     const kindMultiplier = warmupOverride ? 1 : warmupMultiplierFor(kind, warmupWeek);
+    // No acceptance throttle: low acceptance is advisory since the simplified
+    // dispatch (docs/release/2026-10-27-linkedin-simplified-dispatch.md), and
+    // neither the gate nor the planner halves for it. This is the structural
+    // ceiling; `today` below is what the gate admits today, and what the
+    // managed-campaign planner budgets with (`runner.ts`).
     const afterWarmup = Math.floor(dailyCeiling * kindMultiplier);
-    // Halves, never zeroes -- a seat cut to zero can never produce the outcomes
-    // that would clear the throttle, so "halve it" would become "end it".
-    const afterThrottle = throttled
-      ? Math.max(afterWarmup > 0 ? 1 : 0, Math.floor(afterWarmup * ACCEPTANCE_THROTTLE_FACTOR))
-      : afterWarmup;
 
     const poolNote = MESSAGE_POOL_KINDS.includes(kind as (typeof MESSAGE_POOL_KINDS)[number])
       ? ' That setting is one pool over DMs, replies and InMails together, not a number for this kind alone.'
       : '';
 
-    let ceiling = afterThrottle;
+    let ceiling = afterWarmup;
     let boundBy = ceilingSource === 'band' ? 'band-ceiling' : 'operator-daily-limit';
     let rule =
       ceilingSource === 'operator'
@@ -11695,9 +12581,6 @@ async function effectiveLinkedInLimits(
       ceiling = 0;
       boundBy = 'seat-paused';
       rule = `Seat '${seat.label}' is paused${seat.pausedReason ? `: ${seat.pausedReason}` : ''}. Nothing is scheduled while it is paused.`;
-    } else if (throttled && afterThrottle < afterWarmup && acceptance.rate !== null) {
-      boundBy = 'acceptance-rate';
-      rule = `${ACCEPTANCE_WINDOW_DAYS}-day invite acceptance is ${(acceptance.rate * 100).toFixed(0)}% (${acceptance.accepted} of ${acceptance.decided} decided), below the ${(MIN_ACCEPTANCE_RATE * 100).toFixed(0)}% floor, so volume is halved until it recovers.`;
     } else if (kindMultiplier < 1) {
       boundBy = 'warmup-multiplier';
       // The ramp is a percentage OF the binding ceiling, not of the band, which
@@ -11720,6 +12603,13 @@ async function effectiveLinkedInLimits(
       remaining: Math.max(0, ceiling - usedDay),
       boundBy,
       rule,
+      today: {
+        ceiling: today.ceiling,
+        used: today.used,
+        remaining: today.remaining,
+        boundBy: today.boundBy,
+        rule: today.rule
+      },
       confidence: 'REPORTED',
       source: `${LINKEDIN_PLAN_DOC} 1.4`
     });
@@ -11808,9 +12698,10 @@ async function effectiveLinkedInLimits(
         accepted: acceptance.accepted,
         rate: acceptance.rate,
         floor: MIN_ACCEPTANCE_RATE,
-        throttleFactor: ACCEPTANCE_THROTTLE_FACTOR,
+        // 1: nothing is reduced for low acceptance any more. Kept for API shape.
+        throttleFactor: 1,
         throttled,
-        rule: `Sustained invite acceptance below ${(MIN_ACCEPTANCE_RATE * 100).toFixed(0)}% over ${ACCEPTANCE_WINDOW_DAYS} days reads as spam and halves volume. The denominator is DECIDED invites, never sent ones: an unanswered invite is not a refusal.`,
+        rule: `Sustained invite acceptance below ${(MIN_ACCEPTANCE_RATE * 100).toFixed(0)}% over ${ACCEPTANCE_WINDOW_DAYS} days reads as spam, so it is flagged as an advisory to review targeting; it does not reduce volume. The denominator is DECIDED invites, never sent ones: an unanswered invite is not a refusal.`,
         confidence: 'REPORTED' as LinkedInLimitConfidence,
         source: `${LINKEDIN_PLAN_DOC} 1.3`
       },

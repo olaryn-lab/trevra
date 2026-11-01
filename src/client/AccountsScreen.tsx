@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Building2,
   ChevronDown,
@@ -13,6 +13,7 @@ import {
 import {
   draftContentOpportunityLinkedIn,
   getAccountSourceProviders,
+  getLinkedInManagerLeadLists,
   getObservationProviderHealth,
   getRankedAccounts,
   importAccounts,
@@ -32,8 +33,9 @@ import {
 import './account-import-workbench.css';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
-import { Select } from './ui/primitives';
+import { Field, Select } from './ui/primitives';
 import { plural } from './ui/plural';
+import type { LinkedInLeadList } from '../server/linkedin/lead-lists';
 import {
   collectPreparedPeople,
   prepareAccountFiles,
@@ -177,6 +179,14 @@ export function AccountsScreen({
   const [result, setResult] = useState<AccountImportResult | null>(null);
   const [fileSummary, setFileSummary] = useState('');
   const [preparedFiles, setPreparedFiles] = useState<PreparedAccountFiles | null>(null);
+  // TRV-029: People from a reviewed import may also go into a lead list, so a
+  // campaign on that list admits them through its usual checks.
+  const [leadLists, setLeadLists] = useState<LinkedInLeadList[] | null>(null);
+  const [leadListId, setLeadListId] = useState('');
+  const preparedPeople = useMemo(
+    () => (preparedFiles?.rows.length ? collectPreparedPeople(preparedFiles.rows) : []),
+    [preparedFiles]
+  );
   const [sourceProviders, setSourceProviders] = useState<AccountSourceProvider[]>([]);
   const [sourceProvider, setSourceProvider] = useState('directory');
   const [sourceKeywords, setSourceKeywords] = useState('');
@@ -246,6 +256,13 @@ export function AccountsScreen({
       .catch(() => undefined);
   }, []);
 
+  useEffect(() => {
+    if (preparedPeople.length === 0 || leadLists !== null) return;
+    void getLinkedInManagerLeadLists()
+      .then(setLeadLists)
+      .catch(() => setLeadLists([]));
+  }, [preparedPeople.length, leadLists]);
+
   const runImport = async () => {
     const importText = preparedFiles?.rows.length
       ? serializePreparedAccountRows(preparedFiles.rows)
@@ -263,7 +280,9 @@ export function AccountsScreen({
       const imported = await importAccounts({
         text: importText,
         source,
-        ...(preparedFiles?.rows.length ? { people: collectPreparedPeople(preparedFiles.rows) } : {})
+        ...(preparedPeople.length
+          ? { people: preparedPeople, ...(leadListId ? { leadListId } : {}) }
+          : {})
       });
       setResult(imported);
       setShowAddMore(true);
@@ -278,10 +297,13 @@ export function AccountsScreen({
         setFileSummary('');
         setPreparedFiles(null);
       }
+      const placed = imported.leadList
+        ? ` ${plural(imported.leadList.inserted + imported.leadList.duplicates, 'person', 'people')} in the lead list.`
+        : '';
       setToast(
-        imported.created > 0 || (imported.people?.created ?? 0) > 0
+        (imported.created > 0 || (imported.people?.created ?? 0) > 0
           ? `${plural(imported.created, 'account')}, ${plural(imported.people?.created ?? 0, 'person', 'people')} added.`
-          : 'All usable accounts and people were already imported.'
+          : 'All usable accounts and people were already imported.') + placed
       );
       await load();
     } catch (err) {
@@ -590,6 +612,10 @@ export function AccountsScreen({
                   setText(serializePreparedAccountRows(prepared.rows));
                 }}
                 runImport={runImport}
+                peopleCount={preparedPeople.length}
+                leadLists={leadLists ?? []}
+                leadListId={leadListId}
+                setLeadListId={setLeadListId}
                 heading="Add more accounts"
                 subheading="Paste a list, choose a file, or choose a folder. Existing accounts are skipped."
               />
@@ -618,6 +644,10 @@ export function AccountsScreen({
               setText(serializePreparedAccountRows(prepared.rows));
             }}
             runImport={runImport}
+            peopleCount={preparedPeople.length}
+            leadLists={leadLists ?? []}
+            leadListId={leadListId}
+            setLeadListId={setLeadListId}
             heading="Start with the list you already have"
             subheading="Paste a list, choose a file, or choose a folder. Accounts are scored after their sites are read."
           />
@@ -669,6 +699,10 @@ function AddAccountsForm({
   preparedFiles,
   onPreparedChange,
   runImport,
+  peopleCount,
+  leadLists,
+  leadListId,
+  setLeadListId,
   heading,
   subheading
 }: {
@@ -683,6 +717,10 @@ function AddAccountsForm({
   preparedFiles: PreparedAccountFiles | null;
   onPreparedChange: (prepared: PreparedAccountFiles) => void;
   runImport: () => void;
+  peopleCount: number;
+  leadLists: readonly LinkedInLeadList[];
+  leadListId: string;
+  setLeadListId: (value: string) => void;
   heading: string;
   subheading: string;
 }) {
@@ -782,12 +820,33 @@ function AddAccountsForm({
           </Select>
           <small className="li-hint">Saved with the account.</small>
         </label>
+        {peopleCount > 0 && leadLists.length > 0 && (
+          <Field
+            label="Also add their people to a lead list"
+            hint="Optional. A running campaign on that list checks each person like any other lead."
+          >
+            <Select
+              value={leadListId}
+              disabled={importing}
+              onChange={(event) => setLeadListId(event.target.value)}
+            >
+              <option value="">No lead list</option>
+              {leadLists.map((list) => (
+                <option key={list.id} value={list.id}>
+                  {list.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+        )}
       </div>
 
       <div className="panel-footer">
         <span>
           {hasWorkbench
-            ? `${plural(included, 'reviewed account')} will be imported. Nothing is contacted.`
+            ? peopleCount > 0 && leadListId
+              ? `${plural(included, 'reviewed account')} will be imported and their people added to the lead list.`
+              : `${plural(included, 'reviewed account')} will be imported. Nothing is contacted.`
             : !text.trim()
               ? 'Paste at least one domain to enable import.'
               : 'Import adds accounts. It does not contact anyone.'}

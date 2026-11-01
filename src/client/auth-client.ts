@@ -1,5 +1,9 @@
 import { createAuthClient } from 'better-auth/react';
 import { magicLinkClient, organizationClient } from 'better-auth/client/plugins';
+import { hasCapability, parseWorkspaceRole, type Capability } from '../server/roles';
+import type { WorkspaceRole } from './workspace-role';
+
+export { lacksOwnerRole, type WorkspaceRole } from './workspace-role';
 
 /**
  * The `organization` plugin (docs/superpowers/specs/2026-08-13-team-
@@ -23,23 +27,16 @@ export const authClient = createAuthClient({
 });
 
 /**
- * `pending` until BOTH the organization and the member read have resolved, so
- * a panel can hold back the owner controls AND the member's read-only line:
- * an owner on a hard reload must not see "Only the workspace owner can ..."
- * flash on, and a member must not see an owner control flash on.
- */
-export type WorkspaceRole = 'pending' | 'owner' | 'member';
-
-/**
- * The one role signal every owner-only control in the app reads.
- * `activeMember?.role === 'owner'` is the one place that decides who is an
- * owner once the reads have resolved; everyone else is a member.
+ * The one role signal every role-gated control in the app reads. The server's
+ * `parseWorkspaceRole` (src/server/roles.ts) decides owner / manager / member
+ * from the Better Auth member row, so the browser and the API agree on it.
+ * The server stays the source of truth: this only hides controls.
  */
 export function useWorkspaceRole(): WorkspaceRole {
   const { isPending: orgPending } = authClient.useActiveOrganization();
   const { data: activeMember, isPending: memberPending } = authClient.useActiveMember();
   if (orgPending || memberPending) return 'pending';
-  return activeMember?.role === 'owner' ? 'owner' : 'member';
+  return parseWorkspaceRole(activeMember?.role);
 }
 
 /**
@@ -48,4 +45,13 @@ export function useWorkspaceRole(): WorkspaceRole {
  */
 export function useIsWorkspaceOwner(): boolean {
   return useWorkspaceRole() === 'owner';
+}
+
+/**
+ * Whether the signed-in role holds one capability of the central map in
+ * src/server/roles.ts. False while the role is pending.
+ */
+export function useWorkspaceCan(capability: Capability): boolean {
+  const role = useWorkspaceRole();
+  return role !== 'pending' && hasCapability(role, capability);
 }

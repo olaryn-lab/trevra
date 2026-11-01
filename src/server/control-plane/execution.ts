@@ -14,6 +14,8 @@ import { projectPreparedConversationEmail } from '../conversations.js';
 import { communityReplyPayloadSchema, publishCommunityReply } from '../outreach/publish.js';
 import { crmActivityPayloadSchema, logCrmActivity } from '../crm/activity.js';
 import { bufferDraftPayloadSchema, createBufferDraft } from '../content/buffer.js';
+import { executeCrmContactUpsert } from '../crm/contact-upsert-execute.js';
+import { payloadAttachmentViolation, type RichContentChannel } from '../../shared/rich-content.js';
 /**
  * External execution is intentionally a closed GTM action set.
  *
@@ -25,11 +27,40 @@ export const EXECUTION_ACTION_TYPES = [
   'email.send',
   'community.reply',
   'crm.log-activity',
-  'buffer.create-draft'
+  'buffer.create-draft',
+  'crm.upsert-contact'
 ] as const;
 export type ExecutionActionType = (typeof EXECUTION_ACTION_TYPES)[number];
 const actionTypeSchema = z.enum(EXECUTION_ACTION_TYPES);
 
+/**
+ * An adapter marks a definite refusal with `retryable: false` (a 4xx, a stale
+ * prepare, a payload-hash mismatch). The playbook engine then fails the step
+ * instead of re-running a write that cannot succeed with the same payload.
+ * Errors without the flag keep the engine's existing retry behavior.
+ */
+export function isRetryableExecutionError(error: unknown): boolean {
+  return !(
+    error &&
+    typeof error === 'object' &&
+    (error as { retryable?: unknown }).retryable === false
+  );
+}
+
+/**
+ * TRV-040 send boundary: these channels are text-only in the rich-content
+ * matrix. A payload naming attachments is a definite refusal with the matrix's
+ * code and reason -- never a send with the attachment quietly stripped by a
+ * schema that does not know the key.
+ */
+function refuseRichPayload(channel: RichContentChannel, payload: unknown): void {
+  const violation = payloadAttachmentViolation(channel, payload);
+  if (violation)
+    throw Object.assign(new Error(`${violation.reason} Nothing was sent.`), {
+      code: violation.code,
+      retryable: false
+    });
+}
 const emailPayloadSchema = z.object({
   recipient: z.string().email(),
   subject: z.string().min(1).max(200),
@@ -53,6 +84,7 @@ export async function executePreparedPlaybookAction(
   const actionType = actionTypeSchema.parse(input.actionType);
 
   if (actionType === 'email.send') {
+    refuseRichPayload('email', input.payload);
     const payload = emailPayloadSchema.parse(input.payload);
     const metadata = payload.metadata ?? {};
     const approvedConnectionId = await approvedMailboxConnection(db, input.workspaceId, metadata);
@@ -138,6 +170,7 @@ export async function executePreparedPlaybookAction(
   }
 
   if (actionType === 'community.reply') {
+    refuseRichPayload('community_reply', input.payload);
     const payload = communityReplyPayloadSchema.parse(input.payload);
     const now = new Date();
     const outcome = await publishCommunityReply(
@@ -156,8 +189,18 @@ export async function executePreparedPlaybookAction(
   }
 
   if (actionType === 'buffer.create-draft') {
+    refuseRichPayload('buffer_draft', input.payload);
     const payload = bufferDraftPayloadSchema.parse(input.payload);
     const result = await createBufferDraft(db, input.workspaceId, payload, input.payloadHash);
+    return { provider: result.provider, externalRef: result.externalRef, actionType };
+  }
+
+  if (actionType === 'crm.upsert-contact') {
+    const result = await executeCrmContactUpsert(db, {
+      workspaceId: input.workspaceId,
+      payload: input.payload,
+      payloadHash: input.payloadHash
+    });
     return { provider: result.provider, externalRef: result.externalRef, actionType };
   }
 

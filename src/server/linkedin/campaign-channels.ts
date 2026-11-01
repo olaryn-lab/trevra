@@ -23,6 +23,7 @@ import { listSendingMailboxes, resolveMailboxAddress } from '../email/mailbox-ad
 import { getSenderDeliverability } from '../email/sender-deliverability.js';
 import { unsubscribeConfigured } from '../email/unsubscribe.js';
 import { campaignEmailPolicyGate } from './campaign-email-approval.js';
+import { payloadAttachmentViolation } from '../../shared/rich-content.js';
 import {
   campaignTrackableUrls,
   escapeCampaignHtml,
@@ -450,6 +451,10 @@ async function executeEmail(
   const body = String(payload.body ?? '').trim();
   if (!recipient || !subject || !body)
     throw new Error('Email action requires recipient, subject, and body.');
+  // TRV-040: campaign email is text-only in the rich-content matrix. A payload
+  // naming attachments is HELD with the matrix's reason, never sent without them.
+  const contentRefusal = payloadAttachmentViolation('email', payload);
+  if (contentRefusal) throw new CampaignEmailPolicyHold(contentRefusal.reason);
   // Cold campaign email needs a recorded lawful basis wherever the recipient's
   // country requires one. Checked BEFORE tracking tokens exist, so a refused
   // send leaves nothing behind. Not legal advice; verify with counsel.

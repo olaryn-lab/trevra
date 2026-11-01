@@ -23,6 +23,7 @@ import {
   setDailyLeadCap,
   getDailyLeadCap,
   DEFAULT_DAILY_LEAD_CAP,
+  MAX_DAILY_LEAD_CAP,
   type LeadSourceKind,
   type LeadSourcingConfig
 } from './leads.js';
@@ -772,10 +773,15 @@ describe('the scrubber runs on scraped leads too', () => {
 });
 
 describe('the daily lead cap', () => {
-  it('defaults to 100 and refuses a value outside 0-1000', async () => {
+  it('defaults to 25 and refuses a value outside 0-100', async () => {
+    expect(DEFAULT_DAILY_LEAD_CAP).toBe(25);
+    expect(MAX_DAILY_LEAD_CAP).toBe(100);
     expect(await getDailyLeadCap(db, WORKSPACE_ID)).toBe(DEFAULT_DAILY_LEAD_CAP);
-    await expect(setDailyLeadCap(db, WORKSPACE_ID, 1001)).rejects.toThrow();
+    await expect(setDailyLeadCap(db, WORKSPACE_ID, MAX_DAILY_LEAD_CAP + 1)).rejects.toThrow();
     await expect(setDailyLeadCap(db, WORKSPACE_ID, -1)).rejects.toThrow();
+    expect(await setDailyLeadCap(db, WORKSPACE_ID, MAX_DAILY_LEAD_CAP, NOW)).toBe(
+      MAX_DAILY_LEAD_CAP
+    );
     // 0 IS LEGAL: it is how an operator pauses without touching an environment
     // variable they may not own.
     expect(await setDailyLeadCap(db, WORKSPACE_ID, 0, NOW)).toBe(0);

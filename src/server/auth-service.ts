@@ -3,6 +3,7 @@ import { migrationAuthority, mountAuthwardLink } from './authward-link.js';
 import type { Express, RequestHandler } from 'express';
 import { authwardAuthority } from './authward-config.js';
 import type { IncomingHttpHeaders } from 'node:http';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import pg from 'pg';
 import {
   nativeTrevraPasskeyPlugin,
@@ -10,9 +11,17 @@ import {
 } from './native-product-passkey.js';
 import { createRemoteJWKSet, customFetch, jwtVerify } from 'jose';
 import { APIError, betterAuth } from 'better-auth';
+import { createAuthMiddleware, getSessionFromCtx } from 'better-auth/api';
 import { fromNodeHeaders } from 'better-auth/node';
 import { getMigrations } from 'better-auth/db/migration';
 import { genericOAuth, organization } from 'better-auth/plugins';
+import { createAccessControl } from 'better-auth/plugins/access';
+import {
+  adminAc,
+  defaultStatements,
+  memberAc,
+  ownerAc
+} from 'better-auth/plugins/organization/access';
 import type { Db } from './db.js';
 import { DEMO_WORKSPACE_ID, id } from './db.js';
 import {
@@ -22,7 +31,17 @@ import {
   smtpConfigured
 } from './email.js';
 import { recordMarketingEvent } from './public-site.js';
+import { getBillingClient } from './billing-client.js';
+import { EntitlementDeniedError, loadEntitlements } from './billing/entitlements.js';
+import { assertTeamInvite, assertTeamJoin } from './billing/boundaries.js';
 import { exchangeAuthwardCode } from './authward-token.js';
+import { appendDomainEvent } from './control-plane/events.js';
+import {
+  canManageTeammate,
+  hasCapability,
+  parseWorkspaceRole,
+  type WorkspaceRole
+} from './roles.js';
 
 const { Pool } = pg;
 const production = process.env.NODE_ENV === 'production';
@@ -486,11 +505,41 @@ function requireProvisioningDb(): Db {
 }
 
 /**
+ * TRV-057 team limit for Better Auth's own invitation and membership routes.
+ * Trevra's POST /api/team/members already holds the entitlement lock around
+ * `createInvitation`; these hooks run on other connections, so they check
+ * without the lock (taking it here would wait on that route's transaction).
+ * Direct calls to Better Auth's endpoints are therefore checked, but two of
+ * them racing at the limit are not serialized: Better Auth 1.7 runs
+ * `beforeCreateInvitation` and the invitation insert outside any transaction
+ * a hook can join, so there is no transaction to hold the lock in (known gap).
+ * Follows TREVRA_BILLING_ENFORCEMENT like every other boundary: only
+ * `enforce` refuses; `observe` records a would-deny. No-op when Billing is
+ * not configured.
+ */
+async function enforceTeamEntitlement(
+  organizationId: string,
+  mode: 'invite' | 'join'
+): Promise<void> {
+  if (!getBillingClient()) return;
+  const db = requireProvisioningDb();
+  try {
+    const view = await loadEntitlements(db, organizationId);
+    if (mode === 'invite') await assertTeamInvite(db, view, organizationId, { lock: false });
+    else await assertTeamJoin(db, view, organizationId);
+  } catch (error) {
+    if (error instanceof EntitlementDeniedError)
+      throw new APIError('FORBIDDEN', { message: error.message });
+    throw error;
+  }
+}
+
+/**
  * True when `role` (a possibly comma-joined string, e.g. `'owner,admin'`)
  * includes the workspace owner role. Comma-joining is better-auth's own
  * representation for multi-role members (`parseRoles` in the plugin); this
- * workspace only ever assigns a single role per member (spec Non-goals: no
- * custom access-control statements), but a plain `===` check would silently
+ * workspace only ever assigns a single role per member (owner, manager or
+ * member -- see roles.ts), but a plain `===` check would silently
  * stop recognising ownership the day that stops being true, so this parses
  * the same way the plugin does.
  */
@@ -555,7 +604,120 @@ async function listOrganizationMembers(
     [organizationId]
   );
   return result.rows;
+  return result.rows;
 }
+
+/* ===========================================================================
+ * TRV-045: the manager role, and the rules Better Auth's own routes enforce.
+ * ======================================================================== */
+
+/**
+ * The Better Auth access-control role for `manager`, DERIVED from the
+ * capability map (roles.ts) rather than restated: a manager may invite and
+ * remove members, may not touch the organization itself, and gets
+ * `member:update` (role changes) only if the map ever grants `team.roles`.
+ * `owner`, `admin` and `member` stay the plugin's own defaults, byte for byte,
+ * so existing owner and member behaviour on `/organization/*` is unchanged.
+ */
+function betterAuthMemberActions(role: WorkspaceRole): Array<'create' | 'update' | 'delete'> {
+  if (hasCapability(role, 'team.roles')) return ['create', 'update', 'delete'];
+  return hasCapability(role, 'team.remove') ? ['delete'] : [];
+}
+const workspaceAccessControl = createAccessControl(defaultStatements);
+const managerAccess = workspaceAccessControl.newRole({
+  organization: [],
+  member: betterAuthMemberActions('manager'),
+  invitation: hasCapability('manager', 'team.invite') ? ['create', 'cancel'] : [],
+  team: [],
+  ac: ['read']
+});
+
+/**
+ * Who is changing a role, for the domain event `afterUpdateMemberRole` writes.
+ *
+ * Better Auth's member hooks do not receive the acting user, so the one route
+ * allowed to change roles (`PATCH /api/team/members/:memberId`, app.ts) runs
+ * `updateMemberRole` inside this scope after its own owner check. The
+ * `teamRoleGuard` below refuses `/organization/update-member-role` outside it,
+ * which is what makes "every role change records who made it" true rather
+ * than true for one caller.
+ */
+const roleChangeScope = new AsyncLocalStorage<{ actorUserId: string }>();
+
+export function runAsRoleChange<T>(
+  actor: { actorUserId: string },
+  change: () => Promise<T>
+): Promise<T> {
+  return roleChangeScope.run(actor, change);
+}
+
+async function memberRoleIn(organizationId: string, authUserId: string): Promise<WorkspaceRole> {
+  const result = await authPool.query<{ role: string }>(
+    'SELECT role FROM member WHERE "organizationId"=$1 AND "userId"=$2 LIMIT 1',
+    [organizationId, authUserId]
+  );
+  return parseWorkspaceRole(result.rows[0]?.role);
+}
+
+/**
+ * A manager may invite, cancel an invitation for, or remove only a `member`.
+ * Owners and managers as targets need `team.roles`. Members never reach this:
+ * the plugin's own access control refuses them first, exactly as before.
+ */
+async function assertTeammateTarget(
+  organizationId: string,
+  actorAuthUserId: string,
+  targetRole: string,
+  act: 'invite' | 'remove',
+  message: string
+): Promise<void> {
+  const actor = await memberRoleIn(organizationId, actorAuthUserId);
+  if (!canManageTeammate(actor, parseWorkspaceRole(targetRole), act))
+    throw new APIError('FORBIDDEN', { message });
+}
+
+/**
+ * Better Auth `hooks.before`, for the two member routes whose own hooks cannot
+ * see who is acting: role changes only inside `runAsRoleChange`, and a
+ * manager removing only members.
+ */
+const teamRoleGuard = createAuthMiddleware(async (ctx) => {
+  if (ctx.path === '/organization/update-member-role' && !roleChangeScope.getStore())
+    throw new APIError('FORBIDDEN', {
+      message: 'Change workspace roles from Team settings'
+    });
+  if (ctx.path !== '/organization/remove-member') return;
+  const session = await getSessionFromCtx(ctx);
+  if (!session) return;
+  const body = (ctx.body ?? {}) as { memberIdOrEmail?: unknown; organizationId?: unknown };
+  const target = typeof body.memberIdOrEmail === 'string' ? body.memberIdOrEmail : '';
+  const organizationId =
+    typeof body.organizationId === 'string' && body.organizationId
+      ? body.organizationId
+      : ((session.session as { activeOrganizationId?: string | null }).activeOrganizationId ??
+        null);
+  if (!target || !organizationId) return;
+  const targetRow = target.includes('@')
+    ? await authPool.query<{ role: string }>(
+        `SELECT m.role FROM member m JOIN "user" u ON u.id=m."userId"
+         WHERE m."organizationId"=$1 AND lower(u.email)=lower($2) LIMIT 1`,
+        [organizationId, target]
+      )
+    : await authPool.query<{ role: string }>(
+        'SELECT role FROM member WHERE "organizationId"=$1 AND id=$2 LIMIT 1',
+        [organizationId, target]
+      );
+  const targetRole = targetRow.rows[0]?.role;
+  // An unknown target, or an actor the plugin will refuse anyway, is the
+  // plugin's to answer -- this guard only narrows what a manager may do.
+  if (targetRole === undefined) return;
+  const actor = await memberRoleIn(organizationId, session.user.id);
+  if (!hasCapability(actor, 'team.remove')) return;
+  if (!canManageTeammate(actor, parseWorkspaceRole(targetRole), 'remove'))
+    throw new APIError('FORBIDDEN', {
+      message: 'Only the workspace owner can remove an owner or manager'
+    });
+});
 
 export const auth = betterAuth({
   appName: 'Trevra',
@@ -584,14 +746,16 @@ export const auth = betterAuth({
     // request leaves the machine and HTTP avoids requiring a private local CA.
     useSecureCookies: production && process.env.COOKIE_SECURE !== 'false'
   },
+  hooks: { before: teamRoleGuard },
   plugins: [
     authwardProvider,
     nativeTrevraPasskeyPlugin(authPool),
-    // Default roles only (owner / admin / member), no custom access-control
-    // statements and no teams -- spec Non-goals. This workspace uses exactly
-    // two of the three: 'owner' (the credential-management carve-out) and
-    // 'member' (everyone else, full data parity).
+    // Roles: the plugin's default owner / admin / member plus Trevra's
+    // `manager` (TRV-045), whose access-control role is derived from the
+    // capability map in roles.ts. No teams. 'admin' is never assigned.
     organization({
+      ac: workspaceAccessControl,
+      roles: { owner: ownerAc, admin: adminAc, member: memberAc, manager: managerAccess },
       ...(smtpConfigured()
         ? {
             sendInvitationEmail: async (data) => {
@@ -713,11 +877,29 @@ export const auth = betterAuth({
             });
           });
         },
-        // Last-owner protection (spec "Error handling & edge cases"). Wired here
-        // rather than only in a future bespoke route so it protects better-auth's
-        // own auto-mounted `/organization/remove-member` and
-        // `/organization/update-member-role` from day one -- see the doc comment
-        // on `assertOwnerChangeAllowed`.
+        // TRV-057 plan team limit. Creating the organization adds its creator
+        // through beforeAddMember before any member exists; that is never gated.
+        beforeAddMember: async ({ organization }) => {
+          if (!getBillingClient()) return;
+          const members = await listOrganizationMembers(organization.id);
+          if (members.length === 0) return;
+          await enforceTeamEntitlement(organization.id, 'join');
+        },
+        // TRV-045 first (a manager may invite a member only), then the TRV-057
+        // plan team limit.
+        beforeCreateInvitation: async ({ invitation, inviter, organization }) => {
+          await assertTeammateTarget(
+            organization.id,
+            inviter.id,
+            invitation.role,
+            'invite',
+            'Only the workspace owner can invite a manager or owner'
+          );
+          await enforceTeamEntitlement(organization.id, 'invite');
+        },
+        beforeAcceptInvitation: async ({ organization }) => {
+          await enforceTeamEntitlement(organization.id, 'join');
+        },
         afterAcceptInvitation: async ({ invitation, user, organization }) => {
           if (!smtpConfigured()) return;
           try {
@@ -741,6 +923,11 @@ export const auth = betterAuth({
             console.error('Failed to deliver Trevra invitation-accepted email', error);
           }
         },
+        // Last-owner protection (spec "Error handling & edge cases"). Wired here
+        // rather than only in a future bespoke route so it protects better-auth's
+        // own auto-mounted `/organization/remove-member` and
+        // `/organization/update-member-role` from day one -- see the doc comment
+        // on `assertOwnerChangeAllowed`.
         beforeRemoveMember: async ({ member, organization }) => {
           const members = await listOrganizationMembers(organization.id);
           assertOwnerChangeAllowed(members, member.userId, false);
@@ -764,6 +951,34 @@ export const auth = betterAuth({
         beforeUpdateMemberRole: async ({ member, newRole, organization }) => {
           const members = await listOrganizationMembers(organization.id);
           assertOwnerChangeAllowed(members, member.userId, hasOwnerRole(newRole));
+        },
+        // TRV-045: every role change is an append-only domain event naming who
+        // made it (from `runAsRoleChange`), whose role it was, and from/to.
+        afterUpdateMemberRole: async ({ member, previousRole, organization }) => {
+          await appendDomainEvent(requireProvisioningDb(), {
+            workspaceId: organization.id,
+            streamType: 'workspace_member',
+            streamId: member.id,
+            eventType: 'workspace.member_role_changed',
+            actorType: 'user',
+            actorId: roleChangeScope.getStore()?.actorUserId ?? null,
+            payload: {
+              memberId: member.id,
+              authUserId: member.userId,
+              fromRole: previousRole,
+              toRole: member.role
+            }
+          });
+        },
+        // A manager may cancel the invitation of a member only.
+        beforeCancelInvitation: async ({ invitation, cancelledBy, organization }) => {
+          await assertTeammateTarget(
+            organization.id,
+            cancelledBy.id,
+            invitation.role,
+            'invite',
+            'Only the workspace owner can cancel an invitation for a manager or owner'
+          );
         }
       }
     })

@@ -3,6 +3,11 @@ import { zodToJsonSchema } from 'zod-to-json-schema';
 import type { Db } from '../db.js';
 import { OUTREACH_UNSUBSCRIBE_MODES } from '../email/unsubscribe-policy.js';
 import { outreachThreadSchema } from '../outreach/scorer.js';
+import {
+  CRM_UPSERT_APPROVAL_STEP_ID,
+  CRM_UPSERT_PLAYBOOK_ID,
+  crmContactUpsertPayloadSchema
+} from '../crm/contact-upsert-payload.js';
 import type { PlaybookDefinition } from './types.js';
 
 // GTM-only registry: post-sale revenue/project playbooks and financial action flows are intentionally absent.
@@ -697,6 +702,46 @@ export const bufferDraftPlaybook: PlaybookDefinition = {
   source: { type: 'builtin' }
 };
 
+/**
+ * TRV-051. Starts only from `prepareCrmContactUpsert`, which searched the CRM
+ * deterministically and wrote the exact payload to `crm_contact_upserts`. The
+ * founder approves that payload verbatim; execution re-reads the CRM first.
+ */
+export const crmContactUpsertPlaybook: PlaybookDefinition = {
+  id: CRM_UPSERT_PLAYBOOK_ID,
+  version: '1.0.0',
+  name: 'Sync contact to CRM',
+  description:
+    'Create or fill empty fields on one CRM contact after the founder approves the exact match and fields.',
+  inputSchema: crmContactUpsertPayloadSchema,
+  steps: [
+    {
+      id: CRM_UPSERT_APPROVAL_STEP_ID,
+      type: 'approval',
+      title: 'Sync contact to CRM',
+      payload: { $ref: '$.input' }
+    },
+    {
+      id: 'upsert-crm-contact',
+      type: 'action',
+      actionType: 'crm.upsert-contact',
+      approvalStepId: CRM_UPSERT_APPROVAL_STEP_ID,
+      needs: [CRM_UPSERT_APPROVAL_STEP_ID],
+      payload: { $ref: `$.steps.${CRM_UPSERT_APPROVAL_STEP_ID}.input` },
+      // Rate limits and 5xx retry; the adapter marks 4xx and stale prepares
+      // terminal, and its ledger reconciles a retry after an unknown outcome.
+      retry: { maxAttempts: 3, delaySeconds: 60 }
+    }
+  ],
+  output: {
+    approved: { $ref: `$.steps.${CRM_UPSERT_APPROVAL_STEP_ID}.output.approved` },
+    delivery: { $ref: '$.steps.upsert-crm-contact.output' },
+    leadContactId: { $ref: '$.input.subject.leadContactId' }
+  },
+  source: { type: 'builtin' },
+  preparedOnly: true
+};
+
 registerPlaybook(auditLedOutreachPlaybook);
 registerPlaybook(communityOutreachPlaybook);
 registerPlaybook(threadReplyPlaybook);
@@ -705,6 +750,7 @@ registerPlaybook(conversationEmailReplyPlaybook);
 registerPlaybook(emailOutreachPlaybook);
 registerPlaybook(emailOutreachPlaybookV1_1);
 registerPlaybook(bufferDraftPlaybook);
+registerPlaybook(crmContactUpsertPlaybook);
 
 export function registerPlaybook(playbook: PlaybookDefinition): PlaybookDefinition {
   validatePlaybook(playbook);

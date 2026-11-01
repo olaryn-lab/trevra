@@ -1,4 +1,6 @@
 import type { GtmMilestoneKind } from '../shared/milestones';
+import type { RichContentViolation } from '../shared/rich-content';
+import type { WorkspaceRole as ResolvedWorkspaceRole } from '../server/roles';
 import type {
   AgentBudget,
   AgentPrincipal,
@@ -79,6 +81,13 @@ export type CitationSourceSummary = CitationSourceView;
 import type { EmailChannelStatus } from '../server/email/types';
 import type { ConversationMessage, ConversationSummary } from '../server/conversations';
 import type { LinkedInActionKind, LinkedInActionStatus } from '../server/linkedin/actions';
+import type { RepReport, ReportPreset } from '../server/linkedin/rep-reporting';
+export type {
+  RepMetrics,
+  RepReport,
+  ReportMemberRow,
+  ReportPreset
+} from '../server/linkedin/rep-reporting';
 import type { LinkedInPost, LinkedInPostStatus } from '../server/linkedin/posts';
 import type { PostBlock } from '../shared/linkedin-post-format';
 import type { BranchOn, StepCondition } from '../server/linkedin/branching';
@@ -88,6 +97,16 @@ import type {
   LinkedInMessageRecord,
   LinkedInThreadRecord
 } from '../server/linkedin/inbox';
+import type {
+  AssignableMember,
+  InboxBulkAction,
+  InboxTag,
+  InboxTagColor,
+  ReplyClassificationView,
+  ThreadNote,
+  ThreadNoteRevision
+} from '../server/linkedin/inbox-organization';
+import type { ReplyClass } from '../server/linkedin/reply-classification';
 import type {
   LeadSourceKind,
   LeadSourceStatus,
@@ -112,6 +131,7 @@ import type {
   ManualTaskView
 } from '../server/linkedin/managed-campaigns';
 import type { LinkedInCampaignExecution } from '../server/linkedin/execution-state';
+import type { AutoEnrolRule, AutoEnrolSourceKind } from '../server/linkedin/auto-enrol';
 import type {
   Account,
   AccountImportResult,
@@ -160,10 +180,19 @@ type ExportFormat = 'dripify' | 'heyreach' | 'expandi' | 'generic';
 export class ApiError extends Error {
   constructor(
     message: string,
-    public readonly status: number
+    public readonly status: number,
+    /** Machine-readable refusal, e.g. `entitlement_denied` (TRV-057). */
+    public readonly code?: string,
+    /** Where the user can resolve an entitlement refusal. */
+    public readonly billingUrl?: string
   ) {
     super(message);
   }
+}
+
+/** True when the server refused the write because of the workspace plan. */
+export function isEntitlementError(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.code === 'entitlement_denied';
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -174,7 +203,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({ error: response.statusText }));
-    throw new ApiError(body.error ?? 'Request failed', response.status);
+    throw new ApiError(
+      body.error ?? 'Request failed',
+      response.status,
+      typeof body.code === 'string' ? body.code : undefined,
+      typeof body.billingUrl === 'string' ? body.billingUrl : undefined
+    );
   }
   // 204 No Content has no body to parse -- watches' DELETE is the only route
   // that returns it today, and every other caller of `request` always gets a
@@ -209,28 +243,35 @@ export async function resolveUncertainCommunityPost(
   return response.post;
 }
 
+export type BillingUsageLine = {
+  key: 'campaigns' | 'outreach_prepare' | 'team';
+  label: string;
+  used: number;
+  /** `null` = unlimited, `0` = not included in the plan. */
+  limit: number | null;
+  over: boolean;
+};
+
 export type BillingSnapshot =
   | { enabled: false }
   | {
       enabled: true;
+      /** Rollout mode (TREVRA_BILLING_ENFORCEMENT): limits block only under `enforce`. */
+      enforcement: 'off' | 'observe' | 'enforce';
+      canManage: boolean;
       customer: {
-        id: string;
-        product: 'trevra';
-        external_customer_id: string;
-        name: string;
-        billing_email: string | null;
-        currency: string;
-        stripe_customer_id: string | null;
         plan_code: string | null;
+        currency: string;
+        has_payment_profile: boolean;
       };
       subscription: {
         status: string;
         plan_code: string | null;
         scheduled_plan_code?: string | null;
-        stripe_subscription_id?: string | null;
         current_period_start?: string | null;
         current_period_end?: string | null;
         cancel_at_period_end?: boolean;
+        current_period_payment_status?: string;
       };
       credits: {
         balance: string | number;
@@ -242,6 +283,24 @@ export type BillingSnapshot =
       entitlements: {
         features: Record<string, Record<string, unknown>>;
       };
+      state: {
+        fetchedAt: string | null;
+        stale: boolean;
+        withinGrace: boolean;
+        graceEndsAt: string | null;
+      };
+      trial: { active: boolean; expired: boolean; endsAt: string | null } | null;
+      renewal: {
+        renewsOn: string | null;
+        endsOn: string | null;
+        annual: boolean;
+        cancelAtPeriodEnd: boolean;
+        scheduledPlanCode: string | null;
+        noticeDays: number;
+        noticeDue: boolean;
+      };
+      usage: BillingUsageLine[];
+      expansionBlock: { code: string; reason: string } | null;
     };
 
 export type BillingPlan = {
@@ -275,14 +334,60 @@ export async function getBillingPlans(): Promise<BillingPlans> {
   return request('/api/billing/plans');
 }
 
+/** `nonce` identifies one user intent; retrying with it never repeats the action. */
 export async function startBillingCheckout(
   planCode: string,
-  idempotencyKey: string
+  nonce: string
 ): Promise<BillingCheckout> {
   return request('/api/billing/checkout', {
     method: 'POST',
-    body: JSON.stringify({ planCode, idempotencyKey })
+    body: JSON.stringify({ planCode, nonce })
   });
+}
+
+export type BillingPlanPreview = {
+  preview: {
+    change_type: string;
+    apply_immediately: boolean;
+    amount_due: number;
+    currency: string;
+    current_plan_code: string | null;
+    new_plan_code: string;
+    credits_new: string | number;
+    current_period_end?: string | null;
+  };
+  /** Resources already over the target plan's limits; null when unknown. */
+  overLimit: BillingUsageLine[] | null;
+};
+
+export async function previewBillingPlan(planCode: string): Promise<BillingPlanPreview> {
+  return request('/api/billing/preview', {
+    method: 'POST',
+    body: JSON.stringify({ planCode })
+  });
+}
+
+export type BillingLifecycleResponse = {
+  result: { status?: string; url?: string | null; message?: string | null };
+  overLimit?: BillingUsageLine[] | null;
+};
+
+export async function changeBillingPlan(
+  planCode: string,
+  nonce: string
+): Promise<BillingLifecycleResponse> {
+  return request('/api/billing/change', {
+    method: 'POST',
+    body: JSON.stringify({ planCode, nonce })
+  });
+}
+
+export async function cancelBillingPlan(nonce: string): Promise<BillingLifecycleResponse> {
+  return request('/api/billing/cancel', { method: 'POST', body: JSON.stringify({ nonce }) });
+}
+
+export async function resumeBillingPlan(nonce: string): Promise<BillingLifecycleResponse> {
+  return request('/api/billing/resume', { method: 'POST', body: JSON.stringify({ nonce }) });
 }
 
 export async function getPublicConfig(): Promise<PublicConfig> {
@@ -370,6 +475,16 @@ export async function prepareBufferDraft(
     method: 'POST',
     body: JSON.stringify({ channelId })
   });
+}
+
+export type CrmContactUpsert = import('../server/crm/contact-upsert-store').CrmUpsertView;
+
+/** TRV-051: search the CRM and prepare one contact upsert behind approval. */
+export async function prepareCrmContactUpsert(input: {
+  leadContactId: string;
+  connectionId?: string;
+}): Promise<{ upsert: CrmContactUpsert; run: PlaybookRun | null }> {
+  return request('/api/crm/contact-upserts', { method: 'POST', body: JSON.stringify(input) });
 }
 
 export async function getContentPerformance(limit = 100): Promise<ContentPerformanceReport> {
@@ -783,9 +898,10 @@ export async function prepareOutreach(input: {
  * wrapper, and NOT declared here. This one route exists because `organization.
  * createInvitation` is server-only in better-auth's own plugin (see
  * auth-client.ts's comment) and needs this request's own session as the
- * inviter -- there is no client-callable equivalent. Owner-only; the server
- * 403s a member and this simply surfaces that ApiError like every other
- * gated call.
+ * inviter -- there is no client-callable equivalent. Owners and managers may
+ * invite; only an owner may invite a manager or owner (TRV-045,
+ * src/server/roles.ts). The server 403s anyone else and this simply surfaces
+ * that ApiError like every other gated call.
  */
 interface TeamMemberInvited {
   status: 'invited';
@@ -802,9 +918,25 @@ interface TeamMemberInvited {
 
 export async function addTeamMember(input: {
   email: string;
-  role?: 'owner' | 'member';
+  role?: ResolvedWorkspaceRole;
 }): Promise<TeamMemberInvited> {
   return request('/api/team/members', { method: 'POST', body: JSON.stringify(input) });
+}
+
+/**
+ * TRV-045: owner-only role change. The second bespoke team call, because
+ * better-auth's own `update-member-role` endpoint is refused unless it runs
+ * through this route, which is what lets every change record a domain event
+ * naming who made it. The server refuses demoting the last owner.
+ */
+export async function updateTeamMemberRole(
+  memberId: string,
+  role: ResolvedWorkspaceRole
+): Promise<{ member: { id: string; userId: string; role: string }; changed: boolean }> {
+  return request(`/api/team/members/${encodeURIComponent(memberId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ role })
+  });
 }
 
 export async function getIntegrations(): Promise<{
@@ -1630,6 +1762,14 @@ export type {
   LinkedInSeat,
   LinkedInSequence,
   LinkedInThreadRecord,
+  AssignableMember,
+  InboxBulkAction,
+  InboxTag,
+  InboxTagColor,
+  ReplyClass,
+  ReplyClassificationView,
+  ThreadNote,
+  ThreadNoteRevision,
   PacedKind,
   PacingPlan,
   SeatPosture,
@@ -1695,7 +1835,11 @@ export type LinkedInCeilingSource = 'band' | 'operator' | 'operator-override';
 export interface LinkedInCeiling {
   kind: PacedKind;
   window: 'day' | 'week' | 'month';
-  /** What applies right now, after warm-up, throttle, posture and the account's own setting. */
+  /**
+   * The structural daily number the planner budgets with: band or the
+   * account's own setting, warm-up and posture. Not what today admits -- see
+   * `today`.
+   */
   ceiling: number;
   /** The band's own number, before any of that. */
   bandCeiling: number;
@@ -1712,6 +1856,20 @@ export interface LinkedInCeiling {
   /** Which rule produced `ceiling`. */
   boundBy: string;
   rule: string;
+  /**
+   * DAY ROWS ONLY. What the send-time safety check admits of this kind in the
+   * 24 hours ending now: `ceiling` after today's draw and the cold-account
+   * day-over-day ramp; `remaining` also after the account's message pool, the
+   * rolling 7- and 30-day limits, the InMail quota and the outstanding-invite
+   * backlog. This is the "effective today" number.
+   */
+  today?: {
+    ceiling: number;
+    used: number;
+    remaining: number;
+    boundBy: string;
+    rule: string;
+  };
   /**
    * The provenance of `bandCeiling`, i.e. of the RESEARCH -- never of an
    * operator's own setting, which has no confidence tag and is not given one.
@@ -2099,17 +2257,44 @@ export async function skipLinkedInAction(id: string): Promise<LinkedInActionView
 }
 
 /**
+ * A Today handoff card is on screen: stamp it presented. Returns the words as
+ * stamped -- frozen from here on, and what "Mark sent" records. Refused (409)
+ * when the row is no longer this workspace's handoff.
+ */
+export async function presentLinkedInHandoff(
+  id: string
+): Promise<{ actionId: string; copyText: string | null; subject: string | null }> {
+  const result = await request<{
+    handoff: { actionId: string; copyText: string | null; subject: string | null };
+  }>(`/api/linkedin/handoffs/${encodeURIComponent(id)}/present`, {
+    method: 'POST',
+    body: JSON.stringify({})
+  });
+  return result.handoff;
+}
+
+export type LinkedInHandoffFailure = 'profile_unavailable' | 'linkedin_refused';
+
+/**
  * The founder's answer to a human-send handoff in Today: they sent it on
- * LinkedIn themselves, or they are skipping it. A report, never a send.
+ * LinkedIn themselves (optionally saying when), they are skipping it, or
+ * LinkedIn would not let them send it. A report, never a send.
  */
 export async function resolveLinkedInHandoff(
   id: string,
-  resolution: 'sent' | 'skip'
-): Promise<{ actionId: string; status: 'sent' | 'skipped' }> {
-  const result = await request<{ handoff: { actionId: string; status: 'sent' | 'skipped' } }>(
-    `/api/linkedin/handoffs/${encodeURIComponent(id)}/resolve`,
-    { method: 'POST', body: JSON.stringify({ resolution }) }
-  );
+  resolution: 'sent' | 'skip' | 'failed',
+  options: { sentAt?: string; failure?: LinkedInHandoffFailure } = {}
+): Promise<{ actionId: string; status: 'sent' | 'skipped' | 'failed' }> {
+  const result = await request<{
+    handoff: { actionId: string; status: 'sent' | 'skipped' | 'failed' };
+  }>(`/api/linkedin/handoffs/${encodeURIComponent(id)}/resolve`, {
+    method: 'POST',
+    body: JSON.stringify({
+      resolution,
+      ...(options.sentAt ? { sentAt: options.sentAt } : {}),
+      ...(options.failure ? { failure: options.failure } : {})
+    })
+  });
   return result.handoff;
 }
 
@@ -2410,7 +2595,8 @@ export interface LinkedInLeadCsvPreview {
       | 'phone'
       | 'country'
       | 'profileUrl'
-      | 'fullName',
+      | 'fullName'
+      | 'title',
       string
     >
   >;
@@ -2424,7 +2610,8 @@ export interface LinkedInLeadCsvPreview {
       | 'phone'
       | 'country'
       | 'profileUrl'
-      | 'fullName',
+      | 'fullName'
+      | 'title',
       'exact' | 'guessed'
     >
   >;
@@ -2462,6 +2649,27 @@ export async function previewLinkedInManagerLeadCsv(
   return response.json();
 }
 
+/** One pasted entry that is not a LinkedIn profile, with the paste line it came from. */
+export interface PastedProfileRejection {
+  line: number;
+  value: string;
+  reason: string;
+}
+
+/** Checks a paste of profile URLs and writes nothing. A paste over `cap` profiles is a 400. */
+export async function previewLinkedInManagerProfileUrls(urls: string): Promise<{
+  acceptedCount: number;
+  duplicates: number;
+  rejected: PastedProfileRejection[];
+  rejectedCount: number;
+  cap: number;
+}> {
+  return request('/api/linkedin/manager/lead-lists/preview-profile-urls', {
+    method: 'POST',
+    body: JSON.stringify({ urls })
+  });
+}
+
 export async function importLinkedInManagerProfileUrls(
   listId: string,
   urls: string,
@@ -2470,7 +2678,9 @@ export async function importLinkedInManagerProfileUrls(
   inserted: number;
   duplicates: number;
   reused: number;
-  rejected: Array<{ value: string; reason: string }>;
+  /** The first rejected entries; `rejectedCount` is the exact total. */
+  rejected: PastedProfileRejection[];
+  rejectedCount: number;
 }> {
   return request(`/api/linkedin/manager/lead-lists/${encodeURIComponent(listId)}/profile-urls`, {
     method: 'POST',
@@ -2865,6 +3075,40 @@ export async function moveLinkedInManagedCampaignMembers(
   );
 }
 
+export type { AutoEnrolRule, AutoEnrolSourceKind };
+
+/** TRV-029: the capture sources and lead lists that enrol their new leads into a campaign. */
+export async function getManagedCampaignAutoEnrolRules(
+  campaignId: string
+): Promise<AutoEnrolRule[]> {
+  return (
+    await request<{ rules: AutoEnrolRule[] }>(
+      `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/auto-enrol-rules`
+    )
+  ).rules;
+}
+
+export async function createManagedCampaignAutoEnrolRule(
+  campaignId: string,
+  input: { sourceKind: AutoEnrolSourceKind; sourceId: string }
+): Promise<AutoEnrolRule> {
+  return (
+    await request<{ rule: AutoEnrolRule }>(
+      `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/auto-enrol-rules`,
+      { method: 'POST', body: JSON.stringify(input) }
+    )
+  ).rule;
+}
+
+export async function disableManagedCampaignAutoEnrolRule(ruleId: string): Promise<AutoEnrolRule> {
+  return (
+    await request<{ rule: AutoEnrolRule }>(
+      `/api/linkedin/manager/auto-enrol-rules/${encodeURIComponent(ruleId)}/disable`,
+      { method: 'POST', body: JSON.stringify({}) }
+    )
+  ).rule;
+}
+
 export async function duplicateLinkedInManagedCampaign(
   id: string,
   name?: string
@@ -2906,6 +3150,79 @@ export async function downloadLinkedInManagedCampaignExport(id: string): Promise
   return response.blob();
 }
 
+/**
+ * Range and filters for the per-rep report and its exports (TRV-046, TRV-049).
+ * Either `range` (a preset) or `from` + `to`, never both; `from` is inclusive,
+ * `to` exclusive, both local dates in the workspace's time zone.
+ */
+export interface LinkedInReportQuery {
+  range?: ReportPreset;
+  from?: string;
+  to?: string;
+  seatKey?: string;
+  campaignId?: string;
+}
+
+export interface CsvDownload {
+  blob: Blob;
+  /** The server's filename, which carries the range. */
+  filename: string;
+}
+
+function reportParams(query: LinkedInReportQuery, extra: Record<string, string> = {}): string {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries({ ...query, ...extra }))
+    if (value) params.set(key, value);
+  return params.toString();
+}
+
+export async function getLinkedInReport(query: LinkedInReportQuery): Promise<RepReport> {
+  return request(`/api/linkedin/manager/reports?${reportParams(query)}`);
+}
+
+async function downloadReportCsv(path: string, fallback: string): Promise<CsvDownload> {
+  const response = await fetch(path, { credentials: 'include' });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({ error: response.statusText }));
+    throw new ApiError(body.error ?? 'Unable to export these stats', response.status);
+  }
+  const disposition = response.headers.get('Content-Disposition') ?? '';
+  return {
+    blob: await response.blob(),
+    filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? fallback
+  };
+}
+
+/** Workspace daily stats, one row per day, honouring the seat and campaign filters. */
+export function downloadLinkedInDailyStatsCsv(query: LinkedInReportQuery): Promise<CsvDownload> {
+  return downloadReportCsv(
+    `/api/linkedin/manager/reports/daily.csv?${reportParams(query)}`,
+    'trevra-daily-stats.csv'
+  );
+}
+
+/** One campaign's stats, one row per day. */
+export function downloadLinkedInCampaignStatsCsv(
+  campaignId: string,
+  query: Omit<LinkedInReportQuery, 'campaignId'>
+): Promise<CsvDownload> {
+  return downloadReportCsv(
+    `/api/linkedin/manager/reports/campaigns/${encodeURIComponent(campaignId)}/daily.csv?${reportParams(query)}`,
+    'trevra-campaign-stats.csv'
+  );
+}
+
+/** Selected members, one row per member per day. Refused (400) past the row cap, never truncated. */
+export function downloadLinkedInTeamStatsCsv(
+  query: LinkedInReportQuery,
+  memberIds: readonly string[]
+): Promise<CsvDownload> {
+  return downloadReportCsv(
+    `/api/linkedin/manager/reports/team.csv?${reportParams(query, { memberIds: memberIds.join(',') })}`,
+    'trevra-team-stats.csv'
+  );
+}
+
 export async function getLinkedInManagedCampaign(
   id: string
 ): Promise<{ campaign: ManagedCampaign; members: ManagedCampaignMember[] }> {
@@ -2938,9 +3255,18 @@ export async function pauseLinkedInManagedCampaign(id: string): Promise<ManagedC
   ).campaign;
 }
 
+/** Provenance of an AI-drafted body applied to a queued action (TRV-039). */
+export interface AppliedAiDraft {
+  draftId: string;
+  origin: string;
+  modelLabel: string | null;
+  evidenceHash: string;
+}
 export interface LinkedInActionReview {
   actionId: string;
   campaignId: string | null;
+  memberId: string | null;
+  workflowStepId: string | null;
   seatKey: string;
   kind: string;
   targetRef: string;
@@ -2948,9 +3274,12 @@ export interface LinkedInActionReview {
   body: string | null;
   threadUrn: string | null;
   hasAttachments: boolean;
+  /** TRV-040: set when the attachment breaks the rich-content matrix; the row is held. */
+  richContent: RichContentViolation | null;
   contentHash: string;
   approved: boolean;
   policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+  aiDraft: AppliedAiDraft | null;
 }
 export async function getLinkedInActionReviews(): Promise<LinkedInActionReview[]> {
   return (
@@ -2972,6 +3301,8 @@ export async function approveLinkedInActionReview(
 export interface CampaignEmailReview {
   actionId: string;
   campaignId: string;
+  memberId: string;
+  workflowStepId: string;
   recipient: string;
   subject: string;
   body: string;
@@ -2982,6 +3313,7 @@ export interface CampaignEmailReview {
   contentHash: string;
   approved: boolean;
   policy: { effect: 'allow' | 'deny' | 'require_approval'; policyName: string; reason: string };
+  aiDraft: AppliedAiDraft | null;
 }
 export async function getCampaignEmailReviews(campaignId: string): Promise<CampaignEmailReview[]> {
   const result = await request<{ reviews: CampaignEmailReview[] }>(
@@ -2999,6 +3331,99 @@ export async function approveCampaignEmailReview(
     { method: 'POST', body: JSON.stringify({ contentHash }) }
   );
   return result.review;
+}
+
+/** TRV-039: an AI draft is a proposal bound to one exact payload hash. */
+export type AiDraftStatus = 'proposed' | 'approved' | 'edited' | 'rejected' | 'superseded' | 'sent';
+export interface AiDraft {
+  id: string;
+  campaignId: string;
+  memberId: string;
+  workflowStepId: string;
+  actionId: string;
+  actionType: 'linkedin' | 'email';
+  channel: 'linkedin_invite' | 'linkedin_message' | 'linkedin_inmail' | 'email';
+  origin: 'model' | 'template_fallback' | 'human_edit';
+  modelLabel: string | null;
+  evidenceHash: string;
+  payloadHash: string;
+  text: string;
+  attempts: number;
+  fallbackReason: string | null;
+  parentDraftId: string | null;
+  status: AiDraftStatus;
+  requestedBy: string;
+  decidedBy: string | null;
+  createdAt: string;
+  decidedAt: string | null;
+  sentAt: string | null;
+  contactName: string;
+  maxChars: number;
+  evidenceFacts: Array<{ label: string; value: string }>;
+}
+export interface AiDraftReadiness {
+  modelConfigured: boolean;
+  modelLabel: string | null;
+  budgetEnabled: boolean;
+  budgetRemainingCents: number;
+  blocker: string | null;
+  setupPath: string;
+}
+export interface AiDraftRequestResult {
+  memberId: string;
+  stepId: string | null;
+  outcome: 'drafted' | 'fallback' | 'skipped';
+  draftId: string | null;
+  reason: string | null;
+}
+const aiDraftsPath = (campaignId: string) =>
+  `/api/linkedin/manager/campaigns/${encodeURIComponent(campaignId)}/ai-drafts`;
+export async function getAiDrafts(
+  campaignId: string
+): Promise<{ drafts: AiDraft[]; readiness: AiDraftReadiness }> {
+  return request(aiDraftsPath(campaignId));
+}
+export async function requestAiDrafts(
+  campaignId: string,
+  targets: Array<{ memberId: string; stepId?: string | null }>
+): Promise<{ results: AiDraftRequestResult[]; drafts: AiDraft[] }> {
+  return request(aiDraftsPath(campaignId), {
+    method: 'POST',
+    body: JSON.stringify({ targets })
+  });
+}
+export async function editAiDraft(
+  campaignId: string,
+  draftId: string,
+  text: string,
+  payloadHash: string
+): Promise<AiDraft> {
+  return (
+    await request<{ draft: AiDraft }>(
+      `${aiDraftsPath(campaignId)}/${encodeURIComponent(draftId)}/edit`,
+      { method: 'POST', body: JSON.stringify({ text, payloadHash }) }
+    )
+  ).draft;
+}
+export async function approveAiDraft(
+  campaignId: string,
+  draftId: string,
+  payloadHash: string
+): Promise<AiDraft> {
+  return (
+    await request<{ draft: AiDraft }>(
+      `${aiDraftsPath(campaignId)}/${encodeURIComponent(draftId)}/approve`,
+      { method: 'POST', body: JSON.stringify({ payloadHash }) }
+    )
+  ).draft;
+}
+export async function rejectAiDraft(campaignId: string, draftId: string): Promise<AiDraft> {
+  return (
+    await request<{ draft: AiDraft }>(
+      `${aiDraftsPath(campaignId)}/${encodeURIComponent(draftId)}/reject`,
+      { method: 'POST', body: '{}' }
+    )
+  ).draft;
 }
 
 export async function stopLinkedInManagedCampaign(id: string): Promise<ManagedCampaign> {
@@ -3226,28 +3651,9 @@ interface LinkedInLeadSourceList {
   offReason: string | null;
 }
 
-/** 201 for a new source, 200 with `duplicate` when this URL is already live. */
-export async function createLinkedInLeadSource(input: {
-  kind: LeadSourceKind;
-  url: string;
-  seatKey?: string;
-}): Promise<{
-  source: LinkedInLeadSource;
-  duplicate: boolean;
-}> {
-  const result = await request<{ source: LinkedInLeadSource; duplicate?: boolean }>(
-    '/api/linkedin/lead-sources',
-    {
-      method: 'POST',
-      body: JSON.stringify({
-        kind: input.kind,
-        url: input.url,
-        ...(input.seatKey ? { seatKey: input.seatKey } : {})
-      })
-    }
-  );
-  return { source: result.source, duplicate: result.duplicate ?? false };
-}
+// No client call queues a lead source: Trevra does not collect from LinkedIn
+// search, Sales Navigator or post engagers, and POST /api/linkedin/lead-sources
+// answers 409 `intake_source_unsupported` (TRV-021/022/023).
 
 export async function getLinkedInLeadSources(
   limit?: number,
@@ -3393,13 +3799,10 @@ interface LinkedInQueuedReply {
 /**
  * The inbox list.
  *
- * `unread` AND `hasReply` ARE ON-OR-ABSENT, never `false`, and that is not a
- * simplification. The route parses them with `z.coerce.boolean()`, and
- * `Boolean('false')` is `true` -- so `?hasReply=false`, which the store layer
- * would read as "the ones still silent", arrives at the handler as `true` and
- * asks for the exact opposite. Until that schema takes a literal enum, the
- * only two states this filter can honestly express are on and off, so a
- * `false` here is dropped rather than sent as its own opposite.
+ * Booleans are sent as literal 'true'/'false': the route parses them with a
+ * strict enum, so `hasReply=false` asks for the conversations still silent.
+ * `archived` defaults to hidden on the server; 'any' includes archived ones.
+ * `assignee` is 'me', 'unassigned', or a user id from `getInboxAssignees`.
  */
 export async function getLinkedInThreads(
   filters: {
@@ -3410,16 +3813,26 @@ export async function getLinkedInThreads(
     limit?: number;
     search?: string;
     offset?: number;
+    tagId?: string;
+    assignee?: string;
+    starred?: boolean;
+    archived?: boolean | 'any';
+    lastFrom?: 'lead' | 'sender';
   } = {}
 ): Promise<LinkedInThreadRecord[]> {
   const query = new URLSearchParams();
   if (filters.unread === true) query.set('unread', 'true');
-  if (filters.hasReply === true) query.set('hasReply', 'true');
+  if (filters.hasReply !== undefined) query.set('hasReply', String(filters.hasReply));
   if (filters.campaignId) query.set('campaignId', filters.campaignId);
   if (filters.seatKey) query.set('seatKey', filters.seatKey);
   if (filters.limit !== undefined) query.set('limit', String(filters.limit));
   if (filters.search?.trim()) query.set('search', filters.search.trim());
   if (filters.offset !== undefined) query.set('offset', String(filters.offset));
+  if (filters.tagId) query.set('tagId', filters.tagId);
+  if (filters.assignee) query.set('assignee', filters.assignee);
+  if (filters.starred === true) query.set('starred', 'true');
+  if (filters.archived !== undefined) query.set('archived', String(filters.archived));
+  if (filters.lastFrom) query.set('lastFrom', filters.lastFrom);
   const result = await request<{ threads?: LinkedInThreadRecord[] }>(
     `/api/linkedin/inbox/threads${query.size ? `?${query}` : ''}`
   );
@@ -3437,14 +3850,141 @@ export async function getLinkedInThreads(
 export async function getLinkedInThread(
   threadUrn: string,
   seatKey?: string
-): Promise<LinkedInConversation> {
+): Promise<LinkedInConversation & { replyClassifications: ReplyClassificationView[] }> {
   const result = await request<{
     thread: LinkedInThreadRecord;
     messages?: LinkedInMessageRecord[];
+    replyClassifications?: ReplyClassificationView[];
   }>(
     `/api/linkedin/inbox/threads/${encodeURIComponent(threadUrn)}${seatKey ? `?seatKey=${encodeURIComponent(seatKey)}` : ''}`
   );
-  return { thread: result.thread, messages: Array.isArray(result.messages) ? result.messages : [] };
+  return {
+    thread: result.thread,
+    messages: Array.isArray(result.messages) ? result.messages : [],
+    replyClassifications: Array.isArray(result.replyClassifications)
+      ? result.replyClassifications
+      : []
+  };
+}
+
+/* TRV-036 inbox organization and TRV-037 reply-class confirmation. */
+
+const ORGANIZE = '/api/linkedin/inbox/organize';
+
+export async function getInboxTags(): Promise<InboxTag[]> {
+  const result = await request<{ tags?: InboxTag[] }>(`${ORGANIZE}/tags`);
+  return Array.isArray(result.tags) ? result.tags : [];
+}
+
+export async function createInboxTag(input: {
+  name: string;
+  color?: InboxTagColor;
+}): Promise<InboxTag> {
+  const result = await request<{ tag: InboxTag }>(`${ORGANIZE}/tags`, {
+    method: 'POST',
+    body: JSON.stringify(input)
+  });
+  return result.tag;
+}
+
+export async function updateInboxTag(
+  tagId: string,
+  input: { name?: string; color?: InboxTagColor }
+): Promise<InboxTag> {
+  const result = await request<{ tag: InboxTag }>(`${ORGANIZE}/tags/${encodeURIComponent(tagId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input)
+  });
+  return result.tag;
+}
+
+export async function deleteInboxTag(
+  tagId: string
+): Promise<{ deleted: true; removedAssociations: number }> {
+  return request(`${ORGANIZE}/tags/${encodeURIComponent(tagId)}`, { method: 'DELETE' });
+}
+
+export async function getInboxAssignees(): Promise<AssignableMember[]> {
+  const result = await request<{ assignees?: AssignableMember[] }>(`${ORGANIZE}/assignees`);
+  return Array.isArray(result.assignees) ? result.assignees : [];
+}
+
+export async function organizeInboxThread(
+  threadId: string,
+  input: { starred?: boolean; archived?: boolean; unread?: boolean; assigneeUserId?: string | null }
+): Promise<void> {
+  await request(`${ORGANIZE}/threads/${encodeURIComponent(threadId)}`, {
+    method: 'PATCH',
+    body: JSON.stringify(input)
+  });
+}
+
+export async function tagInboxThread(threadId: string, tagId: string): Promise<void> {
+  await request(`${ORGANIZE}/threads/${encodeURIComponent(threadId)}/tags`, {
+    method: 'POST',
+    body: JSON.stringify({ tagId })
+  });
+}
+
+export async function untagInboxThread(threadId: string, tagId: string): Promise<void> {
+  await request(
+    `${ORGANIZE}/threads/${encodeURIComponent(threadId)}/tags/${encodeURIComponent(tagId)}`,
+    { method: 'DELETE' }
+  );
+}
+
+export async function getInboxThreadNotes(threadId: string): Promise<ThreadNote[]> {
+  const result = await request<{ notes?: ThreadNote[] }>(
+    `${ORGANIZE}/threads/${encodeURIComponent(threadId)}/notes`
+  );
+  return Array.isArray(result.notes) ? result.notes : [];
+}
+
+export async function addInboxThreadNote(threadId: string, body: string): Promise<ThreadNote> {
+  const result = await request<{ note: ThreadNote }>(
+    `${ORGANIZE}/threads/${encodeURIComponent(threadId)}/notes`,
+    { method: 'POST', body: JSON.stringify({ body }) }
+  );
+  return result.note;
+}
+
+export async function editInboxThreadNote(noteId: string, body: string): Promise<ThreadNote> {
+  const result = await request<{ note: ThreadNote }>(
+    `${ORGANIZE}/notes/${encodeURIComponent(noteId)}`,
+    { method: 'PATCH', body: JSON.stringify({ body }) }
+  );
+  return result.note;
+}
+
+export async function deleteInboxThreadNote(noteId: string): Promise<void> {
+  await request(`${ORGANIZE}/notes/${encodeURIComponent(noteId)}`, { method: 'DELETE' });
+}
+
+export async function getInboxNoteRevisions(noteId: string): Promise<ThreadNoteRevision[]> {
+  const result = await request<{ revisions?: ThreadNoteRevision[] }>(
+    `${ORGANIZE}/notes/${encodeURIComponent(noteId)}/revisions`
+  );
+  return Array.isArray(result.revisions) ? result.revisions : [];
+}
+
+export async function confirmInboxReplyClass(
+  messageId: string,
+  input: { confirmedClass: ReplyClass; endMembership?: boolean }
+): Promise<ReplyClassificationView> {
+  const result = await request<{ classification: ReplyClassificationView }>(
+    `${ORGANIZE}/messages/${encodeURIComponent(messageId)}/classification`,
+    { method: 'POST', body: JSON.stringify(input) }
+  );
+  return result.classification;
+}
+
+export async function bulkOrganizeInbox(input: {
+  threadIds: string[];
+  action: InboxBulkAction;
+  tagId?: string;
+  assigneeUserId?: string;
+}): Promise<{ action: InboxBulkAction; selected: number; changed: number }> {
+  return request(`${ORGANIZE}/bulk`, { method: 'POST', body: JSON.stringify(input) });
 }
 
 /** Walks the conversation rail in a real browser. 409 where this process cannot open one. */
@@ -3810,6 +4350,8 @@ export async function importAccounts(input: {
     role?: string;
     sourcePath?: string;
   }>;
+  /** Also place the imported People in this lead list (TRV-029). */
+  leadListId?: string;
 }): Promise<AccountImportResult> {
   return request('/api/accounts/import', { method: 'POST', body: JSON.stringify(input) });
 }
@@ -3973,6 +4515,149 @@ export async function setProviderWebhookStatus(
 
 export async function removeProviderWebhook(id: string): Promise<void> {
   await request<void>(`/api/setup/webhooks/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export const OUTBOUND_WEBHOOK_EVENTS = [
+  'linkedin_campaign.started',
+  'linkedin_campaign.stopped',
+  'linkedin_campaign.paused',
+  'playbook.run.completed',
+  'playbook.run.failed'
+] as const;
+export type OutboundWebhookEventType = (typeof OUTBOUND_WEBHOOK_EVENTS)[number];
+
+/** Owner-only. Never carries a signing secret; create and rotate return one exactly once. */
+export interface OutboundWebhookSubscription {
+  id: string;
+  workspaceId: string;
+  url: string;
+  eventTypes: string[];
+  active: boolean;
+  createdAt: string;
+  disabledReason: 'owner' | 'consecutive_failures' | null;
+  disabledAt: string | null;
+  secretRotatedAt: string | null;
+  previousSecretExpiresAt: string | null;
+  consecutiveFailures: number;
+  lastFailureCode: string | null;
+  lastFailureAt: string | null;
+  lastSuccessAt: string | null;
+}
+
+export interface OutboundWebhookDelivery {
+  id: string;
+  eventId: string;
+  status: 'pending' | 'leased' | 'delivered' | 'dead';
+  attempts: number;
+  attemptSeries: number;
+  lastHttpStatus: number | null;
+  lastError: string | null;
+  lastReasonCode: string | null;
+  createdAt: string;
+  deliveredAt: string | null;
+  deadAt: string | null;
+  replayedAt: string | null;
+}
+
+export interface OutboundWebhookWindowStats {
+  delivered: number;
+  failed: number;
+  pending: number;
+  dead: number;
+}
+
+export interface OutboundWebhookHealth {
+  stats: {
+    last24h: OutboundWebhookWindowStats;
+    last7d: OutboundWebhookWindowStats;
+    consecutiveFailures: number;
+    lastFailureCode: string | null;
+    lastFailureAt: string | null;
+    lastSuccessAt: string | null;
+  };
+  /** Status, HTTP code, latency and reason only: response bodies are never stored. */
+  attempts: Array<{
+    id: string;
+    deliveryId: string;
+    eventId: string;
+    attemptSeries: number;
+    attemptNumber: number;
+    outcome: 'delivered' | 'failed' | 'blocked';
+    httpStatus: number | null;
+    latencyMs: number | null;
+    reasonCode: string | null;
+    attemptedAt: string;
+  }>;
+}
+
+const outboundWebhookPath = (id: string, suffix = '') =>
+  `/api/outbound-webhooks/${encodeURIComponent(id)}${suffix}`;
+
+export async function getOutboundWebhooks(): Promise<OutboundWebhookSubscription[]> {
+  const result = await request<{ subscriptions: OutboundWebhookSubscription[] }>(
+    '/api/outbound-webhooks'
+  );
+  return result.subscriptions;
+}
+
+export async function createOutboundWebhook(input: {
+  url: string;
+  eventTypes: OutboundWebhookEventType[];
+}): Promise<{ subscription: OutboundWebhookSubscription; signingSecret: string }> {
+  return request('/api/outbound-webhooks', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export async function updateOutboundWebhook(
+  id: string,
+  input: { url?: string; eventTypes?: OutboundWebhookEventType[]; active?: boolean }
+): Promise<OutboundWebhookSubscription> {
+  const result = await request<{ subscription: OutboundWebhookSubscription }>(
+    outboundWebhookPath(id),
+    { method: 'PATCH', body: JSON.stringify(input) }
+  );
+  return result.subscription;
+}
+
+export async function rotateOutboundWebhookSecret(
+  id: string,
+  overlapHours: number
+): Promise<{ subscription: OutboundWebhookSubscription; signingSecret: string }> {
+  return request(outboundWebhookPath(id, '/rotate-secret'), {
+    method: 'POST',
+    body: JSON.stringify({ overlapHours })
+  });
+}
+
+export async function getOutboundWebhookHealth(id: string): Promise<OutboundWebhookHealth> {
+  return request(outboundWebhookPath(id, '/health'));
+}
+
+export async function getOutboundWebhookDeliveries(id: string): Promise<OutboundWebhookDelivery[]> {
+  const result = await request<{ deliveries: OutboundWebhookDelivery[] }>(
+    outboundWebhookPath(id, '/deliveries')
+  );
+  return result.deliveries;
+}
+
+/** Bulk replay of dead-lettered deliveries; past 500 the server requires an explicit `limit`. */
+export async function replayOutboundWebhookDeliveries(
+  id: string,
+  limit?: number
+): Promise<{ replayed: number; deliveryIds: string[] }> {
+  return request(outboundWebhookPath(id, '/replay'), {
+    method: 'POST',
+    body: JSON.stringify(limit === undefined ? {} : { limit })
+  });
+}
+
+export async function replayOutboundWebhookDelivery(
+  id: string,
+  deliveryId: string
+): Promise<{ replayed: number; deliveryIds: string[] }> {
+  return request(outboundWebhookPath(id, `/deliveries/${encodeURIComponent(deliveryId)}/replay`), {
+    method: 'POST',
+    body: '{}'
+  });
 }
 
 /** Workspace-visible and content-free; Cal.com endpoints themselves are owner-only. */

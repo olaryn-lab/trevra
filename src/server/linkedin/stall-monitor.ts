@@ -148,6 +148,8 @@ export async function findStalledLinkedInCampaigns(
     ]);
     if (current.seatKey !== row.seat_key || earlier.seatKey !== row.seat_key) continue;
     if (current.humanSendNext || earlier.humanSendNext) continue;
+    // A policy deny is a decision, not a stall.
+    if (current.policyDenied || earlier.policyDenied) continue;
     if (current.restingUntil || earlier.restingUntil) continue;
     if (!current.gate?.allowed || !earlier.gate?.allowed) continue;
     const exact = await exactlyApprovedOverdueActions(db, {

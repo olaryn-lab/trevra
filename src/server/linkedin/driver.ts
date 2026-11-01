@@ -101,6 +101,11 @@ import {
   type LinkedInThreadTranscript
 } from './driver-inbox.js';
 import { hoverClick, settle, typeLike } from './human.js';
+import {
+  checkRichContent,
+  mimeTypeFromName,
+  normalizeMimeType
+} from '../../shared/rich-content.js';
 
 /** The seven outcomes a routine may report. Ordered as in plan 4.5. */
 export type LinkedInFailureKind =
@@ -115,7 +120,13 @@ export type LinkedInFailureKind =
   | 'compose_unavailable'
   | 'connect_unavailable'
   | 'note_quota_exhausted'
-  | 'paid_credit_required';
+  | 'paid_credit_required'
+  /**
+   * TRV-040. Never returned by a driver routine: the local worker records it
+   * on a row it HOLDS because the row's attachment breaks the rich-content
+   * matrix for its kind. Nothing was opened, typed or sent.
+   */
+  | 'content_unsupported';
 
 export interface LinkedInPostImageUpload {
   name: string;
@@ -1560,30 +1571,23 @@ export async function sendInvite(
   }
 }
 
-const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-
-function attachmentMime(name: string, contentType: string | null): string {
-  if (contentType?.trim()) return contentType.split(';')[0]!.trim();
-  const lower = name.toLowerCase();
-  if (lower.endsWith('.gif')) return 'image/gif';
-  if (lower.endsWith('.png')) return 'image/png';
-  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
-  if (lower.endsWith('.pdf')) return 'application/pdf';
-  return 'application/octet-stream';
-}
-
+/**
+ * TRV-040: the composer's limits are the DM/InMail rows of the rich-content
+ * matrix. Checked twice: on what the action declares before anything is
+ * downloaded, and on the real bytes and Content-Type after.
+ */
 async function uploadComposerAttachment(
   page: LinkedInPage,
   attachment: LinkedInAttachment,
   inputSelector: string,
-  previewSelector: string
+  previewSelector: string,
+  channel: 'linkedin_message' | 'linkedin_inmail'
 ): Promise<LinkedInDriverResult | null> {
-  if (attachment.mediaKind === 'voice') {
-    return fail(
-      'compose_unavailable',
-      'Native LinkedIn voice messages are not exposed through a verified upload surface. The text draft was not sent.'
-    );
-  }
+  const declared = checkRichContent(channel, [
+    { url: attachment.url, name: attachment.name ?? null, mediaKind: attachment.mediaKind ?? null }
+  ]);
+  if (declared)
+    return fail('compose_unavailable', `${declared.reason} The text draft was not sent.`);
   let parsed: URL;
   try {
     parsed = new URL(attachment.url);
@@ -1613,27 +1617,49 @@ async function uploadComposerAttachment(
         'compose_unavailable',
         `Attachment download returned HTTP ${response.status}. The text draft was not sent.`
       );
-    const declared = Number(response.headers.get('content-length') ?? 0);
-    if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES)
-      return fail(
-        'compose_unavailable',
-        'Attachment is larger than the 10 MB campaign limit. The text draft was not sent.'
-      );
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.byteLength === 0 || bytes.byteLength > MAX_ATTACHMENT_BYTES)
-      return fail(
-        'compose_unavailable',
-        bytes.byteLength === 0
-          ? 'Attachment is empty. The text draft was not sent.'
-          : 'Attachment is larger than the 10 MB campaign limit. The text draft was not sent.'
-      );
     const fallbackName = decodeURIComponent(
       parsed.pathname.split('/').filter(Boolean).at(-1) ?? 'attachment'
     );
     const name = attachment.name?.trim() || fallbackName || 'attachment';
+    const declaredLength = Number(response.headers.get('content-length') ?? 0);
+    const tooLongDeclared =
+      Number.isFinite(declaredLength) && declaredLength > 0
+        ? checkRichContent(channel, [
+            {
+              url: attachment.url,
+              name,
+              mediaKind: attachment.mediaKind,
+              sizeBytes: declaredLength
+            }
+          ])
+        : null;
+    if (tooLongDeclared?.code === 'attachment_too_large')
+      return fail('compose_unavailable', `${tooLongDeclared.reason} The text draft was not sent.`);
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.byteLength === 0)
+      return fail('compose_unavailable', 'Attachment is empty. The text draft was not sent.');
+    const mimeType =
+      normalizeMimeType(response.headers.get('content-type')) ??
+      mimeTypeFromName(name) ??
+      mimeTypeFromName(parsed.toString());
+    if (!mimeType)
+      return fail(
+        'compose_unavailable',
+        'Neither the download nor the file name says what type this attachment is, so it cannot be checked against what LinkedIn messages accept. The text draft was not sent.'
+      );
+    const actual = checkRichContent(channel, [
+      {
+        url: attachment.url,
+        name,
+        mimeType,
+        sizeBytes: bytes.byteLength,
+        mediaKind: attachment.mediaKind
+      }
+    ]);
+    if (actual) return fail('compose_unavailable', `${actual.reason} The text draft was not sent.`);
     await input.first().setInputFiles!({
       name: name.slice(0, 255),
-      mimeType: attachmentMime(name, response.headers.get('content-type')),
+      mimeType,
       buffer: bytes
     });
     await settle(page, `${parsed.toString()}#attachment-upload`);
@@ -1701,7 +1727,8 @@ export async function sendDm(
         page,
         options.attachment,
         SELECTORS.messageAttachmentInput,
-        SELECTORS.messageAttachmentPreview
+        SELECTORS.messageAttachmentPreview,
+        'linkedin_message'
       );
       if (attachmentResult) return attachmentResult;
     }
@@ -1812,7 +1839,8 @@ export async function sendInMail(
         page,
         options.attachment,
         SELECTORS.inmailAttachmentInput,
-        SELECTORS.inmailAttachmentPreview
+        SELECTORS.inmailAttachmentPreview,
+        'linkedin_inmail'
       );
       if (attachmentResult) return attachmentResult;
     }

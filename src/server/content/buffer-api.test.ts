@@ -54,7 +54,7 @@ vi.mock('@nangohq/node', () => ({
 import { closeAuthDatabase, migrateAuthDatabase } from '../auth-service.js';
 import { createApp } from '../app.js';
 import { openDatabase, type Db } from '../db.js';
-import { createPost } from '../linkedin/posts.js';
+import { addPostImage, createPost } from '../linkedin/posts.js';
 import { seedPlaybooks } from '../playbooks/registry.js';
 import { createContentAsset } from './assets.js';
 
@@ -253,5 +253,31 @@ describe('Buffer content API handoff', () => {
       .send({ channelId: 'channel_linkedin' })
       .expect(404);
     expect(bufferMutationCalls()).toHaveLength(0);
+  });
+
+  it('TRV-040: refuses a post with images instead of drafting it without them', async () => {
+    await seedProvenancePost(WORKSPACE, 'lipost_buffer_media');
+    await addPostImage(
+      db,
+      WORKSPACE,
+      'lipost_buffer_media',
+      { name: 'chart.png', mimeType: 'image/png', bytes: Buffer.from([1, 2, 3]) },
+      NOW
+    );
+    nangoMock.post.mockClear();
+    const refused = await authed('post', '/api/content/posts/lipost_buffer_media/buffer-draft')
+      .send({ channelId: 'channel_linkedin' })
+      .expect(422);
+    expect(refused.body).toMatchObject({
+      code: 'content_type_unsupported',
+      channel: 'buffer_draft',
+      contentType: 'image',
+      error: expect.stringMatching(/Buffer/)
+    });
+    expect(bufferMutationCalls()).toHaveLength(0);
+    const runs = await db
+      .prepare('SELECT COUNT(*)::int AS total FROM playbook_runs WHERE workspace_id=?')
+      .get<{ total: number }>(WORKSPACE);
+    expect(runs?.total).toBe(0);
   });
 });

@@ -9,7 +9,8 @@ import type {
   InboundSubmissionRecord
 } from './types.js';
 import { LeadCaptureError } from './types.js';
-import { MILESTONE_KINDS_SQL } from './milestones.js';
+import { isMilestoneKind, MILESTONE_KINDS_SQL } from './milestones.js';
+import { applyCaptureAutoEnrolRules } from '../linkedin/auto-enrol.js';
 
 function parseObject(value: unknown): Record<string, unknown> {
   if (value && typeof value === 'object' && !Array.isArray(value))
@@ -261,6 +262,22 @@ export async function acceptInboundSubmission(
         receivedAt
       );
     }
+
+    // TRV-029: this source's auto-enrol rules, in the same transaction, so the
+    // submission and its campaign enrolments commit together. A milestone is an
+    // outcome, not a new lead, and a duplicate returned above enrols nobody.
+    if (!isMilestoneKind(input.body.kind))
+      await applyCaptureAutoEnrolRules(
+        tx,
+        {
+          workspaceId: input.source.workspaceId,
+          captureSourceId: input.source.id,
+          personId: resolved.contact.id,
+          company: input.body.company?.name ?? null,
+          submissionId
+        },
+        receivedAt
+      );
 
     return {
       submission: toSubmission(row),

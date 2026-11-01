@@ -13,10 +13,11 @@ import type { CrmAdapter, CrmActivity, CrmContactRef, CrmProxy, ContactHint } fr
  * for this to work -- a fresh install with a connected HubSpot can write on day
  * one.
  *
- * Scopes required on the HubSpot app: `crm.objects.contacts.read` and
- * `crm.objects.notes.write`. Deliberately NOT `crm.objects.contacts.write`:
- * this adapter must not be able to edit a contact even if a future bug asked
- * it to.
+ * Scopes this adapter needs: `crm.objects.contacts.read` and
+ * `crm.objects.notes.write`. The connection also carries
+ * `crm.objects.contacts.write` for the separate, approval-gated
+ * `crm.upsert-contact` adapter (../contact-providers.ts); this adapter never
+ * calls a contact write endpoint.
  */
 
 /** HubSpot's association type id for note -> contact. Defined by HubSpot, not by us. */
@@ -47,12 +48,20 @@ export const hubspotCrmAdapter: CrmAdapter = {
     const hit = response.results?.[0];
     if (!hit?.id) return null;
     const properties = hit.properties ?? {};
-    const name = [properties.firstname, properties.lastname].filter((part) => typeof part === 'string' && part).join(' ');
+    const name = [properties.firstname, properties.lastname]
+      .filter((part) => typeof part === 'string' && part)
+      .join(' ');
     return { externalId: String(hit.id), label: name || email };
   },
 
-  async logActivity(contact: CrmContactRef, activity: CrmActivity, proxy: CrmProxy): Promise<string> {
-    const body = activity.url ? `${activity.subject}\n\n${activity.body}\n\n${activity.url}` : `${activity.subject}\n\n${activity.body}`;
+  async logActivity(
+    contact: CrmContactRef,
+    activity: CrmActivity,
+    proxy: CrmProxy
+  ): Promise<string> {
+    const body = activity.url
+      ? `${activity.subject}\n\n${activity.body}\n\n${activity.url}`
+      : `${activity.subject}\n\n${activity.body}`;
     const response = await proxy.post<{ id?: unknown }>('/crm/v3/objects/notes', {
       properties: {
         // HubSpot renders this as HTML, so a plain-text body needs its newlines
@@ -63,7 +72,12 @@ export const hubspotCrmAdapter: CrmAdapter = {
       associations: [
         {
           to: { id: contact.externalId },
-          types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: NOTE_TO_CONTACT_ASSOCIATION }]
+          types: [
+            {
+              associationCategory: 'HUBSPOT_DEFINED',
+              associationTypeId: NOTE_TO_CONTACT_ASSOCIATION
+            }
+          ]
         }
       ]
     });
@@ -73,8 +87,5 @@ export const hubspotCrmAdapter: CrmAdapter = {
 };
 
 function escapeHtml(value: string): string {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;');
+  return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }

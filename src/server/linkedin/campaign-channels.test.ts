@@ -326,6 +326,47 @@ describe('campaign channel executor', () => {
     expect(nangoMock.post).toHaveBeenCalledTimes(1);
   });
 
+  it('TRV-040: holds a campaign email whose payload names an attachment, even once approved', async () => {
+    await seedReadyMailbox();
+    await queuedReviewEmail('licha_rich_content');
+    await db
+      .prepare(
+        `UPDATE linkedin_campaign_channel_actions
+         SET payload_json = payload_json || ?::jsonb WHERE workspace_id=? AND id=?`
+      )
+      .run(
+        JSON.stringify({
+          attachments: [{ url: 'https://cdn.example.test/deck.pdf', mimeType: 'application/pdf' }]
+        }),
+        WORKSPACE,
+        'licha_rich_content'
+      );
+    const review = await previewCampaignEmail(db, WORKSPACE, 'licha_rich_content');
+    await approveCampaignEmail(
+      db,
+      WORKSPACE,
+      'licha_rich_content',
+      review!.contentHash,
+      'owner',
+      NOW
+    );
+    const run = await runCampaignChannelActions(db, WORKSPACE, NOW);
+    expect(run).toMatchObject({ sent: 0, failed: 0, unknown: 0 });
+    expect(nangoMock.post).not.toHaveBeenCalled();
+    const row = await db
+      .prepare(
+        'SELECT status,last_error,payload_json FROM linkedin_campaign_channel_actions WHERE workspace_id=? AND id=?'
+      )
+      .get<{ status: string; last_error: string | null; payload_json: Record<string, unknown> }>(
+        WORKSPACE,
+        'licha_rich_content'
+      );
+    expect(row?.status).toBe('planned');
+    expect(row?.last_error).toMatch(/Document attachments are link-only on Email/);
+    // Held, not stripped.
+    expect(row?.payload_json.attachments).toHaveLength(1);
+  });
+
   it('invalidates an exact approval when content, footer or sender changes', async () => {
     await seedReadyMailbox();
     await db.prepare('DELETE FROM workspace_policies WHERE workspace_id=?').run(WORKSPACE);

@@ -108,7 +108,8 @@ describe('buildStructuredData', () => {
     );
     expect(jsonLd).not.toMatch(/open.source|foss|free.software/i);
     expect(llms).not.toMatch(/open.source|foss|free.software/i);
-    expect(llms).toContain('No software license has been published');
+    expect(llms).toContain('Trevra is proprietary software with all rights reserved');
+    expect(llms).toContain('Self-hosting on PostgreSQL is an unsupported preview');
     expect(jsonLd).toContain('licensing terms require approval');
   });
 

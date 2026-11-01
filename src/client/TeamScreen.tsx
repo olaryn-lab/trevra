@@ -8,33 +8,52 @@ import {
   getAgentTokens,
   getWorkspaceSkills,
   updateAgent,
+  updateTeamMemberRole,
   type WorkspaceSkillManifest
 } from './api';
 import type { AgentPrincipal, AgentTokenSummary } from '../shared/types';
-import { authClient, useIsWorkspaceOwner } from './auth-client';
+import { authClient, useWorkspaceCan, useWorkspaceRole } from './auth-client';
+import {
+  canManageTeammate,
+  parseWorkspaceRole,
+  type WorkspaceRole as ResolvedWorkspaceRole
+} from '../server/roles';
 import { relativeTime } from './LinkedInScreen';
 import { reloadOutreach } from './LinkedInSafety';
 import { ConfirmDrawer } from './ui/dialog';
+import { ErrorOrBillingBlocked } from './ui/BillingBlockedNotice';
 import { EmptyState, InlineActions, Panel } from './ui/layout';
 import { Button, Field, Input, Select, Textarea } from './ui/primitives';
 import type { Route } from './ui/route';
 
 /**
- * `/setup/team` -- who is in this workspace, and the one owner-only control
- * over who joins or leaves it (docs/superpowers/specs/2026-08-13-team-
- * workspace-access-design.md).
+ * `/setup/team` -- who is in this workspace, their role, and who may change
+ * that (docs/superpowers/specs/2026-08-13-team-workspace-access-design.md,
+ * TRV-045).
  *
- * EVERYTHING ELSE ON THIS SCREEN IS READ-ONLY FOR A MEMBER, ON PURPOSE. The
- * design's access decision is full workspace parity for any member -- the
- * one and only role-gated action anywhere in this product is who manages the
- * stored LinkedIn credentials (already enforced server-side, see the save/
- * delete routes in app.ts) plus, by the same reasoning, who manages who is IN
- * the workspace at all. Hiding Add/Remove from a member here is a courtesy:
- * the boundary a member cannot cross is the server 403ing `/api/team/members`
- * and better-auth's own `beforeRemoveMember`/`beforeUpdateMemberRole` hooks
- * (`assertOwnerChangeAllowed` in auth-service.ts) rejecting the request
- * outright, not this screen choosing not to render a button.
+ * THE ROLE RULES LIVE IN ONE PLACE: src/server/roles.ts. An owner invites
+ * anyone, removes managers and members, and changes roles. A manager invites
+ * and removes members only. A member reads. Hiding or disabling a control
+ * here is a courtesy: the boundary is the server 403ing `/api/team/members`
+ * and better-auth's own organization hooks (auth-service.ts) rejecting the
+ * request outright, not this screen choosing not to render a button.
  */
+
+const ROLE_LABELS: Record<ResolvedWorkspaceRole, string> = {
+  owner: 'Owner',
+  manager: 'Manager',
+  member: 'Member'
+};
+
+/** What a role change hands over or takes away, in one sentence for the confirmation. */
+const ROLE_SUMMARIES: Record<ResolvedWorkspaceRole, string> = {
+  owner:
+    'Owners control everything here: billing, policy, credentials, API tokens, webhooks, and every role.',
+  manager:
+    'Managers approve outreach, manage every campaign, LinkedIn account assignment, lead lists and team reports, and invite or remove members. They cannot change billing, policy, credentials, tokens, webhooks or roles.',
+  member:
+    'Members run their own campaigns and work the inbox. They cannot approve outreach or manage other people.'
+};
 
 /* -------------------------------------------------------------------------
  * Who is in the active workspace -- one read, shared with every "queued by
@@ -626,8 +645,17 @@ function TeamMembersPanel({
   onNavigate: (path: string) => void;
 }) {
   const { data: activeOrg, isPending, refetch: refetchOrg } = authClient.useActiveOrganization();
-  const isOwner = useIsWorkspaceOwner();
+  const { data: activeMember, refetch: refetchActiveMember } = authClient.useActiveMember();
+  const workspaceRole = useWorkspaceRole();
+  const isOwner = workspaceRole === 'owner';
+  const canInvite = useWorkspaceCan('team.invite');
+  const canChangeRoles = useWorkspaceCan('team.roles');
+  const canRemove = useWorkspaceCan('team.remove');
   const { members } = useWorkspaceMembers();
+  /** False while the role is pending, so no control flashes on. */
+  const canManage = (targetRole: string, act: 'invite' | 'remove') =>
+    workspaceRole !== 'pending' &&
+    canManageTeammate(workspaceRole, parseWorkspaceRole(targetRole), act);
 
   const [invitations, setInvitations] = useState<PendingInvitation[]>([]);
   const [invitationsLoading, setInvitationsLoading] = useState(true);
@@ -654,16 +682,18 @@ function TeamMembersPanel({
   }, [loadInvitations]);
 
   const [email, setEmail] = useState('');
-  const [role, setRole] = useState<'owner' | 'member'>('member');
+  const [role, setRole] = useState<ResolvedWorkspaceRole>('member');
   const [showInvite, setShowInvite] = useState(false);
   const [addBusy, setAddBusy] = useState(false);
   const [addError, setAddError] = useState('');
+  const [addErrorCause, setAddErrorCause] = useState<unknown>(null);
 
   const addTeammate = async () => {
     const trimmed = email.trim();
     if (!trimmed) return;
     setAddBusy(true);
     setAddError('');
+    setAddErrorCause(null);
     try {
       // Always a real invitation now -- no email joins instantly, existing
       // Trevra account or not. When transactional SMTP is configured, Better
@@ -678,6 +708,7 @@ function TeamMembersPanel({
       );
       await loadInvitations();
     } catch (err) {
+      setAddErrorCause(err);
       setAddError(
         err instanceof ApiError || err instanceof Error
           ? err.message
@@ -714,6 +745,33 @@ function TeamMembersPanel({
     setConfirmRemove(null);
     setToast(`${confirmRemove.name} removed from this workspace.`);
     await refetchOrg();
+  };
+
+  const [confirmRoleChange, setConfirmRoleChange] = useState<{
+    member: WorkspaceMember;
+    next: ResolvedWorkspaceRole;
+  } | null>(null);
+  const [roleBusy, setRoleBusy] = useState(false);
+  const [roleError, setRoleError] = useState('');
+
+  const changeRole = async () => {
+    if (!confirmRoleChange) return;
+    const { member, next } = confirmRoleChange;
+    setRoleBusy(true);
+    setRoleError('');
+    try {
+      // The server refuses demoting the last owner and records who made the
+      // change; its refusal sentence is shown verbatim.
+      await updateTeamMemberRole(member.id, next);
+      setConfirmRoleChange(null);
+      setToast(`${member.name} is now ${ROLE_LABELS[next].toLowerCase()}.`);
+      await refetchOrg();
+      if (member.id === (activeMember as { id?: string } | null)?.id) await refetchActiveMember();
+    } catch (err) {
+      setRoleError(err instanceof Error ? err.message : 'Unable to change that role.');
+    } finally {
+      setRoleBusy(false);
+    }
   };
 
   const copyInviteLink = async (invitationId: string) => {
@@ -760,7 +818,7 @@ function TeamMembersPanel({
         actions={
           <InlineActions>
             {!isPending && <span className="status-pill">{members.length} people</span>}
-            {isOwner && !showInvite && (
+            {canInvite && !showInvite && (
               <Button onClick={() => setShowInvite(true)}>
                 <UserPlus size={14} /> Invite person
               </Button>
@@ -780,37 +838,70 @@ function TeamMembersPanel({
                   <th>Name</th>
                   <th>Email</th>
                   <th>Role</th>
-                  {isOwner && <th />}
+                  {canRemove && <th />}
                 </tr>
               </thead>
               <tbody>
-                {members.map((member) => (
-                  <tr key={member.id}>
-                    <td>{member.name}</td>
-                    <td>{member.email}</td>
-                    <td>{member.role}</td>
-                    {isOwner && (
+                {members.map((member) => {
+                  const memberRole = parseWorkspaceRole(member.role);
+                  return (
+                    <tr key={member.id}>
+                      <td>{member.name}</td>
+                      <td>{member.email}</td>
                       <td>
-                        {member.role !== 'owner' && (
-                          <button
-                            className="li-mini-button li-mini-danger"
-                            type="button"
-                            disabled={removeBusy}
-                            onClick={() => setConfirmRemove(member)}
+                        {canChangeRoles ? (
+                          <Select
+                            aria-label={`Role for ${member.name}`}
+                            value={memberRole}
+                            disabled={roleBusy}
+                            onChange={(event) =>
+                              setConfirmRoleChange({
+                                member,
+                                next: event.target.value as ResolvedWorkspaceRole
+                              })
+                            }
                           >
-                            <Trash2 size={13} /> Remove
-                          </button>
+                            <option value="owner">{ROLE_LABELS.owner}</option>
+                            <option value="manager">{ROLE_LABELS.manager}</option>
+                            <option value="member">{ROLE_LABELS.member}</option>
+                          </Select>
+                        ) : (
+                          ROLE_LABELS[memberRole]
                         )}
                       </td>
-                    )}
-                  </tr>
-                ))}
+                      {canRemove && (
+                        <td>
+                          {memberRole !== 'owner' && canManage(member.role, 'remove') && (
+                            <button
+                              className="li-mini-button li-mini-danger"
+                              type="button"
+                              disabled={removeBusy}
+                              onClick={() => setConfirmRemove(member)}
+                            >
+                              <Trash2 size={13} /> Remove
+                            </button>
+                          )}
+                        </td>
+                      )}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
 
-        {isOwner && showInvite && (
+        {workspaceRole === 'manager' && (
+          <p className="li-hint">
+            Managers invite and remove members. Only the workspace owner can change roles or manage
+            owners and managers.
+          </p>
+        )}
+        {workspaceRole === 'member' && (
+          <p className="li-hint">Only a workspace owner or manager can invite or remove people.</p>
+        )}
+
+        {canInvite && showInvite && (
           <div className="workspace-subsection">
             <div className="workspace-subsection-heading">
               <div>
@@ -818,7 +909,7 @@ function TeamMembersPanel({
                 <p>They receive workspace access only after accepting the invitation.</p>
               </div>
             </div>
-            {addError && <div className="error-banner">{addError}</div>}
+            {addError && <ErrorOrBillingBlocked message={addError} error={addErrorCause} />}
             <div className="li-filter-row">
               <Field label="Email">
                 <Input
@@ -828,13 +919,25 @@ function TeamMembersPanel({
                   placeholder="teammate@example.com"
                 />
               </Field>
-              <Field label="Role">
+              <Field
+                label="Role"
+                hint={
+                  canChangeRoles
+                    ? undefined
+                    : 'Only the workspace owner can invite a manager or owner.'
+                }
+              >
                 <Select
                   value={role}
-                  onChange={(event) => setRole(event.target.value as 'owner' | 'member')}
+                  onChange={(event) => setRole(event.target.value as ResolvedWorkspaceRole)}
                 >
-                  <option value="member">Member</option>
-                  <option value="owner">Owner</option>
+                  <option value="member">{ROLE_LABELS.member}</option>
+                  <option value="manager" disabled={!canChangeRoles}>
+                    {ROLE_LABELS.manager}
+                  </option>
+                  <option value="owner" disabled={!canChangeRoles}>
+                    {ROLE_LABELS.owner}
+                  </option>
                 </Select>
               </Field>
               <div className="mgr-actions">
@@ -863,61 +966,64 @@ function TeamMembersPanel({
           </div>
         )}
 
-        {isOwner && (invitationsLoading || Boolean(invitationsError) || invitations.length > 0) && (
-          <div className="workspace-subsection">
-            <div className="workspace-subsection-heading">
-              <h4>Pending invitations</h4>
-              {!invitationsLoading && invitations.length > 0 && (
-                <span>{invitations.length} pending</span>
-              )}
-            </div>
-            {invitationsError && <div className="error-banner">{invitationsError}</div>}
-            {invitationsLoading ? (
-              <p className="empty-copy">Reading pending invitations…</p>
-            ) : invitations.length > 0 ? (
-              <div className="li-table-scroll compact">
-                <table className="li-table">
-                  <thead>
-                    <tr>
-                      <th>Email</th>
-                      <th>Role</th>
-                      <th>Expires</th>
-                      <th />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {invitations.map((invitation) => (
-                      <tr key={invitation.id}>
-                        <td>{invitation.email}</td>
-                        <td>{invitation.role === 'owner' ? 'Owner' : 'Member'}</td>
-                        <td>{relativeTime(invitation.expiresAt)}</td>
-                        <td>
-                          <div className="li-row-actions">
-                            <button
-                              className="li-mini-button"
-                              type="button"
-                              onClick={() => void copyInviteLink(invitation.id)}
-                            >
-                              <Copy size={13} /> Copy invite link
-                            </button>
-                            <button
-                              className="li-mini-button li-mini-danger"
-                              type="button"
-                              disabled={cancelBusy}
-                              onClick={() => setConfirmCancelInvite(invitation)}
-                            >
-                              <Trash2 size={13} /> Cancel
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+        {canInvite &&
+          (invitationsLoading || Boolean(invitationsError) || invitations.length > 0) && (
+            <div className="workspace-subsection">
+              <div className="workspace-subsection-heading">
+                <h4>Pending invitations</h4>
+                {!invitationsLoading && invitations.length > 0 && (
+                  <span>{invitations.length} pending</span>
+                )}
               </div>
-            ) : null}
-          </div>
-        )}
+              {invitationsError && <div className="error-banner">{invitationsError}</div>}
+              {invitationsLoading ? (
+                <p className="empty-copy">Reading pending invitations…</p>
+              ) : invitations.length > 0 ? (
+                <div className="li-table-scroll compact">
+                  <table className="li-table">
+                    <thead>
+                      <tr>
+                        <th>Email</th>
+                        <th>Role</th>
+                        <th>Expires</th>
+                        <th />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {invitations.map((invitation) => (
+                        <tr key={invitation.id}>
+                          <td>{invitation.email}</td>
+                          <td>{ROLE_LABELS[parseWorkspaceRole(invitation.role)]}</td>
+                          <td>{relativeTime(invitation.expiresAt)}</td>
+                          <td>
+                            <div className="li-row-actions">
+                              <button
+                                className="li-mini-button"
+                                type="button"
+                                onClick={() => void copyInviteLink(invitation.id)}
+                              >
+                                <Copy size={13} /> Copy invite link
+                              </button>
+                              {canManage(invitation.role, 'invite') && (
+                                <button
+                                  className="li-mini-button li-mini-danger"
+                                  type="button"
+                                  disabled={cancelBusy}
+                                  onClick={() => setConfirmCancelInvite(invitation)}
+                                >
+                                  <Trash2 size={13} /> Cancel
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : null}
+            </div>
+          )}
       </Panel>
 
       {confirmRemove && (
@@ -970,7 +1076,73 @@ function TeamMembersPanel({
           onConfirm={() => void cancelInvite()}
         />
       )}
+
+      {confirmRoleChange && (
+        <RoleChangeDrawer
+          member={confirmRoleChange.member}
+          next={confirmRoleChange.next}
+          isSelf={confirmRoleChange.member.id === (activeMember as { id?: string } | null)?.id}
+          busy={roleBusy}
+          error={roleError}
+          onCancel={() => {
+            if (!roleBusy) {
+              setConfirmRoleChange(null);
+              setRoleError('');
+            }
+          }}
+          onConfirm={() => void changeRole()}
+        />
+      )}
     </>
+  );
+}
+
+const ROLE_RANK: Record<ResolvedWorkspaceRole, number> = { member: 0, manager: 1, owner: 2 };
+
+/** Owner-only promotion or demotion, confirmed before it is sent. */
+function RoleChangeDrawer({
+  member,
+  next,
+  isSelf,
+  busy,
+  error,
+  onCancel,
+  onConfirm
+}: {
+  member: WorkspaceMember;
+  next: ResolvedWorkspaceRole;
+  isSelf: boolean;
+  busy: boolean;
+  error: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const current = parseWorkspaceRole(member.role);
+  const demotion = ROLE_RANK[next] < ROLE_RANK[current];
+  const withArticle = (role: ResolvedWorkspaceRole) =>
+    `${role === 'owner' ? 'an' : 'a'} ${ROLE_LABELS[role].toLowerCase()}`;
+  return (
+    <ConfirmDrawer
+      title={`Make ${member.name} ${withArticle(next)}?`}
+      tone={demotion || next === 'owner' ? 'danger' : 'default'}
+      body={
+        <>
+          <p>{ROLE_SUMMARIES[next]}</p>
+          <p>
+            {member.name} is currently {withArticle(current)}. The change takes effect immediately
+            and is recorded in the workspace history.
+          </p>
+          {isSelf && demotion && (
+            <p>You are changing your own role and will lose the controls it no longer includes.</p>
+          )}
+        </>
+      }
+      confirmLabel={`Make ${ROLE_LABELS[next].toLowerCase()}`}
+      busy={busy}
+      error={error || null}
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
   );
 }
 

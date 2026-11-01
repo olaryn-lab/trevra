@@ -61,19 +61,28 @@ Legacy finance-oriented agent commands are removed; the Agent surface is GTM-onl
 
 ## Direct agent API
 
-The supported direct agent resources are:
+The supported direct agent API is documented in
+[docs/api/public-api.md](api/public-api.md) (auth, error envelope, rate limits,
+idempotency, versioning) and served as OpenAPI 3.1 at
+`GET /api/v1/openapi.json` to authenticated callers. Its endpoints are:
 
 ```text
-GET  /api/agent/skills
-POST /api/agent/skills/:id/run
-GET  /api/agent/runs
-GET  /api/agent/runs/:id
-GET  /api/agent/playbooks
-POST /api/agent/playbooks/:id/runs
-GET  /api/agent/playbook-runs
-GET  /api/agent/playbook-runs/:id
-GET  /api/agent/events
-POST /api/agent/mcp
+GET    /api/agent/skills
+POST   /api/agent/skills/:id/run
+GET    /api/agent/runs
+GET    /api/agent/runs/:id
+GET    /api/agent/playbooks
+POST   /api/agent/playbooks/:id/runs
+GET    /api/agent/playbook-runs
+GET    /api/agent/playbook-runs/:id
+GET    /api/agent/events
+GET    /api/agent/people
+GET    /api/agent/accounts
+GET    /api/agent/opportunities
+GET    /api/agent/conversations
+GET    /api/agent/deliveries
+POST   /api/agent/mcp
+GET    /api/v1/openapi.json
 ```
 
 Browser-session approval routes are intentionally outside the agent-token surface.

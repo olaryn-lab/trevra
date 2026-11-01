@@ -33,6 +33,18 @@ export function stripQuotedReply(value: string | null | undefined): string {
   return kept.join('\n').trim();
 }
 
+/**
+ * The reply-intent patterns, shared with the LinkedIn reply classifier
+ * (src/server/linkedin/reply-classification.ts) so both channels recognise the
+ * same opt-out and absence wording. No `g` flag: `.test()` stays stateless.
+ */
+export const OPT_OUT_REPLY_PATTERN =
+  /\b(?:unsubscribe|opt[ -]?out|remove me|take me off|stop (?:emailing|sending)|do not email|don't email|no more emails)\b/i;
+export const OUT_OF_OFFICE_REPLY_PATTERN =
+  /\b(?:out of (?:the )?office|currently away|away from (?:the )?office|on (?:annual )?leave|on vacation|returning (?:on|to the office)|limited access to email)\b/i;
+export const AUTO_REPLY_PATTERN =
+  /\b(?:automatic reply|automated reply|automated response|auto[ -]?reply|this is an automated message)\b/i;
+
 export function classifyVerifiedInboundEmail(input: {
   subject?: string | null;
   body?: string | null;
@@ -44,27 +56,11 @@ export function classifyVerifiedInboundEmail(input: {
   const automatic =
     Boolean(compact(input.autoSubmitted)) && compact(input.autoSubmitted).toLowerCase() !== 'no';
 
-  if (
-    /\b(?:unsubscribe|opt[ -]?out|remove me|take me off|stop (?:emailing|sending)|do not email|don't email|no more emails)\b/i.test(
-      body
-    )
-  )
-    return 'unsubscribe';
+  if (OPT_OUT_REPLY_PATTERN.test(body)) return 'unsubscribe';
 
-  if (
-    /\b(?:out of (?:the )?office|currently away|away from (?:the )?office|on (?:annual )?leave|on vacation|returning (?:on|to the office)|limited access to email)\b/i.test(
-      combined
-    )
-  )
-    return 'out_of_office';
+  if (OUT_OF_OFFICE_REPLY_PATTERN.test(combined)) return 'out_of_office';
 
-  if (
-    automatic ||
-    /\b(?:automatic reply|automated reply|automated response|auto[ -]?reply|this is an automated message)\b/i.test(
-      combined
-    )
-  )
-    return 'auto_reply';
+  if (automatic || AUTO_REPLY_PATTERN.test(combined)) return 'auto_reply';
 
   if (!body && !subject) return 'unknown';
   return 'reply';

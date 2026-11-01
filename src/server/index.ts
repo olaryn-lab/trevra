@@ -75,7 +75,7 @@ if (process.env.NODE_ENV === 'production') {
   const APP_PATH_PATTERNS = [
     /^\/loop(?:\/cost)?\/?$/,
     /^\/outreach\/?$/,
-    /^\/outreach\/(?:new|inbound|inbox|opportunities|posts|settings)\/?$/,
+    /^\/outreach\/(?:new|inbound|inbox|opportunities|posts|analytics|settings)\/?$/,
     /^\/outreach\/campaign\/[^/]+\/?$/,
     /^\/outreach\/workflow\/[^/]+(?:\/[^/]+)?\/?$/,
     /^\/ledger\/?$/,

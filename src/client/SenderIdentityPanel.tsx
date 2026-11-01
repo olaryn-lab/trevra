@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { Mail } from 'lucide-react';
 import type { SenderIdentity } from '../server/compliance/sender-identity';
 import { getSenderIdentity, saveSenderIdentity } from './api';
-import type { WorkspaceRole } from './auth-client';
+import { lacksOwnerRole, type WorkspaceRole } from './workspace-role';
 import { errorMessage } from './LinkedInSafety';
 import { ActionRow, FormGrid, OwnerOnlyNote } from './ui/forms';
 import { Panel } from './ui/layout';
@@ -118,7 +118,7 @@ export function SenderIdentityForm({
             {busy ? 'Saving…' : 'Save sender identity'}
           </Button>
         </ActionRow>
-      ) : role === 'member' ? (
+      ) : lacksOwnerRole(role) ? (
         <OwnerOnlyNote>change the sender identity</OwnerOnlyNote>
       ) : null}
     </Panel>

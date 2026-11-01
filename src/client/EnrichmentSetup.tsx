@@ -9,7 +9,7 @@ import {
   type EnrichmentSettings,
   type EnrichmentUsage
 } from './api';
-import { useWorkspaceRole } from './auth-client';
+import { lacksOwnerRole, useWorkspaceRole } from './auth-client';
 import { errorMessage } from './LinkedInSafety';
 import { relativeTime } from './LinkedInScreen';
 import { Panel } from './ui/layout';
@@ -182,7 +182,7 @@ export function EnrichmentSetup({ setToast }: { setToast: (message: string) => v
                 </Button>
               </div>
             </>
-          ) : role === 'member' ? (
+          ) : lacksOwnerRole(role) ? (
             <OwnerOnlyNote>change the key or the cap</OwnerOnlyNote>
           ) : null}
           {runs && (

@@ -91,12 +91,14 @@ import {
 } from './LinkedInManagerProgress';
 import { NOT_ENOUGH_DATA, RATE_MIN_SAMPLE, ratePercent } from './analytics';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
+import { CampaignAutoEnrolRules } from './CampaignAutoEnrolRules';
 import { CampaignEmailApprovals } from './CampaignEmailApprovals';
 import { LinkedInActionApprovals } from './LinkedInActionApprovals';
 import { LinkedInWithdrawalApprovals } from './LinkedInWithdrawalApprovals';
 import { useWorkspaceMembers } from './TeamScreen';
 import { ConfirmDrawer } from './ui/dialog';
+import { ErrorOrBillingBlocked } from './ui/BillingBlockedNotice';
 import { ChoiceMenu } from './ui/choice-menu';
 import { ActionMenu } from './ui/action-menu';
 import { Select } from './ui/primitives';
@@ -579,22 +581,31 @@ const CAPACITY_LABEL: Record<ManagedKind, string> = {
   follow: 'Relationship actions'
 };
 
+/**
+ * ONE SEAT, ONE BUDGET. `remaining` is the room the planner will actually use
+ * on the seat today (`seatRoomToday`: the send gate's allowance less every row
+ * still queued there, from any campaign), so two campaigns sharing an account
+ * show the same remaining room rather than each showing it in full, and the
+ * card never promises more than the planner will plan.
+ */
 function CapacityBreakdown({
   ceilings,
-  allocated
+  queues
 }: {
   ceilings: Record<ManagedKind, EnforcedCeiling>;
-  allocated: CampaignQueueSummary['allocatedCampaignDay'];
+  queues: Pick<CampaignQueueSummary, 'allocatedCampaignDay' | 'allocatedSeatDay' | 'seatRoomToday'>;
 }) {
   return (
     <div className="mgr-summary">
       {(['profile_view', 'invite', 'dm', 'follow'] as const).map((kind) => {
         const limit = ceilings[kind].today;
-        const used = allocated[kind];
-        const remaining = Math.max(0, limit - used);
+        const onSeat = queues.allocatedSeatDay[kind];
+        const mine = queues.allocatedCampaignDay[kind];
+        const remaining = Math.min(Math.max(0, limit - onSeat), queues.seatRoomToday[kind]);
         return (
           <span key={kind}>
-            <b>{CAPACITY_LABEL[kind]}</b>: limit {limit} · {used} allocated · {remaining} remaining
+            <b>{CAPACITY_LABEL[kind]}</b>: limit {limit} · {onSeat} allocated on this account (
+            {mine} by this campaign) · {remaining} remaining
           </span>
         );
       })}
@@ -686,9 +697,9 @@ function campaignBlockers({
       const kind = capacityKindForStep(step);
       if (!kind || seen.has(kind)) continue;
       seen.add(kind);
-      const allocated = operations.queues.allocatedCampaignDay[kind];
+      const allocated = operations.queues.allocatedSeatDay[kind];
       const limit = ceilings[kind].today;
-      if (allocated >= limit) {
+      if (allocated >= limit || operations.queues.seatRoomToday[kind] <= 0) {
         const dayLimit = report?.limits.find(
           (candidate) => candidate.kind === kind && candidate.window === 'day'
         );
@@ -709,7 +720,7 @@ function campaignBlockers({
                 title: `${CAPACITY_LABEL[kind]} capacity fully allocated`,
                 // Today's allowance is spent. Tomorrow's arrives by itself.
                 severity: 'waiting' as const,
-                detail: `${plural(backlog.due, 'lead')} ${are(backlog.due)} sequence-eligible at this step, but this campaign's current ramp limit is ${limit} and ${allocated} are already allocated. Remaining planner capacity is 0.`
+                detail: `${plural(backlog.due, 'lead')} ${are(backlog.due)} sequence-eligible at this step, but this account's limit is ${limit} today and ${allocated} are already allocated across its campaigns, with what has already been sent counted by the send check. Remaining planner capacity is 0.`
               }
         );
       }
@@ -2162,7 +2173,7 @@ export function OutreachManagerRead({
    * a surprise nobody asked for.
    */
   const [activeSeatKey, setActiveSeatKey] = useActiveSeatKey();
-  const isWorkspaceOwner = useIsWorkspaceOwner();
+  const canManageAllCampaigns = useWorkspaceCan('campaigns.manage_all');
   const { members: workspaceMembers } = useWorkspaceMembers();
   const [seats, setSeats] = useState<LinkedInSeat[]>([]);
   const [lists, setLists] = useState<LinkedInLeadList[]>([]);
@@ -2218,6 +2229,7 @@ export function OutreachManagerRead({
   const [analyticsLoading, setAnalyticsLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [errorCause, setErrorCause] = useState<unknown>(null);
   const [starting, setStarting] = useState<ManagedCampaign | null>(null);
   const [stopping, setStopping] = useState<ManagedCampaign | null>(null);
   const [deleting, setDeleting] = useState<ManagedCampaign | null>(null);
@@ -2441,9 +2453,11 @@ export function OutreachManagerRead({
   const guard = async (key: string, work: () => Promise<void>, fallback: string) => {
     setBusy(key);
     setError('');
+    setErrorCause(null);
     try {
       await work();
     } catch (err) {
+      setErrorCause(err);
       setError(errorMessage(err, fallback));
     } finally {
       setBusy('');
@@ -2892,12 +2906,12 @@ export function OutreachManagerRead({
         ? enforcedCeilings(report, warmup?.fraction ?? rampFractionForDay(report, 1) ?? 1)
         : null,
       rampDays: rampFractions(report)?.length ?? null,
-      allocated: operationsByCampaign[starting.id]?.queues.allocatedCampaignDay ?? null
+      allocated: operationsByCampaign[starting.id]?.queues.allocatedSeatDay ?? null
     };
   })();
   return (
     <div className="page-stack li-polished">
-      {error && <div className="error-banner">{error}</div>}
+      {error && <ErrorOrBillingBlocked message={error} error={errorCause} />}
       <LinkedInActionApprovals />
       <LinkedInWithdrawalApprovals />
 
@@ -3177,7 +3191,7 @@ export function OutreachManagerRead({
                       </span>
                       <span>
                         Owned by <b>{campaign.ownerName ?? 'workspace owner'}</b>
-                        {isWorkspaceOwner && workspaceMembers.length > 0 && (
+                        {canManageAllCampaigns && workspaceMembers.length > 0 && (
                           <ChoiceMenu
                             label={`Change owner for ${campaign.name}`}
                             title="Choose campaign owner"
@@ -3819,10 +3833,7 @@ export function OutreachManagerRead({
                             </Hint>
                           </p>
                           {operations && (
-                            <CapacityBreakdown
-                              ceilings={ceilings}
-                              allocated={operations.queues.allocatedCampaignDay}
-                            />
+                            <CapacityBreakdown ceilings={ceilings} queues={operations.queues} />
                           )}
                         </>
                       ) : (
@@ -3873,6 +3884,7 @@ export function OutreachManagerRead({
                         busy={busy !== ''}
                         onSave={(policy) => saveCampaignExclusions(campaign, policy)}
                       />
+                      <CampaignAutoEnrolRules campaign={campaign} lists={lists} />
                     </div>
                   )}
 

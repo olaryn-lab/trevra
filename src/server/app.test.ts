@@ -267,6 +267,40 @@ describe('Trevra API on PostgreSQL', () => {
     expect(remaining.body.posts.some((post: { id: string }) => post.id === postId)).toBe(false);
   });
 
+  it('mounts per-rep reporting and its exports behind the session, scoped to the caller workspace', async () => {
+    db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
+    const app = createApp(db);
+    const { owner, ownerAuth, member } = await ownerAndMember(app);
+    const outsider = await signUpAgent(app, 'report-outsider');
+    const outsiderAuth = await sessionAuth(outsider.agent);
+
+    await request(app).get('/api/linkedin/manager/reports').expect(401);
+    await request(app).get('/api/linkedin/manager/reports/daily.csv?range=7d').expect(401);
+
+    const asOwner = await owner.agent.get('/api/linkedin/manager/reports?range=7d').expect(200);
+    const asMember = await member.agent.get('/api/linkedin/manager/reports?range=7d').expect(200);
+    expect(asOwner.body.range.days).toBe(7);
+    expect(asMember.body.members).toEqual(asOwner.body.members);
+    const people = (asOwner.body.members as Array<{ userId: string; status: string }>).filter(
+      (row) => row.status === 'current'
+    );
+    expect(people).toHaveLength(2);
+    expect(people.map((row) => row.userId)).toContain(ownerAuth.userId);
+
+    const theirs = await outsider.agent.get('/api/linkedin/manager/reports?range=7d').expect(200);
+    expect((theirs.body.members as Array<{ userId: string }>).map((row) => row.userId)).toEqual([
+      outsiderAuth.userId
+    ]);
+
+    const csv = await member.agent
+      .get(`/api/linkedin/manager/reports/team.csv?range=7d&memberIds=${ownerAuth.userId}`)
+      .expect(200);
+    expect(csv.headers['content-disposition']).toMatch(/trevra-team-stats_from-.*_before-.*\.csv/);
+    await outsider.agent
+      .get(`/api/linkedin/manager/reports/team.csv?range=7d&memberIds=${ownerAuth.userId}`)
+      .expect(400);
+  });
+
   it('publishes canonical search, AI, and security discovery resources', async () => {
     process.env.PUBLIC_SITE_URL = 'https://trevra.example';
     process.env.INDEXNOW_KEY = 'trevra-indexnow-key-12345678';

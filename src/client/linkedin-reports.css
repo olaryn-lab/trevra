@@ -1,0 +1,63 @@
+/* /outreach/analytics (TRV-046, TRV-049). Composition only: controls,
+   tables, pills and the stat row keep their shared skins. */
+
+/* The panel is a grid item of .page-stack. Without this its min-width is the
+   widest table's, which widens the whole screen (and the section nav) instead
+   of letting the table scroll inside .li-table-scroll. */
+.li-reports {
+  min-width: 0;
+}
+
+.li-reports-filters {
+  --ui-field-row-cols: repeat(auto-fit, minmax(180px, 1fr));
+  margin-bottom: 12px;
+}
+
+.li-reports-views {
+  margin-top: 16px;
+}
+
+.li-reports .li-table tfoot th,
+.li-reports .li-table tfoot td {
+  border-top: 1px solid var(--line);
+  font-weight: 700;
+}
+
+.li-reports .li-table tbody th {
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.li-reports-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.li-reports-pick {
+  width: var(--t-tap);
+  padding: 0;
+}
+
+/* The checkbox's hit area is the whole cell, at least --t-tap square. */
+.li-reports-check {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: var(--t-tap);
+  min-height: var(--t-tap);
+  cursor: pointer;
+}
+
+.li-reports-check input {
+  width: 17px;
+  height: 17px;
+  margin: 0;
+  accent-color: var(--t-green-fill);
+}
+
+.li-reports-team-footer {
+  gap: 12px;
+  flex-wrap: wrap;
+}

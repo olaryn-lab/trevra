@@ -37,7 +37,7 @@ import {
   type LinkedInPost
 } from './api';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import { replaceNavigate } from './ui/route';
 import type { ContentChannelVariant } from '../server/content/channel-variants';
 import type { BufferChannel, BufferConnectionState } from '../server/content/buffer';
@@ -576,7 +576,7 @@ const STATUS_LABELS: Record<LinkedInPost['status'], string> = {
 
 function PostRow({ post, onChanged }: { post: LinkedInPost; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
-  const isOwner = useIsWorkspaceOwner();
+  const canApprove = useWorkspaceCan('outreach.approve');
   const [review, setReview] = useState<LinkedInPostReview | null>(null);
   const [reviewOpen, setReviewOpen] = useState(false);
   // A 409 (someone else already published it, the worker already claimed it)
@@ -699,9 +699,9 @@ function PostRow({ post, onChanged }: { post: LinkedInPost; onChanged: () => voi
                 ? 'Workspace policy allows publishing.'
                 : review.approved
                   ? 'This exact post is approved.'
-                  : 'Owner approval required before the post is published.'}
+                  : 'Owner or manager approval required before the post is published.'}
           </p>
-          {isOwner && review.policy.effect === 'require_approval' && !review.approved && (
+          {canApprove && review.policy.effect === 'require_approval' && !review.approved && (
             <button
               type="button"
               disabled={busy}

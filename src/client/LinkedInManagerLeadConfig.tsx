@@ -20,21 +20,30 @@ import {
   importLinkedInManagerLeadCsv,
   importLinkedInManagerProfileUrls,
   previewLinkedInManagerLeadCsv,
+  previewLinkedInManagerProfileUrls,
   renameLinkedInManagerLeadList,
   updateLinkedInManagerLeadContact,
-  type LinkedInLeadCsvPreview
+  type LinkedInLeadCsvPreview,
+  type PastedProfileRejection
 } from './api';
 import type {
   LeadListSourceKind,
   LinkedInLeadContact,
   LinkedInLeadList
 } from '../server/linkedin/lead-lists';
+import { LEAD_CSV_PREAMBLE_SCAN_ROWS, leadCsvHeaderRowIndex } from '../shared/lead-csv-header';
 import { useActiveSeatKey } from './LinkedInActiveAccount';
-import { useIsWorkspaceOwner } from './auth-client';
-import { salesNavigatorCsvMapping } from './leadCsvPresets';
+import { useWorkspaceCan } from './auth-client';
+import {
+  LEAD_CSV_PRESETS,
+  detectLeadCsvPreset,
+  leadCsvPreset,
+  type LeadCsvPresetId
+} from './leadCsvPresets';
 import { errorMessage } from './LinkedInSafety';
+import { CrmContactSync } from './CrmContactSync';
 import { ActionMenu } from './ui/action-menu';
-import { Select } from './ui/primitives';
+import { Button, Field, Select, Textarea } from './ui/primitives';
 import { pluralGrouped } from './ui/plural';
 /**
  * Building a lead list, and living with one afterwards.
@@ -71,8 +80,12 @@ const FIELDS: ReadonlyArray<{ field: LeadField; label: string; required: boolean
   { field: 'email', label: 'Email', required: false },
   { field: 'phone', label: 'Phone', required: false },
   { field: 'country', label: 'Country', required: false },
-  { field: 'profileUrl', label: 'LinkedIn profile URL', required: false }
+  { field: 'profileUrl', label: 'LinkedIn profile URL', required: false },
+  { field: 'title', label: 'Job title', required: false }
 ];
+
+/** Rejected pasted entries listed on screen; the count beside them is always exact. */
+const PASTE_REJECTIONS_SHOWN = 20;
 
 const REQUIRED_FIELDS: readonly LeadField[] = ['firstName', 'lastName', 'company'];
 
@@ -155,14 +168,19 @@ async function readCsvHead(
 ): Promise<{ headers: string[]; rows: Array<Record<string, string>> }> {
   const slice = file.slice(0, 256 * 1024);
   const text = await slice.text();
-  const raw = parseCsvRows(text, SAMPLE_ROWS + 2);
+  // Room for a LinkedIn Connections preamble above the header, then the sample.
+  const raw = parseCsvRows(text, LEAD_CSV_PREAMBLE_SCAN_ROWS + SAMPLE_ROWS + 2);
   if (raw.length === 0) return { headers: [], rows: [] };
   // A sliced file can end mid-row, so the last row of a truncated read is dropped.
   const complete = slice.size < file.size && raw.length > 1 ? raw.slice(0, -1) : raw;
-  const headers = (complete[0] ?? []).map((header) => header.replace(/^﻿/, ''));
-  const rows = complete
-    .slice(1)
-    .filter((cells) => cells.some((cell) => cell.trim() !== ''))
+  // The same header rule as the server's parser, so the sample lines up with it.
+  const headerIndex = leadCsvHeaderRowIndex(
+    complete.filter((cells) => cells.some((cell) => cell.trim() !== ''))
+  );
+  const nonBlank = complete.filter((cells) => cells.some((cell) => cell.trim() !== ''));
+  const headers = (nonBlank[headerIndex] ?? []).map((header) => header.replace(/^﻿/, ''));
+  const rows = nonBlank
+    .slice(headerIndex + 1)
     .slice(0, SAMPLE_ROWS)
     .map((cells) => {
       const record: Record<string, string> = {};
@@ -195,11 +213,30 @@ interface ContactDraft {
   doNotContact: boolean;
 }
 
+/** A request, from the screen around this one, to bring one way of adding leads forward. */
+export interface LeadIntakeRequest {
+  mode: 'csv' | 'paste';
+  /** Bumped per request, so asking for the same mode twice still moves focus. */
+  seq: number;
+}
+
+interface ProfileUrlCheck {
+  /** The exact text that was checked; editing it makes the check stale. */
+  text: string;
+  acceptedCount: number;
+  duplicates: number;
+  rejected: PastedProfileRejection[];
+  rejectedCount: number;
+  cap: number;
+}
+
 export function LinkedInManagerLeadConfig({
   onChanged,
   setToast,
   compact = false,
-  onImported
+  onImported,
+  showSourceGuide = true,
+  intakeRequest = null
 }: {
   onChanged: () => Promise<void>;
   setToast: (message: string) => void;
@@ -214,9 +251,13 @@ export function LinkedInManagerLeadConfig({
   compact?: boolean;
   /** Compact mode only: fires with the list a successful import just created. */
   onImported?: (list: LinkedInLeadList) => void;
+  /** Off where the surrounding screen already explains which sources exist. */
+  showSourceGuide?: boolean;
+  /** Opens and focuses the paste box, or brings the CSV chooser into view. */
+  intakeRequest?: LeadIntakeRequest | null;
 }) {
   const [activeSeatKey] = useActiveSeatKey();
-  const isOwner = useIsWorkspaceOwner();
+  const canManageLists = useWorkspaceCan('lead_lists.manage');
   const [lists, setLists] = useState<LinkedInLeadList[]>([]);
   const [listsLoading, setListsLoading] = useState(true);
 
@@ -232,9 +273,12 @@ export function LinkedInManagerLeadConfig({
   /** What the automatch chose on its own, kept so a change can be named as one. */
   const [autoMapping, setAutoMapping] = useState<FieldMapping>({});
   const [overrides, setOverrides] = useState<FieldMapping>({});
-  const [salesNavigatorPreset, setSalesNavigatorPreset] = useState(false);
+  /** The CSV format preset that pre-filled the mapping; '' when none did. */
+  const [preset, setPreset] = useState<LeadCsvPresetId | ''>('');
+  /** What that preset chose, so a column it set can be named as its choice. */
+  const [presetMapping, setPresetMapping] = useState<FieldMapping>({});
   const [dragging, setDragging] = useState(false);
-  const [busy, setBusy] = useState<'' | 'preview' | 'import'>('');
+  const [busy, setBusy] = useState<'' | 'preview' | 'import' | 'check'>('');
   const [report, setReport] = useState<{
     listName: string;
     listId: string;
@@ -242,8 +286,15 @@ export function LinkedInManagerLeadConfig({
   } | null>(null);
   const [error, setError] = useState('');
   const [profileUrls, setProfileUrls] = useState('');
+  const [pasteOpen, setPasteOpen] = useState(false);
+  /** The last server check of the pasted text: per-line rejections, before any write. */
+  const [pasteCheck, setPasteCheck] = useState<ProfileUrlCheck | null>(null);
+  const [pasteError, setPasteError] = useState('');
   /** Last preview wins: changing two columns quickly must not race. */
   const previewToken = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const chooseFileRef = useRef<HTMLButtonElement | null>(null);
+  const pasteRef = useRef<HTMLTextAreaElement | null>(null);
 
   /* -- the list half ----------------------------------------------------- */
   const [openListId, setOpenListId] = useState('');
@@ -262,6 +313,9 @@ export function LinkedInManagerLeadConfig({
   const [visible, setVisible] = useState(PAGE);
   const [draft, setDraft] = useState<ContactDraft | null>(null);
   const [armed, setArmed] = useState('');
+  /** TRV-051: the lead whose CRM sync panel is open above the table. */
+  const [crmSync, setCrmSync] = useState<{ id: string; name: string } | null>(null);
+  const crmSyncRef = useRef<HTMLDivElement | null>(null);
   const [rowBusy, setRowBusy] = useState('');
   const [listError, setListError] = useState('');
   const [renamingList, setRenamingList] = useState(false);
@@ -394,6 +448,22 @@ export function LinkedInManagerLeadConfig({
     })();
   }, [compact, loadLists, openList]);
 
+  useEffect(() => {
+    if (!intakeRequest) return;
+    if (intakeRequest.mode === 'paste') {
+      setPasteOpen(true);
+      requestAnimationFrame(() => {
+        pasteRef.current?.scrollIntoView({ block: 'center' });
+        pasteRef.current?.focus();
+      });
+    } else {
+      requestAnimationFrame(() => {
+        chooseFileRef.current?.scrollIntoView({ block: 'center' });
+        chooseFileRef.current?.focus();
+      });
+    }
+  }, [intakeRequest]);
+
   const headers = preview?.headers ?? sample?.headers ?? [];
 
   /** The column each field is on right now: the operator's choice, else the server's. */
@@ -426,30 +496,52 @@ export function LinkedInManagerLeadConfig({
     [chosenHeader]
   );
 
-  const runPreview = useCallback(async (target: File, mapping: FieldMapping, first: boolean) => {
-    const token = previewToken.current + 1;
-    previewToken.current = token;
-    setBusy('preview');
-    try {
-      const result = await previewLinkedInManagerLeadCsv(
-        target,
-        Object.keys(mapping).length > 0 ? mapping : undefined
-      );
-      if (previewToken.current !== token) return;
-      setPreview(result);
-      if (first) setAutoMapping(result.mapping);
-      setError('');
-    } catch (err) {
-      if (previewToken.current !== token) return;
-      setPreview(null);
-      const message = errorMessage(err, 'Unable to read that CSV.');
-      // "Could not map required field" is not a fault to report twice: the
-      // mapper below already shows which identity columns are still unanswered.
-      setError(/Could not map required field/i.test(message) ? '' : message);
-    } finally {
-      if (previewToken.current === token) setBusy('');
-    }
-  }, []);
+  const runPreview = useCallback(
+    async (
+      target: File,
+      mapping: FieldMapping,
+      first: boolean
+    ): Promise<LinkedInLeadCsvPreview | null> => {
+      const token = previewToken.current + 1;
+      previewToken.current = token;
+      setBusy('preview');
+      try {
+        const result = await previewLinkedInManagerLeadCsv(
+          target,
+          Object.keys(mapping).length > 0 ? mapping : undefined
+        );
+        if (previewToken.current !== token) return null;
+        setPreview(result);
+        if (first) setAutoMapping(result.mapping);
+        setError('');
+        return result;
+      } catch (err) {
+        if (previewToken.current !== token) return null;
+        setPreview(null);
+        const message = errorMessage(err, 'Unable to read that CSV.');
+        // "Could not map required field" is not a fault to report twice: the
+        // mapper below already shows which identity columns are still unanswered.
+        setError(/Could not map required field/i.test(message) ? '' : message);
+        return null;
+      } finally {
+        if (previewToken.current === token) setBusy('');
+      }
+    },
+    []
+  );
+
+  /** Pre-fill the mapping from a preset. Every column stays visible and changeable. */
+  const applyPresetTo = useCallback(
+    async (target: File, id: LeadCsvPresetId | '', fileHeaders: readonly string[]) => {
+      const chosen = id ? leadCsvPreset(id) : undefined;
+      const mapping = chosen ? chosen.map(fileHeaders) : {};
+      setPreset(chosen ? chosen.id : '');
+      setPresetMapping(mapping);
+      setOverrides(mapping);
+      await runPreview(target, mapping, false);
+    },
+    [runPreview]
+  );
 
   const takeFile = useCallback(
     async (next: File | null) => {
@@ -465,7 +557,8 @@ export function LinkedInManagerLeadConfig({
       setPreview(null);
       setAutoMapping({});
       setOverrides({});
-      setSalesNavigatorPreset(false);
+      setPreset('');
+      setPresetMapping({});
       setSample(null);
       // Compact mode has no destination picker, so the list name has to come
       // from somewhere other than an operator typing it first -- the file's
@@ -478,20 +571,30 @@ export function LinkedInManagerLeadConfig({
           .trim();
         setNewName(guess || 'Leads');
       }
+      let head: Awaited<ReturnType<typeof readCsvHead>> | null = null;
       try {
-        setSample(await readCsvHead(next));
+        head = await readCsvHead(next);
+        setSample(head);
       } catch {
         /* the preview below reports what is wrong with it */
       }
-      await runPreview(next, {}, true);
+      // The plain automatch runs first so "Changed from" keeps naming what the
+      // headings alone would have chosen.
+      const first = await runPreview(next, {}, true);
+      // LinkedIn's Connections export is recognisable from its own header, so
+      // its preset is pre-selected; the select and the mapping stay editable.
+      const fileHeaders = first?.headers ?? head?.headers ?? [];
+      const detected = detectLeadCsvPreset(fileHeaders);
+      if (detected) await applyPresetTo(next, detected, fileHeaders);
     },
-    [runPreview, compact, newName]
+    [runPreview, applyPresetTo, compact, newName]
   );
 
   const changeMapping = (field: LeadField, header: string) => {
-    const next: FieldMapping = { ...overrides };
-    if (header) next[field] = header;
-    else delete next[field];
+    // An explicit '' is kept, not deleted: deleting would fall back to the
+    // column the previous preview (or a preset) chose, so "Not imported" could
+    // never stick.
+    const next: FieldMapping = { ...overrides, [field]: header };
     setOverrides(next);
     if (!file) return;
     const mapping = mappingToSend(next);
@@ -508,12 +611,9 @@ export function LinkedInManagerLeadConfig({
     }
   };
 
-  const applySalesNavigatorPreset = () => {
+  const changePreset = (id: string) => {
     if (!file || !headers.length) return;
-    const mapping = salesNavigatorCsvMapping(headers);
-    setOverrides(mapping);
-    setSalesNavigatorPreset(true);
-    void runPreview(file, mapping, false);
+    void applyPresetTo(file, (leadCsvPreset(id)?.id ?? '') as LeadCsvPresetId | '', headers);
   };
 
   /**
@@ -584,7 +684,7 @@ export function LinkedInManagerLeadConfig({
           ? await createLinkedInManagerLeadList({
               seatKey: activeSeatKey,
               name: newName.trim(),
-              sourceKind: salesNavigatorPreset ? 'sales_navigator' : 'csv'
+              sourceKind: (preset ? leadCsvPreset(preset)?.listKind : undefined) ?? 'csv'
             })
           : destinationList!;
       const counts = (await importLinkedInManagerLeadCsv(
@@ -604,7 +704,8 @@ export function LinkedInManagerLeadConfig({
       setSample(null);
       setOverrides({});
       setAutoMapping({});
-      setSalesNavigatorPreset(false);
+      setPreset('');
+      setPresetMapping({});
       setNewName('');
       if (compact) {
         // No report panel, no reopening a contacts browser this mode doesn't
@@ -625,14 +726,42 @@ export function LinkedInManagerLeadConfig({
     }
   };
 
+  /** The check of the text in the box right now, or null once the text has changed. */
+  const currentPasteCheck = pasteCheck && pasteCheck.text === profileUrls ? pasteCheck : null;
+
+  /**
+   * Two steps, the same pipeline as a CSV. First the server checks the paste
+   * (nothing is written, no list is created): over the 10,000 cap it refuses
+   * the whole paste, and every rejected line comes back with its reason. If
+   * anything was rejected the operator sees it first; the next press adds the
+   * valid profiles. A clean paste goes straight through.
+   */
   const runProfileUrlImport = async () => {
-    if (!profileUrls.trim()) return;
+    const text = profileUrls;
+    if (!text.trim()) return;
     if ((compact || destination === 'new') && !newName.trim()) {
-      setError('Name the new list before importing profile URLs.');
+      setPasteError('Name the new list below before adding profile URLs.');
       return;
     }
+    setPasteError('');
+    let check = currentPasteCheck;
+    if (!check) {
+      setBusy('check');
+      try {
+        const result = await previewLinkedInManagerProfileUrls(text);
+        check = { text, ...result };
+        setPasteCheck(check);
+      } catch (err) {
+        setPasteCheck(null);
+        setPasteError(errorMessage(err, 'Unable to check those LinkedIn profile URLs.'));
+        return;
+      } finally {
+        setBusy('');
+      }
+      if (check.rejectedCount > 0) return;
+    }
+    if (check.acceptedCount === 0) return;
     setBusy('import');
-    setError('');
     try {
       const list =
         destination === 'new'
@@ -642,13 +771,14 @@ export function LinkedInManagerLeadConfig({
               sourceKind: 'profile_urls'
             })
           : destinationList!;
-      const counts = await importLinkedInManagerProfileUrls(list.id, profileUrls, activeSeatKey);
+      const counts = await importLinkedInManagerProfileUrls(list.id, text, activeSeatKey);
       setToast(
         counts.inserted > 0 || counts.reused > 0
-          ? `${pluralGrouped(counts.inserted + counts.reused, 'profile')} added to “${list.name}”.${counts.rejected.length ? ` ${pluralGrouped(counts.rejected.length, 'entry')} rejected.` : ''}`
+          ? `${pluralGrouped(counts.inserted + counts.reused, 'profile')} added to “${list.name}”.${counts.rejectedCount ? ` ${pluralGrouped(counts.rejectedCount, 'entry', 'entries')} rejected.` : ''}`
           : `Nothing new was added to “${list.name}”.`
       );
       setProfileUrls('');
+      setPasteCheck(null);
       setNewName('');
       if (compact) {
         onImported?.(list);
@@ -659,11 +789,17 @@ export function LinkedInManagerLeadConfig({
       }
       await onChanged();
     } catch (err) {
-      setError(errorMessage(err, 'Unable to import those LinkedIn profile URLs.'));
+      setPasteError(errorMessage(err, 'Unable to import those LinkedIn profile URLs.'));
     } finally {
       setBusy('');
     }
   };
+
+  const pasteButtonLabel = !currentPasteCheck
+    ? ' Check and add profiles'
+    : currentPasteCheck.acceptedCount === 0
+      ? ' No valid profile to add'
+      : ` Add ${pluralGrouped(currentPasteCheck.acceptedCount, 'valid profile')}`;
 
   /* -- editing what is already in a list --------------------------------- */
 
@@ -798,15 +934,17 @@ export function LinkedInManagerLeadConfig({
           ))}
         </Select>
         <span className="lead-map-note">
-          {chosen && auto && chosen !== auto
-            ? `Changed from “${auto}”`
-            : guessed
-              ? 'Guessed from its heading — check this'
-              : chosen && chosen === auto
-                ? 'Matched by its heading'
-                : chosen
-                  ? 'Your choice'
-                  : 'No column matched'}
+          {preset && presetMapping[entry.field] && chosen === presetMapping[entry.field]
+            ? 'Set by the format preset'
+            : chosen && auto && chosen !== auto
+              ? `Changed from “${auto}”`
+              : guessed
+                ? 'Guessed from its heading — check this'
+                : chosen && chosen === auto
+                  ? 'Matched by its heading'
+                  : chosen
+                    ? 'Your choice'
+                    : 'No column matched'}
         </span>
       </label>
     );
@@ -838,45 +976,105 @@ export function LinkedInManagerLeadConfig({
               <Users size={18} className="li-heading-icon" /> Add leads from a CSV
             </h3>
             <p>
-              Import a CSV you are authorized to use, including a Sales Navigator-style lead export.
-              Map separate names or a full name, then review before importing. No scraping or
-              contact action happens on upload.
+              Import a CSV you are authorized to use, such as LinkedIn’s own connections export or a
+              list exported from another tool, or paste LinkedIn profile URLs. Review before
+              importing. No scraping or contact action happens on upload.
             </p>
           </div>
         </div>
 
         {error && <div className="error-banner">{error}</div>}
 
-        <details className="mgr-advanced">
+        <details
+          className="mgr-advanced"
+          open={pasteOpen}
+          onToggle={(event) => setPasteOpen(event.currentTarget.open)}
+        >
           <summary>Paste LinkedIn profile URLs instead</summary>
           <p className="li-hint">
-            One /in/ profile per line. Trevra imports the canonical URL without guessing identity or
-            reading restricted profile data. Imported profiles enter the identity-review queue and
-            cannot join a campaign until you complete first name, last name and company in Lead
-            lists.
+            One /in/ profile per line, or separated by commas — up to 10,000 different profiles per
+            paste. Search, company, post and Sales Navigator links are rejected with the reason.
+            Imported profiles enter the identity-review queue and cannot join a campaign until you
+            complete first name, last name and company in Lead lists.
           </p>
-          <textarea
-            rows={5}
-            value={profileUrls}
-            disabled={busy !== ''}
-            placeholder={
-              'https://www.linkedin.com/in/ada-lovelace/\nhttps://www.linkedin.com/in/grace-hopper/'
-            }
-            onChange={(event) => setProfileUrls(event.target.value)}
-          />
-          <button
-            className="secondary-button"
-            type="button"
+          <Field label="LinkedIn profile URLs">
+            <Textarea
+              ref={pasteRef}
+              rows={5}
+              value={profileUrls}
+              disabled={busy !== ''}
+              placeholder={
+                'https://www.linkedin.com/in/ada-lovelace/\nhttps://www.linkedin.com/in/grace-hopper/'
+              }
+              onChange={(event) => {
+                setProfileUrls(event.target.value);
+                setPasteError('');
+              }}
+            />
+          </Field>
+          {pasteError && <div className="error-banner">{pasteError}</div>}
+          {currentPasteCheck && (
+            <div className="lead-section" role="status">
+              <p className="li-hint">
+                {pluralGrouped(currentPasteCheck.acceptedCount, 'profile')} ready to add
+                {currentPasteCheck.duplicates > 0
+                  ? `, ${pluralGrouped(currentPasteCheck.duplicates, 'repeat')} counted once`
+                  : ''}
+                {currentPasteCheck.rejectedCount > 0
+                  ? `, ${pluralGrouped(currentPasteCheck.rejectedCount, 'entry', 'entries')} rejected and skipped.`
+                  : '.'}
+              </p>
+              {currentPasteCheck.rejectedCount > 0 && (
+                <div className="li-table-scroll">
+                  <table className="li-table lead-rejects">
+                    <thead>
+                      <tr>
+                        <th>Line</th>
+                        <th>Entry</th>
+                        <th>Why</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {currentPasteCheck.rejected
+                        .slice(0, PASTE_REJECTIONS_SHOWN)
+                        .map((entry, index) => (
+                          <tr key={`${entry.line}:${index}`}>
+                            <td className="li-num">{entry.line}</td>
+                            <td>{entry.value}</td>
+                            <td>{entry.reason}</td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {currentPasteCheck.rejectedCount > PASTE_REJECTIONS_SHOWN && (
+                <p className="li-hint">
+                  {pluralGrouped(
+                    currentPasteCheck.rejectedCount - PASTE_REJECTIONS_SHOWN,
+                    'other entry',
+                    'other entries'
+                  )}{' '}
+                  rejected as well.
+                </p>
+              )}
+            </div>
+          )}
+          <Button
             disabled={
               busy !== '' ||
               !profileUrls.trim() ||
-              ((compact || destination === 'new') && !newName.trim())
+              (currentPasteCheck !== null && currentPasteCheck.acceptedCount === 0)
             }
             onClick={() => void runProfileUrlImport()}
           >
-            {busy === 'import' ? <LoaderCircle className="spin" size={14} /> : <Users size={14} />}{' '}
-            Add pasted profiles
-          </button>
+            {busy === 'import' || busy === 'check' ? (
+              <LoaderCircle className="spin" size={14} aria-hidden="true" />
+            ) : (
+              <Users size={14} aria-hidden="true" />
+            )}
+            {pasteButtonLabel}
+          </Button>
         </details>
 
         <div className="li-form-grid">
@@ -920,49 +1118,61 @@ export function LinkedInManagerLeadConfig({
                 : 'Or choose one below. Up to 2 MB, .csv only — a file dropped here is read, not stored.'}
             </p>
           </div>
-          <label className="secondary-button">
+          <Button
+            ref={chooseFileRef}
+            disabled={busy !== ''}
+            onClick={() => fileInputRef.current?.click()}
+          >
             {busy === 'preview' ? (
-              <LoaderCircle className="spin" size={14} />
+              <LoaderCircle className="spin" size={14} aria-hidden="true" />
             ) : (
-              <FileUp size={14} />
+              <FileUp size={14} aria-hidden="true" />
             )}
             {file ? ' Choose another file' : ' Choose a CSV'}
-            <input
-              type="file"
-              accept=".csv,text/csv"
-              hidden
-              disabled={busy !== ''}
-              onChange={(event) => {
-                void takeFile(event.target.files?.[0] ?? null);
-                event.target.value = '';
-              }}
-            />
-          </label>
+          </Button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            hidden
+            tabIndex={-1}
+            aria-hidden="true"
+            disabled={busy !== ''}
+            onChange={(event) => {
+              void takeFile(event.target.files?.[0] ?? null);
+              event.target.value = '';
+            }}
+          />
         </div>
 
         {file && headers.length > 0 && (
           <div className="lead-section">
-            <button
-              className="secondary-button"
-              type="button"
-              disabled={busy !== ''}
-              onClick={applySalesNavigatorPreset}
+            <Field
+              label="CSV format"
+              hint={
+                preset
+                  ? `${leadCsvPreset(preset)?.hint ?? ''} The preset only fills in the columns below; change any of them.`
+                  : 'Pick the format the file came from to fill in its columns, or map them yourself below. Nothing here connects to LinkedIn.'
+              }
             >
-              {salesNavigatorPreset ? <Check size={14} /> : <FileUp size={14} />}
-              {salesNavigatorPreset
-                ? ' Sales Navigator CSV mapping applied'
-                : ' Use Sales Navigator CSV mapping'}
-            </button>
-            <p className="li-hint">
-              For a lead CSV you already have permission to export or use. Maps Name, Current
-              Company, profile URL and contact columns; it does not scrape or import directly from
-              LinkedIn. Review the detected fields before submitting.
-            </p>
+              <Select
+                value={preset}
+                disabled={busy !== ''}
+                onChange={(event) => changePreset(event.target.value)}
+              >
+                <option value="">No preset — match by heading</option>
+                {LEAD_CSV_PRESETS.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
           </div>
         )}
         {file &&
           headers.length > 0 &&
-          (missingRequired.length > 0 ? (
+          (missingRequired.length > 0 || preset !== '' ? (
             <div className="lead-section">
               <h4>Which column is which</h4>
               <p className="li-hint">
@@ -1128,32 +1338,31 @@ export function LinkedInManagerLeadConfig({
           </div>
         )}
 
-        {!compact && (
+        {!compact && showSourceGuide && (
           <div className="lead-kinds">
             <h4>Where lead lists come from</h4>
             <dl>
               <div>
                 <dt>{SOURCE_LABELS.csv}</dt>
-                <dd>Built here, from a file you export from anywhere.</dd>
-              </div>
-              <div>
-                <dt>{SOURCE_LABELS.linkedin_search}</dt>
                 <dd>
-                  Walked by the local browser worker on Lead sources, then added to a list from
-                  there.
+                  A file you are allowed to use: LinkedIn’s own connections export, or a list
+                  exported from another tool. Pick its format above to fill in the columns.
                 </dd>
               </div>
               <div>
-                <dt>{SOURCE_LABELS.sales_navigator}</dt>
-                <dd>The same walk against a Sales Navigator people search.</dd>
+                <dt>{SOURCE_LABELS.profile_urls}</dt>
+                <dd>Paste /in/ profile links you already have, one per line.</dd>
               </div>
               <div>
-                <dt>{SOURCE_LABELS.post_keyword}</dt>
-                <dd>People who reacted to or commented on posts matching your keywords.</dd>
+                <dt>Search, Sales Navigator and post engagers</dt>
+                <dd>
+                  Not supported. Collecting them means scraping LinkedIn, which breaks its terms and
+                  puts your account at risk of restriction.
+                </dd>
               </div>
             </dl>
-            <a className="li-link" href="/outreach/leads">
-              Open Lead sources <ArrowRight size={13} />
+            <a className="li-link" href="/outreach?focus=leads">
+              Why these sources are not supported <ArrowRight size={13} aria-hidden="true" />
             </a>
           </div>
         )}
@@ -1196,15 +1405,9 @@ export function LinkedInManagerLeadConfig({
             <div className="mgr-empty">
               <h4 aria-level={3}>No lead list yet</h4>
               <p>
-                Import a CSV above, or walk a LinkedIn search on Lead sources and add the people it
-                finds to a list. A campaign enrols from a list — until one has leads in it, there is
-                nobody to reach.
+                Import a CSV or paste LinkedIn profile URLs above. A campaign enrols from a list —
+                until one has leads in it, there is nobody to reach.
               </p>
-              <div className="mgr-actions">
-                <a className="secondary-button" href="/outreach/leads">
-                  Open Lead sources <ArrowRight size={14} />
-                </a>
-              </div>
             </div>
           ) : (
             <>
@@ -1249,7 +1452,7 @@ export function LinkedInManagerLeadConfig({
                 {openMeta && (
                   <span className="li-chip">From {SOURCE_LABELS[openMeta.sourceKind]}</span>
                 )}
-                {openMeta && isOwner && !renamingList && (
+                {openMeta && canManageLists && !renamingList && (
                   <button
                     type="button"
                     className="secondary-button"
@@ -1508,6 +1711,16 @@ export function LinkedInManagerLeadConfig({
                     </div>
                   )}
 
+                  {crmSync && contacts.some((contact) => contact.id === crmSync.id) && (
+                    <div ref={crmSyncRef}>
+                      <CrmContactSync
+                        leadContactId={crmSync.id}
+                        leadName={crmSync.name}
+                        onClose={() => setCrmSync(null)}
+                      />
+                    </div>
+                  )}
+
                   <div className="li-table-scroll">
                     <table className="li-table lead-contacts">
                       <thead>
@@ -1579,6 +1792,24 @@ export function LinkedInManagerLeadConfig({
                                           icon: <Pencil size={12} />,
                                           disabled: rowBusy !== '' || editing,
                                           onSelect: () => startEdit(contact)
+                                        },
+                                        {
+                                          label: 'Sync to CRM',
+                                          icon: <RefreshCw size={12} />,
+                                          disabled: rowBusy !== '',
+                                          onSelect: () => {
+                                            setDraft(null);
+                                            setArmed('');
+                                            setCrmSync({
+                                              id: contact.id,
+                                              name: `${contact.firstName} ${contact.lastName}`.trim()
+                                            });
+                                            requestAnimationFrame(() =>
+                                              crmSyncRef.current?.scrollIntoView({
+                                                block: 'nearest'
+                                              })
+                                            );
+                                          }
                                         },
                                         {
                                           label: 'Remove lead permanently',

@@ -143,9 +143,11 @@ export type BandName = 'warmup' | 'steady';
  *              list-processing.
  * - endorse -- 3 / 8. The lowest by a wide margin, for two reasons. Endorsing
  *              a stranger's skills is the least plausible human behaviour of
- *              the three, and ONE endorse action already performs up to three
- *              clicks (`driver-engage.ts` `endorseSkills`), so 8 actions is up
- *              to 24 clicks.
+ *              the three, and ONE endorse action performs up to `maxSkills`
+ *              clicks (1-`MAX_ENDORSE_SKILLS` per workflow step; `driver-engage.ts`
+ *              `endorseSkills`). The band counts ACTIONS, one per lead, not
+ *              clicks: 8 actions is up to 24 clicks at the maximum setting.
+ *              endorse-quota.acceptance.test.ts pins that contract.
  *
  * DAILY ONLY for all four judgement rows: no `perWeek`, no `perMonth`.
  * Supplying a daily figure is already a stretch and the gate cannot run
@@ -209,6 +211,13 @@ export const LINKEDIN_LIMITS: Readonly<
  * this, and between them they are what makes a withdrawal give something back.
  */
 export const MAX_OUTSTANDING_INVITES = 100;
+
+/**
+ * Skills one endorse action may endorse (owner decision, 2026-11-01). At the
+ * 8/day steady endorse band that is at most 24 endorsements a day per account.
+ * Workflow saves refuse more; older stored workflows are capped when they run.
+ */
+export const MAX_ENDORSE_SKILLS = 3;
 
 /**
  * The core anti-"Slide and Spike" number, and the one this engine exists for.
@@ -324,16 +333,6 @@ export const MIN_ACCEPTANCE_RATE = 0.3;
 
 /** The week in "acceptance rate <30% over a week". REPORTED (1.3). */
 export const ACCEPTANCE_WINDOW_DAYS = 7;
-
-/**
- * What a failing acceptance rate multiplies volume by. Plan 4-phase-2 step 4.
- *
- * A throttle, not a stop: halving never takes a day that was allowed at least
- * one action down to zero (see pacing.ts). A seat cut to zero can never
- * generate the outcomes that would clear the throttle, so "halve it" would
- * become "end it" -- which is a decision for a human, not for a multiplier.
- */
-export const ACCEPTANCE_THROTTLE_FACTOR = 0.5;
 
 /**
  * The spread window, in the SEAT's local hours. REPORTED (1.4): "spread across

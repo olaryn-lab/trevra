@@ -41,7 +41,19 @@ export async function persistImportedPeople(
   actor: ImportedPeopleActor,
   now: Date = new Date()
 ): Promise<ImportedPeopleResult> {
+  return (await persistImportedPeopleWithIds(db, workspaceId, evidence, actor, now)).result;
+}
+
+/** {@link persistImportedPeople}, plus the canonical Person ids it created or matched, in order. */
+export async function persistImportedPeopleWithIds(
+  db: Db,
+  workspaceId: string,
+  evidence: readonly ImportedPersonEvidence[],
+  actor: ImportedPeopleActor,
+  now: Date = new Date()
+): Promise<{ result: ImportedPeopleResult; personIds: string[] }> {
   const result: ImportedPeopleResult = { created: 0, matched: 0, linked: 0, skipped: 0 };
+  const personIds = new Set<string>();
   for (const item of evidence.slice(0, 4000)) {
     const domain = normalizeAccountDomain(item.accountDomain);
     const email = normalizeContactEmail(item.email);
@@ -121,6 +133,7 @@ export async function persistImportedPeople(
     if (outcome.resolved.created) result.created += 1;
     else result.matched += 1;
     if (outcome.linked?.linked) result.linked += 1;
+    personIds.add(outcome.resolved.contact.id);
   }
-  return result;
+  return { result, personIds: [...personIds] };
 }

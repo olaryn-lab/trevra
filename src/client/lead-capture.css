@@ -373,6 +373,21 @@
   margin: 0;
 }
 
+.outbound-webhook-events {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.outbound-webhook-detail {
+  display: grid;
+  gap: 12px;
+}
+
+.outbound-webhook-detail .li-hint {
+  margin: 0;
+}
+
 .capture-load-error {
   display: grid;
   gap: 10px;

@@ -8,6 +8,7 @@ import {
   type LinkedInPage
 } from './driver.js';
 import { hoverClick, settle } from './human.js';
+import { MAX_ENDORSE_SKILLS } from './limits.js';
 
 /**
  * The three ENGAGEMENT routines: follow a profile, like their most recent
@@ -182,7 +183,7 @@ export interface EndorseOptions extends EngageOptions {
 }
 
 const DEFAULT_ENDORSE_LIMIT = 1;
-const MAX_ENDORSE_LIMIT = 10;
+const MAX_ENDORSE_LIMIT = MAX_ENDORSE_SKILLS;
 const ENDORSE_INTER_CLICK_GAP_MS = 1250;
 
 function fail(failureKind: LinkedInFailureKind, detail: string): LinkedInDriverResult {
@@ -626,7 +627,8 @@ export async function likeRecentPost(
  * ------------------------------------------------------------------------ */
 
 /**
- * Endorse up to the approved `maxSkills` count. Default 1; hard cap 10.
+ * Endorse up to the approved `maxSkills` count. Default 1; hard cap
+ * `MAX_ENDORSE_SKILLS` (3), which also caps workflows saved before the cap.
  *
  * ONE LEDGER ACTION, SEVERAL CLICKS: each click must have a confirmed
  * decline in the remaining unendorsed-control count. A fixed bounded

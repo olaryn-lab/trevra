@@ -75,7 +75,7 @@ import { ConfirmDrawer } from './ui/dialog';
 import { Hint } from './ui/hint';
 import { Select } from './ui/primitives';
 import { are, plural } from './ui/plural';
-import { useIsWorkspaceOwner } from './auth-client';
+import { useWorkspaceCan } from './auth-client';
 import { useWorkspaceMembers } from './TeamScreen';
 
 /**
@@ -222,7 +222,7 @@ export function LinkedInAccounts({
   startAdding?: boolean;
   onClose?: () => void;
 }) {
-  const isWorkspaceOwner = useIsWorkspaceOwner();
+  const canAssignSeats = useWorkspaceCan('seats.assign');
   const { members: workspaceMembers } = useWorkspaceMembers();
   const [activeKey, setActiveKey] = useActiveSeatKey();
   const [accounts, setAccounts] = useState<LinkedInSeat[] | null>(null);
@@ -431,7 +431,7 @@ export function LinkedInAccounts({
             safety={safety}
             companion={Boolean(worker?.companionBrowser)}
             setToast={setToast}
-            canAssignOwner={isWorkspaceOwner}
+            canAssignOwner={canAssignSeats}
             workspaceMembers={workspaceMembers}
             onAssignOwner={assignAccountOwner}
             onChanged={load}
@@ -642,7 +642,7 @@ export function LinkedInAccounts({
               safety={safety}
               companion={Boolean(worker?.companionBrowser)}
               setToast={setToast}
-              canAssignOwner={isWorkspaceOwner}
+              canAssignOwner={canAssignSeats}
               workspaceMembers={workspaceMembers}
               onAssignOwner={assignAccountOwner}
               onChanged={load}
@@ -1503,9 +1503,12 @@ function AccountPanel({
         <div className="li-stat-row">
           {LIMIT_FIELDS.map((limit) => {
             const configured = account[limit.field];
-            const enforced = safety?.limits.find(
+            // TODAY'S number from the send-time check (draw and cold-account
+            // ramp applied), not the structural ceiling.
+            const dayRow = safety?.limits.find(
               (entry) => entry.kind === limit.kind && entry.window === 'day'
-            )?.ceiling;
+            );
+            const enforced = dayRow?.today?.ceiling ?? dayRow?.ceiling;
             const ceiling = enforced ?? configured;
             const used = usedToday(limit, detail);
             return (
@@ -2152,7 +2155,7 @@ function AccountsTable({
                       reports[account.seatKey]?.limits.find(
                         (entry) => entry.kind === limit.kind && entry.window === 'day'
                       ) ?? null;
-                    const ceiling = row?.ceiling ?? null;
+                    const ceiling = row?.today?.ceiling ?? row?.ceiling ?? null;
                     const used = usedToday(limit, detail);
                     const share =
                       ceiling !== null && ceiling > 0 && used !== undefined
