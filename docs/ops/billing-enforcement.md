@@ -1,5 +1,10 @@
 # Billing enforcement rollout (TRV-057)
 
+**Owner decision (2026-11-01): production stays on `observe` until the first
+paying customer.** Switch to `enforce` (see Switching below) only once that
+customer's subscription is active in Billing and the would-deny review is
+clean. Until then nothing is blocked and nothing is charged.
+
 Trevra reads plans, credits and capabilities from Olaryn Billing. Blocking a
 workspace and charging it are owner decisions, so neither happens just because
 Billing is configured (`infra/gcp/deploy.sh` configures it by default). One
