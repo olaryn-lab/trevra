@@ -2,7 +2,7 @@
 
 Trevra is a ledger and control plane for agent-operated go-to-market. Founders and agents use it to find and qualify accounts/people, capture inbound demand, operate outreach, manage conversations and opportunity state, and run evidence-backed GTM playbooks. Trevra records what happened and executes consequential GTM actions only through explicit policy and approval boundaries.
 
-No open-source license has been published for this repository. Do not assume that source availability grants reuse, redistribution, or deployment rights; licensing must be approved separately.
+Trevra is proprietary software; all rights are reserved (see [`LICENSE`](LICENSE)). Being able to read the source does not grant reuse, redistribution, hosting, or deployment rights. The hosted service is the supported way to run Trevra; self-hosting is an unsupported preview.
 
 Trevra is deliberately **not** a project-management, contract, accounting, invoicing, payment, generic backend, generic event-bus, or arbitrary webhook automation product.
 

@@ -59,7 +59,7 @@ export const FAQ_ITEMS: ReadonlyArray<FaqItem> = [
   {
     question: 'Can I self-host?',
     answer:
-      'Trevra supports PostgreSQL-based self-hosted deployments. Contact the team for deployment access and licensing terms.'
+      'The hosted service is the supported way to run Trevra. Self-hosting on PostgreSQL is an unsupported preview; contact the team for deployment access and licensing terms.'
   }
 ];
 
@@ -124,7 +124,7 @@ export function buildStructuredData(config: StructuredDataConfig) {
           'Exact-payload approval with cryptographic hashing',
           'Named, idempotent execution adapters for external writes',
           'Append-only events and inspectable run outcomes',
-          'PostgreSQL-backed self-hosting; deployment and licensing terms require approval'
+          'Hosted service; self-hosting is an unsupported preview whose deployment and licensing terms require approval'
         ],
         publisher: { '@id': `${config.origin}/#organization` }
       },
@@ -205,7 +205,7 @@ Agent tokens cannot approve or execute consequential actions. Trevra freezes the
 Integration plumbing is delegated to Nango or official provider SDKs for GTM systems such as Gmail, Microsoft 365, CRM providers, public communities, and research sources. Trevra owns normalization, source provenance, policy, approvals, and outcomes rather than rebuilding OAuth or token storage.
 
 ## Ownership
-Trevra uses PostgreSQL and has documented self-hosting procedures. No software license has been published for this repository; source availability does not grant deployment or redistribution rights. Contact the team to obtain approved licensing and deployment terms.
+Trevra is proprietary software with all rights reserved; source availability does not grant deployment or redistribution rights. The hosted service is the supported way to run it. Self-hosting on PostgreSQL is an unsupported preview with documented procedures. Contact the team to obtain approved licensing and deployment terms.
 ## Questions
 ${questions}
 

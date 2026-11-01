@@ -2,6 +2,7 @@
   "name": "trevra",
   "version": "0.1.0",
   "private": true,
+  "license": "UNLICENSED",
   "bin": {
     "trevra": "packages/trevra-cli/bin/trevra.js"
   },
