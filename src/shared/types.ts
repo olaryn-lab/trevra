@@ -1,3 +1,5 @@
+import type { AgentScope } from './agent-scopes.js';
+
 export type RecommendationType = 'stale_proposal' | 'qualified_demand' | 'person_discovery';
 
 export type RecommendationStatus =
@@ -106,14 +108,7 @@ export interface DashboardPayload {
   availableIntegrations: AvailableIntegration[];
 }
 
-export type AgentScope =
-  | 'skills:read'
-  | 'skills:run'
-  | 'runs:read'
-  | 'workspace:read'
-  | 'playbooks:read'
-  | 'playbooks:run'
-  | 'workflows:read';
+export type { AgentScope };
 export type PlaybookRunStatus =
   'queued' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled';
 export type PlaybookStepStatus =

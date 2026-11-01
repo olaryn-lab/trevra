@@ -791,6 +791,11 @@ export async function createManagedCampaign(
     enrichmentCreditCap?: number | null;
     /** Narrow intent-preparation correlation; never controls campaign execution. */
     preparationId?: string | null;
+    /**
+     * The Agent that prepared this campaign through the `outreach:prepare`
+     * tools. Its LinkedIn writes then always need exact human approval.
+     */
+    preparedByAgentId?: string | null;
   },
   now: Date = new Date()
 ): Promise<{
@@ -847,9 +852,9 @@ export async function createManagedCampaign(
       INSERT INTO linkedin_campaigns (
         id,workspace_id,owner_user_id,name,status,sequence_json,playbook_run_id,seat_key,sender_keys_json,mailbox_assignments_json,lead_list_id,workflow_id,
         priority,admission_policy_json,exclusion_policy_json,scheduled_start_at,scheduled_end_at,schedule_days_json,
-        schedule_start_minute,schedule_end_minute,end_behavior,inmail_credit_cap,enrichment_credit_cap,preparation_id,created_at,updated_at
+        schedule_start_minute,schedule_end_minute,end_behavior,inmail_credit_cap,enrichment_credit_cap,preparation_id,prepared_by_agent_id,created_at,updated_at
       )
-      VALUES (?,?,?,?,'draft',?::jsonb,NULL,?,?::jsonb,?::jsonb,?,?,?,?::jsonb,?::jsonb,?,?,?::jsonb,?,?,?,?,?,?,?,?)
+      VALUES (?,?,?,?,'draft',?::jsonb,NULL,?,?::jsonb,?::jsonb,?,?,?,?::jsonb,?::jsonb,?,?,?::jsonb,?,?,?,?,?,?,?,?,?)
     `
       )
       .run(
@@ -880,6 +885,7 @@ export async function createManagedCampaign(
         input.inmailCreditCap ?? null,
         input.enrichmentCreditCap ?? null,
         input.preparationId ?? null,
+        input.preparedByAgentId ?? null,
         timestamp,
         timestamp
       );
@@ -3689,9 +3695,12 @@ export async function recordManagedCampaignAudit(
     entityType: 'linkedin_campaign' | 'linkedin_campaign_member' | 'linkedin_workflow';
     entityId: string;
     metadata?: Record<string, unknown>;
+    /** Who acted. An Agent acting through its `outreach:prepare` tools is 'agent'. */
+    actorType?: 'user' | 'agent';
   },
   now: Date = new Date()
 ): Promise<void> {
+  const actorType = input.actorType ?? 'user';
   await db.transactionOrInline(async (tx) => {
     await tx
       .prepare(
@@ -3701,7 +3710,7 @@ export async function recordManagedCampaignAudit(
       .run(
         id('audit'),
         input.workspaceId,
-        'user',
+        actorType,
         input.actorId,
         input.eventType,
         input.entityType,
@@ -3726,7 +3735,7 @@ export async function recordManagedCampaignAudit(
         streamType: 'linkedin_campaign',
         streamId: input.entityId,
         eventType: input.eventType,
-        actorType: 'user',
+        actorType,
         actorId: input.actorId,
         occurredAt: now
       });

@@ -20,7 +20,12 @@ interface ActionRow {
   status: string;
   campaign_member_id: string | null;
   workflow_step_id: string | null;
+  /** Set when an Agent prepared the campaign (migration 169). */
+  prepared_by_agent_id: string | null;
 }
+
+/** Policy name shown when an agent-prepared campaign's action waits for a person. */
+export const AGENT_PREPARED_POLICY_NAME = 'Agent-prepared campaign rule';
 /** Provenance of an AI-drafted body that was applied to this action (TRV-039). */
 export interface AppliedAiDraft {
   draftId: string;
@@ -77,10 +82,12 @@ function stable(value: unknown): unknown {
 async function rowFor(db: Db, workspaceId: string, id: string): Promise<ActionRow | undefined> {
   return db
     .prepare(
-      `SELECT id,workspace_id,campaign_id,seat_key,kind,target_ref,subject,body,
-            thread_urn,attachment_json,channel_metadata_json,status,
-            campaign_member_id,workflow_step_id
-     FROM linkedin_actions WHERE workspace_id=? AND id=? AND status='planned'`
+      `SELECT a.id,a.workspace_id,a.campaign_id,a.seat_key,a.kind,a.target_ref,a.subject,a.body,
+            a.thread_urn,a.attachment_json,a.channel_metadata_json,a.status,
+            a.campaign_member_id,a.workflow_step_id,c.prepared_by_agent_id
+     FROM linkedin_actions a
+     LEFT JOIN linkedin_campaigns c ON c.workspace_id=a.workspace_id AND c.id=a.campaign_id
+     WHERE a.workspace_id=? AND a.id=? AND a.status='planned'`
     )
     .get<ActionRow>(workspaceId, id);
 }
@@ -141,13 +148,31 @@ export async function reviewLinkedInAction(
       ])
     )
     .digest('hex');
-  const policy = await evaluatePolicy(db, {
+  const sideEffect = row.kind === 'profile_view' ? 'network-read' : 'external-write';
+  const evaluated = await evaluatePolicy(db, {
     workspaceId,
     action: `action:linkedin.${row.kind}`,
     actorType: 'system',
-    sideEffect: row.kind === 'profile_view' ? 'network-read' : 'external-write',
+    sideEffect,
     attributes: { recipients: 1 }
   });
+  // HARD RULE (app-spec section 11, TRV-054): no agent approves its own work.
+  // A workspace `allow` policy is a person's standing approval of THEIR OWN
+  // campaigns; it does not extend to a campaign an agent prepared, or the agent
+  // could compose words and recipients that go out with nobody reading them.
+  // So every LinkedIn write in such a campaign waits for an exact-hash approval.
+  // `deny` still wins, and a granted approval is checked below as usual.
+  const policy: PolicyDecision =
+    row.prepared_by_agent_id && sideEffect === 'external-write' && evaluated.effect === 'allow'
+      ? {
+          effect: 'require_approval',
+          policyId: null,
+          policyName: AGENT_PREPARED_POLICY_NAME,
+          reason:
+            'An agent prepared this campaign, so a person must approve the exact content of every LinkedIn write.',
+          evaluatedAt: evaluated.evaluatedAt
+        }
+      : evaluated;
   const grant = await db
     .prepare(
       'SELECT content_hash FROM linkedin_action_approvals WHERE workspace_id=? AND action_id=?'

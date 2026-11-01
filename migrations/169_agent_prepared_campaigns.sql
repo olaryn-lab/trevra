@@ -1,0 +1,13 @@
+-- Agent-prepared LinkedIn campaigns (TRV-054).
+--
+-- `prepared_by_agent_id` names the Agent principal that prepared a campaign
+-- through the `outreach:prepare` MCP tools. While it is set, every LinkedIn
+-- write in the campaign needs a person to approve its exact content, even
+-- where a workspace policy would allow it (reviewLinkedInAction). Of all
+-- agents, only this one may start the campaign, and only from draft.
+--
+-- Writer: prepareOutreach (outreach/prepare.ts) via createManagedCampaign.
+-- Closer: none needed; the value lives and dies with its campaign row, and it
+-- is deliberately permanent so the approval rule cannot be dropped by an edit.
+-- No foreign key: deleting an Agent must not loosen its campaigns' rule.
+ALTER TABLE linkedin_campaigns ADD COLUMN IF NOT EXISTS prepared_by_agent_id TEXT;

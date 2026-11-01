@@ -6,7 +6,7 @@ import type {
   LanguageModelV4CallOptions,
   LanguageModelV4GenerateResult
 } from '@ai-sdk/provider';
-import { AGENT_SCOPES } from '../agent-access.js';
+import { DEFAULT_AGENT_SCOPES } from '../agent-access.js';
 import { ensureDefaultAgent } from '../agents.js';
 import { openDatabase, type Db } from '../db.js';
 import { setAgentBudget, unreportedUsageFloorCents } from './budget.js';
@@ -703,7 +703,12 @@ describe('the tool surface handed to the model', () => {
     const offered = (model.doGenerateCalls[0].tools ?? []).map(
       (tool) => (tool as { name: string }).name
     );
-    const expected = (await listAgentTools(db, WORKSPACE_ID)).map((definition) => definition.name);
+    const expected = (await listAgentTools(db, WORKSPACE_ID, undefined, DEFAULT_AGENT_SCOPES)).map(
+      (definition) => definition.name
+    );
+    // Never the opt-in campaign tools.
+    expect(offered).not.toContain('trevra_prepare_linkedin_campaign');
+    expect(offered).not.toContain('trevra_start_linkedin_campaign');
 
     // app-spec.md section 11: no agent approves its own work. The list itself is
     // the boundary, so the loop must add nothing to it.
@@ -720,7 +725,8 @@ describe('the tool surface handed to the model', () => {
    * be refused.
    */
   it('holds exactly the scopes a laptop agent token is issued with', () => {
-    expect([...HOSTED_AGENT_SCOPES].sort()).toEqual([...AGENT_SCOPES].sort());
+    expect([...HOSTED_AGENT_SCOPES].sort()).toEqual([...DEFAULT_AGENT_SCOPES].sort());
+    expect(HOSTED_AGENT_SCOPES).not.toContain('outreach:prepare');
   });
 
   it('has neither approve nor execute, and no scope that could stand in for one', () => {

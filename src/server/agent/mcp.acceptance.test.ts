@@ -102,7 +102,17 @@ const DOCUMENTED_BUILT_INS = [
   'trevra_get_playbook_run',
   'trevra_list_events',
   'trevra_list_runs',
-  'trevra_get_run'
+  'trevra_get_run',
+  'trevra_list_linkedin_seats',
+  'trevra_get_linkedin_campaign'
+];
+
+/** Every built-in, in registry order. `outreach:prepare` adds the two middle ones. */
+const ALL_BUILT_INS = [
+  ...DOCUMENTED_BUILT_INS.slice(0, -1),
+  'trevra_prepare_linkedin_campaign',
+  'trevra_start_linkedin_campaign',
+  'trevra_get_linkedin_campaign'
 ];
 
 const LIMITS: PublicApiRateLimitPolicy = {
@@ -505,7 +515,9 @@ describe('MCP tools/list', () => {
   it('offers every tool name the public documentation promises', async () => {
     const tenant = await workspace('docs');
     const listed = new Set(
-      (await listTools(app, (await tenant.token()).authorization)).map((tool) => tool.name)
+      (await listTools(app, (await tenant.token([...AGENT_SCOPES])).authorization)).map(
+        (tool) => tool.name
+      )
     );
     const promised = new Set<string>();
     for (const text of [
@@ -560,7 +572,12 @@ describe('MCP per-tool scope', () => {
       [['skills:read'], ['trevra_list_skills']],
       [
         ['skills:read', 'workspace:read'],
-        ['trevra_list_skills', ...workspaceReads]
+        [
+          'trevra_list_skills',
+          ...workspaceReads,
+          'trevra_list_linkedin_seats',
+          'trevra_get_linkedin_campaign'
+        ]
       ],
       [
         ['skills:read', 'skills:run'],
@@ -581,7 +598,7 @@ describe('MCP per-tool scope', () => {
           'trevra_get_run'
         ]
       ],
-      [[...AGENT_SCOPES], [...DOCUMENTED_BUILT_INS, ...skillTools]]
+      [[...AGENT_SCOPES], [...ALL_BUILT_INS, ...skillTools]]
     ];
     for (const [scopes, expected] of cases) {
       const { authorization } = await tenant.token(scopes);
@@ -590,7 +607,7 @@ describe('MCP per-tool scope', () => {
       // Everything hidden is still refused on call, before it runs. (Built-ins
       // and one skill tool: every skill tool shares one scope, and the write
       // bucket bounds how many calls one test can make.)
-      for (const name of [...DOCUMENTED_BUILT_INS, SCORE_TOOL].filter(
+      for (const name of [...ALL_BUILT_INS, SCORE_TOOL].filter(
         (candidate) => !listed.includes(candidate)
       )) {
         const outcome = await callTool(app, authorization, name, {});
@@ -598,7 +615,7 @@ describe('MCP per-tool scope', () => {
         expect(String(outcome.value.error)).toMatch(/^Agent token is missing scope: /);
       }
       // And nothing listed is refused for scope when called.
-      for (const name of listed.filter((candidate) => DOCUMENTED_BUILT_INS.includes(candidate))) {
+      for (const name of listed.filter((candidate) => ALL_BUILT_INS.includes(candidate))) {
         const outcome = await callTool(app, authorization, name, {});
         expect(String(outcome.value?.error ?? ''), `${scopes.join(' ')} ${name}`).not.toMatch(
           /missing scope/

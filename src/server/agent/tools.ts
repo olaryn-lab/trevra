@@ -40,6 +40,7 @@ import {
   startPlaybookRun
 } from '../playbooks/engine.js';
 import { getPlaybook } from '../playbooks/registry.js';
+import { LINKEDIN_CAMPAIGN_AGENT_TOOLS } from './linkedin-campaign-tools.js';
 import { listDomainEvents } from '../control-plane/events.js';
 import { listContacts } from '../lead-capture/people.js';
 import { listRankedAccounts } from '../accounts/store.js';
@@ -60,6 +61,12 @@ export interface AgentToolContext {
   workspaceId: string;
   /** Durable Agent principal id. Credentials and run ids are never actors. */
   actorId: string;
+  /**
+   * The person who created the calling token, when there is one. Tools that act
+   * on their behalf (the LinkedIn campaign tools) read this person's CURRENT
+   * workspace role and refuse without one. Null for Trevra-minted credentials.
+   */
+  userId?: string | null;
 }
 
 export interface AgentToolDefinition {
@@ -397,7 +404,10 @@ export const BUILT_IN_AGENT_TOOLS: readonly AgentToolDefinition[] = [
       if (!run) throw new Error('Skill run not found');
       return run;
     }
-  }
+  },
+  // Prepare, start and read LinkedIn campaigns. Starting plans actions only;
+  // every write of an agent-prepared campaign waits for a person's approval.
+  ...LINKEDIN_CAMPAIGN_AGENT_TOOLS
 ];
 
 const BUILT_IN_BY_NAME = new Map(BUILT_IN_AGENT_TOOLS.map((tool) => [tool.name, tool]));
