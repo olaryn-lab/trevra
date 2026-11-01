@@ -14,9 +14,23 @@ workspace:read
 playbooks:read
 playbooks:run
 workflows:read
+outreach:prepare
 ```
 
+A token gets every scope except `outreach:prepare` unless its creator chooses otherwise. `outreach:prepare` is opt-in: in Trevra, under Setup, Advanced, tick "Let this agent prepare and start LinkedIn campaigns".
+
 There is no `approve`, `execute`, billing, generic integration-admin, or legacy `actions:prepare` agent scope.
+
+## LinkedIn campaigns
+
+With `workspace:read` an agent can call `trevra_list_linkedin_seats` (the LinkedIn accounts, who owns each, working hours, limits, and whether the Companion is online) and `trevra_get_linkedin_campaign` (a campaign's status, each person's progress, planned and completed actions including acceptance, replies, and what waits for approval).
+
+With `outreach:prepare` it can also call:
+
+- `trevra_prepare_linkedin_campaign`: a draft campaign for up to 100 people (profile URL, first name, last name and company, the identity every campaign lead needs) and a LinkedIn-only sequence (`profile_view`, `connection_request`, `message`, `wait`, `condition`, `monitor`, `end`). Email, InMail, email finding, withdrawals and attachments are refused. The same `idempotencyKey` and input return the same campaign.
+- `trevra_start_linkedin_campaign`: start a draft this agent prepared. It cannot start a person's campaign or resume a paused one.
+
+The agent acts with its token creator's current workspace role: it may use a LinkedIn account only if that person could. Starting a campaign only lets Trevra plan the steps. Every invite and message of an agent-prepared campaign waits for a person to approve its exact content in Trevra, even where a workspace policy would let a person's own campaign send unattended. Sending is done by the Companion after that approval, within the account's working hours and limits.
 
 ## Claude Code using the local stdio bridge
 

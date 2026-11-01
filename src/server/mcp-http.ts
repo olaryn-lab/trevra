@@ -49,7 +49,12 @@ export async function handleMcpHttpRequest(
     try {
       const { name, arguments: args = {} } = request.params;
       const value = await callAgentTool(
-        { db, workspaceId: identity.workspaceId, actorId: identity.agentId },
+        {
+          db,
+          workspaceId: identity.workspaceId,
+          actorId: identity.agentId,
+          userId: identity.createdByUserId
+        },
         identity.scopes,
         name,
         args

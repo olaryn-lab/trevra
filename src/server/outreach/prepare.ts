@@ -6,6 +6,7 @@ import { createManagedCampaign, getManagedCampaign } from '../linkedin/managed-c
 import { listSeats } from '../linkedin/seats.js';
 import {
   getWorkflow,
+  saveWorkflow,
   workflowStepsSchema,
   type LinkedInWorkflow,
   type WorkflowStep
@@ -91,6 +92,13 @@ export interface PrepareOutreachInput {
   senderKey?: string;
   existingLeadListId?: string;
   uploadedPeopleCsv?: string;
+  /**
+   * A sequence to use instead of the default workflow. Saved once as the
+   * actor's personal workflow, named after this preparation.
+   */
+  steps?: unknown;
+  /** The Agent preparing this campaign. Marks it agent-prepared (migration 169). */
+  preparedByAgentId?: string;
 }
 
 export interface PreparedOutreachResult {
@@ -150,6 +158,20 @@ function normalizeInput(input: PrepareOutreachInput) {
       400
     );
   }
+  let steps: WorkflowStep[] | null = null;
+  if (input.steps !== undefined) {
+    const parsed = workflowStepsSchema.safeParse(input.steps);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      const where = issue?.path.length ? ` (steps.${issue.path.join('.')})` : '';
+      throw new PrepareOutreachError(
+        `The sequence is not valid: ${issue?.message ?? 'invalid steps'}${where}`,
+        400
+      );
+    }
+    steps = parsed.data;
+  }
+  const preparedByAgentId = input.preparedByAgentId?.trim() || null;
   if (uploadedPeopleCsv && Buffer.byteLength(uploadedPeopleCsv, 'utf8') > 2_000_000) {
     throw new PrepareOutreachError('People CSV is too large; keep it under 2 MB.', 413);
   }
@@ -159,6 +181,8 @@ function normalizeInput(input: PrepareOutreachInput) {
     idempotencyKey,
     existingLeadListId,
     uploadedPeopleCsv,
+    steps,
+    preparedByAgentId,
     senderKey: input.senderKey?.trim() || null,
     name
   };
@@ -171,10 +195,53 @@ function requestHash(input: ReturnType<typeof normalizeInput>): string {
         name: input.name,
         senderKey: input.senderKey,
         existingLeadListId: input.existingLeadListId,
-        uploadedPeopleCsv: input.uploadedPeopleCsv
+        uploadedPeopleCsv: input.uploadedPeopleCsv,
+        // Added only when present, so a key stored before these fields existed
+        // still hashes the same and its retry is not refused as a new request.
+        ...(input.steps ? { steps: input.steps } : {}),
+        ...(input.preparedByAgentId ? { preparedByAgentId: input.preparedByAgentId } : {})
       })
     )
     .digest('hex');
+}
+
+/**
+ * The personal workflow holding a preparation's custom sequence. Its name
+ * carries the request hash, so a retry after a crash finds the one it saved
+ * instead of colliding with it on the unique workflow name.
+ */
+async function ensurePreparedWorkflow(
+  db: Db,
+  input: { workspaceId: string; ownerUserId: string; name: string; steps: WorkflowStep[] },
+  now: Date
+): Promise<LinkedInWorkflow> {
+  const existing = await db
+    .prepare(
+      `SELECT id,owner_user_id FROM linkedin_workflows
+       WHERE workspace_id=? AND LOWER(name)=LOWER(?) LIMIT 1`
+    )
+    .get<{ id: string; owner_user_id: string | null }>(input.workspaceId, input.name);
+  if (existing) {
+    if (existing.owner_user_id !== input.ownerUserId)
+      throw new PrepareOutreachError(
+        'A workflow with this preparation name already exists. Use a different campaign name.',
+        409
+      );
+    const workflow = await getWorkflow(db, input.workspaceId, existing.id);
+    if (!workflow) throw new Error('Prepared outreach workflow disappeared.');
+    return workflow;
+  }
+  return saveWorkflow(
+    db,
+    {
+      workspaceId: input.workspaceId,
+      name: input.name,
+      steps: input.steps,
+      scope: 'personal',
+      ownerUserId: input.ownerUserId
+    },
+    now
+  );
 }
 
 async function ensureDefaultWorkflow(
@@ -368,42 +435,71 @@ export async function prepareOutreach(
     }
 
     if (!leadListId && input.uploadedPeopleCsv) {
-      const suffix = hash.slice(0, 8);
-      const list = await createLeadList(
+      const sourceRef = `outreach-preparation:${row.id}`;
+      // A retry after a crash between creating the list and recording it finds
+      // the same list instead of failing on the unique list name.
+      const recovered = await db
+        .prepare('SELECT id FROM linkedin_lead_lists WHERE workspace_id=? AND source_ref=? LIMIT 1')
+        .get<{ id: string }>(rawInput.workspaceId, sourceRef);
+      const listId =
+        recovered?.id ??
+        (
+          await createLeadList(
+            db,
+            {
+              workspaceId: rawInput.workspaceId,
+              seatKey: senderKey,
+              name: `${input.name} people ${hash.slice(0, 8)}`,
+              sourceKind: 'csv',
+              sourceRef
+            },
+            now
+          )
+        ).id;
+      await importLeadCsv(
         db,
         {
           workspaceId: rawInput.workspaceId,
           seatKey: senderKey,
-          name: `${input.name} people ${suffix}`,
-          sourceKind: 'csv',
-          sourceRef: `outreach-preparation:${row.id}`
-        },
-        now
-      );
-      leadListId = list.id;
-      await db
-        .prepare('UPDATE outreach_preparations SET lead_list_id=?,updated_at=? WHERE id=?')
-        .run(leadListId, timestamp, row.id);
-      const imported = await importLeadCsv(
-        db,
-        {
-          workspaceId: rawInput.workspaceId,
-          seatKey: senderKey,
-          listId: leadListId,
+          listId,
           csv: input.uploadedPeopleCsv
         },
         now
       );
-      if (imported.inserted + imported.reused === 0) {
+      // Judged on the list's membership, not this call's counts: a retry's
+      // import finds everyone already there. The preparation records the list
+      // only once it holds someone, so a failed import is retried on the next
+      // call, never turned into a campaign with nobody in it.
+      const members = await db
+        .prepare(
+          'SELECT COUNT(*)::int AS total FROM linkedin_lead_list_members WHERE workspace_id=? AND list_id=?'
+        )
+        .get<{ total: number }>(rawInput.workspaceId, listId);
+      if (!members?.total) {
         throw new PrepareOutreachError('The CSV did not contain any campaign-usable people.', 400);
       }
+      leadListId = listId;
+      await db
+        .prepare('UPDATE outreach_preparations SET lead_list_id=?,updated_at=? WHERE id=?')
+        .run(leadListId, timestamp, row.id);
     }
 
     if (!leadListId) throw new Error('Outreach preparation has no lead list.');
 
     let workflowId = row.workflow_id;
     if (!workflowId) {
-      const workflow = await ensureDefaultWorkflow(db, rawInput.workspaceId, now);
+      const workflow = input.steps
+        ? await ensurePreparedWorkflow(
+            db,
+            {
+              workspaceId: rawInput.workspaceId,
+              ownerUserId: rawInput.actorUserId,
+              name: `${input.name} sequence ${hash.slice(0, 8)}`,
+              steps: input.steps
+            },
+            now
+          )
+        : await ensureDefaultWorkflow(db, rawInput.workspaceId, now);
       workflowId = workflow.id;
       await db
         .prepare('UPDATE outreach_preparations SET workflow_id=?,updated_at=? WHERE id=?')
@@ -430,7 +526,8 @@ export async function prepareOutreach(
           seatKey: senderKey,
           leadListId,
           workflowId,
-          preparationId: row.id
+          preparationId: row.id,
+          preparedByAgentId: input.preparedByAgentId
         },
         now
       );

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
-import { AGENT_SCOPES, type AgentScope } from '../agent-access.js';
+import { AGENT_SCOPES, DEFAULT_AGENT_SCOPES, type AgentScope } from '../agent-access.js';
+import { HOSTED_AGENT_SCOPES } from './loop.js';
 import { BUILT_IN_AGENT_TOOLS, callAgentTool, listAgentTools, toolNameForSkill } from './tools.js';
 
 let db: Db;
@@ -56,7 +57,11 @@ const EXPECTED_BUILT_INS: ReadonlyArray<readonly [string, AgentScope | null]> = 
   ['trevra_get_playbook_run', 'workflows:read'],
   ['trevra_list_events', 'workflows:read'],
   ['trevra_list_runs', 'runs:read'],
-  ['trevra_get_run', 'runs:read']
+  ['trevra_get_run', 'runs:read'],
+  ['trevra_list_linkedin_seats', 'workspace:read'],
+  ['trevra_prepare_linkedin_campaign', 'outreach:prepare'],
+  ['trevra_start_linkedin_campaign', 'outreach:prepare'],
+  ['trevra_get_linkedin_campaign', 'workspace:read']
 ];
 
 describe('the built-in tool surface', () => {
@@ -228,6 +233,13 @@ describe('the invariant (app-spec section 11)', () => {
   it('never grants approve or execute as a scope, because neither exists', () => {
     expect(AGENT_SCOPES).not.toContain('actions:approve');
     expect(AGENT_SCOPES).not.toContain('actions:execute');
+  });
+
+  it('keeps campaign preparation opt-in: no default or hosted token carries it', () => {
+    expect(AGENT_SCOPES).toContain('outreach:prepare');
+    expect(DEFAULT_AGENT_SCOPES).not.toContain('outreach:prepare');
+    expect(DEFAULT_AGENT_SCOPES).toEqual(AGENT_SCOPES.filter((s) => s !== 'outreach:prepare'));
+    expect(HOSTED_AGENT_SCOPES).not.toContain('outreach:prepare');
   });
 });
 

@@ -4,16 +4,9 @@ import type { Db } from './db.js';
 import { id } from './db.js';
 import { resolveActiveAgent } from './agents.js';
 
-export const AGENT_SCOPES = [
-  'skills:read',
-  'skills:run',
-  'runs:read',
-  'workspace:read',
-  'playbooks:read',
-  'playbooks:run',
-  'workflows:read'
-] as const;
-export type AgentScope = (typeof AGENT_SCOPES)[number];
+import { AGENT_SCOPES, DEFAULT_AGENT_SCOPES, type AgentScope } from '../shared/agent-scopes.js';
+
+export { AGENT_SCOPES, DEFAULT_AGENT_SCOPES, type AgentScope };
 
 /** A credential resolves to an Agent principal. The token itself is never the actor. */
 export interface AgentIdentity {
@@ -52,7 +45,7 @@ export async function createAgentToken(
   }
 ): Promise<{ token: string; record: AgentTokenSummary }> {
   const agent = await resolveActiveAgent(db, input.workspaceId, input.agentId, input.userId);
-  const scopes = normalizeScopes(input.scopes ?? [...AGENT_SCOPES]);
+  const scopes = normalizeScopes(input.scopes ?? [...DEFAULT_AGENT_SCOPES]);
   const tokenName = input.name.trim();
   if (!tokenName) throw new Error('Token name is required');
   const token = `trv_live_${randomBytes(32).toString('base64url')}`;

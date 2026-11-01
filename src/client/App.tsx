@@ -42,6 +42,7 @@ import type {
   DashboardPayload,
   WorkspacePolicy
 } from '../shared/types';
+import { DEFAULT_AGENT_SCOPES } from '../shared/agent-scopes';
 import {
   createAgentToken,
   createPolicy,
@@ -1356,6 +1357,7 @@ function AgentAccessPanel({ setToast }: { setToast: (message: string) => void })
   const [copiedTarget, setCopiedTarget] = useState<'claude' | 'codex' | ''>('');
   const [confirmRevoke, setConfirmRevoke] = useState<AgentTokenSummary | null>(null);
   const [confirmHide, setConfirmHide] = useState(false);
+  const [allowCampaigns, setAllowCampaigns] = useState(false);
 
   const reload = async () => {
     const [nextAgents, nextTokens] = await Promise.all([getAgents(), getAgentTokens()]);
@@ -1394,8 +1396,11 @@ function AgentAccessPanel({ setToast }: { setToast: (message: string) => void })
     try {
       const created = await createAgentToken({
         agentId: agentId || undefined,
-        name: 'Agent access · ' + new Date().toLocaleDateString()
+        name: 'Agent access · ' + new Date().toLocaleDateString(),
+        // Opt-in, and only ever added on top of the defaults.
+        scopes: allowCampaigns ? [...DEFAULT_AGENT_SCOPES, 'outreach:prepare'] : undefined
       });
+      setAllowCampaigns(false);
       setCopiedTarget('');
       setRevealed(created.token);
       await reload();
@@ -1481,6 +1486,12 @@ function AgentAccessPanel({ setToast }: { setToast: (message: string) => void })
 
       {!revealed ? (
         <>
+          <SwitchField
+            label="Let this agent prepare and start LinkedIn campaigns"
+            description="Each invite and message still waits for your approval in Trevra before anything is sent."
+            checked={allowCampaigns}
+            onChange={(event) => setAllowCampaigns(event.target.checked)}
+          />
           <p className="li-hint">
             New access tokens are shown only once. Save the generated command before closing it.
           </p>
@@ -1538,6 +1549,9 @@ function AgentAccessPanel({ setToast }: { setToast: (message: string) => void })
                 <div>
                   <strong>{token.agentName}</strong>
                   <span>{token.name}</span>
+                  {token.scopes.includes('outreach:prepare') && (
+                    <span>Can prepare and start LinkedIn campaigns</span>
+                  )}
                   <code>{token.prefix}…</code>
                 </div>
                 <span>

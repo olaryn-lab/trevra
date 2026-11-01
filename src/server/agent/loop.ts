@@ -32,7 +32,7 @@
  */
 
 import { dynamicTool, generateText, isStepCount, jsonSchema } from 'ai';
-import type { AgentScope } from '../agent-access.js';
+import { DEFAULT_AGENT_SCOPES, type AgentScope } from '../agent-access.js';
 import type { Db } from '../db.js';
 import { agentInstructions, resolveActiveAgent } from '../agents.js';
 import { AgentBudgetError, assertAgentBudgetAvailable, recordAgentModelCall } from './budget.js';
@@ -49,19 +49,12 @@ import { resolveCliBackend, resolveWorkspaceCliBackend, runHostedAgentViaCli } f
 import { describeMissingWorkspaceModel, resolveWorkspaceModel } from './provider.js';
 
 /**
- * The hosted agent gets the same read/run scopes as a laptop agent token.
- * Approval and execution are not agent scopes; prepared external work is
- * created only inside durable GTM playbooks and remains human-gated.
+ * The hosted agent gets the same read/run scopes as a laptop agent token is
+ * issued by default -- the same list, so they cannot drift. Approval and
+ * execution are not agent scopes, and the opt-in `outreach:prepare` is a
+ * person's grant to one token, never something the hosted agent holds.
  */
-export const HOSTED_AGENT_SCOPES: readonly AgentScope[] = [
-  'skills:read',
-  'skills:run',
-  'runs:read',
-  'playbooks:read',
-  'playbooks:run',
-  'workflows:read',
-  'workspace:read'
-];
+export const HOSTED_AGENT_SCOPES: readonly AgentScope[] = DEFAULT_AGENT_SCOPES;
 
 export interface HostedAgentRunInput {
   workspaceId: string;

@@ -362,7 +362,12 @@ async function toolRead(
     Object.entries(args).filter(([, value]) => value !== undefined)
   );
   return callAgentTool(
-    { db: ctx.db, workspaceId: ctx.agent.workspaceId, actorId: ctx.agent.agentId },
+    {
+      db: ctx.db,
+      workspaceId: ctx.agent.workspaceId,
+      actorId: ctx.agent.agentId,
+      userId: ctx.agent.createdByUserId
+    },
     ctx.agent.scopes,
     tool,
     defined
