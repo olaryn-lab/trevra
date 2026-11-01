@@ -1,10 +1,15 @@
 import { createCipheriv, randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { openDatabase, type Db } from '../db.js';
-import { ENVELOPE_V1, ENVELOPE_V2, configuredKeyIds } from './crypto.js';
+import { ENVELOPE_V1, ENVELOPE_V2, configuredKeyIds, openSecret } from './crypto.js';
 import { resealSecrets, secretsCustodyReport } from './custody.js';
 import { putLinkedInCredentials, readLinkedInCredentials } from './linkedin.js';
 import { putWorkspaceSecret, readWorkspaceSecretPlaintext } from './store.js';
+import {
+  createOutboundWebhookSubscription,
+  rotateOutboundWebhookSecret
+} from '../outbound-webhooks.js';
+import type { WebhookResolver } from '../outbound-webhook-egress.js';
 
 // Unique to this file so parallel test files cannot collide on fixtures --
 // and every call below passes `workspaceId: WORKSPACE_ID` for the same reason.
@@ -31,7 +36,9 @@ beforeAll(async () => {
   db = await openDatabase({ connectionString: process.env.TEST_DATABASE_URL, seedDemo: false });
   for (const workspaceId of [WORKSPACE_ID, OTHER_WORKSPACE_ID]) {
     await db
-      .prepare('INSERT INTO workspaces (id,name,created_at) VALUES (?,?,?) ON CONFLICT (id) DO NOTHING')
+      .prepare(
+        'INSERT INTO workspaces (id,name,created_at) VALUES (?,?,?) ON CONFLICT (id) DO NOTHING'
+      )
       .run(workspaceId, 'Secrets custody test', new Date().toISOString());
   }
 });
@@ -40,12 +47,17 @@ beforeEach(async () => {
   for (const workspaceId of [WORKSPACE_ID, OTHER_WORKSPACE_ID]) {
     await db.prepare('DELETE FROM workspace_secrets WHERE workspace_id=?').run(workspaceId);
     await db.prepare('DELETE FROM linkedin_seat_credentials WHERE workspace_id=?').run(workspaceId);
+    await db
+      .prepare('DELETE FROM outbound_webhook_subscriptions WHERE workspace_id=?')
+      .run(workspaceId);
     await db.prepare('DELETE FROM audit_events WHERE workspace_id=?').run(workspaceId);
   }
 });
 
 afterAll(async () => {
-  await db?.prepare('DELETE FROM workspaces WHERE id=? OR id=?').run(WORKSPACE_ID, OTHER_WORKSPACE_ID);
+  await db
+    ?.prepare('DELETE FROM workspaces WHERE id=? OR id=?')
+    .run(WORKSPACE_ID, OTHER_WORKSPACE_ID);
   await db?.close();
   if (previousKey === undefined) delete process.env.TREVRA_SECRETS_KEY;
   else process.env.TREVRA_SECRETS_KEY = previousKey;
@@ -56,31 +68,43 @@ afterAll(async () => {
  * Straight SQL, because no code path may produce one any more -- and this is
  * what a deployment upgrading to this build actually has in its table.
  */
-async function insertLegacyRow(workspaceId: string, kind: string, plaintext: string, keyBase64: string): Promise<void> {
+async function insertLegacyRow(
+  workspaceId: string,
+  kind: string,
+  plaintext: string,
+  keyBase64: string
+): Promise<void> {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', Buffer.from(keyBase64, 'base64'), iv);
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const now = new Date().toISOString();
-  await db.prepare(`
+  await db
+    .prepare(
+      `
     INSERT INTO workspace_secrets (id,workspace_id,kind,ciphertext,iv,auth_tag,key_version,key_id,last4,label,created_at,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-  `).run(
-    `wsec_custody_${workspaceId}_${kind.replace(/\W/g, '_')}`,
-    workspaceId,
-    kind,
-    ciphertext,
-    iv,
-    cipher.getAuthTag(),
-    ENVELOPE_V1,
-    null,
-    '',
-    null,
-    now,
-    now
-  );
+  `
+    )
+    .run(
+      `wsec_custody_${workspaceId}_${kind.replace(/\W/g, '_')}`,
+      workspaceId,
+      kind,
+      ciphertext,
+      iv,
+      cipher.getAuthTag(),
+      ENVELOPE_V1,
+      null,
+      '',
+      null,
+      now,
+      now
+    );
 }
 
-async function envelopeOf(workspaceId: string, kind: string): Promise<{ key_version: number; key_id: string | null }> {
+async function envelopeOf(
+  workspaceId: string,
+  kind: string
+): Promise<{ key_version: number; key_id: string | null }> {
   const row = await db
     .prepare('SELECT key_version, key_id FROM workspace_secrets WHERE workspace_id=? AND kind=?')
     .get<{ key_version: number; key_id: string | null }>(workspaceId, kind);
@@ -90,12 +114,21 @@ async function envelopeOf(workspaceId: string, kind: string): Promise<{ key_vers
 
 describe('secretsCustodyReport', () => {
   it('answers the question the rotation runbook could not: which rows are still old', async () => {
-    await putWorkspaceSecret(db, { workspaceId: WORKSPACE_ID, kind: 'model_api_key', plaintext: API_KEY });
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE_ID,
+      kind: 'model_api_key',
+      plaintext: API_KEY
+    });
     // Both rows in the SAME workspace -- one current, one still on the legacy
     // envelope -- because the report is read here scoped to this file's own
     // fixtures. The mix is what the assertion is about; which workspace holds
     // it never was.
-    await insertLegacyRow(WORKSPACE_ID, 'cli_oauth_token', API_KEY, String(process.env.TREVRA_SECRETS_KEY));
+    await insertLegacyRow(
+      WORKSPACE_ID,
+      'cli_oauth_token',
+      API_KEY,
+      String(process.env.TREVRA_SECRETS_KEY)
+    );
 
     const report = await secretsCustodyReport(db, process.env, { workspaceId: WORKSPACE_ID });
     expect(report.configured).toBe(true);
@@ -118,8 +151,15 @@ describe('secretsCustodyReport', () => {
   });
 
   it('separates "needs re-encrypting" from "cannot be recovered here"', async () => {
-    await putWorkspaceSecret(db, { workspaceId: WORKSPACE_ID, kind: 'model_api_key', plaintext: API_KEY });
-    const stranger = { ...process.env, TREVRA_SECRETS_KEY: randomBytes(32).toString('base64') } as NodeJS.ProcessEnv;
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE_ID,
+      kind: 'model_api_key',
+      plaintext: API_KEY
+    });
+    const stranger = {
+      ...process.env,
+      TREVRA_SECRETS_KEY: randomBytes(32).toString('base64')
+    } as NodeJS.ProcessEnv;
     delete stranger.TREVRA_SECRETS_KEY_PREVIOUS;
 
     const report = await secretsCustodyReport(db, stranger, { workspaceId: WORKSPACE_ID });
@@ -130,7 +170,11 @@ describe('secretsCustodyReport', () => {
   });
 
   it('is never complete on a deployment with no key at all', async () => {
-    await putWorkspaceSecret(db, { workspaceId: WORKSPACE_ID, kind: 'model_api_key', plaintext: API_KEY });
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE_ID,
+      kind: 'model_api_key',
+      plaintext: API_KEY
+    });
     const keyless = { ...process.env } as NodeJS.ProcessEnv;
     delete keyless.TREVRA_SECRETS_KEY;
     delete keyless.TREVRA_SECRETS_KEY_PREVIOUS;
@@ -142,8 +186,14 @@ describe('secretsCustodyReport', () => {
   });
 
   it('carries no plaintext, no ciphertext and no key material', async () => {
-    await putWorkspaceSecret(db, { workspaceId: WORKSPACE_ID, kind: 'model_api_key', plaintext: API_KEY });
-    const serialized = JSON.stringify(await secretsCustodyReport(db, process.env, { workspaceId: WORKSPACE_ID }));
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE_ID,
+      kind: 'model_api_key',
+      plaintext: API_KEY
+    });
+    const serialized = JSON.stringify(
+      await secretsCustodyReport(db, process.env, { workspaceId: WORKSPACE_ID })
+    );
     expect(serialized).not.toContain(API_KEY);
     expect(serialized).not.toContain(String(process.env.TREVRA_SECRETS_KEY));
   });
@@ -151,7 +201,12 @@ describe('secretsCustodyReport', () => {
 
 describe('resealSecrets', () => {
   it('converts a legacy row to the bound envelope and says so', async () => {
-    await insertLegacyRow(WORKSPACE_ID, 'model_api_key', API_KEY, String(process.env.TREVRA_SECRETS_KEY));
+    await insertLegacyRow(
+      WORKSPACE_ID,
+      'model_api_key',
+      API_KEY,
+      String(process.env.TREVRA_SECRETS_KEY)
+    );
     expect((await envelopeOf(WORKSPACE_ID, 'model_api_key')).key_version).toBe(ENVELOPE_V1);
 
     const result = await resealSecrets(db, { workspaceId: WORKSPACE_ID });
@@ -165,17 +220,46 @@ describe('resealSecrets', () => {
     // Still the same secret, and now bound to its row.
     expect(await readWorkspaceSecretPlaintext(db, WORKSPACE_ID, 'model_api_key')).toBe(API_KEY);
     const bound = await db
-      .prepare('SELECT ciphertext, iv, auth_tag, key_version, key_id FROM workspace_secrets WHERE workspace_id=? AND kind=?')
-      .get<{ ciphertext: Buffer; iv: Buffer; auth_tag: Buffer; key_version: number; key_id: string }>(WORKSPACE_ID, 'model_api_key');
-    await putWorkspaceSecret(db, { workspaceId: OTHER_WORKSPACE_ID, kind: 'model_api_key', plaintext: 'sk-live-000000000000beef' });
+      .prepare(
+        'SELECT ciphertext, iv, auth_tag, key_version, key_id FROM workspace_secrets WHERE workspace_id=? AND kind=?'
+      )
+      .get<{
+        ciphertext: Buffer;
+        iv: Buffer;
+        auth_tag: Buffer;
+        key_version: number;
+        key_id: string;
+      }>(WORKSPACE_ID, 'model_api_key');
+    await putWorkspaceSecret(db, {
+      workspaceId: OTHER_WORKSPACE_ID,
+      kind: 'model_api_key',
+      plaintext: 'sk-live-000000000000beef'
+    });
     await db
-      .prepare('UPDATE workspace_secrets SET ciphertext=?, iv=?, auth_tag=?, key_version=?, key_id=? WHERE workspace_id=? AND kind=?')
-      .run(bound!.ciphertext, bound!.iv, bound!.auth_tag, bound!.key_version, bound!.key_id, OTHER_WORKSPACE_ID, 'model_api_key');
-    await expect(readWorkspaceSecretPlaintext(db, OTHER_WORKSPACE_ID, 'model_api_key')).rejects.toThrow(/DIFFERENT row/);
+      .prepare(
+        'UPDATE workspace_secrets SET ciphertext=?, iv=?, auth_tag=?, key_version=?, key_id=? WHERE workspace_id=? AND kind=?'
+      )
+      .run(
+        bound!.ciphertext,
+        bound!.iv,
+        bound!.auth_tag,
+        bound!.key_version,
+        bound!.key_id,
+        OTHER_WORKSPACE_ID,
+        'model_api_key'
+      );
+    await expect(
+      readWorkspaceSecretPlaintext(db, OTHER_WORKSPACE_ID, 'model_api_key')
+    ).rejects.toThrow(/DIFFERENT row/);
   });
 
   it('is idempotent, and reports completion once there is nothing left', async () => {
-    await insertLegacyRow(WORKSPACE_ID, 'model_api_key', API_KEY, String(process.env.TREVRA_SECRETS_KEY));
+    await insertLegacyRow(
+      WORKSPACE_ID,
+      'model_api_key',
+      API_KEY,
+      String(process.env.TREVRA_SECRETS_KEY)
+    );
     await resealSecrets(db, { workspaceId: WORKSPACE_ID });
 
     // Second pass: nothing to do, and the report is the completion criterion
@@ -194,10 +278,18 @@ describe('resealSecrets', () => {
   it('walks a whole key rotation to a verifiable end', async () => {
     const oldKey = String(process.env.TREVRA_SECRETS_KEY);
     const newKey = randomBytes(32).toString('base64');
-    await putWorkspaceSecret(db, { workspaceId: WORKSPACE_ID, kind: 'model_api_key', plaintext: API_KEY });
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE_ID,
+      kind: 'model_api_key',
+      plaintext: API_KEY
+    });
 
     // Step 1: new key current, old key read-only.
-    const rotating = { ...process.env, TREVRA_SECRETS_KEY: newKey, TREVRA_SECRETS_KEY_PREVIOUS: oldKey } as NodeJS.ProcessEnv;
+    const rotating = {
+      ...process.env,
+      TREVRA_SECRETS_KEY: newKey,
+      TREVRA_SECRETS_KEY_PREVIOUS: oldKey
+    } as NodeJS.ProcessEnv;
     let report = await secretsCustodyReport(db, rotating, { workspaceId: WORKSPACE_ID });
     expect(report.counts.previous).toBeGreaterThanOrEqual(1);
     expect(report.complete).toBe(false);
@@ -213,13 +305,100 @@ describe('resealSecrets', () => {
 
     const afterDrop = { ...process.env, TREVRA_SECRETS_KEY: newKey } as NodeJS.ProcessEnv;
     delete afterDrop.TREVRA_SECRETS_KEY_PREVIOUS;
-    expect(await readWorkspaceSecretPlaintext(db, WORKSPACE_ID, 'model_api_key', afterDrop)).toBe(API_KEY);
-    expect((await secretsCustodyReport(db, afterDrop, { workspaceId: WORKSPACE_ID })).complete).toBe(true);
+    expect(await readWorkspaceSecretPlaintext(db, WORKSPACE_ID, 'model_api_key', afterDrop)).toBe(
+      API_KEY
+    );
+    expect(
+      (await secretsCustodyReport(db, afterDrop, { workspaceId: WORKSPACE_ID })).complete
+    ).toBe(true);
   });
 
+  it('re-encrypts outbound webhook signing secrets, the live overlap secret included', async () => {
+    const resolver: WebhookResolver = async () => [{ address: '93.184.216.34', family: 4 }];
+    const created = await createOutboundWebhookSubscription(
+      db,
+      {
+        workspaceId: WORKSPACE_ID,
+        url: 'https://hooks.partner.example/notify',
+        eventTypes: ['linkedin_campaign.started']
+      },
+      {
+        policy: { allowedHosts: ['hooks.partner.example'], allowedPorts: [], allowHttp: false },
+        resolver
+      }
+    );
+    const subscriptionId = created.subscription.id;
+    // A rotation inside its overlap: the outgoing secret is still being signed with.
+    const rotated = await rotateOutboundWebhookSecret(db, {
+      workspaceId: WORKSPACE_ID,
+      subscriptionId
+    });
+    expect(rotated).not.toBeNull();
+
+    const oldKey = String(process.env.TREVRA_SECRETS_KEY);
+    const newKey = randomBytes(32).toString('base64');
+    const rotating = {
+      ...process.env,
+      TREVRA_SECRETS_KEY: newKey,
+      TREVRA_SECRETS_KEY_PREVIOUS: oldKey
+    } as NodeJS.ProcessEnv;
+    let report = await secretsCustodyReport(db, rotating, { workspaceId: WORKSPACE_ID });
+    expect(
+      report.outstanding
+        .filter((row) => row.store === 'outbound_webhook_subscriptions')
+        .map((row) => [row.kind, row.custody, row.slot ?? 'current'])
+    ).toEqual([
+      [`outbound:${subscriptionId}`, 'previous', 'current'],
+      [`outbound:${subscriptionId}`, 'previous', 'previous']
+    ]);
+    expect(report.complete).toBe(false);
+
+    const result = await resealSecrets(db, { env: rotating, workspaceId: WORKSPACE_ID });
+    expect(result).toMatchObject({ resealed: 2, failed: [], remaining: 0 });
+    report = await secretsCustodyReport(db, rotating, { workspaceId: WORKSPACE_ID });
+    expect(report.complete).toBe(true);
+
+    // With the old key gone, both secrets still open, each to its own value.
+    const afterDrop = { ...process.env, TREVRA_SECRETS_KEY: newKey } as NodeJS.ProcessEnv;
+    delete afterDrop.TREVRA_SECRETS_KEY_PREVIOUS;
+    const row = await db
+      .prepare(
+        `SELECT ciphertext,iv,auth_tag,key_version,key_id,previous_ciphertext,previous_iv,
+                previous_auth_tag,previous_key_version,previous_key_id
+         FROM outbound_webhook_subscriptions WHERE workspace_id=? AND id=?`
+      )
+      .get<Record<string, Buffer | number | string | null>>(WORKSPACE_ID, subscriptionId);
+    const context = {
+      store: 'outbound_webhook_subscriptions' as const,
+      workspaceId: WORKSPACE_ID,
+      seatKey: 'owner',
+      kind: `outbound:${subscriptionId}`
+    };
+    const open = (prefix: '' | 'previous_') =>
+      openSecret(
+        {
+          ciphertext: row![`${prefix}ciphertext`] as Buffer,
+          iv: row![`${prefix}iv`] as Buffer,
+          authTag: row![`${prefix}auth_tag`] as Buffer,
+          keyVersion: Number(row![`${prefix}key_version`]),
+          keyId: row![`${prefix}key_id`] as string | null
+        },
+        context,
+        afterDrop
+      );
+    expect(open('')).toBe(rotated!.signingSecret);
+    expect(open('previous_')).toBe(created.signingSecret);
+  });
   it('reports rather than throws for a row it cannot open, and leaks nothing', async () => {
-    await putWorkspaceSecret(db, { workspaceId: WORKSPACE_ID, kind: 'model_api_key', plaintext: API_KEY });
-    const stranger = { ...process.env, TREVRA_SECRETS_KEY: randomBytes(32).toString('base64') } as NodeJS.ProcessEnv;
+    await putWorkspaceSecret(db, {
+      workspaceId: WORKSPACE_ID,
+      kind: 'model_api_key',
+      plaintext: API_KEY
+    });
+    const stranger = {
+      ...process.env,
+      TREVRA_SECRETS_KEY: randomBytes(32).toString('base64')
+    } as NodeJS.ProcessEnv;
     delete stranger.TREVRA_SECRETS_KEY_PREVIOUS;
 
     const result = await resealSecrets(db, { env: stranger, workspaceId: WORKSPACE_ID });
@@ -235,14 +414,23 @@ describe('resealSecrets', () => {
   it('refuses to run at all with no key configured', async () => {
     const keyless = { ...process.env } as NodeJS.ProcessEnv;
     delete keyless.TREVRA_SECRETS_KEY;
-    await expect(resealSecrets(db, { env: keyless, workspaceId: WORKSPACE_ID })).rejects.toThrow(/TREVRA_SECRETS_KEY/);
+    await expect(resealSecrets(db, { env: keyless, workspaceId: WORKSPACE_ID })).rejects.toThrow(
+      /TREVRA_SECRETS_KEY/
+    );
   });
 
   it('re-seals a non-owner seat credential in its own table, bound to its seat', async () => {
-    await putLinkedInCredentials(db, { workspaceId: WORKSPACE_ID, seatKey: SEAT_KEY, email: EMAIL, password: PASSWORD });
+    await putLinkedInCredentials(db, {
+      workspaceId: WORKSPACE_ID,
+      seatKey: SEAT_KEY,
+      email: EMAIL,
+      password: PASSWORD
+    });
     // Force the pair back to the legacy envelope so the pass has work to do.
     await db
-      .prepare('UPDATE linkedin_seat_credentials SET key_version=?, key_id=NULL WHERE workspace_id=?')
+      .prepare(
+        'UPDATE linkedin_seat_credentials SET key_version=?, key_id=NULL WHERE workspace_id=?'
+      )
       .run(ENVELOPE_V1, WORKSPACE_ID);
 
     const result = await resealSecrets(db, { workspaceId: WORKSPACE_ID });
@@ -254,9 +442,16 @@ describe('resealSecrets', () => {
   });
 
   it('DOES NOT relax the hosted refusal to do maintenance', async () => {
-    await putLinkedInCredentials(db, { workspaceId: WORKSPACE_ID, seatKey: SEAT_KEY, email: EMAIL, password: PASSWORD });
+    await putLinkedInCredentials(db, {
+      workspaceId: WORKSPACE_ID,
+      seatKey: SEAT_KEY,
+      email: EMAIL,
+      password: PASSWORD
+    });
     await db
-      .prepare('UPDATE linkedin_seat_credentials SET key_version=?, key_id=NULL WHERE workspace_id=?')
+      .prepare(
+        'UPDATE linkedin_seat_credentials SET key_version=?, key_id=NULL WHERE workspace_id=?'
+      )
       .run(ENVELOPE_V1, WORKSPACE_ID);
 
     const hosted = { ...process.env, TREVRA_DEPLOYMENT_MODE: 'hosted' } as NodeJS.ProcessEnv;

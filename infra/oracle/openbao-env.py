@@ -39,6 +39,9 @@ KEYS = (
     "SMTP_USERNAME", "SMTP_PASSWORD", "CLOUDFLARE_TUNNEL_TOKEN",
     "TREVRA_DB_PASSWORD", "INGEST_API_KEY", "BILLING_CLIENT_SECRET",
     "OPENAI_API_KEY", "STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET",
+    # Only during a server-key rotation window, and only fetched while the
+    # host file has it non-empty (docs/ops/credential-custody.md).
+    "TREVRA_SECRETS_KEY_PREVIOUS",
 )
 KEY_SET = frozenset(KEYS)
 VALID_ENV = re.compile(r"^([A-Z][A-Z0-9_]*)=(.*)$")
