@@ -25,6 +25,7 @@ import {
   validateLinkedInManagerWorkflow
 } from './api';
 import type { ManagedCampaign } from '../server/linkedin/managed-campaigns';
+import { MAX_ENDORSE_SKILLS } from '../server/linkedin/limits';
 import type { LinkedInWorkflow, WorkflowDelay, WorkflowStep } from '../server/linkedin/workflows';
 import { errorMessage } from './LinkedInSafety';
 import { useWorkspaceCan } from './auth-client';
@@ -2629,11 +2630,11 @@ function WorkflowStepCard({
 
         {step.action === 'endorse_skills' && (
           <label>
-            Skills to endorse per lead (1–10)
+            Skills to endorse per lead (1–{MAX_ENDORSE_SKILLS})
             <input
               type="number"
               min={1}
-              max={10}
+              max={MAX_ENDORSE_SKILLS}
               value={step.config.maxSkills}
               onChange={(event) =>
                 onChange({
@@ -2641,7 +2642,7 @@ function WorkflowStepCard({
                   config: {
                     maxSkills: Math.max(
                       1,
-                      Math.min(10, Math.trunc(Number(event.target.value) || 1))
+                      Math.min(MAX_ENDORSE_SKILLS, Math.trunc(Number(event.target.value) || 1))
                     )
                   }
                 })

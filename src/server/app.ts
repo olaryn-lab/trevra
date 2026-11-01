@@ -527,6 +527,7 @@ import {
 } from './linkedin/lead-lists.js';
 import {
   deleteWorkflow,
+  endorseSkillCapViolation,
   getWorkflow,
   listWorkflows,
   saveWorkflow,
@@ -8340,6 +8341,21 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
       const stepIndex = contentRefusal
         ? parsed.data!.findIndex((step) => step.id === contentRefusal.stepId)
         : -1;
+      const endorseRefusal =
+        parsed.success && !contentRefusal ? endorseSkillCapViolation(parsed.data) : null;
+      if (endorseRefusal) {
+        res.json({
+          valid: false,
+          issues: [
+            {
+              path: [endorseRefusal.index, 'config', 'maxSkills'],
+              message: endorseRefusal.message,
+              stepId: endorseRefusal.stepId
+            }
+          ]
+        });
+        return;
+      }
       res.json(
         parsed.success && !contentRefusal
           ? { valid: true, steps: parsed.data, issues: [] }

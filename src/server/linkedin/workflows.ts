@@ -5,6 +5,31 @@ import { actionKindSupportsBranch } from './branching.js';
 import type { LinkedInActionKind } from './actions.js';
 import { LinkedInApiError } from './errors.js';
 import { assertWorkflowRichContent } from './rich-content-guard.js';
+import { MAX_ENDORSE_SKILLS } from './limits.js';
+
+/**
+ * Owner decision (2026-11-01): one endorse action endorses at most
+ * `MAX_ENDORSE_SKILLS` skills. A save-time rule, NOT in the schema: workflows
+ * and campaign snapshots stored with up to 10 keep parsing, and the runner and
+ * driver cap what they send at the same number.
+ */
+export function endorseSkillCapViolation(
+  steps: readonly WorkflowStep[]
+): { stepId: string; index: number; message: string } | null {
+  const index = steps.findIndex(
+    (step) => step.action === 'endorse_skills' && step.config.maxSkills > MAX_ENDORSE_SKILLS
+  );
+  if (index < 0) return null;
+  return {
+    stepId: steps[index].id,
+    index,
+    message: `Endorse at most ${MAX_ENDORSE_SKILLS} skills per lead.`
+  };
+}
+export function assertEndorseSkillCap(steps: readonly WorkflowStep[]): void {
+  const violation = endorseSkillCapViolation(steps);
+  if (violation) throw new LinkedInApiError(`Step ${violation.stepId}: ${violation.message}`, 400);
+}
 
 /**
  * The merge fields a managed-workflow template may use.
@@ -1120,6 +1145,7 @@ export async function saveWorkflow(
   const steps = workflowStepsSchema.parse(input.steps);
   // TRV-040: refused here, not in the schema, so stored workflows keep parsing.
   assertWorkflowRichContent(steps);
+  assertEndorseSkillCap(steps);
   const workflowId = input.id ?? id('liwf');
   const timestamp = now.toISOString();
   const row = await db

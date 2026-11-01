@@ -266,7 +266,7 @@ describe('TRV-012 LinkedIn actions: planned -> claimed -> recorded outcome', () 
         { id: 'view', action: 'profile_view', config: {} },
         { id: 'follow', action: 'follow', config: {} },
         { id: 'like', action: 'like_post', config: {} },
-        { id: 'endorse', action: 'endorse_skills', config: { maxSkills: 4 } },
+        { id: 'endorse', action: 'endorse_skills', config: { maxSkills: 3 } },
         {
           id: 'inmail',
           action: 'inmail',
@@ -349,7 +349,7 @@ describe('TRV-012 LinkedIn actions: planned -> claimed -> recorded outcome', () 
         walk,
         'endorse',
         'endorseSkills',
-        ['https://www.linkedin.com/in/trv012-ana/', { seed: expect.any(String), maxSkills: 4 }]
+        ['https://www.linkedin.com/in/trv012-ana/', { seed: expect.any(String), maxSkills: 3 }]
       ],
       [
         walk,
@@ -396,7 +396,7 @@ describe('TRV-012 LinkedIn actions: planned -> claimed -> recorded outcome', () 
     expect(one(walk, 'invite').body).toBe('Hello Ana at Acme');
     expect(one(bare, 'invite').body).toBeNull();
     expect(one(walk, 'inmail').subject).toBe('Quick question, Ana');
-    expect(metadataOf(one(walk, 'endorse'))).toMatchObject({ maxSkills: 4 });
+    expect(metadataOf(one(walk, 'endorse'))).toMatchObject({ maxSkills: 3 });
     expect(calls).toHaveLength(8);
 
     // Withdraw: the workflow's withdraw_pending step queues the stale invite a

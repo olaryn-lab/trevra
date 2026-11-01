@@ -12,6 +12,7 @@ import {
   stepUsesBookingLink,
   unsupportedVariables,
   workflowStepsSchema,
+  endorseSkillCapViolation,
   workflowUsesBookingLink
 } from './workflows.js';
 describe('LinkedIn manager workflows', () => {
@@ -227,8 +228,13 @@ describe('LinkedIn manager workflows', () => {
       delayBefore: { amount: 0, unit: 'days' },
       config: { maxSkills: 6 }
     };
+    // A count stored before the 3-skill cap still parses; saving it is refused.
     const parsed = workflowStepsSchema.parse([raw]);
     expect(parsed[0]).toMatchObject({ action: 'endorse_skills', config: { maxSkills: 6 } });
+    expect(endorseSkillCapViolation(parsed)).toMatchObject({ stepId: 'skills', index: 0 });
+    expect(
+      endorseSkillCapViolation(workflowStepsSchema.parse([{ ...raw, config: { maxSkills: 3 } }]))
+    ).toBeNull();
     expect(
       workflowStepsSchema.safeParse([
         {

@@ -144,9 +144,9 @@ export type BandName = 'warmup' | 'steady';
  * - endorse -- 3 / 8. The lowest by a wide margin, for two reasons. Endorsing
  *              a stranger's skills is the least plausible human behaviour of
  *              the three, and ONE endorse action performs up to `maxSkills`
- *              clicks (1-10 per workflow step; `driver-engage.ts`
+ *              clicks (1-`MAX_ENDORSE_SKILLS` per workflow step; `driver-engage.ts`
  *              `endorseSkills`). The band counts ACTIONS, one per lead, not
- *              clicks: 8 actions is up to 80 clicks at the maximum setting.
+ *              clicks: 8 actions is up to 24 clicks at the maximum setting.
  *              endorse-quota.acceptance.test.ts pins that contract.
  *
  * DAILY ONLY for all four judgement rows: no `perWeek`, no `perMonth`.
@@ -211,6 +211,13 @@ export const LINKEDIN_LIMITS: Readonly<
  * this, and between them they are what makes a withdrawal give something back.
  */
 export const MAX_OUTSTANDING_INVITES = 100;
+
+/**
+ * Skills one endorse action may endorse (owner decision, 2026-11-01). At the
+ * 8/day steady endorse band that is at most 24 endorsements a day per account.
+ * Workflow saves refuse more; older stored workflows are capped when they run.
+ */
+export const MAX_ENDORSE_SKILLS = 3;
 
 /**
  * The core anti-"Slide and Spike" number, and the one this engine exists for.

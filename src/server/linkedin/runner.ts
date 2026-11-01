@@ -11,7 +11,7 @@ import {
   type AdmissionPolicy
 } from './admission.js';
 import { linkedInDailyAllowance } from './guard.js';
-import { ACTION_GAP_SECONDS, INMAIL_MONTHLY_QUOTA } from './limits.js';
+import { ACTION_GAP_SECONDS, INMAIL_MONTHLY_QUOTA, MAX_ENDORSE_SKILLS } from './limits.js';
 import {
   admitPendingCampaignMembers,
   campaignActionLimit,
@@ -2426,7 +2426,8 @@ async function planManagedCampaigns(db: Db, workspaceId: string, now: Date): Pro
               attachment ? JSON.stringify(attachment) : null,
               JSON.stringify(
                 step.action === 'endorse_skills'
-                  ? { maxSkills: step.config.maxSkills }
+                  ? // A workflow saved before the 3-skill cap still sends at most 3.
+                    { maxSkills: Math.min(step.config.maxSkills, MAX_ENDORSE_SKILLS) }
                   : step.action === 'inmail'
                     ? {
                         allowPaid:

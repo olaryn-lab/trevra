@@ -3,7 +3,7 @@
  *
  * THE QUOTA IS PER ACTION, NOT PER CLICK. One `endorse` ledger row is one
  * endorse action on one lead; the runner budgets and the pre-send gate count
- * ROWS, and `maxSkills` (1-10, set in the workflow builder) only bounds how many
+ * ROWS, and `maxSkills` (1-3, set in the workflow builder) only bounds how many
  * visible skills that one action may click. These tests pin that contract from
  * the HTTP writer to the driver call. They do not prove live LinkedIn DOM
  * behaviour (driver-engage.test.ts covers the click routine against a fake page).
@@ -227,8 +227,8 @@ afterEach(async () => {
 });
 
 describe('TRV-013 skill endorsements', () => {
-  it('accepts exactly the 1-10 range the builder offers and defaults to one skill', async () => {
-    for (const bad of [0, 11, 2.5, '3'])
+  it('accepts exactly the 1-3 range the builder offers and defaults to one skill', async () => {
+    for (const bad of [0, 4, 11, 2.5, '3'])
       await client()
         .post('/api/linkedin/manager/workflows')
         .send({ name: 'bad ' + String(bad), steps: [endorseStep(bad)] })
@@ -240,11 +240,54 @@ describe('TRV-013 skill endorsements', () => {
         .expect(201)
     ).body.workflow;
     expect(defaulted.steps[0].config).toEqual({ maxSkills: 1 });
+    const validation = (
+      await client()
+        .post('/api/linkedin/manager/workflows/validate')
+        .send({ steps: [endorseStep(4)] })
+        .expect(200)
+    ).body;
+    expect(validation).toMatchObject({
+      valid: false,
+      issues: [{ path: [0, 'config', 'maxSkills'], stepId: 'endorse' }]
+    });
+  });
+
+  it('sends at most three skills for a workflow stored before the cap', async () => {
+    const campaign = await startCampaign('Legacy', ['trv013-legacy'], 3);
+    // Written before the owner capped endorsements at 3: the stored snapshot
+    // still parses, and the runner caps what it hands the driver.
+    for (const [table, column] of [
+      ['linkedin_campaigns', 'sequence_json'],
+      ['linkedin_campaign_members', 'workflow_snapshot_json']
+    ] as const)
+      await db
+        .prepare(
+          `UPDATE ${table} SET ${column}=regexp_replace(${column}::text, '"maxSkills": {0,1}3', '"maxSkills": 9')::jsonb
+           WHERE workspace_id=? AND ${table === 'linkedin_campaigns' ? 'id' : 'campaign_id'}=? AND ${column} IS NOT NULL`
+        )
+        .run(workspace, campaign);
+    const stored = await db
+      .prepare(
+        'SELECT sequence_json::text AS s FROM linkedin_campaigns WHERE workspace_id=? AND id=?'
+      )
+      .get<{ s: string }>(workspace, campaign);
+    expect(stored?.s).toMatch(/"maxSkills": ?9/);
+    await runManagedCampaigns(db, workspace, T0);
+    await approveAll();
+    const endorsed: Array<{ target: string; maxSkills: unknown }> = [];
+    expect((await work(endorsed, await latestDue(T0))).executed).toBe(1);
+    const [row] = await endorseRows(campaign);
+    const metadata =
+      typeof row.channel_metadata_json === 'string'
+        ? JSON.parse(row.channel_metadata_json)
+        : row.channel_metadata_json;
+    expect(metadata).toMatchObject({ maxSkills: 3 });
+    expect(endorsed).toEqual([{ target: row.target_ref, maxSkills: 3 }]);
   });
 
   it('delivers the configured skill count to the driver exactly, at both bounds', async () => {
     const campaigns = new Map<number, string>();
-    for (const maxSkills of [1, 7, 10])
+    for (const maxSkills of [1, 2, 3])
       campaigns.set(
         maxSkills,
         await startCampaign(`Endorse ${maxSkills}`, [`trv013-n${maxSkills}`], maxSkills)
@@ -270,7 +313,7 @@ describe('TRV-013 skill endorsements', () => {
 
   it('charges one quota unit per endorse action however many skills it clicks', async () => {
     const handles = Array.from({ length: 9 }, (_, index) => `trv013-q${index}`);
-    const campaign = await startCampaign('Quota', handles, 10);
+    const campaign = await startCampaign('Quota', handles, 3);
     // Today's draw of the 8/day steady band, as the send gate prices it.
     const today = await linkedInDailyAllowance(
       db,
@@ -283,7 +326,7 @@ describe('TRV-013 skill endorsements', () => {
     expect(today.ceiling).toBeLessThanOrEqual(8);
     await runManagedCampaigns(db, workspace, T0);
     // Planner boundary: the gate's allowance admits and plans exactly that
-    // many ten-skill actions. Per-click accounting would have planned none.
+    // many three-skill actions. Per-click accounting would have planned fewer.
     expect((await endorseRows(campaign)).filter((row) => row.status === 'planned')).toHaveLength(
       today.remaining
     );
@@ -291,13 +334,13 @@ describe('TRV-013 skill endorsements', () => {
     const endorsed: Array<{ target: string; maxSkills: unknown }> = [];
     const when = await latestDue(T0);
     const pass = await work(endorsed, when);
-    // Gate boundary: the last ten-skill action is still allowed at send time.
+    // Gate boundary: the last three-skill action is still allowed at send time.
     expect(pass).toMatchObject({ executed: today.remaining, blocked: 0 });
     expect(endorsed).toHaveLength(today.remaining);
-    expect(endorsed.every((call) => call.maxSkills === 10)).toBe(true);
+    expect(endorsed.every((call) => call.maxSkills === 3)).toBe(true);
 
     // One past: the next endorse inside the same 24h is refused by the gate,
-    // which counts actions (not ten times as many skills) against the ceiling.
+    // which counts actions (not three times as many skills) against the ceiling.
     const verdict = await gate({
       id: 'lact_not_yet_written',
       seatKey: 'owner',

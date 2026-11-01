@@ -24,6 +24,7 @@ import {
   type PacedKind
 } from './limits.js';
 import {
+  assertEndorseSkillCap,
   BOOKING_LINK_MISSING_MESSAGE,
   BOOKING_LINK_PREVIEW_PLACEHOLDER,
   BookingLinkMissingError,
@@ -3221,6 +3222,7 @@ export async function updateCampaignSequence(
     throw new Error(`A ${campaign.status} campaign cannot have its steps changed.`);
   const parsed = workflowStepsSchema.parse(steps);
   assertWorkflowRichContent(parsed);
+  assertEndorseSkillCap(parsed);
   const snapshot = JSON.stringify({
     manager: true,
     workflowId: campaign.workflowId,
