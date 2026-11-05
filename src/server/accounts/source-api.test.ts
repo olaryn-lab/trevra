@@ -160,6 +160,10 @@ describe('generic account sourcing API', () => {
 
     expect(first.body.providerKey).toBe('seed');
     expect(first.body.found).toBe(2);
+    expect(first.body.candidates).toEqual([
+      expect.objectContaining({ domain: 'acme.com', providerKey: 'seed' }),
+      expect.objectContaining({ domain: 'orbit.com', providerKey: 'seed' })
+    ]);
     expect(first.body.import.created).toBe(2);
     expect(first.body.import.duplicate).toBe(0);
     expect(first.body.runId).toMatch(/^run_/);

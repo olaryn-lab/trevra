@@ -15,7 +15,13 @@ const withExa: CredentialAccessor = {
 
 describe('research provider registry', () => {
   it('registers every shipped provider under a stable key', () => {
-    expect(listProviders().map((provider) => provider.key)).toEqual(['directory', 'exa', 'seed']);
+    expect(listProviders().map((provider) => provider.key)).toEqual([
+      'dach-footwear',
+      'directory',
+      'exa',
+      'seed',
+      'shoeai-dach'
+    ]);
     expect(getProvider('nope')).toBeUndefined();
   });
 
