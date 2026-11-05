@@ -1,0 +1,25 @@
+name: LemonCrow
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+  checks: read
+
+concurrency:
+  group: lemoncrow-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: LemonCrow review
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: lemoncrow-lab/lemoncrow@cabdaab7d40bf107306069369f38dddc95a69b6e # v0.8.2
+        with:
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
