@@ -156,6 +156,37 @@ describe('DACH footwear source providers', () => {
     expect(requests).toEqual(['https://normal-shoes.test/robots.txt']);
   });
 
+  it('accepts a realistic large Shopify homepage while keeping a response cap', async () => {
+    const result = await dachFootwearProvider.search(query({ domains: ['large-shoe-store.com'] }), {
+      credentials: noCredentials,
+      fetchImpl: async (url) =>
+        url.endsWith('/robots.txt')
+          ? new Response('', { status: 404 })
+          : new Response('<h1>Schuhe</h1><div>Warenkorb</div>' + ' '.repeat(1_100_000), {
+              headers: { 'content-type': 'text/html' }
+            })
+    });
+    expect(result.candidates.map((entry) => entry.domain)).toEqual(['large-shoe-store.com']);
+  });
+
+  it('reports a cross-domain merchant redirect instead of treating it as no leads', async () => {
+    const result = await dachFootwearProvider.search(
+      query({ domains: ['legacy-shoe-store.com'] }),
+      {
+        credentials: noCredentials,
+        fetchImpl: async (url) =>
+          url.endsWith('/robots.txt')
+            ? new Response('', { status: 404 })
+            : new Response('', {
+                status: 302,
+                headers: { location: 'https://new-shoe-store.com/' }
+              })
+      }
+    );
+    expect(result.candidates).toEqual([]);
+    expect(result.warnings.join(' ')).toContain('enter the canonical domain');
+  });
+
   it('rejects unsupported countries without arbitrary country-wide scraping', async () => {
     let called = false;
     const result = await dachFootwearProvider.search(query({ countries: ['FR'] }), {
@@ -168,6 +199,20 @@ describe('DACH footwear source providers', () => {
     expect(called).toBe(false);
     expect(result.candidates).toEqual([]);
     expect(result.warnings[0]).toContain('No supported DACH');
+  });
+
+  it('stops after the first upstream timeout instead of hanging across all three countries', async () => {
+    let requests = 0;
+    const result = await dachFootwearProvider.search(query(), {
+      credentials: noCredentials,
+      fetchImpl: async () => {
+        requests++;
+        throw new DOMException('The operation timed out', 'TimeoutError');
+      }
+    });
+    expect(requests).toBe(1);
+    expect(result.candidates).toEqual([]);
+    expect(result.warnings.join(' ')).toContain('remaining city lookups were skipped');
   });
 
   it('degrades Overpass rate limits to an explicit warning and no fabricated customers', async () => {

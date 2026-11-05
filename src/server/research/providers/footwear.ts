@@ -149,6 +149,19 @@ async function candidatesFromOSM(query: SourceQuery, options: ProviderSearchOpti
       }
     } catch (error) {
       warnings.push(`${region.city}: ${error instanceof Error ? error.message : String(error)}`);
+      // One unavailable public Overpass instance will also be unavailable for
+      // the next city. Don't turn a manual click into three 20-second timeouts.
+      if (
+        error instanceof Error &&
+        (error.name === 'TimeoutError' ||
+          error.name === 'AbortError' ||
+          /timed out|timeout|aborted/i.test(error.message))
+      ) {
+        warnings.push(
+          'Overpass timed out; remaining city lookups were skipped. Try seeded domains or a later manual run.'
+        );
+        break;
+      }
     }
   }
   return { stores: [...stores.values()], warnings };
@@ -179,7 +192,9 @@ async function inspect(store: Store, fetchImpl?: FetchLike) {
   const crawler = await createPublicWebCrawler(store.domain, {
     fetchImpl,
     maxRequests: 4,
-    maxResponseBytes: 800_000,
+    // Shopify and other catalog-heavy homepages commonly exceed 1 MB.
+    // Keep an explicit upper bound, but do not reject ordinary large shops.
+    maxResponseBytes: 2_000_000,
     maxRobotsBytes: 32_768,
     timeoutMs: 8_000,
     maxDurationMs: 18_000,
@@ -187,8 +202,22 @@ async function inspect(store: Store, fetchImpl?: FetchLike) {
     strictRobots: true
   });
   const homepage = await crawler.get('/');
-  if (homepage.response?.status !== 200 || !/text\/html/i.test(homepage.response.contentType))
-    return null;
+  if (homepage.response?.status !== 200) {
+    const skipReason =
+      homepage.skipped === 'robots-disallowed'
+        ? 'robots.txt disallows inspection'
+        : homepage.skipped === 'robots-unavailable'
+          ? 'robots.txt could not be verified'
+          : homepage.error?.includes('redirect outside caller scope')
+            ? 'redirects to another domain; enter the canonical domain as a seed'
+            : homepage.error?.includes('response body exceeds')
+              ? 'homepage exceeds the 2 MB inspection limit'
+              : homepage.response?.status
+                ? `homepage returned HTTP ${homepage.response.status}`
+                : 'homepage could not be inspected';
+    return { skipReason };
+  }
+  if (!/text\/html/i.test(homepage.response.contentType)) return null;
   const html = homepage.response.text;
   if (!SHOE.test(html) || !COMMERCE.test(html)) return null;
   let shoeai = SHOEAI.test(html);
@@ -226,17 +255,23 @@ function provider(onlyShoeAI: boolean): ResearchProvider {
     async search(query, options) {
       const { stores, warnings } = await candidatesFromOSM(query, options);
       const candidates: CandidateCompany[] = [];
+      let skippedCount = 0;
       for (let i = 0; i < stores.length && candidates.length < query.limit; i += 4) {
         const checked = await Promise.all(
           stores.slice(i, i + 4).map(async (store) => {
             try {
               return { store, result: await inspect(store, options.fetchImpl) };
             } catch {
-              return { store, result: null };
+              return { store, result: { skipReason: 'storefront could not be inspected' } };
             }
           })
         );
         for (const { store, result } of checked) {
+          if (result && 'skipReason' in result) {
+            skippedCount++;
+            if (skippedCount <= 6) warnings.push(`${store.domain}: ${result.skipReason}`);
+            continue;
+          }
           if (!result || (onlyShoeAI && !result.shoeai)) continue;
           candidates.push({
             domain: store.domain,
@@ -250,6 +285,8 @@ function provider(onlyShoeAI: boolean): ResearchProvider {
           if (candidates.length >= query.limit) break;
         }
       }
+      if (skippedCount > 6)
+        warnings.push(`${skippedCount - 6} additional sites could not be inspected.`);
       warnings.push(
         'Sampled cities/seed domains only; not all DACH stores or active ShoeAI customers. Static HTML may omit JavaScript-loaded widgets.'
       );

@@ -258,7 +258,9 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
       const first = menuRef.current?.querySelector<HTMLButtonElement>(
         '[role="option"]:not(:disabled)'
       );
-      (selectedOption ?? first)?.focus();
+      // Focusing a portalled option can scroll the document. The dropdown's
+      // scroll-to-dismiss listener would then close it immediately after opening.
+      (selectedOption ?? first)?.focus({ preventScroll: true });
     });
 
     const onPointerDown = (event: PointerEvent) => {
@@ -272,12 +274,23 @@ export const Select = forwardRef<HTMLButtonElement, SelectProps>(function Select
         triggerRef.current?.focus();
       }
     };
-    const closeForViewportChange = () => setOpen(false);
+    // A queued document scroll from bringing the trigger into view can arrive
+    // just AFTER opening, even when the option focus uses preventScroll. If we
+    // close on that event, the listbox never becomes usable. Arm scroll-dismiss
+    // after the opening layout/focus has settled; later user scrolls still close.
+    let scrollDismissArmed = false;
+    const scrollArmTimeout = window.setTimeout(() => {
+      scrollDismissArmed = true;
+    }, 250);
+    const closeForViewportChange = () => {
+      if (scrollDismissArmed) setOpen(false);
+    };
     document.addEventListener('pointerdown', onPointerDown);
     document.addEventListener('keydown', onKeyDown);
     window.addEventListener('resize', closeForViewportChange);
     window.addEventListener('scroll', closeForViewportChange, true);
     return () => {
+      window.clearTimeout(scrollArmTimeout);
       document.removeEventListener('pointerdown', onPointerDown);
       document.removeEventListener('keydown', onKeyDown);
       window.removeEventListener('resize', closeForViewportChange);
