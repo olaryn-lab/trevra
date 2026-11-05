@@ -4217,6 +4217,13 @@ export interface AccountSourceRunResult {
   providerKey: string;
   availability: AccountSourceProvider['availability'];
   found: number;
+  candidates?: Array<{
+    domain: string;
+    name: string | null;
+    description: string | null;
+    providerKey: string;
+    sourceUrl: string | null;
+  }>;
   warnings: string[];
   import: AccountImportResult;
 }

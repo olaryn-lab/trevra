@@ -1,5 +1,6 @@
 import { directoryProvider } from './providers/directory.js';
 import { exaProvider } from './providers/exa.js';
+import { dachFootwearProvider, shoeaiDachProvider } from './providers/footwear.js';
 import { configuredHttpSourceProviders } from './providers/http.js';
 import { seedProvider } from './providers/seed.js';
 import type { ResearchProvider, WithheldProvider } from './types.js';
@@ -39,6 +40,8 @@ export const DEFAULT_PROVIDER_KEY = 'seed';
 for (const provider of [
   seedProvider,
   directoryProvider,
+  dachFootwearProvider,
+  shoeaiDachProvider,
   exaProvider,
   ...configuredHttpSourceProviders()
 ]) {

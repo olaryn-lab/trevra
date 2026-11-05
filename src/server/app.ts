@@ -9657,6 +9657,7 @@ export function createApp(db: Db, options: CreateAppOptions = {}) {
         providerKey: sourced.providerKey,
         availability: sourced.availability,
         found: sourced.candidates.length,
+        candidates: sourced.candidates,
         warnings: sourced.warnings,
         import: imported
       });

@@ -191,3 +191,35 @@ The response includes the `runId`, provider key, candidate count, warnings, and 
 > Trevra owns prospects, evidence, and actions — not the system prospects were discovered in.
 
 Do not add source-specific account tables or copy another product's fixture/storage hierarchy into Trevra core. Add a provider or import adapter that emits the generic candidate-company contract instead.
+
+## DACH footwear discovery (manual pilot)
+
+Two registered providers appear under **Outreach → Target accounts → Find accounts from a source**:
+
+- `dach-footwear`: finds footwear web stores and checks for public shoe and shopping markers.
+- `shoeai-dach`: additionally requires a ShoeAI/ShoeSize.Me JavaScript fingerprint, e.g. `shoesize.me/assets/plugin/loader.js` or `ShoeSizeMe_loader`. This establishes a public static-code trace, **not** an active installation, billing relationship, or working recommendation widget.
+
+With no seed domains, each manual run queries `shop=shoes` merchant website tags on OpenStreetMap via a bounded public [Private.coffee Overpass](https://overpass.private.coffee/api/interpreter) query: **Berlin, Vienna and Zurich by default**, or up to three explicitly selected cities (Berlin, Munich, Hamburg, Vienna, Graz, Zurich, Basel, Bern). You may filter to DE/AT/CH. Candidate websites are deduplicated and inspected with safe redirect validation, a timeout, and a small cap. Only sites with both shoe and commerce markers enter the account list; a matching ShoeAI marker is required for the `shoeai-dach` mode. Javascript-only sites and widgets may be missed.
+
+Alternatively, paste public merchant domains into the source field; that skips OpenStreetMap entirely and checks only the supplied domains. A source run never contacts leads or launches outreach. Existing workspace account deduplication, source tagging, scoring, and skill-run retention rules still apply. The API equivalent is:
+
+```json
+{
+  "provider": "shoeai-dach",
+  "countries": ["DE"],
+  "keywords": ["Berlin"],
+  "domains": [],
+  "limit": 25,
+  "tags": ["shoeai-dach"]
+}
+```
+
+**Provenance and licence:** Data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), available under the [Open Database License](https://opendatacommons.org/licenses/odbl/). Source object URLs are retained as candidate evidence; ensure attribution and review any ODbL obligations when distributing a combined database. Private.coffee's Overpass endpoint permits commercial use with fair-share terms; it is intended here for occasional, user-triggered small-area lookups. Public endpoints can time out or become unavailable; Trevra reports that as a warning rather than fabricating results. For regular or DACH-wide commercial sourcing, use regional OSM extracts/your own server or a properly licensed provider; do **not** schedule unlimited public Overpass sweeps. This is _not_ an exhaustive list of DACH online footwear stores or ShoeAI customers.
+
+The previously discussed urlscan Search API is **not** wired into this commercial lead database: its terms restrict systematic directory creation and commercial reuse without permission. Obtain written usage approval before adding a urlscan-based bulk customer-finding adapter.
+
+### Reproduce the local DACH browser acceptance
+
+Run `npx tsx scripts/smoke-dach-footwear-local.ts` from the Trevra checkout with Docker and Playwright Chromium installed. It starts the actual React app and API against a disposable PostgreSQL container, signs up a disposable owner, exercises the ShoeAI-only and general-footwear dropdowns, checks workspace-scoped persisted accounts and evidence, verifies deduplication, handles a simulated 429, and checks mobile layout. Only external OSM/store HTTP calls are replaced with deterministic test responses. The script removes its test database container on exit and never accesses production credentials.
+
+A separate **live** seed-domain probe is needed to establish real website behavior. In the November 5, 2026 local qualification, `dancing-queens.com` was identified from unmocked public HTML after raising the storefront budget to 2 MB; `dancingqueens.ch` could not be inspected because of an out-of-scope storefront redirect. This is a generic footwear detection check, **not** evidence that Dancing Queens uses ShoeAI. The public Overpass interpreter did not answer the local smoke requests; live automatic city discovery remains unverified, and failures must be shown explicitly rather than reported as no matching merchants.

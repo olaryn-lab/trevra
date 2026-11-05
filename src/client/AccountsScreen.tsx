@@ -191,6 +191,7 @@ export function AccountsScreen({
   const [sourceProvider, setSourceProvider] = useState('directory');
   const [sourceKeywords, setSourceKeywords] = useState('');
   const [sourceUrls, setSourceUrls] = useState('');
+  const [sourceCountry, setSourceCountry] = useState('');
   const [sourcing, setSourcing] = useState(false);
   const [sourceRun, setSourceRun] = useState<AccountSourceRunResult | null>(null);
   const [observationProviders, setObservationProviders] = useState<ObservationProviderHealth[]>([]);
@@ -373,7 +374,16 @@ export function AccountsScreen({
     setSourcing(true);
     setError('');
     try {
-      const sourced = await sourceAccounts({ provider: provider.key, urls, keywords, limit: 100 });
+      const footwear = provider.key === 'dach-footwear' || provider.key === 'shoeai-dach';
+      const sourced = await sourceAccounts({
+        provider: provider.key,
+        urls: footwear ? [] : urls,
+        ...(footwear
+          ? { domains: urls, countries: sourceCountry ? [sourceCountry] : [], tags: [provider.key] }
+          : {}),
+        keywords,
+        limit: footwear ? 50 : 100
+      });
       setSourceRun(sourced);
       setToast(
         sourced.import.created > 0
@@ -675,6 +685,8 @@ export function AccountsScreen({
                 setKeywords={setSourceKeywords}
                 urls={sourceUrls}
                 setUrls={setSourceUrls}
+                country={sourceCountry}
+                setCountry={setSourceCountry}
                 sourcing={sourcing}
                 runSource={runSource}
                 result={sourceRun}
@@ -1209,6 +1221,8 @@ function SourceAccountsForm({
   setKeywords,
   urls,
   setUrls,
+  country,
+  setCountry,
   sourcing,
   runSource,
   result
@@ -1220,11 +1234,14 @@ function SourceAccountsForm({
   setKeywords: (value: string) => void;
   urls: string;
   setUrls: (value: string) => void;
+  country: string;
+  setCountry: (value: string) => void;
   sourcing: boolean;
   runSource: () => void;
   result: AccountSourceRunResult | null;
 }) {
   const selected = providers.find((provider) => provider.key === providerKey) ?? providers[0];
+  const footwear = selected?.key === 'dach-footwear' || selected?.key === 'shoeai-dach';
   const canPersist = Boolean(
     selected && selected.availability.mode === 'ready' && selected.retention === 'default'
   );
@@ -1257,28 +1274,54 @@ function SourceAccountsForm({
           </Select>
         </label>
         <label>
-          Keywords
+          {footwear ? 'Cities (optional)' : 'Keywords'}
           <input
             value={keywords}
             disabled={sourcing}
             onChange={(event) => setKeywords(event.target.value)}
-            placeholder="AI visibility, ecommerce, Switzerland"
+            placeholder={
+              footwear
+                ? 'Berlin, Vienna, Zurich (default)'
+                : 'AI visibility, ecommerce, Switzerland'
+            }
           />
           <small className="li-hint">
-            Comma or newline separated. Providers may ignore fields they do not need.
+            {footwear
+              ? 'Choose up to three: Berlin, Munich, Hamburg, Vienna, Graz, Zurich, Basel, Bern. Leave empty for Berlin, Vienna and Zurich.'
+              : 'Comma or newline separated. Providers may ignore fields they do not need.'}
           </small>
         </label>
       </div>
 
+      {footwear && (
+        <Field label="Country" hint="A bounded manual pilot, not a complete DACH inventory.">
+          <Select
+            value={country}
+            disabled={sourcing}
+            onChange={(event) => setCountry(event.target.value)}
+          >
+            <option value="">Germany · Austria · Switzerland</option>
+            <option value="DE">Germany</option>
+            <option value="AT">Austria</option>
+            <option value="CH">Switzerland</option>
+          </Select>
+        </Field>
+      )}
       <label className="li-block-label acc-paste">
-        Public source URLs{' '}
-        {selected?.key === 'directory' ? '(required for directory crawl)' : '(optional)'}
+        {footwear
+          ? 'Store domains to verify (optional; skips OSM discovery)'
+          : 'Public source URLs'}{' '}
+        {selected?.key === 'directory' ? '(required for directory crawl)' : ''}
         <textarea
           rows={4}
           value={urls}
           disabled={sourcing}
           onChange={(event) => setUrls(event.target.value)}
-          placeholder={'https://example.com/best-companies\nhttps://example.org/directory'}
+          placeholder={
+            footwear
+              ? 'example-shoes.de\nhttps://shop.example.ch/'
+              : 'https://example.com/best-companies\nhttps://example.org/directory'
+          }
         />
       </label>
 
@@ -1302,6 +1345,33 @@ function SourceAccountsForm({
               {warning}
             </p>
           ))}
+          {result.candidates && result.candidates.length > 0 && (
+            <details className="mgr-inputs">
+              <summary>
+                View {plural(result.candidates.length, 'discovered store')} and source evidence
+              </summary>
+              <div className="mgr-inputs-body client-table">
+                {result.candidates.map((candidate) => (
+                  <article className="client-card-large" key={candidate.domain}>
+                    <div>
+                      <h4 aria-level={3}>{candidate.name || candidate.domain}</h4>
+                      <p>
+                        <a href={`https://${candidate.domain}/`} target="_blank" rel="noreferrer">
+                          {candidate.domain} <ExternalLink size={13} aria-hidden="true" />
+                        </a>
+                      </p>
+                      {candidate.description && <p className="li-hint">{candidate.description}</p>}
+                      {candidate.sourceUrl && /^https?:\/\//i.test(candidate.sourceUrl) && (
+                        <a href={candidate.sourceUrl} target="_blank" rel="noreferrer">
+                          View discovery evidence <ExternalLink size={13} aria-hidden="true" />
+                        </a>
+                      )}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </details>
+          )}
           <ImportReport result={result.import} />
         </div>
       )}
