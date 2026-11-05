@@ -35,7 +35,7 @@ const ELEMENTS = [
 function fakeFetch(requests: string[]): FetchLike {
   return async (url, init) => {
     requests.push(url);
-    if (url.includes('overpass-api.de')) {
+    if (url.includes('overpass.private.coffee')) {
       const body = String(init?.body);
       expect(body).toContain('52.45%2C13.30');
       expect(body).not.toContain('48.15%2C16.28');
@@ -83,7 +83,7 @@ describe('DACH footwear source providers', () => {
     expect(result.candidates[0].description).toContain('ShoeAI marker');
     expect(result.candidates[1].description).toContain('ShoeAI unknown');
     expect(result.evidence[0].sourceUrl).toContain('openstreetmap.org/copyright');
-    expect(requests.filter((url) => url.includes('overpass-api')).length).toBe(1);
+    expect(requests.filter((url) => url.includes('overpass.private.coffee')).length).toBe(1);
   });
 
   it('only surfaces companies with an observed ShoeAI marker, not generic shoe shops', async () => {
@@ -109,7 +109,7 @@ describe('DACH footwear source providers', () => {
       { credentials: noCredentials, fetchImpl: fakeFetch(requests) }
     );
     expect(result.candidates.map((item) => item.domain)).toEqual(['berlin-shoes.test']);
-    expect(requests.some((url) => url.includes('overpass-api.de'))).toBe(false);
+    expect(requests.some((url) => url.includes('overpass.private.coffee'))).toBe(false);
   });
 
   it('visits all three default DACH capitals instead of exhausting the cap in Berlin', async () => {
@@ -122,7 +122,7 @@ describe('DACH footwear source providers', () => {
     await dachFootwearProvider.search(query({ limit: 10 }), {
       credentials: noCredentials,
       fetchImpl: async (url, init) => {
-        if (url.includes('overpass-api.de')) {
+        if (url.includes('overpass.private.coffee')) {
           const body = decodeURIComponent(String(init?.body));
           const city = body.includes('52.45,13.30')
             ? 'Berlin'

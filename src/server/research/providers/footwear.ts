@@ -12,7 +12,9 @@ import type {
  * Not a complete census. Bulk/recurring use needs a licensed extract or own data server.
  * OSM data © OpenStreetMap contributors, ODbL: https://www.openstreetmap.org/copyright
  */
-const OSM_URL = 'https://overpass-api.de/api/interpreter';
+// Private.coffee permits commercial API usage with fair-share expectations.
+// Its public endpoint is still best-effort, not production infrastructure.
+const OSM_URL = 'https://overpass.private.coffee/api/interpreter';
 const OSM_ATTRIBUTION = 'https://www.openstreetmap.org/copyright';
 const REGIONS = [
   { city: 'Berlin', country: 'DE', bbox: '52.45,13.30,52.57,13.53' },
