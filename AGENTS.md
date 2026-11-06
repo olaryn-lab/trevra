@@ -76,3 +76,10 @@ Do not rebuild OAuth, token rotation, rate-limit handling, or sync storage. Use 
 - Before creating a branch/worktree, check whether an existing unmerged branch or worktree already covers that work. Prefer continuing or folding it over starting another parallel line. Do not use separate branches merely to record progress or documentation.
 - **Close the loop:** run the relevant checks, integrate finished work through the project's normal merge/review process, then clean up its no-longer-needed branch/worktree after verifying it is merged, clean, and unused. Record unfinished branches/worktrees and their blockers in one durable task tracker.
 - **Never lose work for cleanup.** Do not force-remove or reset a dirty/active worktree, discard uncommitted or ignored runtime/configuration files, or delete unique unmerged commits. Preserve other agents' changes and follow the repository's explicit approval and backup rules before destructive operations. Do not delete remote branches as an automatic cleanup step.
+
+## Testing Policy
+
+- Write only high-value tests that catch meaningful bugs, regressions, or security issues.
+- Prefer real behavior and integration tests over mocked or implementation-detail tests.
+- Avoid trivial, redundant, or coverage-driven tests.
+- Run focused tests during development; preserve existing mandatory CI and release checks.
