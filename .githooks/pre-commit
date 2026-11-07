@@ -18,7 +18,8 @@ FILES_TO_CHECK=()
 if (($# > 0)); then
   FILES_TO_CHECK=("$@")
 else
-  mapfile -d '' -t FILES_TO_CHECK < <(git diff --cached --name-only -z --diff-filter=ACM)
+  # while-read, not mapfile: macOS ships bash 3.2.
+  while IFS= read -r -d '' f; do FILES_TO_CHECK+=("$f"); done < <(git diff --cached --name-only -z --diff-filter=ACM)
 fi
 if ((${#FILES_TO_CHECK[@]} == 0)); then
   echo "No staged files to check."
@@ -41,7 +42,7 @@ if ((${#FORMAT_FILES[@]} > 0)); then
   git diff --quiet || HAD_UNSTAGED=1
   npx prettier --write -- "${FORMAT_FILES[@]}"
   FORMATTED_FILES=()
-  mapfile -d '' -t FORMATTED_FILES < <(git diff --name-only -z -- "${FORMAT_FILES[@]}")
+  while IFS= read -r -d '' f; do FORMATTED_FILES+=("$f"); done < <(git diff --name-only -z -- "${FORMAT_FILES[@]}")
   if ((${#FORMATTED_FILES[@]} > 0)); then
     if ((HAD_UNSTAGED == 0)); then
       echo "Auto-staging formatting changes..."
