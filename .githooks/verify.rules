@@ -4,4 +4,5 @@
 # $VERIFY_CHANGED names a file listing the changed paths that still exist.
 package-lock.json | npm ci --no-audit --no-fund
 . | [ -d node_modules ] || npm ci --no-audit --no-fund
-. :!*.md :!docs :!reports :!*.png | npm test
+*.ts *.tsx tsconfig*.json package.json | npm run -s typecheck
+src packages migrations scripts *.ts package.json package-lock.json | npx tsx scripts/test-with-postgres.ts --changed origin/main --passWithNoTests
