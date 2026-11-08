@@ -62,7 +62,7 @@ changed() {
 changed . | sort -u > "$tmp/all"
 if [ ! -s "$tmp/all" ]; then echo "pre-push: no changed files, nothing to check"; exit 0; fi
 # Commands get only the paths that still exist; rules also fire on deletions.
-while IFS= read -r f; do [ ! -e "$f" ] || echo "$f"; done < "$tmp/all" > "$tmp/changed"
+while IFS= read -r f; do [ ! -e "$f" ] || printf '%s\n' "$f"; done < "$tmp/all" > "$tmp/changed"
 export VERIFY_CHANGED="$tmp/changed"
 
 ran=0 failed=""
@@ -74,14 +74,15 @@ while IFS= read -r line; do
   set -- $specs
   [ -n "$(changed "$@" | head -n 1)" ] || continue
   ran=$((ran + 1))
-  echo "pre-push: \$ $cmd"
+  # printf, not echo: macOS sh's echo expands backslashes such as \n.
+  printf 'pre-push: $ %s\n' "$cmd"
   if ! sh -c "$cmd" < /dev/null; then failed="$failed
   $cmd"; fi
 done < "$rules"
 set +f
 
 if [ -n "$failed" ]; then
-  echo "pre-push: FAILED:$failed" >&2
+  printf 'pre-push: FAILED:%s\n' "$failed" >&2
   echo "pre-push: fix the failures; only a person may bypass with --no-verify." >&2
   exit 1
 fi
