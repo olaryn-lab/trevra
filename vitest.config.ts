@@ -2,14 +2,18 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    // Order matters: the worker-db setup must claim this worker's isolated
+    // Migrates, once per run, the template every test file's database is
+    // cloned from (see vitest.global-setup.ts).
+    globalSetup: ['./vitest.global-setup.ts'],
+    // Order matters: the worker-db setup must give this file its fresh
     // database (see vitest.setup.worker-db.ts) before vitest.setup.ts or the
     // test file itself runs, since auth-service.ts reads DATABASE_URL at
     // import time, not lazily.
     setupFiles: ['./vitest.setup.worker-db.ts', './vitest.setup.ts'],
-    // Each worker gets its own Postgres database (vitest.setup.worker-db.ts),
-    // so files on different workers no longer share the one fixed demo
-    // workspace `resetDemoData()` deletes and reseeds -- safe to parallelize.
+    // Each test file gets its own fresh Postgres database
+    // (vitest.setup.worker-db.ts), so files never share the one fixed demo
+    // workspace `resetDemoData()` deletes and reseeds, nor each other's
+    // leftovers -- safe to parallelize.
     fileParallelism: true,
     // Bounded rather than left at vitest's CPU-count default: every worker
     // opens its own connection pools (app pool + better-auth pool), and an
