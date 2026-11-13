@@ -1,0 +1,8 @@
+# Checks run by .githooks/pre-push. One rule per line:
+#   <git pathspecs> | <shell command>
+# A rule runs when the pushed commits change a path matching its pathspecs.
+# $VERIFY_CHANGED names a file listing the changed paths that still exist.
+package-lock.json | npm ci --no-audit --no-fund
+. | [ -d node_modules ] || npm ci --no-audit --no-fund
+*.ts *.tsx tsconfig*.json package.json | npm run -s typecheck
+src packages migrations scripts *.ts package.json package-lock.json | npx tsx scripts/test-with-postgres.ts --changed origin/main --passWithNoTests

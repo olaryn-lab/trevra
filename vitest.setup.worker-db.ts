@@ -1,68 +1,74 @@
 /**
- * Give every vitest worker its own Postgres database, so `fileParallelism`
- * can be turned back on.
+ * Give every test FILE a fresh Postgres database of its own.
  *
  * WHY THIS EXISTS: `scripts/test-with-postgres.ts` starts exactly one
  * ephemeral Postgres container for the whole run, and `resetDemoData()`
  * (`src/server/db.ts`) deletes and reseeds ONE fixed workspace --
  * `DEMO_WORKSPACE_ID = 'ws_demo'` -- on every call. Two test files sharing
  * that workspace concurrently would have one file's `beforeEach` deleting
- * rows the other file is mid-assertion against. `fileParallelism: false`
- * (the setting this file exists to remove) was the blunt fix: never let two
- * files touch the database at the same instant.
+ * rows the other file is mid-assertion against.
  *
- * THE ACTUAL FIX is a physical isolation boundary instead of a scheduling
- * one: each vitest worker gets its OWN database inside the same container
- * (`trevra_test_w<N>`, keyed by `VITEST_POOL_ID`), created and migrated once
- * per worker, then reused by every test file that worker runs. Files on
- * DIFFERENT workers can now race all they like -- they are not touching the
- * same rows, or even the same database.
+ * ONE DATABASE PER WORKER WAS NOT ENOUGH. Files on different workers could no
+ * longer race, but every file a worker ran inherited whatever the files before
+ * it on that worker left behind -- and which files those were changed from
+ * run to run. A query that reads past its own workspace
+ * (`runManagedCampaignsForAllWorkspaces` ticks every running campaign in the
+ * database) then counted another file's leftovers, and failed only in the
+ * full suite.
  *
- * IDEMPOTENT BY CONSTRUCTION: `setupFiles` re-run for every test file, not
- * once per worker. The second (and 30th) file handled by a worker sees
- * `process.env.TEST_DATABASE_URL` already pointing at that worker's
- * database (env vars persist for the worker process's lifetime even though
- * vitest gives each file a fresh module registry), so the `CREATE DATABASE`
- * path below is skipped after the first file -- one cheap SELECT, no-op.
+ * THE FIX: before each file, drop the worker's database (`trevra_test_w<N>`,
+ * keyed by `VITEST_POOL_ID`, so two files running at the same instant never
+ * share one) and re-create it from the template `vitest.global-setup.ts`
+ * migrated once for the run. Every file starts from exactly the database it
+ * would get running alone. `WITH (FORCE)` also cuts off any connection the
+ * previous file's exiting worker process still holds.
  *
- * `openDatabase()` (`src/server/db.ts`) already treats "run migrations" as
- * "skip if none are pending," so the one-time-per-worker migration cost is
- * the only new expense; every test file's actual setup work is unchanged.
+ * vitest starts a new process per file (`isolate`), and this runs before
+ * vitest.setup.ts or the test file is imported -- auth-service.ts reads
+ * DATABASE_URL at import time, not lazily.
  */
 import pg from 'pg';
+import { inject } from 'vitest';
 
 const { Client } = pg;
 
-const baseUrl = process.env.TEST_DATABASE_URL;
+// The server-level connection the per-file databases are created over. Kept
+// apart from TEST_DATABASE_URL, which this file repoints at the file's own
+// database -- a later file in the same process must not try to drop the
+// database it is connected to.
+const adminUrl = process.env.TREVRA_TEST_ADMIN_DATABASE_URL ?? process.env.TEST_DATABASE_URL;
 
-if (baseUrl) {
-  const poolId = process.env.VITEST_POOL_ID ?? '1';
-  const dbName = `trevra_test_w${poolId}`;
-  const url = new URL(baseUrl);
+if (adminUrl) {
+  process.env.TREVRA_TEST_ADMIN_DATABASE_URL = adminUrl;
+  const dbName = `trevra_test_w${process.env.VITEST_POOL_ID ?? '1'}`;
+  // Absent only if a config runs this without vitest.global-setup.ts: the
+  // file then still gets a fresh database, and openDatabase() migrates it.
+  const template = inject('trevraTemplateDatabase');
 
-  if (url.pathname.replace(/^\//, '') !== dbName) {
-    const admin = new Client({ connectionString: baseUrl });
-    await admin.connect();
-    try {
-      const existing = await admin.query('SELECT 1 FROM pg_database WHERE datname = $1', [dbName]);
-      if (existing.rowCount === 0) {
-        // Not parameterizable -- CREATE DATABASE takes an identifier, not a
-        // value. `dbName` is our own template-literal construction from a
-        // vitest-assigned integer, never user input.
-        await admin.query(`CREATE DATABASE "${dbName}"`);
-      }
-    } finally {
-      await admin.end();
-    }
-
-    url.pathname = `/${dbName}`;
-    const workerUrl = url.toString();
-    // Both names matter: test files pass TEST_DATABASE_URL explicitly to
-    // openDatabase(); auth-service.ts reads DATABASE_URL directly at import
-    // time. Setting both before the test file (and therefore auth-service.ts)
-    // is ever imported in this worker is what makes better-auth land on the
-    // same isolated database as everything else this worker touches.
-    process.env.DATABASE_URL = workerUrl;
-    process.env.TEST_DATABASE_URL = workerUrl;
+  const admin = new Client({ connectionString: adminUrl });
+  await admin.connect();
+  try {
+    // Not parameterizable -- CREATE/DROP DATABASE take identifiers, not
+    // values. Both names are our own: a vitest-assigned integer and the
+    // global setup's constant, never user input.
+    await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
+    await admin.query(
+      template
+        ? `CREATE DATABASE "${dbName}" TEMPLATE "${template}"`
+        : `CREATE DATABASE "${dbName}"`
+    );
+  } finally {
+    await admin.end();
   }
+
+  const url = new URL(adminUrl);
+  url.pathname = `/${dbName}`;
+  const fileUrl = url.toString();
+  // Both names matter: test files pass TEST_DATABASE_URL explicitly to
+  // openDatabase(); auth-service.ts reads DATABASE_URL directly at import
+  // time. Setting both before the test file (and therefore auth-service.ts)
+  // is imported is what makes better-auth land on the same database as
+  // everything else this file touches.
+  process.env.DATABASE_URL = fileUrl;
+  process.env.TEST_DATABASE_URL = fileUrl;
 }
